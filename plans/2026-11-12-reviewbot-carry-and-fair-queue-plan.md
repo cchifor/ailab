@@ -33,6 +33,9 @@ existing four migrations; no backfill - old rows have NULL and are never a carry
 - `jobs.diff_digest TEXT` - the review FINGERPRINT (below) of the head this job reviewed.
 - `jobs.carried_from TEXT` - for a carried review, the head the model actually read (the ORIGIN,
   not the immediately preceding carried head, so a chain A -> B -> C names A).
+- `jobs.verdict_seq INTEGER` - the order in which verdicts were PRODUCED: a `meta` counter
+  (`verdict_seq`) taken in the same transaction that enters `posting` with the verdict. Row ids only
+  order when heads were first queued, and a retried older head can reach its verdict after a newer one.
 
 **The fingerprint** (`review_fingerprint(raw)`) is
 `sha256("reviewbot-carry/v1" | CARRY_EPOCH | raw)`, stored as `"sha256:<hex>"`, where `raw` is the
@@ -74,10 +77,10 @@ into the adapter and is never carried), after the post-diff race check (`d2 = pr
    adapter's `reviews()` discipline; `iter_reviews()` stops at 10 pages and at the first short page,
    so it is not used here) whose highest-id authenticated own marker (`marker_of`) is
    `verdict=clean` at a head S that has a matching row from 3.
-5. **No later contrary verdict in the DB:** no row for `(repo, pr)` with `id >` S's row id, at
-   another head, whose recorded `verdict` is anything but `clean`, in ANY state. This catches a
-   findings review whose POST failed or is still unresolved (quarantined, posting) and is therefore
-   absent from Gitea.
+5. **No later contrary verdict in the DB:** no row for `(repo, pr)` with `verdict_seq >` S's,
+   at ANY head (this one included), whose recorded `verdict` is anything but `clean`, in ANY state.
+   This catches a findings review whose POST failed or is still unresolved (quarantined, posting)
+   and is therefore absent from Gitea, including an earlier attempt at this very head.
 
 Any exception while evaluating 3-5 -> no carry, log, fall through to the ordinary review (carry is
 an optimization; it never fails a job).
@@ -106,7 +109,10 @@ rewrites `<!--`), and it is recognised only at that fixed position in an authent
 - `convergence_context()`: when choosing "your previous review", skip own reviews ending in the
   carried comment, so the next real round still sees the substantive review (a clean review can
   carry nits, and from round 3 advisories) rather than the carry notice.
-- `existing_marker()`: unchanged; the carried marker dedupes its head like any review.
+- `existing_marker()`: unchanged; the carried marker dedupes its head like any review. When
+  `review_job()` completes a job because our review is ALREADY at its head (restart, `--requeue`, a
+  restored database), `record_rediscovered_carry()` reads that review and, if it is a carried one
+  (the authenticated tail), records `carried_from`, so `review_round()` still does not count it.
 - `maybe_merge()`: unchanged. It reads markers at the CURRENT head and merges at that head. A
   carried marker exists only for a head whose reviewed input the persona already judged clean as
   its latest word; the merge still needs every persona clean at that head + CI green + author
@@ -156,14 +162,16 @@ merge update: only the bytes of the diff matter.
   one-lock/one-connection/one-commit claim. (Fairness does not assume one queued head per PR: an
   older RUNNING head that fails returns to `retry` beside a newer queued one, and is superseded by
   `pr_ok()` when claimed, exactly as under FIFO.)
-- Chunked reviews (`progress` requeues with `next_at=0`) now interleave with other repos instead of
-  running back to back; correctness is unaffected (each part is durably recorded), only latency -
-  and a 128-part train holding the only worker for hours is exactly the starvation this removes.
+- **An active chunk snapshot keeps the worker.** An eligible job holding a `chunk_jobs` receipt
+  (it has bound a snapshot and requeues itself after every persisted part) is claimed before the
+  rotation, oldest first - what FIFO did by its old `created`. The snapshot binding includes the base
+  sha, so interleaving other repos between its parts would give the base time to move and restart
+  the snapshot, possibly forever on a busy base. Fairness decides which NEW job starts.
 - An unknown `queue_policy` value logs once at startup and runs `fifo`.
 - Observability: when the fair pick differs from what FIFO would have claimed, after the lock is
   released: `bump_meta("queue_fair_overrides_total")` (exported
   `reviewbot_queue_fair_overrides_total`) and
-  `queue: fair pick <repo>#<pr> ahead of fifo <repo2>#<pr2> (<n> repos eligible)`.
+  `queue: fair pick <repo>#<pr> ahead of fifo <repo2>#<pr2>`.
   Startup logs `queue: policy=<x>, carry_clean_verdicts=<bool>`.
 
 **Author dimension: not now.** Repo-level fairness is what stops platform#2748 waiting behind 30
@@ -256,4 +264,19 @@ platform vs relay.
 13. "At most one queued head per PR" was false; numeric parsing; transition tests - ACCEPTED.
 14. Offline test environment needs PyYAML/jinja2 - ACCEPTED (image above).
 
-<!-- codex-review-status: complete -->
+## Codex plan review, round 2 - dispositions
+
+Codex conceded items 3, 6 and 8 of round 1 (existing gaps carry does not widen).
+
+1. Rediscovered carried review counts as a round (restored database) - ACCEPTED:
+   `record_rediscovered_carry()` on the marker-present path.
+2. Chunk snapshots invalidated by interleaving (binding includes `base_sha`) - ACCEPTED: an
+   eligible job with a `chunk_jobs` receipt is claimed before the rotation.
+3. PR title/description are part of the prompt but not of the fingerprint - REJECTED: the spec
+   defines identity on the PR's diff, and the verdict is about the change; a carry runs no model, so
+   a description cannot steer it either (prompt injection through an edited description gains
+   nothing). Folding the description in would turn every description edit into a full re-review.
+   Stated in the PR as a residual: a description edit alone does not trigger a re-read.
+4. Row ids order insertion, not verdict production - ACCEPTED: `verdict_seq`.
+
+<!-- codex-review-status: finalized -->
