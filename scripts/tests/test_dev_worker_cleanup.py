@@ -1336,6 +1336,28 @@ class WorktreesTest(unittest.TestCase):
         self.assertTrue(os.path.isdir(stale))
         self.assertEqual([c for c, _ in inv.at_removal], [stale])
 
+    def test_a_process_that_starts_during_the_refresh_stops_the_worktree_removal(self):
+        stale = self.worktree("stale")
+        self.age(stale, 40)
+        clock = [1000.0]
+        inv = cl.Inventory([self.root], set(), monotonic=lambda: clock[0])
+        ws = [cl.scan_worktree(stale, (self.now - timedelta(days=3)).timestamp())]
+        plan, _ = cl.plan_worktrees(ws, 30, 3, self.now, set(), set(), set(), linked=inv.linked)
+        self.assertEqual(self.rules(plan), [(stale, "stale")])
+        clock[0] += cl.INDEX_MAX_AGE + 1
+        started = []
+        real = cl.link_index
+
+        def walk_while_a_shell_cds_in(*a, **kw):
+            started.append(stale)
+            return real(*a, **kw)
+        with mock.patch.object(cl, "link_index", side_effect=walk_while_a_shell_cds_in), \
+                mock.patch.object(cl, "busy_paths", side_effect=lambda: set(started)), \
+                mock.patch.object(cl.shutil, "which", return_value=None), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(cl.execute(plan, plan, worktree_days=30, merged_days=3, inventory=inv), (0, 1))
+        self.assertTrue(os.path.isdir(stale))
+
     def test_a_worktree_that_fails_inspection_never_costs_an_inventory(self):
         stale = self.worktree("stale")
         write(os.path.join(stale, "node_modules", "a", "index.js"))
@@ -1658,6 +1680,26 @@ class LinkGuardTest(unittest.TestCase):
         with mock.patch("sys.stdout", io.StringIO()):
             failures, skipped = cl.execute(plan, plan, deps_days=14, inventory=inv)
         self.assertEqual((failures, skipped), (0, 1))
+        self.assertTrue(os.path.isdir(self.nm))
+
+    def test_a_process_that_starts_during_the_refresh_stops_the_removal(self):
+        # execute() must take its /proc and mount snapshots AFTER the (minutes-long) refresh.
+        age_tree(self.src, 30)
+        clock = [1000.0]
+        inv = self.inventory(lambda: clock[0])
+        w = cl.scan_worktree(self.src, (self.now - timedelta(days=14)).timestamp())
+        plan, _ = cl.plan_deps([w], 14, self.now, set(), set(), linked=inv.linked)
+        clock[0] += cl.INDEX_MAX_AGE + 1
+        started = []
+        real = cl.link_index
+
+        def walk_while_a_test_run_starts(*a, **kw):
+            started.append(self.src)
+            return real(*a, **kw)
+        with mock.patch.object(cl, "link_index", side_effect=walk_while_a_test_run_starts), \
+                mock.patch.object(cl, "busy_paths", side_effect=lambda: set(started)), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(cl.execute(plan, plan, deps_days=14, inventory=inv), (0, 1))
         self.assertTrue(os.path.isdir(self.nm))
 
     def test_a_fresh_index_is_reused_within_its_age(self):

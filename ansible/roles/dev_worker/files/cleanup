@@ -1808,7 +1808,8 @@ def still_planned(action, fresh_plan):
 
 def execute(plan, fresh_plan, deps_days=None, worktree_days=None, merged_days=None, inventory=None):
     """Remove what the fresh scan still plans. `inventory` guards each deps and worktree removal
-    against links made since the scan (Inventory.ready / recheck)."""
+    against links made since the scan (Inventory.ready / recheck). ready() runs before the
+    process, container and mount snapshots are taken: a refresh can take minutes."""
     failures = skipped = 0
     for i, a in enumerate(plan, 1):
         if not still_planned(a, fresh_plan):
@@ -1817,6 +1818,8 @@ def execute(plan, fresh_plan, deps_days=None, worktree_days=None, merged_days=No
             continue
         if a.kind == "worktree":
             try:
+                if inventory:
+                    inventory.ready()           # first: the snapshots below must postdate the refresh
                 err = remove_worktree(a, worktree_days, merged_days, datetime.now(timezone.utc),
                                       busy_paths(), container_claims(), mount_points(), inventory)
             except (OSError, RuntimeError, subprocess.SubprocessError) as e:
@@ -1833,8 +1836,11 @@ def execute(plan, fresh_plan, deps_days=None, worktree_days=None, merged_days=No
             continue
         if a.kind == "deps":
             # Fresh /proc, container and mount state for EVERY worktree, right before its removal:
-            # the plan's snapshot is minutes old by the time a long run reaches the last one.
+            # the plan's snapshot is minutes old by the time a long run reaches the last one. Taken
+            # AFTER the inventory refresh, which can itself take minutes (review, #1734).
             try:
+                if inventory:
+                    inventory.ready()
                 n = remove_deps(a, deps_days, datetime.now(timezone.utc), busy_paths(),
                                 bind_mount_sources(), mount_points(), inventory)
             except (OSError, RuntimeError) as e:
