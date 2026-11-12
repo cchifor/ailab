@@ -280,3 +280,21 @@ Codex conceded items 3, 6 and 8 of round 1 (existing gaps carry does not widen).
 4. Row ids order insertion, not verdict production - ACCEPTED: `verdict_seq`.
 
 <!-- codex-review-status: finalized -->
+
+## Codex implementation review, round 1 - dispositions
+
+All five ACCEPTED and fixed in one commit, each with a test that a targeted mutant of the code fails:
+
+1. (blocker) A finding the model reached was lost when the head moved, posting was disabled or the
+   final eligibility read failed before the provenance UPDATE - `post_review()` now records verdict,
+   coverage, fingerprint, carried_from and verdict_seq first (without touching `updated`, which
+   dates the running attempt for `reviewbot_running_job_age_seconds`), then enters `posting`.
+2. (blocker) A chunk-lane review (its own marker, its own receipts) was invisible to both vetoes,
+   and a lane rollback restores the old epoch - the Gitea check now reads our account's latest
+   review of ANY kind and refuses one without a readable v1 marker; a PR with any `chunk_jobs`
+   receipt is never carried.
+3. (important) A `chunk_jobs` receipt is not activity: only a queued receipt job with `next_at=0`
+   (a part was just persisted) keeps the worker; peer-waiting and backing-off jobs join the rotation.
+4. (important) The final "marker appeared before post" path now records a carried review's
+   provenance too.
+5. (nit) `_meta_int()` raised OverflowError on "inf", which would kill the worker thread.
