@@ -326,3 +326,11 @@ all ACCEPTED (one with a narrower fix than proposed), each with a mutant-killing
 - reviewer-claude (nit): model/effort outside the epoch - intended (the verdict is the persona's,
   whichever tier served it); now said in the code.
 - reviewer-claude (nit): the runbook named a miss reason the code never logs - fixed.
+
+## Reviewer bots on #1731, round 2 - dispositions
+
+reviewer-codex: clean (APPROVED). reviewer-claude confirmed round 1 resolved and raised one new
+finding, ACCEPTED: the entry-path `retry` on an unreadable rediscovery (implementation review round
+2, finding 3) consumed no attempt, so a history that stays unreadable looped forever. The path now
+completes unconditionally, as before this PR; a row without a verdict of its own is marked
+`verdict='unread'`, which `review_round()` does not count.
