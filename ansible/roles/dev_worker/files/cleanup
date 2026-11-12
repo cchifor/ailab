@@ -927,10 +927,22 @@ def remove_dep_dir(path, ident):
             return False
         trash = f".{name}.cleanup-{os.getpid()}-{os.urandom(6).hex()}"
         os.rename(name, trash, src_dir_fd=pfd, dst_dir_fd=pfd)
-        # The name may have been replaced between the stat above and the rename: delete only the
-        # dir that was checked. Anything else stays where it now is, under the trash name.
+        # The name may have been replaced between the stat above and the rename (a consumer's fresh
+        # `npm ci`): delete only the dir that was checked. Anything else goes back under its name
+        # while that is free — a rename onto a dir created meanwhile succeeds only if it is empty —
+        # and stays under the trash name, reported, otherwise.
         moved = os.stat(trash, dir_fd=pfd, follow_symlinks=False)
         if not stat.S_ISDIR(moved.st_mode) or (moved.st_dev, moved.st_ino) != ident:
+            try:
+                os.stat(name, dir_fd=pfd, follow_symlinks=False)
+            except FileNotFoundError:
+                try:
+                    os.rename(trash, name, src_dir_fd=pfd, dst_dir_fd=pfd)
+                    print(f"cleanup: {path} changed under the removal; put back, not removed",
+                          file=sys.stderr)
+                    return False
+                except OSError:
+                    pass
             print(f"cleanup: {path} changed under the removal; left as {os.path.join(parent, trash)}",
                   file=sys.stderr)
             return False
@@ -2011,9 +2023,11 @@ def main(argv=None):
     boots = boot_times() if docker else ()
     excluded = container_roots() if walk else set()
     # The link inventory always covers LINK_ROOTS as well: disk-guard narrows --deps-roots to the
-    # filesystems under pressure, and a consumer on another one must still be seen.
+    # filesystems under pressure, and a consumer on another one must still be seen. Only a non-root
+    # DRY run may skip what it cannot read (a removing run is root-only, refused above; stated here
+    # too, so the two never drift apart).
     inventory = Inventory(sorted(set(LINK_ROOTS) | set(deps_roots)), excluded,
-                          strict=os.geteuid() == 0) if walk else None
+                          strict=os.geteuid() == 0 or not args.dry_run) if walk else None
     linked = inventory.linked if inventory else None
 
     def scan():

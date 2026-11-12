@@ -810,9 +810,37 @@ class DepsTest(unittest.TestCase):
             return real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
         with mock.patch.object(cl.os, "rename", swap), mock.patch("sys.stderr", io.StringIO()):
             self.assertFalse(cl.remove_dep_dir(nm, (st.st_dev, st.st_ino)))
+        # The replacement (say a consumer's fresh `npm ci`) is put back under its name.
+        self.assertTrue(os.path.isfile(os.path.join(nm, "keep", "precious.txt")))
+        self.assertEqual([n for n in os.listdir(wt) if n.startswith(".node_modules.cleanup-")], [])
+        self.assertTrue(os.path.isfile(os.path.join(wt, "moved-away", "a", "index.js")))
+
+    def test_a_replacement_stays_aside_when_its_name_was_taken_again(self):
+        wt = make_repo(os.path.join(self.user, "wt"))
+        nm = os.path.join(wt, "node_modules")
+        write(os.path.join(nm, "a", "index.js"))
+        st = os.lstat(nm)
+        real_rename, real_stat = cl.os.rename, cl.os.stat
+
+        def swap(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+            if src == "node_modules":
+                real_rename(nm, os.path.join(wt, "moved-away"))
+                write(os.path.join(nm, "keep", "precious.txt"))
+            return real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+
+        def stat_then_retake(path, *, dir_fd=None, follow_symlinks=True):
+            r = real_stat(path, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+            if dir_fd is not None and str(path).startswith(".node_modules.cleanup-"):
+                os.makedirs(os.path.join(nm, "third"))            # right after the moved-dir check,
+                with open(os.path.join(nm, "third", "x.txt"), "w") as f:   # the name is taken again
+                    f.write("x")
+            return r
+        with mock.patch.object(cl.os, "rename", swap), mock.patch.object(cl.os, "stat", stat_then_retake), \
+                mock.patch("sys.stderr", io.StringIO()):
+            self.assertFalse(cl.remove_dep_dir(nm, (st.st_dev, st.st_ino)))
         [left] = [n for n in os.listdir(wt) if n.startswith(".node_modules.cleanup-")]
         self.assertTrue(os.path.isfile(os.path.join(wt, left, "keep", "precious.txt")))
-        self.assertTrue(os.path.isfile(os.path.join(wt, "moved-away", "a", "index.js")))
+        self.assertTrue(os.path.isfile(os.path.join(nm, "third", "x.txt")))
 
     # CLI
 
