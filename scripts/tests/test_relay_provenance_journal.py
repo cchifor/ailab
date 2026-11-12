@@ -1,11 +1,13 @@
 """Offline rendering contracts for the inactive provenance source."""
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 import yaml
 
 
@@ -66,6 +68,47 @@ class RendererTest(unittest.TestCase):
         return {'version': 1, 'relaySourceCommit': COMMIT,
                 'relayImage': 'registry.example/relay@sha256:' + HASH,
                 **public, 'clients': [{'namespace': 'strive-ailab', 'podLabels': {'app': 'relay'}}]}
+
+    def backing_config(self):
+        base = '/run/relay-vm-backing/'
+        public = base + 'public/'
+        private = base + 'private/'
+        pins = {}
+        for name in ('policy.json', 'reader-pins.json', 'storage-class.json', 'source-ca.pem',
+                     'kubernetes-ca.pem', 'provider-ca.pem', 'provider-client.crt',
+                     'guest-ca.pem', 'tls.crt', 'client-ca.pem'):
+            value = json.dumps({'version': 3, 'bindingMode': 'WaitForFirstConsumer',
+                                'namespace': {'name': 'vm-tenant', 'uid': 'uid-1'},
+                                'sources': [{'kind': 'backing', 'id': '00000000-0000-4000-8000-000000000001'}]}) if name == 'policy.json' else name
+            disk = self.file(name, value)
+            pins[name] = {'path': public + name, 'sha256': disk['sha256']}
+        runtime = {
+            'version': 1, 'policy': pins['policy.json'],
+            'backingSource': {'sourceId': '00000000-0000-4000-8000-000000000001',
+                              'ca': pins['source-ca.pem'], 'keyFile': private + 'source-key.pem',
+                              'keyOwnerUid': 65532,
+                              'pins': {'origin': 'https://relay-provenance-journal.relay-provenance-journal.svc:8443',
+                                       'caSha256': pins['source-ca.pem']['sha256']}},
+            'issuerKeyFile': private + 'issuer-key.pem', 'issuerKeyOwnerUid': 65532,
+            'readerPins': pins['reader-pins.json'], 'storageClass': pins['storage-class.json'],
+            'kubernetes': {'origin': 'https://kubernetes.default.svc', 'ca': pins['kubernetes-ca.pem'],
+                           'tokenFile': '/var/run/secrets/kubernetes.io/serviceaccount/token'},
+            'provider': {'origin': 'https://provider.example.test:9443', 'ca': pins['provider-ca.pem'],
+                         'clientCert': pins['provider-client.crt'], 'clientKeyFile': private + 'provider-client-key.pem',
+                         'clientKeyOwnerUid': 65532},
+            'guest': {'origin': 'https://guest.example.test:9444', 'ca': pins['guest-ca.pem'], 'timeoutMs': 1000},
+            'archive': {'directory': '/var/lib/relay-vm-backing/archive', 'trustedUid': 65532},
+            'service': {'host': '0.0.0.0', 'port': 8443, 'tlsKeyFile': private + 'tls-key.pem',
+                        'tlsKeyOwnerUid': 65532, 'tlsCert': pins['tls.crt'], 'clientCa': pins['client-ca.pem'],
+                        'clientFingerprintSha256': HASH}}
+        config = self.file('config.json', json.dumps(runtime))
+        return ({'version': 1, 'relaySourceCommit': COMMIT,
+                 'backingImage': 'registry.example/vm-backing@sha256:' + HASH,
+                 'publicDirectory': str(self.dir), 'configSha256': config['sha256'],
+                 'privateSecret': 'vm-backing-private', 'archiveClaim': 'vm-backing-archive',
+                 'clients': [{'namespace': 'strive-ailab', 'podLabels': {'app': 'infrastructure-agent'}}],
+                 'kubernetesCidrs': ['10.96.0.1/32'], 'providerCidrs': ['10.42.0.0/24'],
+                 'guestCidrs': ['10.43.0.0/24']}, runtime)
 
     def test_suspended_initialization_and_preflight_pins(self):
         config = {'version': 1, 'relaySourceCommit': COMMIT}
@@ -176,6 +219,14 @@ class RendererTest(unittest.TestCase):
         pending.unlink()
         self.assertEqual(run(), 0)
         self.assertTrue(marker.exists())
+        marker.unlink()
+        schema.write_text('15\n')
+        self.assertEqual(run(), 0)
+        self.assertTrue(marker.exists())
+        marker.unlink()
+        schema.write_text('14\n')
+        self.assertEqual(run(), 78)
+        self.assertFalse(marker.exists())
 
     def test_schema10_upgrade_requires_exact_stage_and_preserves_maintenance_guards(self):
         config = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': 9,
@@ -271,6 +322,55 @@ class RendererTest(unittest.TestCase):
         malformed = self.file('011-malformed.sql', 'BEGIN;\nCOMMIT;\nBEGIN;\nCOMMIT;\n')
         self.assertEqual(self.render('upgrade11', {**config, 'schema011': malformed}).returncode, 78)
 
+    def test_vm_upgrade_is_separate_pinned_suspended_stage(self):
+        spec = importlib.util.spec_from_file_location('provenance_render_under_test', RENDER)
+        renderer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(renderer)
+        names = ('schema008Repair', 'vmSchema011', 'vmSchema012', 'vmSchema013', 'vmSchema014')
+        config = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': 11}
+        for name in names:
+            config[name] = self.file(name + '.sql', 'BEGIN;\n-- ' + name + '\nCOMMIT;\n')
+        with mock.patch.dict(renderer.REVIEWED_SCHEMA_SHA256,
+                             {name: config[name]['sha256'] for name in names}):
+            schema, script, job = renderer.upgrade_vm(config)
+            self.assertEqual(set(schema['data']), {'008-repair.sql', 'vm011.sql', 'vm012.sql', 'vm013.sql', 'vm014.sql'})
+            self.assertEqual(set(script['data']), {'upgrade-vm.sh'})
+            self.assertEqual(job['metadata']['name'], 'relay-provenance-journal-upgrade-11-to-vm15')
+            self.assertTrue(job['spec']['suspend'])
+            self.assertEqual(job['spec']['backoffLimit'], 0)
+            pod = job['spec']['template']['spec']
+            self.assertFalse(pod['automountServiceAccountToken'])
+            self.assertNotIn('fsGroup', pod['securityContext'])
+            self.assertEqual(pod['containers'][0]['command'], ['/bin/sh', '/initialize/upgrade-vm.sh'])
+            self.assertEqual([e['name'] for e in pod['containers'][0]['env'][1:-1]],
+                             ['SCHEMA_008_REPAIR_SHA256', 'VM_SCHEMA_011_SHA256', 'VM_SCHEMA_012_SHA256',
+                              'VM_SCHEMA_013_SHA256', 'VM_SCHEMA_014_SHA256'])
+            self.assertEqual(pod['containers'][0]['env'][-1], {'name': 'FROM_SCHEMA_VERSION', 'value': '11'})
+            for bad in (True, '11', 10, 12, None):
+                with self.subTest(from_version=bad):
+                    self.assertRaises(renderer.Refusal, renderer.upgrade_vm, {**config, 'fromVersion': bad})
+            for name in names:
+                with self.subTest(missing=name):
+                    self.assertRaises(renderer.Refusal, renderer.upgrade_vm,
+                                      {key: value for key, value in config.items() if key != name})
+        # The actual CLI requires reviewed raw bytes; a claim over unrelated
+        # local SQL cannot produce an upgrade Job.
+        self.assertEqual(self.render('upgradeVm', config).returncode, 78)
+
+    def test_vm_upgrade_rejects_unreviewed_pin_before_hash_or_data_access(self):
+        marker = self.dir / 'hash-called-vm'
+        sha = self.dir / 'sha256sum'
+        sha.write_text('#!/bin/sh\ntouch "' + str(marker) + '"\nexit 99\n')
+        sha.chmod(0o755)
+        env = dict(os.environ, PGDATA='/var/lib/postgresql/data/pgdata', FROM_SCHEMA_VERSION='11',
+                   SCHEMA_008_REPAIR_SHA256=HASH, VM_SCHEMA_011_SHA256=HASH,
+                   VM_SCHEMA_012_SHA256=HASH, VM_SCHEMA_013_SHA256=HASH,
+                   VM_SCHEMA_014_SHA256=HASH, PATH=str(self.dir) + ':/usr/bin:/bin')
+        script = ROOT / 'kubernetes/optional/relay-provenance-journal/initialize/upgrade-vm.sh'
+        result = subprocess.run(['sh', str(script)], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 78)
+        self.assertFalse(marker.exists())
+
     def test_schema11_rejects_bad_pin_before_reading_retained_data(self):
         marker = self.dir / 'hash-called-011'
         sha = self.dir / 'sha256sum'
@@ -357,6 +457,49 @@ class RendererTest(unittest.TestCase):
         self.assertNotEqual(items[0]['metadata']['name'], rotated[0]['metadata']['name'])
         config['clientCertSha256'] = '0' * 64
         self.assertEqual(self.render('presence', config).returncode, 78)
+
+    def test_vm_backing_renderer_stays_inactive_and_materializes_private_keys(self):
+        config, runtime = self.backing_config()
+        result = self.render('backing', config)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        items = json.loads(result.stdout)['items']
+        self.assertEqual(len(items), 10)
+        deploy = next(x for x in items if x['kind'] == 'Deployment')
+        pod = deploy['spec']['template']['spec']
+        self.assertEqual(deploy['spec']['replicas'], 0)
+        self.assertFalse(pod['automountServiceAccountToken'])
+        self.assertEqual(pod['securityContext']['runAsUser'], 65532)
+        init = pod['initContainers'][0]
+        self.assertEqual(init['securityContext']['capabilities'], {'drop': ['ALL'], 'add': ['CHOWN']})
+        self.assertEqual(init['securityContext']['runAsUser'], 0)
+        materialize = init['command'][2]
+        self.assertLess(materialize.index("f.chmodSync(b+'/'+n,0o600)"),
+                        materialize.index("f.chownSync(b+'/'+n,65532,65532)"))
+        self.assertLess(materialize.index('f.chmodSync(b,0o700)'),
+                        materialize.index('f.chownSync(b,65532,65532)'))
+        self.assertEqual(pod['containers'][0]['command'][-1], config['configSha256'])
+        self.assertEqual(pod['volumes'][1]['secret']['secretName'], config['privateSecret'])
+        self.assertEqual(pod['volumes'][2]['emptyDir']['medium'], 'Memory')
+        self.assertEqual(pod['volumes'][4]['persistentVolumeClaim']['claimName'], config['archiveClaim'])
+        public = items[0]
+        self.assertEqual(len(public['data']), 11)
+        self.assertFalse(any(x['kind'] == 'Secret' for x in items))
+        role = next(x for x in items if x['kind'] == 'Role')
+        self.assertEqual(role['metadata']['namespace'], 'vm-tenant')
+        self.assertEqual({rule['apiGroups'][0] for rule in role['rules']}, {'', 'kubevirt.io'})
+        network = next(x for x in items if x['kind'] == 'NetworkPolicy' and x['metadata']['name'].endswith('-peers'))
+        self.assertEqual([e['ports'][0]['port'] for e in network['spec']['egress'][:4]],
+                         [8443, 443, 9443, 9444])
+        self.assertEqual(network['spec']['ingress'][0]['from'][0]['podSelector']['matchLabels'],
+                         {'app': 'infrastructure-agent'})
+        source_ingress = next(x for x in items if x['kind'] == 'NetworkPolicy' and x['metadata']['name'].endswith('-journal-access'))
+        self.assertEqual(source_ingress['spec']['podSelector']['matchLabels'], {'app': 'relay-provenance-journal'})
+        config['kubernetesCidrs'] = ['0.0.0.0/0']
+        self.assertEqual(self.render('backing', config).returncode, 78)
+        config['kubernetesCidrs'] = ['10.96.0.1/32']
+        runtime['issuerKeyOwnerUid'] = 0
+        config['configSha256'] = self.file('config.json', json.dumps(runtime))['sha256']
+        self.assertEqual(self.render('backing', config).returncode, 78)
 
     def test_database_ingress_admits_both_source_listeners(self):
         raw = (ROOT / 'kubernetes/optional/relay-provenance-journal/network-policy.yaml').read_text()

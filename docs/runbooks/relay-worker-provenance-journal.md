@@ -426,7 +426,7 @@ until this stage and the independent witness/custody prerequisites are complete.
 
 Local validation uses SQL001–011 from source composition `021d2da4` and the
 exact renderer image
-`postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac`
+`postgres@sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0`
 (PostgreSQL 17.11 Alpine), running as UID70 with read-only root, no network,
 no capabilities and temporary data. Fifteen scenarios passed: fresh
 initialization; 10→11 with exact retained row hashes preserved; successful
@@ -449,6 +449,120 @@ That source composition is evidence only; substitute the final merged source
 pin before a live change. Raw scenario scripts and logs are in
 `/workspace/archive/relay-provenance-schema11-20261112` on dev-worker-3 and
 follow archive retention. No live Kubernetes or database write was performed.
+
+## Stage the separate retained VM source chain
+
+The runtime-presence `011-runtime-presence-current-readback.sql` remains the
+schema-11 stage above. The retained VM source uses a **different**
+`011-kubevirt-original-registration.sql`, followed by
+`012-kubevirt-connector.sql`, `013-kubevirt-lease-renewal.sql`, and
+`014-vm-backing-effect-lookups.sql`. The attended `upgradeVm` renderer adds
+those four transactions after marker 11 and publishes marker 15. It first
+replays the reviewed 008 compatibility repair. That replay accepts the prior
+and corrected schema-8 transition bodies, changes no retained rows, and brings
+both paths to the NULL-safe body required by the current 009 and VM source.
+The 009 transaction is never replayed. The current startup script accepts
+markers 11 and 15; it still refuses every intermediate marker and a pending
+maintenance latch.
+
+The ailab renderer and upgrade script pin these exact current Relay source
+artifacts by raw SHA-256:
+
+| Input | SHA-256 |
+| --- | --- |
+| 008 compatibility repair | `9e7b48a1f624c83e421bd187354318f589f788229908bc283d4e4e0abf07f95c` |
+| VM 011 original registration | `02a3d6459458304f69ded3c3601d2b3df53ea84ca5cd59b3c4df99f94d66993d` |
+| VM 012 connector | `cabffdf93c9759110d31480481d90b4cf9996514d1fb217080e2350ed8155c3a` |
+| VM 013 lease renewal | `4d0397e70d144104d0a991b2f4475b9fa8d5d52ed03f1a63de8eb6023d679fcd` |
+| VM 014 backing reads | `17721e0021c88d76bf68157fbe6f28bb1ac44119fd92ecb291e001644d6eddf0` |
+
+The deployment preparer derives all five file pins from one checked-out,
+reviewed Relay commit and verifies that each worktree file equals that
+commit's Git object. This is build/publication work; the operator does not
+hand-enter SQL hashes. After the Relay source and image release receipts are
+final, run from the ailab checkout with a clean checkout of that exact Relay
+source:
+
+```sh
+python3 -B scripts/relay-provenance-vm-upgrade-input.py \
+  /absolute/relay-checkout FULL_RELAY_COMMIT \
+  /operator/run/vm-upgrade-render.json
+sha256sum /operator/run/vm-upgrade-render.json
+python3 -B kubernetes/optional/relay-provenance-journal/render.py \
+  upgradeVm /operator/run/vm-upgrade-render.json RENDER_JSON_SHA256 \
+  > /operator/run/vm-upgrade-list.json
+```
+
+The rendered Job is suspended, has no retry or service-account token, mounts
+the retained PVC without `fsGroup`, and uses the pinned PostgreSQL 17 image.
+It requires the stopped marker-11 database, UID 70 and reviewed mode, no
+postmaster/recovery/pending files, the exact prior lookup and transition
+bodies, the runtime-presence current-readback body, and no preapplied VM
+family or v3 policy. It checks these before writing the persistent latch.
+After applying the five pinned transactions, it verifies both final function
+bodies, VM family owners, unchanged runtime-presence readback and retained
+history row counts. It stops PostgreSQL before writing marker 15. Any unknown
+commit, failed verification, interruption, or uncertain outcome leaves the
+latch and old marker for attended recovery; do not replay or edit the marker.
+All existing consumer-exclusion and backup review steps above apply. This
+stage grants no source login, policy, signing key or provider authority.
+
+## Stage the independent VM backing service
+
+Relay's dedicated `deploy/vm-original-backing/Dockerfile` produces a Node 22
+image that runs as UID/GID 65532. The build/release owner supplies its reviewed
+image digest and source receipt. The `backing` renderer takes that digest, a
+pinned public runtime config under `publicDirectory`, the existing private
+Secret name, a retained receipt-archive PVC name, the agent client selector,
+and approved Kubernetes/provider/guest egress CIDRs. It derives the ten other
+public file pins from the runtime config, verifies every file, the v3 backing
+source ID, fixed paths, owner UIDs and HTTPS endpoints, then emits a
+zero-replica Deployment, Service, read-only Kubernetes RBAC and scoped
+NetworkPolicies. The bundle creates no Secret, private key, PVC or source
+login and is absent from every Flux inventory.
+
+The renderer input has exactly `version: 1`, `relaySourceCommit`,
+`backingImage` (digest form), `publicDirectory`, `configSha256`,
+`privateSecret`, `archiveClaim`, `clients` (the same namespace/podLabels shape
+as the cleanup listener), and nonempty `kubernetesCidrs`, `providerCidrs`,
+`guestCidrs` arrays. Each CIDR must be canonical and narrower than a default
+route. The renderer takes HTTPS ports from the pinned config and refuses a
+source origin other than the local provenance listener. Pin this input JSON
+as for every other renderer mode:
+
+```sh
+python3 -B kubernetes/optional/relay-provenance-journal/render.py \
+  backing /operator/run/vm-backing-render.json RENDER_JSON_SHA256 \
+  > /operator/run/vm-backing-list.json
+```
+
+The public directory uses these names: `config.json`, `policy.json`,
+`reader-pins.json`, `storage-class.json`, `source-ca.pem`,
+`kubernetes-ca.pem`, `provider-ca.pem`, `provider-client.crt`,
+`guest-ca.pem`, `tls.crt`, and `client-ca.pem`. Its runtime paths must be
+`/run/relay-vm-backing/public/<name>`. The existing private Secret must have
+`source-key.pem`, `issuer-key.pem`, `provider-client-key.pem`, and
+`tls-key.pem`. An init container in the same digest-pinned backing image
+reads that projection as root with only `CHOWN`, copies each key into a memory
+`emptyDir` as a regular UID/GID-65532 file with mode 0600, and gives the main
+nonroot container read-only access. The archive PVC must already have a
+writable UID-65532 directory; the Pod has no `fsGroup` repair. The rotating
+Kubernetes service-account token alone remains projected. These details meet
+the dedicated runtime's strict regular-file checks without putting key bytes
+in Git. The operator must verify the target namespace permits the one bounded
+root init container before selecting this optional bundle.
+
+The operator supplies the real cluster/namespace identity, qualified storage
+class and capacity evidence, reachable provider and guest readback endpoints,
+read-only Kubernetes access, approved key custody and client certificate
+fingerprint, a pre-owned archive PVC, and the actual network CIDRs. The Relay
+release owner supplies the source and image digests, reader and policy
+artifacts, and prepared public configuration. The agent's separate opt-in
+`vmProvenance` chart values mount only its own source and backing mTLS client
+keys; the backing issuer, source and provider keys stay in this service.
+The source and backing workloads remain at zero replicas until the operator
+checks the current release, provider/guest evidence and full VM lifecycle
+contract. No deployment or live qualification is implied by rendering.
 
 ## Database credentials
 

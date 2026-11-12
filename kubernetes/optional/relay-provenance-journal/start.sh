@@ -5,13 +5,16 @@ umask 077
 if [ ! -f "$PGDATA/PG_VERSION" ] || [ "$(cat "$PGDATA/PG_VERSION")" != 17 ] ||
    [ ! -f "$PGDATA/relay-provenance-journal-schema-version" ] ||
    [ -L "$PGDATA/relay-provenance-journal-schema-version" ] ||
-   [ "$(cat "$PGDATA/relay-provenance-journal-schema-version")" != 11 ] ||
    [ -e "$PGDATA/relay-provenance-journal-upgrade-pending" ] ||
    [ -L "$PGDATA/relay-provenance-journal-upgrade-pending" ] ||
    [ -e "$PGDATA/standby.signal" ] || [ -e "$PGDATA/recovery.signal" ]; then
   echo 'Independent provenance journal database requires operator initialization or recovery review' >&2
   exit 78
 fi
+case "$(cat "$PGDATA/relay-provenance-journal-schema-version")" in
+  11|15) ;; # 15 is 11 plus the separately pinned VM 011–014 chain.
+  *) echo 'Independent provenance journal schema marker is unsupported' >&2; exit 78;;
+esac
 # Kubelet fsGroup repair must not silently make PGDATA group-writable.
 # Refuse and preserve retained state; never chmod/chown it automatically.
 owner=$(stat -c '%u' "$PGDATA")
