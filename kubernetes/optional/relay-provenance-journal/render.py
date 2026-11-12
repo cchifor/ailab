@@ -16,6 +16,11 @@ SERVICE_NS = NAME
 PUBLIC = '/run/relay-provenance/'
 ORIGIN = 'https://' + NAME + '.' + SERVICE_NS + '.svc:8443'
 PG_IMAGE = 'docker.io/library/postgres:17.11-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac'
+# Keep renderer pins consistent with initialize.sh and the matching upgrade script.
+REVIEWED_SCHEMA_SHA256 = {
+    'schema010': '86fd1612f0d9aac62902825d7e4fb290ac6c2c030f89d3e4a764a23230a125e1',
+    'schema011': '094e6639b07d497401f86ab6af5ccd14813238d2beb1d538bcd1ac7f105caebd',
+}
 SECURITY = {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
             'capabilities': {'drop': ['ALL']}, 'seccompProfile': {'type': 'RuntimeDefault'}}
 AFFINITY = {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [
@@ -132,6 +137,9 @@ def database_job(config, action, numbers):
     is_upgrade = action in ('upgrade', 'upgrade9', 'upgrade10', 'upgrade11')
     commit = common(config, keys + (['fromVersion'] if is_upgrade else []))
     pins = [config[key] for key in keys]
+    for key, digest in REVIEWED_SCHEMA_SHA256.items():
+        if key in keys and config[key]['sha256'] != digest:
+            refuse(key + '-pin-mismatch')
     sql = {str(n).zfill(3) + '.sql': pinned(pin, 262144) for n, pin in zip(numbers, pins)}
     if any(len(re.findall(r'^BEGIN;$', raw, re.M)) != 1 or
            len(re.findall(r'^COMMIT;$', raw, re.M)) != 1 for raw in sql.values()):

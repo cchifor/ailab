@@ -23,7 +23,9 @@ adds a restricted, locked current-read envelope with explicit policy/admission
 time bounds. These
 migrations do not install a Node signer, independent witness or execution fence.
 Review and record all eleven
-SHA256 values and the source commit. The initializer renderer input is a single
+SHA256 values and the source commit. SQL 010 and 011 are fixed reviewed
+artifacts: only the digests shown below are accepted, and the renderer refuses
+any other schema010 or schema011 pin before producing the Job. The initializer renderer input is a single
 root or operator-owned, single-link, non-group-writable regular JSON file:
 
 ```json
@@ -39,8 +41,8 @@ root or operator-owned, single-link, non-group-writable regular JSON file:
   "schema007": {"path": "/absolute/007-runtime-presence-open-lifecycle.sql", "sha256": "<64 hex>"},
   "schema008": {"path": "/absolute/008-authority-completion.sql", "sha256": "<64 hex>"},
   "schema009": {"path": "/absolute/009-original-pod-spec-commitment.sql", "sha256": "<64 hex>"},
-  "schema010": {"path": "/absolute/010-runtime-presence-latch-isolation.sql", "sha256": "<64 hex>"},
-  "schema011": {"path": "/absolute/011-runtime-presence-current-readback.sql", "sha256": "<64 hex>"}
+  "schema010": {"path": "/absolute/010-runtime-presence-latch-isolation.sql", "sha256": "86fd1612f0d9aac62902825d7e4fb290ac6c2c030f89d3e4a764a23230a125e1"},
+  "schema011": {"path": "/absolute/011-runtime-presence-current-readback.sql", "sha256": "094e6639b07d497401f86ab6af5ccd14813238d2beb1d538bcd1ac7f105caebd"}
 }
 ```
 
@@ -189,8 +191,9 @@ and update both the previous and repaired digest columns first.
 This is a separate one-shot stage. Keep the existing schema 5/6/7 to schema 8
 upgrade unchanged; do not offer a direct 5/6/7 to 9 path. After that upgrade
 finishes, keep every consumer stopped and do not start the schema 8 runtime
-between stages. Continue through the separate 9→10 stage before restarting;
-the current runtime startup guard accepts only marker 11.
+between stages. Complete both the separate 9→10 and 10→11 stages before
+restarting; the current runtime startup guard accepts only marker 11, so the
+database cannot start at marker 8, 9, or 10.
 
 Before rendering, use the final merged Relay source pin that contains SQL 009
 and recheck both installed-function hashes against that exact source. The
@@ -248,8 +251,9 @@ or change the version marker to manufacture success. Have the operator inspect
 which transactions committed and follow the reviewed recovery procedure. SQL 007
 also refuses inconsistent phase data instead of reopening a closed admission.
 After a successful Job is terminal and its Pod is gone, verify the exact schema
-and continue through 9→10 before an attended database/listener restart with the
-compatible source image. Do not restart at the intermediate marker 8 or 9.
+and continue through 9→10 and 10→11 before an attended database/listener
+restart with the compatible source image. Do not restart at the intermediate
+marker 8, 9, or 10; the runtime startup guard accepts only marker 11.
 All committed manifests remain optional and inactive.
 
 ## Upgrade a retained schema 9 database to schema 10
@@ -268,14 +272,16 @@ binds its expected function bodies to the exact SQL file digest
 different artifact before starting PostgreSQL. If the final merged SQL differs,
 update these pins through a reviewed repository change; do not edit the script
 while rendering a live Job. Do not use an unmerged candidate as a live release
-pin. Fresh initialization enforces this same SQL 010 artifact pin.
+pin. The renderer enforces this same digest for the `upgrade10` and
+`initialize` inputs and refuses any other schema010 pin, before producing a Job; fresh initialization enforces the same SQL 010
+artifact pin at runtime.
 
 ```json
 {
   "version": 1,
   "relaySourceCommit": "<final reviewed 40-hex Relay commit>",
   "fromVersion": 9,
-  "schema010": {"path": "/absolute/010-runtime-presence-latch-isolation.sql", "sha256": "<64 hex>"}
+  "schema010": {"path": "/absolute/010-runtime-presence-latch-isolation.sql", "sha256": "86fd1612f0d9aac62902825d7e4fb290ac6c2c030f89d3e4a764a23230a125e1"}
 }
 ```
 
@@ -303,7 +309,10 @@ there is no pending latch. This does not authorize automatic retries: SQL
 failure, a failed final function check, interruption, or an existing pending
 latch requires attended investigation. Keep the marker and latch as evidence;
 never clear them to manufacture success. All manifests remain outside Flux
-inventory and all runtime replicas remain zero.
+inventory and all runtime replicas remain zero. Do not restart the database at
+marker 10 either: the runtime startup guard accepts only marker 11, so the
+separate 10→11 stage must complete before any attended database or listener
+restart.
 
 Generate and compare the presence-function digests with this read-only query
 against a disposable database initialized from the exact reviewed 001–009

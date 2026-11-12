@@ -13,6 +13,9 @@ ROOT = Path(__file__).resolve().parents[2]
 RENDER = ROOT / 'kubernetes/optional/relay-provenance-journal/render.py'
 COMMIT = 'a' * 40
 HASH = 'b' * 64
+REVIEWED010 = '86fd1612f0d9aac62902825d7e4fb290ac6c2c030f89d3e4a764a23230a125e1'
+REVIEWED011 = '094e6639b07d497401f86ab6af5ccd14813238d2beb1d538bcd1ac7f105caebd'
+FIXTURES = ROOT / 'scripts/tests/fixtures/relay-provenance-journal'
 
 
 class RendererTest(unittest.TestCase):
@@ -30,6 +33,13 @@ class RendererTest(unittest.TestCase):
         pin = self.file('input.json', json.dumps(config))
         return subprocess.run(['python3', '-B', str(RENDER), mode, pin['path'], pin['sha256']],
                               text=True, capture_output=True, check=False)
+
+    def reviewed(self, number):
+        path = FIXTURES / (number + '.sql')
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        expected = {'010': REVIEWED010, '011': REVIEWED011}[number]
+        self.assertEqual(digest, expected, 'fixture must match the reviewed SQL artifact')
+        return {'path': str(path), 'sha256': digest}
 
     def service_config(self):
         public = {key: self.file(key + '.txt', '{}') for key in ('policy', 'authorization', 'witness')}
@@ -61,6 +71,8 @@ class RendererTest(unittest.TestCase):
         config = {'version': 1, 'relaySourceCommit': COMMIT}
         for n in range(1, 12):
             config['schema' + str(n).zfill(3)] = self.file(str(n) + '.sql', 'BEGIN;\nCOMMIT;\n')
+        config['schema010'] = self.reviewed('010')
+        config['schema011'] = self.reviewed('011')
         output = self.render('initialize', config)
         self.assertEqual(output.returncode, 0, output.stderr)
         resource = json.loads(output.stdout)
@@ -167,7 +179,7 @@ class RendererTest(unittest.TestCase):
 
     def test_schema10_upgrade_requires_exact_stage_and_preserves_maintenance_guards(self):
         config = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': 9,
-                  'schema010': self.file('010.sql', 'BEGIN;\nCOMMIT;\n')}
+                  'schema010': self.reviewed('010')}
         output = self.render('upgrade10', config)
         self.assertEqual(output.returncode, 0, output.stderr)
         schema, script, job = json.loads(output.stdout)['items']
@@ -190,6 +202,25 @@ class RendererTest(unittest.TestCase):
                                                                       'sha256': HASH}}).returncode, 78)
         malformed = self.file('010-malformed.sql', 'BEGIN;\nCOMMIT;\nBEGIN;\nCOMMIT;\n')
         self.assertEqual(self.render('upgrade10', {**config, 'schema010': malformed}).returncode, 78)
+
+    def test_renderer_refuses_unreviewed_pins_before_producing_a_job(self):
+        for number, previous in [('010', 9), ('011', 10)]:
+            key = 'schema' + number
+            unreviewed = self.file(number + '-unreviewed.sql', 'BEGIN;\nCOMMIT;\n')
+            claimed = {'path': unreviewed['path'], 'sha256': self.reviewed(number)['sha256']}
+            config = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': previous}
+            action = 'upgrade' + str(previous + 1)
+            for pin in (unreviewed, claimed):
+                with self.subTest(number=number, mode=action, pin=pin):
+                    self.assertEqual(self.render(action, {**config, key: pin}).returncode, 78)
+            initialize = {'version': 1, 'relaySourceCommit': COMMIT}
+            for n in range(1, 12):
+                label = str(n).zfill(3)
+                initialize['schema' + label] = self.reviewed(label) if n >= 10 else self.file(label + '.sql', 'BEGIN;\nCOMMIT;\n')
+            self.assertEqual(self.render('initialize', initialize).returncode, 0)
+            for pin in (unreviewed, claimed):
+                with self.subTest(number=number, mode='initialize', pin=pin):
+                    self.assertEqual(self.render('initialize', {**initialize, key: pin}).returncode, 78)
 
     def test_schema10_rejects_bad_pin_before_reading_retained_data(self):
         marker = self.dir / 'hash-called-010'
@@ -216,7 +247,7 @@ class RendererTest(unittest.TestCase):
 
     def test_schema11_upgrade_requires_exact_stage_and_preserves_maintenance_guards(self):
         config = {'version': 1, 'relaySourceCommit': COMMIT, 'fromVersion': 10,
-                  'schema011': self.file('011.sql', 'BEGIN;\nCOMMIT;\n')}
+                  'schema011': self.reviewed('011')}
         output = self.render('upgrade11', config)
         self.assertEqual(output.returncode, 0, output.stderr)
         schema, script, job = json.loads(output.stdout)['items']
