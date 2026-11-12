@@ -603,8 +603,9 @@ def reflog_time(path, now=None):
         if st.st_size == 0:
             return 0
         start = max(0, st.st_size - REFLOG_TAIL)
-        os.lseek(fd, start, os.SEEK_SET)
-        chunks, left = [], st.st_size - start
+        lead = 1 if start else 0        # one byte more: does the window start on a record?
+        os.lseek(fd, start - lead, os.SEEK_SET)
+        chunks, left = [], st.st_size - start + lead
         while left > 0:
             chunk = os.read(fd, left)
             if not chunk:
@@ -618,8 +619,9 @@ def reflog_time(path, now=None):
         os.close(fd)
     if not data.endswith(b"\n"):
         return None                     # an append in progress, or the file shrank under us
-    records = data[:-1].split(b"\n")
-    if start:
+    cut = lead and data[:1] != b"\n"
+    records = data[lead:-1].split(b"\n")
+    if cut:
         records = records[1:]           # the window began inside a record
     newest = None
     for i, raw in enumerate(records):
@@ -923,23 +925,33 @@ def remove_dep_dir(path, ident):
         st = os.stat(name, dir_fd=pfd, follow_symlinks=False)
         if not stat.S_ISDIR(st.st_mode) or (st.st_dev, st.st_ino) != ident:
             return False
-        trash = f".{name}.cleanup-{os.getpid()}"
+        trash = f".{name}.cleanup-{os.getpid()}-{os.urandom(6).hex()}"
         os.rename(name, trash, src_dir_fd=pfd, dst_dir_fd=pfd)
+        # The name may have been replaced between the stat above and the rename: delete only the
+        # dir that was checked. Anything else stays where it now is, under the trash name.
+        moved = os.stat(trash, dir_fd=pfd, follow_symlinks=False)
+        if not stat.S_ISDIR(moved.st_mode) or (moved.st_dev, moved.st_ino) != ident:
+            print(f"cleanup: {path} changed under the removal; left as {os.path.join(parent, trash)}",
+                  file=sys.stderr)
+            return False
         shutil.rmtree(trash, dir_fd=pfd)
         return True
     finally:
         os.close(pfd)
 
 
-def remove_deps(action, days, now, busy, binds, mounts, recheck=None):
+def remove_deps(action, days, now, busy, binds, mounts, inventory=None):
     """Re-judge the worktree right before deleting — it may have been picked up since the scan —
     with the CALLER's fresh `busy`/`binds`/`mounts`, then remove exactly the planned dep dirs that
     the fresh scan still finds, as the same inodes, and that inspect_dep still clears. The re-inspect
     matters: scan_worktree does not look inside dep dirs, and a checkout cloned into
     node_modules/a after the plan leaves node_modules' own inode and mtime unchanged (review, #1005).
-    `recheck(dir, worktree)` (Inventory.recheck) runs last, right before each removal: a dir another
-    tree has linked into since stays. Returns how many were removed; None = nothing was (the whole
-    worktree skipped, or every dir linked)."""
+    With an Inventory: ready() first — a rebuild can take minutes, so every check here comes after
+    it — and recheck(dir, worktree) last, right before each removal: a dir another tree links into
+    stays. Returns how many were removed; None = nothing was (the whole worktree skipped, or every
+    dir linked)."""
+    if inventory:
+        inventory.ready()
     w = scan_worktree(action.label, (now - timedelta(days=days)).timestamp())
     if w.last_activity is None or in_use(action.label, busy, binds):
         return None
@@ -950,7 +962,7 @@ def remove_deps(action, days, now, busy, binds, mounts, recheck=None):
             continue
         if any(under(m, d) for m in mounts) or inspect_dep(d)[2] is not None:
             continue
-        if recheck and recheck(d, action.label):
+        if inventory and inventory.recheck(d, action.label):
             linked += 1
             continue
         if remove_dep_dir(d, idents[d]):
@@ -973,16 +985,19 @@ def remove_deps(action, days, now, busy, binds, mounts, recheck=None):
 # consumers) — skipping only container storage (dev-worker-3: 3.9 M entries, 37.6 k links, 7 s
 # warm, ~2.5 min cold). The roots are LINK_ROOTS plus --deps-roots: disk-guard passes only the
 # filesystems under pressure as --deps-roots, and a /home consumer of a /workspace dir must still
-# be seen.
+# be seen. The same walk records every dir that holds a `.git`, at any depth: which worktree a link
+# belongs to is decided from those, never from the depth-limited worktree discovery.
 #
 # What it protects: consumers whose dependency is a SYMLINK on those filesystems resolving into the
 # candidate, or into an ancestor of it inside its worktree, observed in a completed inventory. Not:
 # a consumer naming the candidate by path in a file, config or command (directly or through an
 # alias above the worktree, `~/ws -> /workspace/c4`); a link on another filesystem mounted below a
-# root; a link made or retargeted after its directory was walked. The removal re-checks against an
-# inventory completed at most INDEX_MAX_AGE before it. What can go regardless is regenerable (deps)
-# or a clean worktree merged into, or with HEAD on, a remote-tracking branch (its source is on the
-# forge under those local refs; its own HEAD reflog is lost).
+# root; a link made or retargeted after its directory was walked. Each removal makes sure of an
+# inventory completed at most INDEX_MAX_AGE ago BEFORE its own safety checks, and checks that same
+# inventory again right before it deletes (an inventory that aged meanwhile refuses: the next run
+# retries). What can go regardless is regenerable (deps) or a clean worktree merged into, or with
+# HEAD on, a remote-tracking branch (its source is on the forge under those local refs; its own
+# HEAD reflog is lost).
 
 LINK_ROOTS = DEPS_ROOTS
 INDEX_MAX_AGE = 120             # seconds since the inventory's walk COMPLETED
@@ -992,15 +1007,25 @@ GIT_SKIP = frozenset({"objects", "lfs"})       # inside a .git dir: no links, mi
 DANGLING = (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
 
 
-class Incomplete(str):
-    """The one answer an incomplete inventory gives: every candidate counts as linked."""
+class Refusal(str):
+    """A refusal that is not a list of links: an incomplete or aged inventory."""
+
+
+class Incomplete(Refusal):
+    """The answer an incomplete inventory gives: every candidate counts as linked."""
 
 
 @dataclass(frozen=True)
 class LinkIndex:
     started: float              # wall clock when the walk began: links observed no earlier
-    links: tuple                # ((link, ends, through), ...) — see traverse()
+    links: tuple                # ((link, ends, through, owner), ...) — see traverse() and owner()
     errors: tuple = ()          # ((path, why), ...): any makes the index incomplete
+    exposed: dict = field(default_factory=dict, compare=False, repr=False)   # per-worktree cache
+
+
+def incomplete(index):
+    (path, why), n = index.errors[0], len(index.errors)
+    return Incomplete(f"link inventory incomplete ({n} error(s), e.g. {path}: {why})")
 
 
 def traverse(link, target):
@@ -1011,8 +1036,8 @@ def traverse(link, target):
     error): `ends` = every symlink met (the link first) and where resolution ends — when it cannot
     finish (dangling, a loop, the limit) the resolved prefix plus the unresolved rest, so
     unresolved never means "points nowhere"; `through` = every ordinary dir a `..` stepped back out
-    of (`x -> W/node_modules/../src` needs W/node_modules); `error` = any other lookup failure,
-    which makes the inventory incomplete."""
+    of (`x -> W/node_modules/../src` needs W/node_modules); `error` = the OSError of any other
+    lookup failure, which makes the inventory incomplete."""
     ends, through = [link], []
     resolved = os.path.dirname(link)
     pending = target.split("/")
@@ -1033,7 +1058,7 @@ def traverse(link, target):
             st = os.lstat(nxt)
         except OSError as e:
             ends.append(os.path.normpath(os.path.join(nxt, *pending)))
-            return tuple(ends), tuple(through), None if e.errno in DANGLING else f"{nxt}: {e.strerror}"
+            return tuple(ends), tuple(through), None if e.errno in DANGLING else e
         if not stat.S_ISLNK(st.st_mode):
             resolved = nxt
             continue
@@ -1046,7 +1071,7 @@ def traverse(link, target):
             more = os.readlink(nxt)
         except OSError as e:
             ends.append(os.path.normpath(os.path.join(nxt, *pending)))
-            return tuple(ends), tuple(through), None if e.errno in DANGLING else f"{nxt}: {e.strerror}"
+            return tuple(ends), tuple(through), None if e.errno in DANGLING else e
         if more.startswith("/"):
             resolved = "/"
         pending = more.split("/") + pending
@@ -1054,15 +1079,28 @@ def traverse(link, target):
     return tuple(ends), tuple(through), None
 
 
+def owner(path, trees):
+    """The deepest dir in `trees` (dirs holding a `.git`) that holds `path`, or None."""
+    d = os.path.dirname(path)
+    while d not in trees:
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+    return d
+
+
 def link_index(roots, excluded=frozenset(), strict=True, clock=time.time):
-    """Every symlink below `roots` (see above), resolved. Descriptor-relative: each root is opened
-    with open_dir_nofollow and each dir by name under its parent's fd with O_NOFOLLOW, so a dir
-    swapped for a symlink fails the open instead of being followed (and is recorded as the link it
-    became); entry types come from the listing; a link's text is read through the parent's fd. An
-    entry that vanished is skipped; any other error goes into `errors`. strict=False — a non-root
-    dry run, which cannot read other users' trees — skips permission errors instead."""
+    """Every symlink below `roots` (see above), resolved, with the worktree (deepest dir holding a
+    `.git`, found by this same walk) it lives in. Descriptor-relative: each root is opened with
+    open_dir_nofollow and each dir by name under its parent's fd with O_NOFOLLOW, so a dir swapped
+    for a symlink fails the open instead of being followed (and is recorded as the link it became);
+    entry types come from the listing; a link's text is read through the parent's fd. An entry
+    that vanished is skipped; any other error, in the walk or in a link's resolution, goes into
+    `errors`. strict=False — a non-root dry run, which cannot read other users' trees — skips
+    permission errors instead, in both."""
     started = clock()
-    found, errors = {}, []
+    found, errors, trees = {}, [], set()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     skip = {os.path.realpath(x) for x in excluded}
 
@@ -1090,6 +1128,8 @@ def link_index(roots, excluded=frozenset(), strict=True, clock=time.time):
         except OSError as e:
             fail(path, e)
             return
+        if not in_git and any(e.name == ".git" for e in entries):
+            trees.add(path)
         for e in entries:
             p = os.path.join(path, e.name)
             try:
@@ -1120,7 +1160,13 @@ def link_index(roots, excluded=frozenset(), strict=True, clock=time.time):
                     fail(p, err2)
                 continue
             try:
-                if os.fstat(child).st_dev == dev:
+                same = os.fstat(child).st_dev == dev
+            except OSError as err:
+                os.close(child)
+                fail(p, err)
+                continue
+            try:
+                if same:
                     walk(child, p, dev, depth + 1, in_git or (depth + 1 if e.name == ".git" else 0))
             finally:
                 os.close(child)
@@ -1135,102 +1181,120 @@ def link_index(roots, excluded=frozenset(), strict=True, clock=time.time):
             continue
         try:
             walk(fd, root, os.fstat(fd).st_dev, 0, 0)
+        except OSError as e:
+            fail(root, e)
         finally:
             os.close(fd)
     links = []
     for link, target in found.items():
         ends, through, error = traverse(link, target)
         if error:
-            errors.append((link, error))
-        links.append((link, ends, through))
+            fail(link, error)
+        links.append((link, ends, through, owner(link, trees)))
     return LinkIndex(started, tuple(links), tuple(errors))
 
 
-def owner(path, worktrees):
-    """The deepest worktree in `worktrees` that holds `path`, or None."""
-    d = os.path.dirname(path)
-    while d not in worktrees:
-        parent = os.path.dirname(d)
-        if parent == d:
-            return None
-        d = parent
-    return d
-
-
-def linked_from(index, candidate, worktree, worktrees=frozenset()):
+def linked_from(index, candidate, worktree):
     """The links that can reach `candidate` — a dep dir of `worktree`, or a whole worktree when
     candidate == worktree: an `end` of their resolution is in the candidate (or is it), or is an
     ancestor of it inside its worktree (`consumer/lib -> <worktree>` reaches lib/node_modules), or
     a dir it stepped out of with `..` is in the candidate. Not an ancestor above the worktree
     (`~/ws -> /workspace/c4` would make everything linked). Ignored: links inside the candidate,
-    and, for a dep dir, links whose own worktree is the candidate's (its dep dirs regenerate
-    together: pnpm and workspace links) — a NESTED worktree is another consumer. An incomplete
-    index answers one Incomplete, so every candidate counts as linked."""
+    and, for a dep dir, the worktree's OWN links (its dep dirs regenerate together: pnpm and
+    workspace links) — unless another tree's link reaches the part of the worktree they sit in
+    (`other/pkg -> W/packages/p` uses W/packages/p/node_modules -> W/node_modules). A nested
+    worktree is another tree. An incomplete index answers one Incomplete, so every candidate
+    counts as linked."""
     if index.errors:
-        (path, why), n = index.errors[0], len(index.errors)
-        return [Incomplete(f"link inventory incomplete ({n} error(s), e.g. {path}: {why})")]
+        return [incomplete(index)]
+    own = candidate != worktree
+    exposed = ()
+    if own:
+        exposed = index.exposed.get(worktree)
+        if exposed is None:
+            exposed = index.exposed[worktree] = tuple(
+                t for link, ends, _, tree in index.links if tree != worktree
+                for t in ends[1:] if under(t, worktree))
     out = []
-    for link, ends, through in index.links:
+    for link, ends, through, tree in index.links:
         if under(link, candidate):
             continue
         if not (any(under(t, candidate) or (under(candidate, t) and under(t, worktree)) for t in ends)
                 or any(under(t, candidate) for t in through)):
             continue
-        if candidate != worktree and owner(link, worktrees) == worktree:
+        if own and tree == worktree and not any(under(link, t) for t in exposed):
             continue
         out.append(link)
     return out
 
 
 def link_reason(links):
-    if isinstance(links[0], Incomplete):
+    if isinstance(links[0], Refusal):
         return str(links[0])
     return f"linked from {len(links)} path(s), e.g. {links[0]}"
 
 
 def is_link_reason(why):
-    return why.startswith(("linked from ", "link inventory incomplete"))
+    return why.startswith(("linked from ", "link inventory"))
 
 
 class Inventory:
-    """The link index a scan uses: built on first need (a run without a candidate never walks), and
+    """The link index of one run: built on first need (a run without a candidate never walks);
     rebuilt when a caller wants one whose walk completed less than `max_age` seconds ago (a
-    monotonic clock; an index observes links from its walk's START). An incomplete rebuild is kept,
-    never swapped for the previous index: it refuses every later removal of the run."""
+    monotonic clock; an index observes links from its walk's START).
+
+    A removal calls ready() BEFORE its own safety checks — a rebuild can take minutes, and the
+    checks must come after it — and recheck() right before it deletes: the same index, refused
+    if it aged past INDEX_MAX_AGE during the checks. The first incomplete index latches `failed`
+    for the whole run: every later answer is that refusal, and main() exits 1."""
 
     def __init__(self, roots, excluded=frozenset(), strict=True, clock=time.time,
                  monotonic=time.monotonic):
         self.roots, self.excluded, self.strict = list(roots), set(excluded), strict
         self.clock, self.monotonic = clock, monotonic
-        self.index, self.completed, self.seconds, self.walks = None, 0.0, 0.0, 0
-        self.worktrees, self.poisoned = frozenset(), None
+        self.index, self.completed, self.seconds, self.walks, self.links_seen = None, 0.0, 0.0, 0, 0
+        self.failed, self.at_removal = None, []
 
-    def reset(self, worktrees=()):
-        self.index, self.worktrees, self.poisoned = None, frozenset(worktrees), None
-
-    def incomplete(self):
-        return bool((self.index and self.index.errors) or self.poisoned)
+    def reset(self):
+        """A new scan: a new index when one is needed. `failed` stays: it is the run's."""
+        self.index = None
 
     def get(self, max_age=None):
         if self.index is None or (max_age is not None and self.monotonic() - self.completed > max_age):
-            t0 = self.monotonic()
-            self.index = link_index(self.roots, self.excluded, self.strict, self.clock)
-            self.completed = self.monotonic()
-            self.seconds, self.walks = self.completed - t0, self.walks + 1
+            t0, started = self.monotonic(), self.clock()
+            try:
+                index = link_index(self.roots, self.excluded, self.strict, self.clock)
+            except OSError as e:
+                index = LinkIndex(started, (), ((", ".join(self.roots), e.strerror or str(e)),))
+            self.index, self.completed = index, self.monotonic()
+            self.seconds, self.walks, self.links_seen = self.completed - t0, self.walks + 1, len(index.links)
+            if index.errors and not self.failed:
+                self.failed = incomplete(index)
         return self.index
 
     def linked(self, candidate, worktree, max_age=None):
-        return linked_from(self.get(max_age), candidate, worktree, self.worktrees)
+        if self.failed:
+            return [self.failed]
+        index = self.get(max_age)
+        return [self.failed] if self.failed else linked_from(index, candidate, worktree)
+
+    def ready(self):
+        """Before a removal's safety checks: an index completed at most INDEX_MAX_AGE ago."""
+        if not self.failed:
+            self.get(INDEX_MAX_AGE)
 
     def recheck(self, candidate, worktree):
-        """The removal-time check: links into `candidate` against an index completed at most
-        INDEX_MAX_AGE ago. Once a rebuild comes back incomplete, every later removal of the run is
-        refused (the previous, complete index is gone and not trusted again)."""
-        if self.poisoned:
-            return [self.poisoned]
-        links = self.linked(candidate, worktree, INDEX_MAX_AGE)
-        if links and isinstance(links[0], Incomplete):
-            self.poisoned = links[0]
+        """Right before the removal, after its safety checks: the index ready() made sure of, never
+        a rebuild (that would outdate the checks). Links, or a refusal, are recorded for the
+        report."""
+        if self.failed:
+            links = [self.failed]
+        elif self.index is None or self.monotonic() - self.completed > INDEX_MAX_AGE:
+            links = [Refusal("link inventory aged during the safety checks; the next run retries")]
+        else:
+            links = linked_from(self.index, candidate, worktree)
+        if links:
+            self.at_removal.append((candidate, link_reason(links)))
         return links
 
 
@@ -1555,12 +1619,12 @@ def plan_worktrees(worktrees, days, merged_days, now, busy, claims, mounts, link
         is_linked = False
         try:
             rule, problem, head = judge_worktree(w, days, merged_days, now, busy, claims, mounts)
-            if rule and linked:
-                links = linked(w.path, w.path)
-                if links:
-                    rule, problem, is_linked = None, link_reason(links), True
             if rule:
                 size, problem = inspect_worktree(w.path, rule_cutoff(rule, days, merged_days, now))
+            if rule and not problem and linked:         # only an otherwise removable one costs a walk
+                links = linked(w.path, w.path)
+                if links:
+                    problem, is_linked = link_reason(links), True
             if rule and not problem:
                 st = os.lstat(w.path)
                 branch = git_out(st.st_uid, ["symbolic-ref", "-q", "--short", "HEAD"], w.path)
@@ -1575,12 +1639,15 @@ def plan_worktrees(worktrees, days, merged_days, now, busy, claims, mounts, link
     return plan, kept
 
 
-def remove_worktree(action, days, merged_days, now, busy, claims, mounts, recheck=None):
+def remove_worktree(action, days, merged_days, now, busy, claims, mounts, inventory=None):
     """Re-judge with the CALLER's fresh state right before removing — it may have been picked up,
-    changed or replaced since the scan — then `git worktree remove` (no --force) as the owner;
-    `recheck(path, path)` (Inventory.recheck) runs last, right before git. Returns None when it no
-    longer qualifies (or another tree links into it), else git's error text ("" = removed)."""
+    changed or replaced since the scan — then `git worktree remove` (no --force) as the owner.
+    With an Inventory: ready() before the re-judgement (a rebuild can take minutes) and
+    recheck(path, path) last, right before git. Returns None when it no longer qualifies (or
+    another tree links into it), else git's error text ("" = removed)."""
     path = action.label
+    if inventory:
+        inventory.ready()
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -1594,7 +1661,7 @@ def remove_worktree(action, days, merged_days, now, busy, claims, mounts, rechec
     link, _ = linked_worktree(path)
     if not link:                                    # its .git changed since the judgement
         return None
-    if recheck and recheck(path, path):
+    if inventory and inventory.recheck(path, path):
         return None
     r = GIT(st.st_uid, ["worktree", "remove", path], link.common)
     return "" if r.returncode == 0 else ((r.stderr or r.stdout).strip().splitlines() or ["failed"])[-1]
@@ -1739,9 +1806,9 @@ def still_planned(action, fresh_plan):
     return all(i in ids for i in action.ids)
 
 
-def execute(plan, fresh_plan, deps_days=None, worktree_days=None, merged_days=None, recheck=None):
-    """Remove what the fresh scan still plans. `recheck` (Inventory.recheck) guards each deps and
-    worktree removal at its last moment against links made since the scan."""
+def execute(plan, fresh_plan, deps_days=None, worktree_days=None, merged_days=None, inventory=None):
+    """Remove what the fresh scan still plans. `inventory` guards each deps and worktree removal
+    against links made since the scan (Inventory.ready / recheck)."""
     failures = skipped = 0
     for i, a in enumerate(plan, 1):
         if not still_planned(a, fresh_plan):
@@ -1751,7 +1818,7 @@ def execute(plan, fresh_plan, deps_days=None, worktree_days=None, merged_days=No
         if a.kind == "worktree":
             try:
                 err = remove_worktree(a, worktree_days, merged_days, datetime.now(timezone.utc),
-                                      busy_paths(), container_claims(), mount_points(), recheck)
+                                      busy_paths(), container_claims(), mount_points(), inventory)
             except (OSError, RuntimeError, subprocess.SubprocessError) as e:
                 err = str(e)
             if err is None:
@@ -1769,7 +1836,7 @@ def execute(plan, fresh_plan, deps_days=None, worktree_days=None, merged_days=No
             # the plan's snapshot is minutes old by the time a long run reaches the last one.
             try:
                 n = remove_deps(a, deps_days, datetime.now(timezone.utc), busy_paths(),
-                                bind_mount_sources(), mount_points(), recheck)
+                                bind_mount_sources(), mount_points(), inventory)
             except (OSError, RuntimeError) as e:
                 print(f"  ✗ {i:>3} {CATEGORY[a.kind]}: {a.label} — {e}")
                 failures += 1
@@ -1959,7 +2026,7 @@ def main(argv=None):
             for_worktrees = load_worktrees(deps_roots, args.merged_days, now, excluded) \
                 if args.worktrees else []
             for_deps = load_worktrees(deps_roots, args.deps_days, now, excluded) if args.deps else []
-            inventory.reset(w.path for w in for_worktrees or for_deps)
+            inventory.reset()
             going = set()
             if args.worktrees:
                 wplan, kept = plan_worktrees(for_worktrees, args.worktree_days, args.merged_days, now,
@@ -1974,23 +2041,24 @@ def main(argv=None):
         return plan, refused, kept
 
     def report(rc):
-        """The last lines of every walking run (disk-guard keeps only the last 15): the inventory's
-        size and cost when one was taken, and what links kept. An incomplete inventory fails the
-        run: disk-guard counts it as a failed step, never as exhausted."""
+        """The last lines of every walking run that got past its scan (disk-guard keeps only the
+        last 15): the inventory's size and cost when one was taken, and what links kept — at
+        planning and at removal. An incomplete inventory, seen at any point of the run, fails it:
+        disk-guard counts that as a failed step, never as exhausted."""
         if not walk:
             return rc
         if inventory.walks:
-            index = inventory.index
-            print(f"Link inventory: {len(index.links)} links under {', '.join(inventory.roots)} "
-                  f"({inventory.seconds:.0f}s, {inventory.walks} walk(s)).")
+            print(f"Link inventory: {inventory.links_seen} links under {', '.join(inventory.roots)} "
+                  f"({inventory.seconds:.0f}s last walk, {inventory.walks} walk(s)).")
         lk_deps = [(d, why) for d, why in refused if is_link_reason(why)]
         lk_wts = [(d, why) for d, why in kept if is_link_reason(why)]
-        first = (lk_deps + lk_wts)[:1]
+        first = (lk_deps + lk_wts + inventory.at_removal)[:1]
         print(f"Linked from other trees, not removed: {len(lk_deps)} dep dir(s), {len(lk_wts)} "
-              f"worktree(s)" + (f" (e.g. {first[0][0]}: {first[0][1]})." if first else "."))
-        if inventory.incomplete():
-            print("cleanup: link inventory incomplete: removed nothing from --deps/--worktrees",
-                  file=sys.stderr)
+              f"worktree(s) at planning, {len(inventory.at_removal)} at removal"
+              + (f" (e.g. {first[0][0]}: {first[0][1]})." if first else "."))
+        if inventory.failed:
+            print(f"cleanup: {inventory.failed}: every --deps/--worktrees removal from then on was "
+                  "refused", file=sys.stderr)
             return 1
         return rc
 
@@ -2018,10 +2086,10 @@ def main(argv=None):
     interactive = sys.stdin.isatty()
     if not args.yes and not interactive:
         print("Not a terminal and no --y: nothing removed.", file=sys.stderr)
-        return 1
+        return report(1)
     if not confirm(args.yes, interactive, lambda: input(f"Remove the {len(plan)} items above? [y/N] ")):
         print("Aborted. Nothing removed.")
-        return 0
+        return report(0)
     before = {p: shutil.disk_usage(p).used for p in watched}
     try:
         fresh, refused, kept = scan()
@@ -2029,7 +2097,7 @@ def main(argv=None):
         print(f"cleanup: {e}", file=sys.stderr)
         return 1
     failures, skipped = execute(plan, fresh, args.deps_days, args.worktree_days,
-                                args.merged_days, inventory.recheck if inventory else None)
+                                args.merged_days, inventory)
     freed = sum(before[p] - shutil.disk_usage(p).used for p in watched)
     print(f"Done: {len(plan) - failures - skipped} ok, {failures} failed, {skipped} skipped. "
           f"Freed {fmt_size(max(freed, 0))}.")

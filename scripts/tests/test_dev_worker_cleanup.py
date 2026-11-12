@@ -796,6 +796,24 @@ class DepsTest(unittest.TestCase):
             cl.remove_dep_dir(nm, (st.st_dev, st.st_ino))
         self.assertTrue(os.path.isfile(os.path.join(victim, "node_modules", "keep.txt")))
 
+    def test_a_dir_replaced_between_the_check_and_the_rename_is_not_deleted(self):
+        wt = make_repo(os.path.join(self.user, "wt"))
+        nm = os.path.join(wt, "node_modules")
+        write(os.path.join(nm, "a", "index.js"))
+        st = os.lstat(nm)
+        real_rename = cl.os.rename
+
+        def swap(src, dst, *, src_dir_fd=None, dst_dir_fd=None):
+            if src == "node_modules":
+                real_rename(nm, os.path.join(wt, "moved-away"))          # the checked dir leaves...
+                write(os.path.join(nm, "keep", "precious.txt"))          # ...another takes its name
+            return real_rename(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd)
+        with mock.patch.object(cl.os, "rename", swap), mock.patch("sys.stderr", io.StringIO()):
+            self.assertFalse(cl.remove_dep_dir(nm, (st.st_dev, st.st_ino)))
+        [left] = [n for n in os.listdir(wt) if n.startswith(".node_modules.cleanup-")]
+        self.assertTrue(os.path.isfile(os.path.join(wt, left, "keep", "precious.txt")))
+        self.assertTrue(os.path.isfile(os.path.join(wt, "moved-away", "a", "index.js")))
+
     # CLI
 
     def test_no_docker_without_deps_has_nothing_to_do(self):
@@ -1297,12 +1315,39 @@ class WorktreesTest(unittest.TestCase):
         self.age(stale, 40)
         self.age(merged, 5)
         inv = cl.Inventory([self.root], set())
-        inv.reset([stale, merged, consumer, self.repo])
+
         ws = [cl.scan_worktree(p, (self.now - timedelta(days=3)).timestamp()) for p in (stale, merged)]
         plan, kept = cl.plan_worktrees(ws, 30, 3, self.now, set(), set(), set(), linked=inv.linked)
         self.assertEqual(plan, [])
         self.assertEqual(sorted(p for p, _ in kept), sorted([stale, merged]))
         self.assertTrue(all(why.startswith("linked from 1 path") for _, why in kept), kept)
+
+    def test_a_link_made_after_the_scan_stops_the_worktree_removal(self):
+        stale = self.worktree("stale")
+        self.age(stale, 40)
+        clock = [1000.0]
+        inv = cl.Inventory([self.root], set(), monotonic=lambda: clock[0])
+        ws = [cl.scan_worktree(stale, (self.now - timedelta(days=3)).timestamp())]
+        plan, _ = cl.plan_worktrees(ws, 30, 3, self.now, set(), set(), set(), linked=inv.linked)
+        self.assertEqual(self.rules(plan), [(stale, "stale")])
+        os.symlink(os.path.join(stale, "stale.py"), os.path.join(self.user, "uses-stale.py"))
+        clock[0] += cl.INDEX_MAX_AGE + 1
+        self.assertIsNone(cl.remove_worktree(plan[0], 30, 3, self.now, set(), set(), set(), inv))
+        self.assertTrue(os.path.isdir(stale))
+        self.assertEqual([c for c, _ in inv.at_removal], [stale])
+
+    def test_a_worktree_that_fails_inspection_never_costs_an_inventory(self):
+        stale = self.worktree("stale")
+        write(os.path.join(stale, "node_modules", "a", "index.js"))
+        self.age(stale, 40)
+        with open(os.path.join(stale, "node_modules", "a", "index.js"), "a") as f:
+            f.write("// written deep in node_modules: the scan cannot see it, inspection does\n")
+        linked = mock.Mock(return_value=[])
+        ws = [cl.scan_worktree(stale, (self.now - timedelta(days=3)).timestamp())]
+        self.assertIsNotNone(ws[0].last_activity)
+        plan, _ = cl.plan_worktrees(ws, 30, 3, self.now, set(), set(), set(), linked=linked)
+        self.assertEqual(plan, [])
+        linked.assert_not_called()
 
     def test_a_kept_linked_worktree_keeps_its_unlinked_deps_eligible(self):
         stale = self.worktree("stale")
@@ -1393,6 +1438,16 @@ class ReflogTimeTest(unittest.TestCase):
         self.put(rec(self.now + 10 * DAY))
         self.assertAlmostEqual(cl.reflog_time(self.log), time.time(), delta=5)
 
+    def test_a_window_that_starts_exactly_on_a_record_keeps_it(self):
+        first = rec(self.now - DAY, msg="")                          # the newest, then older ones
+        filler = "".join(rec(self.now - 30 * DAY, msg="x" * 200) for _ in range(200))
+        pad = cl.REFLOG_TAIL - len(first) - len(filler)
+        self.assertGreater(pad, 0)
+        window = rec(self.now - DAY, msg="p" * pad) + filler          # exactly REFLOG_TAIL bytes
+        self.assertEqual(len(window), cl.REFLOG_TAIL)
+        self.put("".join(rec(self.now - 40 * DAY) for _ in range(10)) + window)
+        self.assertEqual(cl.reflog_time(self.log), int(self.now - DAY))
+
     def test_the_window_is_bounded_a_known_limit(self):
         # A recent entry followed by more than REFLOG_TAIL bytes of OLDER-dated ones is not seen.
         # Git appends in time order; this takes backdated identities or a clock jump.
@@ -1421,14 +1476,15 @@ class LinkGuardTest(unittest.TestCase):
         write(os.path.join(self.nm, "@s", "p", "index.js"))
         self.consumer = make_repo(os.path.join(self.user, "consumer"))
         self.now = datetime.now(timezone.utc)
+        self._roots = mock.patch.object(cl, "LINK_ROOTS", ())     # never the runner's /home
+        self._roots.start()
 
     def tearDown(self):
+        self._roots.stop()
         self._tmp.cleanup()
 
-    def linked(self, cand=None, wt=None, worktrees=None):
-        inv = cl.Inventory([self.root], set())
-        inv.reset(worktrees if worktrees is not None else [self.src, self.consumer])
-        return inv.linked(cand or self.nm, wt or self.src)
+    def linked(self, cand=None, wt=None):
+        return cl.Inventory([self.root], set()).linked(cand or self.nm, wt or self.src)
 
     def link(self, target, *where):
         path = os.path.join(*where)
@@ -1505,7 +1561,27 @@ class LinkGuardTest(unittest.TestCase):
     def test_a_nested_worktree_is_another_consumer(self):
         nested = make_repo(os.path.join(self.src, ".claude", "worktrees", "n"), linked_from=self.src)
         link = self.link(self.nm, nested, "node_modules")
-        self.assertEqual(self.linked(worktrees=[self.src, nested, self.consumer]), [link])
+        self.assertEqual(self.linked(), [link])
+
+    def test_a_nested_consumer_deeper_than_discovery_is_still_another_tree(self):
+        # find_worktrees stops at DISCOVERY_DEPTH; ownership comes from the inventory's own walk.
+        deep = os.path.join(self.src, *[f"d{i}" for i in range(cl.DISCOVERY_DEPTH + 2)], "nested")
+        nested = make_repo(deep, linked_from=self.src)
+        link = self.link(self.nm, nested, "node_modules")
+        age_tree(self.src, 30)
+        out = io.StringIO()
+        with any_uid(), mock.patch.object(cl.shutil, "which", return_value=None), \
+                mock.patch("sys.stdout", out):
+            rc = cl.main(["--no-docker", "--deps", "--dry-run", "--deps-days", "3", "--deps-roots", self.root])
+        self.assertEqual(rc, 0)
+        self.assertIn(f"Not touching {self.nm}: linked from 1 path(s), e.g. {link}.", out.getvalue())
+
+    def test_a_worktrees_own_link_counts_when_another_tree_reaches_its_part(self):
+        # other/pkg -> W/packages/p uses W/packages/p/node_modules -> W/node_modules.
+        inner = self.link(self.nm, self.src, "packages", "p", "node_modules")
+        self.assertEqual(self.linked(), [])                         # W's own link: regenerated with it
+        self.link(os.path.join(self.src, "packages", "p"), self.consumer, "pkg")
+        self.assertEqual(self.linked(), [inner])
 
     def test_a_link_loop_terminates_and_counts_where_it_passes(self):
         self.link(os.path.join(self.consumer, "l2"), self.consumer, "l1")
@@ -1536,7 +1612,7 @@ class LinkGuardTest(unittest.TestCase):
         link = self.link(self.nm, self.consumer, "node_modules")
         age_tree(self.src, 30)
         inv = cl.Inventory([self.root], set())
-        inv.reset([self.src, self.consumer])
+
         w = cl.scan_worktree(self.src, (self.now - timedelta(days=14)).timestamp())
         plan, refused = cl.plan_deps([w], 14, self.now, set(), set(), linked=inv.linked)
         self.assertEqual([a.ids for a in plan], [[web]])
@@ -1545,7 +1621,7 @@ class LinkGuardTest(unittest.TestCase):
     def test_an_incomplete_inventory_removes_nothing(self):
         age_tree(self.src, 30)
         inv = cl.Inventory([self.root], set())
-        inv.reset([self.src])
+
         with mock.patch.object(cl, "link_index",
                                return_value=cl.LinkIndex(time.time(), (), (("/x", "EIO"),))):
             w = cl.scan_worktree(self.src, (self.now - timedelta(days=14)).timestamp())
@@ -1568,9 +1644,7 @@ class LinkGuardTest(unittest.TestCase):
         self.assertIn("Linked from other trees, not removed: 1 dep dir(s), 0 worktree(s)", out.getvalue())
 
     def inventory(self, tick=None):
-        inv = cl.Inventory([self.root], set(), monotonic=tick or time.monotonic)
-        inv.reset([self.src, self.consumer])
-        return inv
+        return cl.Inventory([self.root], set(), monotonic=tick or time.monotonic)
 
     def test_a_link_made_after_the_scan_is_caught_at_the_removal(self):
         age_tree(self.src, 30)
@@ -1582,7 +1656,7 @@ class LinkGuardTest(unittest.TestCase):
         self.link(self.nm, self.consumer, "node_modules")
         clock[0] += cl.INDEX_MAX_AGE + 1
         with mock.patch("sys.stdout", io.StringIO()):
-            failures, skipped = cl.execute(plan, plan, deps_days=14, recheck=inv.recheck)
+            failures, skipped = cl.execute(plan, plan, deps_days=14, inventory=inv)
         self.assertEqual((failures, skipped), (0, 1))
         self.assertTrue(os.path.isdir(self.nm))
 
@@ -1590,6 +1664,7 @@ class LinkGuardTest(unittest.TestCase):
         inv = self.inventory()
         with mock.patch.object(cl, "link_index", wraps=cl.link_index) as built:
             inv.linked(self.nm, self.src)
+            inv.ready()
             inv.recheck(self.nm, self.src)
         self.assertEqual(built.call_count, 1)
 
@@ -1603,9 +1678,21 @@ class LinkGuardTest(unittest.TestCase):
         inv = self.inventory(lambda: clock[0])
         with mock.patch.object(cl, "link_index", side_effect=slow) as built:
             inv.linked(self.nm, self.src)
-            inv.recheck(self.nm, self.src)
-            inv.recheck(self.nm, self.src)
+            inv.ready()
+            self.assertEqual(inv.recheck(self.nm, self.src), [])
         self.assertEqual(built.call_count, 1)
+
+    def test_recheck_never_rebuilds_and_refuses_an_index_that_aged_during_the_checks(self):
+        clock = [1000.0]
+        inv = self.inventory(lambda: clock[0])
+        inv.ready()
+        clock[0] += cl.INDEX_MAX_AGE + 1                   # the safety checks took too long
+        with mock.patch.object(cl, "link_index") as built:
+            [why] = inv.recheck(self.nm, self.src)
+        built.assert_not_called()
+        self.assertTrue(why.startswith("link inventory aged"))
+        self.assertEqual(inv.at_removal, [(self.nm, str(why))])
+        self.assertIsNone(inv.failed)
 
     def test_an_incomplete_refresh_refuses_every_later_removal(self):
         clock = [1000.0]
@@ -1614,11 +1701,104 @@ class LinkGuardTest(unittest.TestCase):
         clock[0] += cl.INDEX_MAX_AGE + 1
         broken = cl.LinkIndex(time.time(), (), ((self.src, "Input/output error"),))
         with mock.patch.object(cl, "link_index", return_value=broken):
+            inv.ready()
             [why] = inv.recheck(self.nm, self.src)
         self.assertIsInstance(why, cl.Incomplete)
         clock[0] += cl.INDEX_MAX_AGE + 1                   # a later, healthy walk is not trusted
+        inv.ready()
+        inv.reset()                                        # nor a new scan of the same run
         self.assertEqual(inv.recheck(self.nm, self.src), [why])
-        self.assertTrue(inv.incomplete())
+        self.assertEqual(inv.linked(self.nm, self.src), [why])
+        self.assertEqual(inv.failed, why)
+
+    def test_a_walk_that_raises_is_an_incomplete_inventory(self):
+        real = cl.os.fstat
+        calls = [0]
+
+        def fstat(fd):
+            calls[0] += 1
+            if calls[0] == 3:
+                raise OSError(5, "Input/output error")
+            return real(fd)
+        with mock.patch.object(cl.os, "fstat", fstat):
+            index = cl.link_index([self.root])
+        self.assertEqual(len(index.errors), 1)
+        with mock.patch.object(cl, "link_index", side_effect=OSError(5, "Input/output error")):
+            inv = self.inventory()
+            [why] = inv.linked(self.nm, self.src)
+        self.assertIsInstance(why, cl.Incomplete)
+        self.assertEqual(inv.failed, why)
+
+    def test_a_permission_error_resolving_a_link_is_skipped_only_when_not_strict(self):
+        self.link(os.path.join(self.root, "private", "x"), self.consumer, "p")
+        os.makedirs(os.path.join(self.root, "private"))
+        real = cl.os.lstat
+
+        def lstat(path, *a, **kw):
+            if path == os.path.join(self.root, "private", "x"):
+                raise PermissionError(13, "Permission denied")
+            return real(path, *a, **kw)
+        with mock.patch.object(cl.os, "lstat", lstat):
+            self.assertEqual(cl.link_index([self.root], strict=False).errors, ())
+            self.assertEqual(len(cl.link_index([self.root]).errors), 1)
+
+    def test_one_newly_linked_dir_skips_its_whole_deps_action(self):
+        web = os.path.join(self.src, "web", "node_modules")
+        write(os.path.join(web, "b", "i.js"))
+        age_tree(self.src, 30)
+        w = cl.scan_worktree(self.src, (self.now - timedelta(days=14)).timestamp())
+        plan, _ = cl.plan_deps([w], 14, self.now, set(), set(), linked=self.inventory().linked)
+        self.assertEqual([sorted(a.ids) for a in plan], [sorted([self.nm, web])])
+        self.link(self.nm, self.consumer, "node_modules")
+        fresh, _ = cl.plan_deps([w], 14, self.now, set(), set(), linked=self.inventory().linked)
+        with mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(cl.execute(plan, fresh, deps_days=14), (0, 1))
+        self.assertTrue(os.path.isdir(self.nm) and os.path.isdir(web))
+
+    def test_an_incomplete_refresh_after_a_removal_stops_the_rest(self):
+        other = make_repo(os.path.join(self.user, "other"))
+        other_nm = os.path.join(other, "node_modules")
+        write(os.path.join(other_nm, "z", "i.js"))
+        age_tree(self.src, 30)
+        age_tree(other, 30)
+        clock = [1000.0]
+        inv = self.inventory(lambda: clock[0])
+        ws = [cl.scan_worktree(p, (self.now - timedelta(days=14)).timestamp()) for p in (self.src, other)]
+        plan, _ = cl.plan_deps(ws, 14, self.now, set(), set(), linked=inv.linked)
+        self.assertEqual(len(plan), 2)
+        real_remove = cl.remove_dep_dir
+
+        def remove_then_age(path, ident):
+            done = real_remove(path, ident)
+            clock[0] += cl.INDEX_MAX_AGE + 1               # the next removal needs a new walk...
+            return done
+        broken = cl.LinkIndex(time.time(), (), (("/x", "Input/output error"),))
+        with mock.patch.object(cl, "remove_dep_dir", side_effect=remove_then_age), \
+                mock.patch.object(cl, "link_index", return_value=broken), \
+                mock.patch("sys.stdout", io.StringIO()):     # ...and it comes back incomplete
+            failures, skipped = cl.execute(plan, plan, deps_days=14, inventory=inv)
+        self.assertEqual((failures, skipped), (0, 1))
+        self.assertEqual(sorted(os.path.isdir(d) for d in (self.nm, other_nm)), [False, True])
+        self.assertIsInstance(inv.failed, cl.Incomplete)
+        self.assertEqual(len(inv.at_removal), 1)
+
+    def test_a_run_whose_fresh_scan_needs_no_inventory_still_reports(self):
+        age_tree(self.src, 30)
+        out, err = io.StringIO(), io.StringIO()
+
+        def confirm(*a):
+            write(os.path.join(self.src, "src", "touched.py"))   # active again before the fresh scan
+            return True
+        with any_uid(), mock.patch.object(cl.shutil, "which", return_value=None), \
+                mock.patch.object(cl.os, "geteuid", return_value=0), \
+                mock.patch.object(cl, "take_lock", return_value=io.StringIO()), \
+                mock.patch.object(cl, "confirm", side_effect=confirm), \
+                mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            rc = cl.main(["--no-docker", "--deps", "--y", "--deps-days", "3", "--deps-roots", self.root])
+        self.assertEqual(rc, 0, err.getvalue())
+        self.assertTrue(os.path.isdir(self.nm))
+        self.assertIn("Link inventory:", out.getvalue())
+        self.assertTrue(out.getvalue().rstrip().splitlines()[-1].startswith("Linked from other trees"))
 
     def test_a_dir_stepped_out_of_with_dotdot_counts_but_only_for_itself(self):
         write(os.path.join(self.src, "README"))
@@ -1683,7 +1863,7 @@ class LinkGuardTest(unittest.TestCase):
             return real_open(path, flags, mode, dir_fd=dir_fd)
         with mock.patch.object(cl.os, "open", swapping):
             index = cl.link_index([self.root])
-        self.assertEqual([l for l, _, _ in index.links], [swap])
+        self.assertEqual([l for l, _, _, _ in index.links], [swap])
         self.assertEqual(index.errors, ())
 
     def test_main_exits_1_on_an_incomplete_inventory(self):
