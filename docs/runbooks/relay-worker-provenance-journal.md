@@ -440,7 +440,7 @@ uses a test-owned executable psql wrapper; production accepts no event triggers.
 Each result records the exact maintenance-script and harness SHA256 values.
 The current-read fixtures are synthetic SQL projections, not signed or physical
 evidence; the expiry case exercises the existing read refusal, not every new
-time-bound branch in SQL011. Fifteen offline rendering/startup tests, shell syntax, kustomize
+time-bound branch in SQL011. Sixteen offline rendering/startup tests, shell syntax, kustomize
 rendering and diff checks also passed.
 Opus review through LLM Router `pool-claude` ended ALIGNED for inactive merge
 (request `5e830b4d-19ca-4c2c-8549-bb21d41c004e`). Its retained-ledger-membership
