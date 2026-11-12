@@ -335,6 +335,8 @@ class RendererTest(unittest.TestCase):
             schema, script, job = renderer.upgrade_vm(config)
             self.assertEqual(set(schema['data']), {'008-repair.sql', 'vm011.sql', 'vm012.sql', 'vm013.sql', 'vm014.sql'})
             self.assertEqual(set(script['data']), {'upgrade-vm.sh'})
+            for item in (schema, script, job):
+                self.assertRegex(item['metadata']['name'], r'^[a-z0-9]([-a-z0-9]*[a-z0-9])?$')
             self.assertEqual(job['metadata']['name'], 'relay-provenance-journal-upgrade-11-to-vm15')
             self.assertTrue(job['spec']['suspend'])
             self.assertEqual(job['spec']['backoffLimit'], 0)

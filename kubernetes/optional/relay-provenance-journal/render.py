@@ -169,7 +169,8 @@ def database_job(config, action, numbers):
     filename = 'upgrade-vm.sh' if vm else action + '.sh'
     script = (ROOT / 'initialize' / filename).read_text()
     suffix = hashlib.sha256(''.join(pin['sha256'] for pin in pins).encode()).hexdigest()[:16]
-    schema_name, script_name = NAME + '-schema-' + suffix, NAME + '-' + action + '-' + hashlib.sha256(script.encode()).hexdigest()[:16]
+    schema_name = NAME + '-schema-' + suffix
+    script_name = NAME + '-' + ('upgrade-vm' if vm else action) + '-' + hashlib.sha256(script.encode()).hexdigest()[:16]
     env = [{'name': 'PGDATA', 'value': '/var/lib/postgresql/data/pgdata'}] + [
         {'name': name, 'value': pin['sha256']} for name, pin in zip(env_names, pins)]
     if is_upgrade:
