@@ -13,6 +13,7 @@ The tool's contract, pinned here:
   * Without --y it needs an interactive yes; a non-interactive run without --y removes nothing.
 """
 import importlib.machinery
+import io
 import json
 import importlib.util
 import pathlib
@@ -480,6 +481,7 @@ class HelpersTest(unittest.TestCase):
 # (O_NOFOLLOW, /proc), which is where CI and the workers run.
 
 import os
+import re
 import stat
 import tempfile
 import time
@@ -504,6 +506,34 @@ def age_tree(path, days):
     os.utime(path, (t, t))
 
 
+def rec(ts, msg="commit: x", old="0" * 40, new="1" * 40):
+    """One reflog record as git writes it; msg=None writes none (and no tab), as git does."""
+    return f"{old} {new} T <t@t> {int(ts)} +0200" + (f"\t{msg}" if msg is not None else "") + "\n"
+
+
+def age_reflog(path, days):
+    """Rewrite every record's timestamp in a real git reflog to `days` ago."""
+    if not os.path.isfile(path):
+        return
+    t = int(time.time() - days * DAY)
+    with open(path) as f:
+        lines = f.read().split("\n")
+    out = []
+    for line in lines:
+        head, tab, msg = line.partition("\t")
+        out.append(re.sub(r" \d+ ([+-]\d{4})$", rf" {t} \1", head) + tab + msg)
+    with open(path, "w") as f:
+        f.write("\n".join(out))
+
+
+def any_uid():
+    """main() discovers worktrees only in dirs owned by uid >= 1000; test trees may be root's."""
+    real = cl.load_worktrees
+    return mock.patch.object(cl, "load_worktrees",
+                             lambda roots, days, now, excluded=frozenset(), min_uid=0:
+                             real(roots, days, now, excluded, min_uid=0))
+
+
 def make_repo(path, *, linked_from=None):
     """A main checkout (.git dir) or, with linked_from, a linked worktree (.git file)."""
     os.makedirs(path, exist_ok=True)
@@ -524,8 +554,11 @@ class DepsTest(unittest.TestCase):
         self.root = os.path.realpath(self._tmp.name)
         self.user = os.path.join(self.root, "u")
         self.now = datetime.now(timezone.utc)
+        self._roots = mock.patch.object(cl, "LINK_ROOTS", ())     # never the runner's /home
+        self._roots.start()
 
     def tearDown(self):
+        self._roots.stop()
         self._tmp.cleanup()
 
     def cutoff(self, days=14):
@@ -588,6 +621,41 @@ class DepsTest(unittest.TestCase):
         self.assertIsNone(cl.scan_worktree(wt, self.cutoff()).last_activity)
         age_tree(wt, 30)
         write(os.path.join(wt, ".git", "index"))
+        self.assertIsNone(cl.scan_worktree(wt, self.cutoff()).last_activity)
+
+    def test_a_gc_rewritten_reflog_does_not_make_a_worktree_fresh(self):
+        # dev-worker-3, 2026-11-12: `git gc` (reflog expire --all) gave all 282 relay worktrees'
+        # logs/HEAD the repack's mtime; their entries kept their own (old) times.
+        wt = make_repo(os.path.join(self.user, "wt"))
+        write(os.path.join(wt, "node_modules", "a", "index.js"))
+        log = os.path.join(wt, ".git", "logs", "HEAD")
+        write(log, rec(time.time() - 30 * DAY) + rec(time.time() - 29 * DAY))
+        age_tree(wt, 30)
+        os.utime(log)                                       # the rewrite: mtime now
+        w = cl.scan_worktree(wt, self.cutoff())
+        self.assertIsNotNone(w.last_activity)
+        self.assertLess(w.last_activity, self.now - timedelta(days=28))
+
+    def test_a_recent_reflog_entry_is_activity_whatever_the_mtime(self):
+        wt = make_repo(os.path.join(self.user, "wt"))
+        write(os.path.join(wt, ".git", "logs", "HEAD"), rec(time.time() - 3600))
+        age_tree(wt, 30)
+        self.assertIsNone(cl.scan_worktree(wt, self.cutoff()).last_activity)
+
+    def test_an_emptied_reflog_of_a_recently_active_worktree_stays_fresh_through_its_files(self):
+        # `git reflog expire --expire=now --all` empties even a busy worktree's log: the reflog then
+        # says nothing (0), and its recent files still do.
+        wt = make_repo(os.path.join(self.user, "wt"))
+        write(os.path.join(wt, ".git", "logs", "HEAD"), "")
+        age_tree(wt, 30)
+        write(os.path.join(wt, "src", "edited.py"))
+        self.assertIsNone(cl.scan_worktree(wt, self.cutoff()).last_activity)
+
+    def test_an_unreadable_reflog_makes_the_worktree_fresh(self):
+        wt = make_repo(os.path.join(self.user, "wt"))
+        os.makedirs(os.path.join(wt, ".git", "logs"))
+        os.mkfifo(os.path.join(wt, ".git", "logs", "HEAD"))
+        age_tree(wt, 30)
         self.assertIsNone(cl.scan_worktree(wt, self.cutoff()).last_activity)
 
     def test_a_reinstalled_dep_dir_is_activity(self):
@@ -785,6 +853,8 @@ class WorktreesTest(unittest.TestCase):
         self.now = datetime.now(timezone.utc)
         self._uid = mock.patch.object(cl, "MIN_UID", 0)
         self._uid.start()
+        self._roots = mock.patch.object(cl, "LINK_ROOTS", ())     # never the runner's /home
+        self._roots.start()
         self.bare = os.path.join(self.root, "remote.git")
         git(self.root, "init", "-q", "--bare", self.bare)
         self.repo = os.path.join(self.user, "platform")
@@ -800,6 +870,7 @@ class WorktreesTest(unittest.TestCase):
         git(self.repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
 
     def tearDown(self):
+        self._roots.stop()
         self._uid.stop()
         self._tmp.cleanup()
 
@@ -822,7 +893,9 @@ class WorktreesTest(unittest.TestCase):
         git(self.repo, "push", "-q", "origin", "HEAD:main")
 
     def age(self, wt, days):
+        # Real git wrote the reflog entries just now: age them too, or every worktree is fresh.
         age_tree(wt, days)
+        age_reflog(os.path.join(cl.git_dir(wt), "logs", "HEAD"), days)
         age_tree(cl.git_dir(wt), days)
 
     def plan(self, *paths, busy=frozenset(), claims=frozenset(), mounts=frozenset()):
@@ -854,6 +927,28 @@ class WorktreesTest(unittest.TestCase):
         self.squash_merge("feat.py")
         self.age(wt, 5)
         self.assertEqual(self.rules(self.plan(wt)[0]), [(wt, "merged")])
+
+    def test_gc_rewriting_every_worktree_reflog_leaves_them_idle(self):
+        merged = self.worktree("merged", push=False)
+        self.squash_merge("merged.py")
+        stale = self.worktree("stale")
+        self.age(merged, 5)
+        self.age(stale, 40)
+        logs = [os.path.join(cl.git_dir(w), "logs", "HEAD") for w in (merged, stale)]
+        before = [os.lstat(p).st_mtime for p in logs]
+        # What gc's housekeeping does: expire every worktree's reflog (dropping nothing here).
+        git(self.repo, "reflog", "expire", "--all", "--expire=never", "--expire-unreachable=never")
+        git(self.repo, "-c", "gc.reflogExpire=never", "-c", "gc.reflogExpireUnreachable=never",
+            "gc", "-q")
+        self.assertTrue(all(os.path.getsize(p) > 0 for p in logs))           # entries survived
+        self.assertTrue(all(os.lstat(p).st_mtime > b + DAY for p, b in zip(logs, before)))
+        self.assertEqual(sorted(self.rules(self.plan(merged, stale)[0])),
+                         sorted([(merged, "merged"), (stale, "stale")]))
+        # Expiring everything empties the logs: an empty reflog is no activity, not "now".
+        git(self.repo, "reflog", "expire", "--all", "--expire=now", "--expire-unreachable=now")
+        self.assertEqual([os.path.getsize(p) for p in logs], [0, 0])
+        self.assertEqual(sorted(self.rules(self.plan(merged, stale)[0])),
+                         sorted([(merged, "merged"), (stale, "stale")]))
 
     def test_partly_merged_worktree_is_not_merged(self):
         wt = self.worktree("feat", push=False)
@@ -1189,6 +1284,420 @@ class WorktreesTest(unittest.TestCase):
                 mock.patch.object(cl.shutil, "which", return_value="/usr/bin/docker"):
             with self.assertRaises(RuntimeError):
                 cl.container_claims()
+
+    # a worktree another tree links into (2026-11-12)
+
+    def test_a_worktree_another_tree_links_into_is_kept_whatever_its_idle_age(self):
+        stale = self.worktree("stale")
+        merged = self.worktree("merged", push=False)
+        self.squash_merge("merged.py")
+        consumer = make_repo(os.path.join(self.user, "consumer"))
+        os.symlink(os.path.join(stale, "stale.py"), os.path.join(consumer, "lib.py"))
+        os.symlink(merged, os.path.join(consumer, "merged-tree"))
+        self.age(stale, 40)
+        self.age(merged, 5)
+        inv = cl.Inventory([self.root], set())
+        inv.reset([stale, merged, consumer, self.repo])
+        ws = [cl.scan_worktree(p, (self.now - timedelta(days=3)).timestamp()) for p in (stale, merged)]
+        plan, kept = cl.plan_worktrees(ws, 30, 3, self.now, set(), set(), set(), linked=inv.linked)
+        self.assertEqual(plan, [])
+        self.assertEqual(sorted(p for p, _ in kept), sorted([stale, merged]))
+        self.assertTrue(all(why.startswith("linked from 1 path") for _, why in kept), kept)
+
+    def test_a_kept_linked_worktree_keeps_its_unlinked_deps_eligible(self):
+        stale = self.worktree("stale")
+        write(os.path.join(stale, "docs", "x.md"))
+        git(stale, "add", "-A")
+        git(stale, "commit", "-qm", "docs")
+        git(stale, "push", "-q", "origin", "stale")
+        write(os.path.join(stale, "node_modules", "a", "i.js"))
+        os.symlink(os.path.join(stale, "docs"), os.path.join(self.user, "docs-link"))
+        self.age(stale, 40)
+        out = io.StringIO()
+        with any_uid(), mock.patch.object(cl.shutil, "which", return_value=None), \
+                mock.patch("sys.stdout", out):
+            rc = cl.main(["--no-docker", "--worktrees", "--deps", "--dry-run", "--deps-days", "3",
+                          "--deps-roots", self.root])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn(f"Kept worktree {stale}", text)
+        self.assertIn("node_modules", text)                         # its deps are planned
+        self.assertIn("Linked from other trees, not removed: 0 dep dir(s), 1 worktree(s)", text)
+
+
+# ----------------------------------------------------------------------------- reflog entry times
+
+@unittest.skipUnless(LINUX, "Linux-only code path")
+class ReflogTimeTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.log = os.path.join(os.path.realpath(self._tmp.name), "logs", "HEAD")
+        self.now = time.time()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def put(self, text, mtime=None):
+        write(self.log, text)
+        if mtime is not None:
+            os.utime(self.log, (mtime, mtime))
+
+    def test_the_newest_entry_counts_not_the_files_mtime(self):
+        self.put(rec(self.now - 30 * DAY) + rec(self.now - 20 * DAY))   # mtime now: a gc rewrite
+        self.assertEqual(cl.reflog_time(self.log), int(self.now - 20 * DAY))
+
+    def test_an_older_dated_last_entry_does_not_hide_a_newer_one(self):
+        self.put(rec(self.now - DAY) + rec(self.now - 30 * DAY))
+        self.assertEqual(cl.reflog_time(self.log), int(self.now - DAY))
+
+    def test_an_entry_without_a_message_and_sha256_ids_parse(self):
+        self.put(rec(self.now - 9 * DAY, msg=None))
+        self.assertEqual(cl.reflog_time(self.log), int(self.now - 9 * DAY))
+        self.put(rec(self.now - 8 * DAY, old="0" * 64, new="2" * 64))
+        self.assertEqual(cl.reflog_time(self.log), int(self.now - 8 * DAY))
+
+    def test_no_reflog_and_an_empty_one_are_no_activity(self):
+        self.assertEqual(cl.reflog_time(self.log), 0)
+        self.put("")
+        self.assertEqual(cl.reflog_time(self.log), 0)
+
+    def test_an_append_in_progress_is_unknown(self):
+        self.put(rec(self.now - 30 * DAY) + rec(self.now - 30 * DAY)[:-12])
+        self.assertIsNone(cl.reflog_time(self.log))
+
+    def test_a_malformed_last_record_falls_back_to_the_mtime(self):
+        self.put(rec(self.now - 30 * DAY) + "not a reflog record\n", mtime=self.now - 2 * DAY)
+        self.assertAlmostEqual(cl.reflog_time(self.log), self.now - 2 * DAY, delta=2)
+
+    def test_a_record_longer_than_the_tail_falls_back_to_the_mtime(self):
+        self.put(rec(self.now - 30 * DAY, msg="m" * (cl.REFLOG_TAIL + 10)), mtime=self.now - 2 * DAY)
+        self.assertAlmostEqual(cl.reflog_time(self.log), self.now - 2 * DAY, delta=2)
+
+    def test_only_the_tail_is_read_and_its_leading_fragment_dropped(self):
+        body = "".join(rec(self.now - (40 - i % 5) * DAY, msg="x" * 200) for i in range(600))
+        self.put(body + rec(self.now - 3 * DAY))
+        self.assertGreater(len(body), cl.REFLOG_TAIL)
+        self.assertEqual(cl.reflog_time(self.log), int(self.now - 3 * DAY))
+
+    def test_a_fifo_or_a_symlink_is_unknown(self):
+        os.makedirs(os.path.dirname(self.log))
+        os.mkfifo(self.log)
+        self.assertIsNone(cl.reflog_time(self.log))
+        os.remove(self.log)
+        real = self.log + ".real"
+        write(real, rec(self.now - 30 * DAY))
+        os.symlink(real, self.log)
+        self.assertIsNone(cl.reflog_time(self.log))
+
+    def test_a_future_entry_counts_as_now(self):
+        self.put(rec(self.now + 10 * DAY))
+        self.assertAlmostEqual(cl.reflog_time(self.log), time.time(), delta=5)
+
+    def test_the_window_is_bounded_a_known_limit(self):
+        # A recent entry followed by more than REFLOG_TAIL bytes of OLDER-dated ones is not seen.
+        # Git appends in time order; this takes backdated identities or a clock jump.
+        older = "".join(rec(self.now - 30 * DAY, msg="x" * 200) for _ in range(400))
+        self.put(rec(self.now - DAY) + older)
+        self.assertGreater(len(older), cl.REFLOG_TAIL)
+        self.assertEqual(cl.reflog_time(self.log), int(self.now - 30 * DAY))
+
+
+# ----------------------------------------------------------------------------- links into candidates
+#
+# 2026-11-12, dev-worker-3: the relay agent symlinks new worktrees' node_modules (whole, or per
+# entry) and target/debug into OLDER worktrees' dirs. Removing one idle-by-its-own-clock source
+# left 4,793 links in ~60 worktrees dangling.
+
+@unittest.skipUnless(LINUX, "Linux-only code path")
+class LinkGuardTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = os.path.realpath(self._tmp.name)
+        self.user = os.path.join(self.root, "u")
+        self.src = make_repo(os.path.join(self.user, "src"))
+        self.nm = os.path.join(self.src, "node_modules")
+        write(os.path.join(self.nm, "a", "index.js"))
+        write(os.path.join(self.nm, "a", "bin.js"))
+        write(os.path.join(self.nm, "@s", "p", "index.js"))
+        self.consumer = make_repo(os.path.join(self.user, "consumer"))
+        self.now = datetime.now(timezone.utc)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def linked(self, cand=None, wt=None, worktrees=None):
+        inv = cl.Inventory([self.root], set())
+        inv.reset(worktrees if worktrees is not None else [self.src, self.consumer])
+        return inv.linked(cand or self.nm, wt or self.src)
+
+    def link(self, target, *where):
+        path = os.path.join(*where)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.symlink(target, path)
+        return path
+
+    def test_nothing_links_in(self):
+        self.assertEqual(self.linked(), [])
+
+    def test_whole_dir_per_entry_scoped_and_relative_links_count(self):
+        for target, where in [
+                (self.nm, (self.consumer, "node_modules")),
+                (os.path.join(self.nm, "a"), (self.consumer, "web", "node_modules", "a")),
+                (os.path.join(self.nm, "@s", "p"), (self.consumer, "x", "node_modules", "@s", "p")),
+                ("../../src/node_modules/a", (self.consumer, "rel", "a"))]:
+            with self.subTest(where=where[1:]):
+                link = self.link(target, *where)
+                self.assertEqual(self.linked(), [link])
+                os.remove(link)
+
+    def test_deep_links_inside_dependency_and_cache_dirs_count(self):
+        write(os.path.join(self.consumer, "Cargo.toml"))
+        for where in [(self.consumer, "node_modules", ".bin", "tool"),
+                      (self.consumer, "node_modules", "b", "node_modules", "a"),
+                      (self.consumer, ".venv", "bin", "tool"),
+                      (self.consumer, "target", "debug", "deps", "tool"),
+                      (self.user, ".cache", "k", "deep", "tool"),
+                      (self.root, "shared", "tool")]:
+            with self.subTest(where=where[1:]):
+                link = self.link(os.path.join(self.nm, "a", "bin.js"), *where)
+                self.assertEqual(self.linked(), [link])
+                os.remove(link)
+
+    def test_chains_and_symlinked_components_are_followed(self):
+        hop = self.link(self.nm, self.user, "other", "node_modules")
+        first = self.link(os.path.join(self.user, "other", "node_modules"), self.consumer, "node_modules")
+        self.assertEqual(sorted(self.linked()), sorted([hop, first]))
+        os.remove(first)
+        os.remove(hop)
+        alias = self.link(self.user, self.root, "alias")
+        via = self.link(os.path.join(alias, "src", "node_modules", "a"), self.consumer, "a")
+        self.assertEqual(sorted(self.linked()), [via])
+
+    def test_dotdot_after_a_symlinked_component_resolves_like_the_kernel(self):
+        # alias -> u/a/b, so alias/../src is u/a/src; lexically it would be <root>/src.
+        other = make_repo(os.path.join(self.user, "a", "src"))
+        write(os.path.join(other, "node_modules", "z", "i.js"))
+        os.makedirs(os.path.join(self.user, "a", "b"))
+        self.link(os.path.join(self.user, "a", "b"), self.root, "alias")
+        via = self.link(os.path.join(self.root, "alias", "..", "src", "node_modules"), self.consumer, "z")
+        self.assertEqual(self.linked(os.path.join(other, "node_modules"), other), [via])
+        os.makedirs(os.path.join(self.root, "src", "node_modules"))
+        self.assertEqual(self.linked(os.path.join(self.root, "src", "node_modules"),
+                                     os.path.join(self.root, "src")), [])
+
+    def test_an_ancestor_inside_the_worktree_counts_one_above_it_does_not(self):
+        inside = self.link(self.src, self.consumer, "lib")
+        self.assertEqual(self.linked(), [inside])
+        os.remove(inside)
+        self.link(self.user, self.root, "home", "ws")
+        self.assertEqual(self.linked(), [])
+
+    def test_a_dangling_link_into_the_candidate_counts(self):
+        link = self.link(os.path.join(self.nm, "gone", "x.js"), self.consumer, "gone")
+        self.assertEqual(self.linked(), [link])
+
+    def test_links_inside_the_candidate_or_its_own_worktree_and_prefix_siblings_do_not(self):
+        self.link("../a/bin.js", self.nm, ".bin", "a")
+        self.link(os.path.join(self.nm, "a"), self.src, "packages", "p", "node_modules", "a")
+        self.link(os.path.join(self.src, "node_modules2"), self.consumer, "sibling")
+        self.assertEqual(self.linked(), [])
+
+    def test_a_nested_worktree_is_another_consumer(self):
+        nested = make_repo(os.path.join(self.src, ".claude", "worktrees", "n"), linked_from=self.src)
+        link = self.link(self.nm, nested, "node_modules")
+        self.assertEqual(self.linked(worktrees=[self.src, nested, self.consumer]), [link])
+
+    def test_a_link_loop_terminates_and_counts_where_it_passes(self):
+        self.link(os.path.join(self.consumer, "l2"), self.consumer, "l1")
+        self.link(os.path.join(self.consumer, "l1"), self.consumer, "l2")
+        self.assertEqual(self.linked(), [])
+        self.link(os.path.join(self.nm, "loop2"), self.nm, "loop1")
+        self.link(os.path.join(self.nm, "loop1"), self.nm, "loop2")
+        into = self.link(os.path.join(self.nm, "loop1"), self.consumer, "l3")
+        self.assertEqual(self.linked(), [into])
+
+    def test_an_unreadable_dir_makes_the_inventory_incomplete(self):
+        bad = os.path.join(self.user, "bad")
+        os.makedirs(bad)
+        real = cl.os.scandir
+
+        def scandir(arg):
+            if isinstance(arg, int) and os.readlink(f"/proc/self/fd/{arg}") == bad:
+                raise PermissionError(13, "Permission denied")
+            return real(arg)
+        with mock.patch.object(cl.os, "scandir", scandir):
+            [only] = self.linked()
+        self.assertIsInstance(only, cl.Incomplete)
+        self.assertEqual(only, f"link inventory incomplete (1 error(s), e.g. {bad}: Permission denied)")
+
+    def test_plan_deps_refuses_linked_dirs_and_keeps_unlinked_siblings(self):
+        web = os.path.join(self.src, "web", "node_modules")
+        write(os.path.join(web, "b", "i.js"))
+        link = self.link(self.nm, self.consumer, "node_modules")
+        age_tree(self.src, 30)
+        inv = cl.Inventory([self.root], set())
+        inv.reset([self.src, self.consumer])
+        w = cl.scan_worktree(self.src, (self.now - timedelta(days=14)).timestamp())
+        plan, refused = cl.plan_deps([w], 14, self.now, set(), set(), linked=inv.linked)
+        self.assertEqual([a.ids for a in plan], [[web]])
+        self.assertEqual(refused, [(self.nm, f"linked from 1 path(s), e.g. {link}")])
+
+    def test_an_incomplete_inventory_removes_nothing(self):
+        age_tree(self.src, 30)
+        inv = cl.Inventory([self.root], set())
+        inv.reset([self.src])
+        with mock.patch.object(cl, "link_index",
+                               return_value=cl.LinkIndex(time.time(), (), (("/x", "EIO"),))):
+            w = cl.scan_worktree(self.src, (self.now - timedelta(days=14)).timestamp())
+            plan, refused = cl.plan_deps([w], 14, self.now, set(), set(), linked=inv.linked)
+        self.assertEqual(plan, [])
+        self.assertEqual(refused, [(self.nm, "link inventory incomplete (1 error(s), e.g. /x: EIO)")])
+
+    def test_inventory_roots_do_not_shrink_to_the_deletion_roots(self):
+        # disk-guard passes --deps-roots = only the filesystems under pressure.
+        home = os.path.join(self.root, "home")
+        link = self.link(self.nm, home, "c4", "nm")
+        age_tree(self.src, 30)
+        out = io.StringIO()
+        with any_uid(), mock.patch.object(cl, "LINK_ROOTS", (home,)), \
+                mock.patch.object(cl.shutil, "which", return_value=None), mock.patch("sys.stdout", out):
+            rc = cl.main(["--no-docker", "--deps", "--dry-run", "--deps-days", "3",
+                          "--deps-roots", self.user])
+        self.assertEqual(rc, 0)
+        self.assertIn(f"Not touching {self.nm}: linked from 1 path(s), e.g. {link}.", out.getvalue())
+        self.assertIn("Linked from other trees, not removed: 1 dep dir(s), 0 worktree(s)", out.getvalue())
+
+    def inventory(self, tick=None):
+        inv = cl.Inventory([self.root], set(), monotonic=tick or time.monotonic)
+        inv.reset([self.src, self.consumer])
+        return inv
+
+    def test_a_link_made_after_the_scan_is_caught_at_the_removal(self):
+        age_tree(self.src, 30)
+        clock = [1000.0]
+        inv = self.inventory(lambda: clock[0])
+        w = cl.scan_worktree(self.src, (self.now - timedelta(days=14)).timestamp())
+        plan, _ = cl.plan_deps([w], 14, self.now, set(), set(), linked=inv.linked)
+        self.assertEqual([a.ids for a in plan], [[self.nm]])
+        self.link(self.nm, self.consumer, "node_modules")
+        clock[0] += cl.INDEX_MAX_AGE + 1
+        with mock.patch("sys.stdout", io.StringIO()):
+            failures, skipped = cl.execute(plan, plan, deps_days=14, recheck=inv.recheck)
+        self.assertEqual((failures, skipped), (0, 1))
+        self.assertTrue(os.path.isdir(self.nm))
+
+    def test_a_fresh_index_is_reused_within_its_age(self):
+        inv = self.inventory()
+        with mock.patch.object(cl, "link_index", wraps=cl.link_index) as built:
+            inv.linked(self.nm, self.src)
+            inv.recheck(self.nm, self.src)
+        self.assertEqual(built.call_count, 1)
+
+    def test_a_slow_walk_is_aged_from_its_completion_not_its_start(self):
+        clock = [1000.0]
+        real = cl.link_index
+
+        def slow(*a, **kw):
+            clock[0] += cl.INDEX_MAX_AGE + 30              # a cold walk longer than the bound
+            return real(*a, **kw)
+        inv = self.inventory(lambda: clock[0])
+        with mock.patch.object(cl, "link_index", side_effect=slow) as built:
+            inv.linked(self.nm, self.src)
+            inv.recheck(self.nm, self.src)
+            inv.recheck(self.nm, self.src)
+        self.assertEqual(built.call_count, 1)
+
+    def test_an_incomplete_refresh_refuses_every_later_removal(self):
+        clock = [1000.0]
+        inv = self.inventory(lambda: clock[0])
+        self.assertEqual(inv.linked(self.nm, self.src), [])
+        clock[0] += cl.INDEX_MAX_AGE + 1
+        broken = cl.LinkIndex(time.time(), (), ((self.src, "Input/output error"),))
+        with mock.patch.object(cl, "link_index", return_value=broken):
+            [why] = inv.recheck(self.nm, self.src)
+        self.assertIsInstance(why, cl.Incomplete)
+        clock[0] += cl.INDEX_MAX_AGE + 1                   # a later, healthy walk is not trusted
+        self.assertEqual(inv.recheck(self.nm, self.src), [why])
+        self.assertTrue(inv.incomplete())
+
+    def test_a_dir_stepped_out_of_with_dotdot_counts_but_only_for_itself(self):
+        write(os.path.join(self.src, "README"))
+        web = os.path.join(self.src, "web", "node_modules")
+        write(os.path.join(web, "b", "i.js"))
+        via = self.link(os.path.join(self.nm, "..", "README"), self.consumer, "readme")
+        self.assertEqual(self.linked(), [via])
+        self.assertEqual(self.linked(web, self.src), [])
+
+    def test_a_git_hook_is_a_consumer_and_git_objects_are_not_walked(self):
+        hook = self.link(os.path.join(self.nm, "a", "bin.js"), self.consumer, ".git", "hooks", "pre-commit")
+        self.link(os.path.join(self.nm, "a"), self.consumer, ".git", "objects", "ab", "odd")
+        self.assertEqual(self.linked(), [hook])
+
+    def test_forty_links_resolve_and_forty_one_do_not_like_the_kernel(self):
+        for n, reaches in ((40, True), (41, False)):
+            with self.subTest(n=n):
+                chain = os.path.join(self.root, f"chain{n}")
+                os.makedirs(chain)
+                for i in range(1, n):
+                    os.symlink(os.path.join(chain, f"c{i + 1}"), os.path.join(chain, f"c{i}"))
+                os.symlink(os.path.join(self.nm, "a"), os.path.join(chain, f"c{n}"))
+                self.assertEqual(os.path.exists(os.path.join(chain, "c1")), reaches)   # the kernel
+                ends, _, error = cl.traverse(os.path.join(chain, "c1"), os.readlink(os.path.join(chain, "c1")))
+                self.assertIsNone(error)
+                self.assertEqual(any(cl.under(t, self.nm) for t in ends), reaches)
+                _shutil.rmtree(chain)
+
+    def test_lookup_errors_make_the_inventory_incomplete_and_a_vanished_dir_does_not(self):
+        self.link(self.nm, self.consumer, "node_modules")
+        gone = os.path.join(self.user, "gone")
+        os.makedirs(gone)
+        real_open, real_readlink = cl.os.open, cl.os.readlink
+
+        def vanish(path, flags, mode=0o777, *, dir_fd=None):
+            if dir_fd is not None and path == "gone":
+                raise FileNotFoundError(2, "No such file or directory")
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        def eio(path, *, dir_fd=None):
+            if dir_fd is not None and path == "node_modules":
+                raise OSError(5, "Input/output error")
+            return real_readlink(path, dir_fd=dir_fd)
+        before = len(os.listdir("/proc/self/fd"))
+        with mock.patch.object(cl.os, "open", vanish):
+            index = cl.link_index([self.root])
+        self.assertEqual(index.errors, ())
+        with mock.patch.object(cl.os, "readlink", eio):
+            index = cl.link_index([self.root])
+        self.assertEqual(index.errors, ((os.path.join(self.consumer, "node_modules"), "Input/output error"),))
+        self.assertEqual(len(os.listdir("/proc/self/fd")), before)          # no fd left open
+
+    def test_a_dir_swapped_for_a_link_mid_walk_is_recorded_as_the_link(self):
+        swap = os.path.join(self.consumer, "swap")
+        os.makedirs(swap)
+        real_open = cl.os.open
+
+        def swapping(path, flags, mode=0o777, *, dir_fd=None):
+            if dir_fd is not None and path == "swap" and os.path.isdir(swap) and not os.path.islink(swap):
+                os.rmdir(swap)
+                os.symlink(self.nm, swap)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+        with mock.patch.object(cl.os, "open", swapping):
+            index = cl.link_index([self.root])
+        self.assertEqual([l for l, _, _ in index.links], [swap])
+        self.assertEqual(index.errors, ())
+
+    def test_main_exits_1_on_an_incomplete_inventory(self):
+        age_tree(self.src, 30)
+        broken = cl.LinkIndex(time.time(), (), (("/x", "Input/output error"),))
+        out, err = io.StringIO(), io.StringIO()
+        with any_uid(), mock.patch.object(cl, "LINK_ROOTS", ()), \
+                mock.patch.object(cl, "link_index", return_value=broken), \
+                mock.patch.object(cl.shutil, "which", return_value=None), \
+                mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
+            rc = cl.main(["--no-docker", "--deps", "--dry-run", "--deps-days", "3", "--deps-roots", self.user])
+        self.assertEqual(rc, 1)
+        self.assertIn("Nothing to clean up.", out.getvalue())
+        self.assertIn("link inventory incomplete", err.getvalue())
 
 
 if __name__ == "__main__":
