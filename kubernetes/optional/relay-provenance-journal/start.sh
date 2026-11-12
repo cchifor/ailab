@@ -5,7 +5,7 @@ umask 077
 if [ ! -f "$PGDATA/PG_VERSION" ] || [ "$(cat "$PGDATA/PG_VERSION")" != 17 ] ||
    [ ! -f "$PGDATA/relay-provenance-journal-schema-version" ] ||
    [ -L "$PGDATA/relay-provenance-journal-schema-version" ] ||
-   [ "$(cat "$PGDATA/relay-provenance-journal-schema-version")" != 10 ] ||
+   [ "$(cat "$PGDATA/relay-provenance-journal-schema-version")" != 11 ] ||
    [ -e "$PGDATA/relay-provenance-journal-upgrade-pending" ] ||
    [ -L "$PGDATA/relay-provenance-journal-upgrade-pending" ] ||
    [ -e "$PGDATA/standby.signal" ] || [ -e "$PGDATA/recovery.signal" ]; then

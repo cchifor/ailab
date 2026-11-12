@@ -12,15 +12,17 @@ volumes; verify its actual PV reclaim policy before creating it.
 
 Use a merged, reviewed Relay source commit that contains
 `deploy/worker-provenance-journal/001-provenance.sql` through
-`010-runtime-presence-latch-isolation.sql`. SQL 006 supplies the signed presence ledger;
+`011-runtime-presence-current-readback.sql`. SQL 006 supplies the signed presence ledger;
 SQL 007 repairs the open-execution versus closed-cleanup boundary. SQL 008 repairs
 lookup expiry after lock waits and exact backing replay for already installed
 databases; updated SQL 001 also contains those fixes for fresh installations.
 SQL 009 adds the prepared Pod spec commitment for new original Pod effects and
 does not rewrite existing immutable effects. SQL 010 requires fresh READ COMMITTED
-snapshots for both runtime-presence activation and admission latching. These
+snapshots for both runtime-presence activation and admission latching. SQL 011
+adds a restricted, locked current-read envelope with explicit policy/admission
+time bounds. These
 migrations do not install a Node signer, independent witness or execution fence.
-Review and record all ten
+Review and record all eleven
 SHA256 values and the source commit. The initializer renderer input is a single
 root or operator-owned, single-link, non-group-writable regular JSON file:
 
@@ -37,16 +39,17 @@ root or operator-owned, single-link, non-group-writable regular JSON file:
   "schema007": {"path": "/absolute/007-runtime-presence-open-lifecycle.sql", "sha256": "<64 hex>"},
   "schema008": {"path": "/absolute/008-authority-completion.sql", "sha256": "<64 hex>"},
   "schema009": {"path": "/absolute/009-original-pod-spec-commitment.sql", "sha256": "<64 hex>"},
-  "schema010": {"path": "/absolute/010-runtime-presence-latch-isolation.sql", "sha256": "<64 hex>"}
+  "schema010": {"path": "/absolute/010-runtime-presence-latch-isolation.sql", "sha256": "<64 hex>"},
+  "schema011": {"path": "/absolute/011-runtime-presence-current-readback.sql", "sha256": "<64 hex>"}
 }
 ```
 
 Render with `python3 -B kubernetes/optional/relay-provenance-journal/render.py
 initialize /absolute/initializer.json <initializer-json-sha256>`. JSON output
-is a Kubernetes list. The Job verifies all ten SQL files before touching
+is a Kubernetes list. The Job verifies all eleven SQL files before touching
 PGDATA, refuses any existing PGDATA, creates a fresh UTF8 `relay_provenance`
 database, applies each transaction in order, checks empty authority/history,
-cleanly stops PostgreSQL, and only then writes schema marker 10. An interrupted
+cleanly stops PostgreSQL, and only then writes schema marker 11. An interrupted
 attempt or absent marker requires attended inspection. Never reset a retained
 volume or rerun the Job against it. The runtime `start.sh` refuses missing or
 wrong marker/version, recovery signals, or unsafe PGDATA ownership/mode and
@@ -80,7 +83,7 @@ no automatic retry, service-account token or network listener. It mounts the
 existing database PVC. An authorized operator must first pause issuance, stop
 the source listeners and database StatefulSet, and verify that **all** other
 PVC consumers are gone. ReadWriteOnce does not provide this exclusion. Keep
-the new schema-10 startup guard installed while replicas remain zero, so an
+the new schema-11 startup guard installed while replicas remain zero, so an
 older startup script cannot reopen the database during maintenance. Preserve
 the independently reviewed recovery procedure and source history; this job
 does not create a backup or qualify a restore. Uncertain workers stay reserved.
@@ -187,7 +190,7 @@ This is a separate one-shot stage. Keep the existing schema 5/6/7 to schema 8
 upgrade unchanged; do not offer a direct 5/6/7 to 9 path. After that upgrade
 finishes, keep every consumer stopped and do not start the schema 8 runtime
 between stages. Continue through the separate 9→10 stage before restarting;
-the current runtime startup guard accepts only marker 10.
+the current runtime startup guard accepts only marker 11.
 
 Before rendering, use the final merged Relay source pin that contains SQL 009
 and recheck both installed-function hashes against that exact source. The
@@ -347,6 +350,97 @@ also checked after the reviewer-requested NULL handling correction. Raw snapshot
 `/workspace/archive/relay-provenance-schema10-20261112` on dev-worker-3, subject to
 archive retention. No live Kubernetes writes were performed.
 
+## Upgrade a retained schema 10 database to schema 11
+
+Relay PR #399 adds `011-runtime-presence-current-readback.sql` for the inactive
+runtime-presence ledger. Its current readback needs this function and refuses
+without it. SQL011 adds a new function only; it does not rewrite existing
+migration bytes, history or grants on older functions. This is separate from
+the runtime-presence observer endpoint and does not create a Node signer,
+sequence witness, physical fence or live lease authority.
+
+Use the separate `upgrade11` renderer with `fromVersion: 10`, a merged reviewed
+Relay source commit containing the complete 001–011 chain, and only `schema011`:
+
+```json
+{
+  "version": 1,
+  "relaySourceCommit": "<reviewed 40-hex commit>",
+  "fromVersion": 10,
+  "schema011": {"path": "/absolute/011-runtime-presence-current-readback.sql", "sha256": "094e6639b07d497401f86ab6af5ccd14813238d2beb1d538bcd1ac7f105caebd"}
+}
+```
+
+```sh
+python3 -B kubernetes/optional/relay-provenance-journal/render.py \
+  upgrade11 /absolute/upgrade11-render.json <upgrade11-render-json-sha256>
+```
+
+The Job remains suspended, has no retry or service-account token, and mounts
+the retained PVC without fsGroup ownership repair. The existing maintenance
+exclusion rules apply: pause issuance, stop all listeners and the database,
+and verify every PVC consumer is gone. The current runtime startup guard
+requires marker11; earlier retained schemas must complete their separate
+reviewed upgrades through schema10 first. Do not change a marker to skip a
+stage or install an older guard to bypass maintenance.
+
+The script requires exact schema10, PostgreSQL17, reviewed ownership/mode,
+no recovery/postmaster/pending markers, and the fixed SQL011 SHA256 above.
+It starts PostgreSQL over a Unix socket only. Before writing a maintenance
+latch, it checks the exact owner, return type, SECURITY DEFINER flag, search
+path and body digests of the policy/admission lock, current read, admission
+latch and activation functions. The owner and ledger groups must remain
+NOLOGIN, non-superuser and without BYPASSRLS; the new function must be absent.
+Any event trigger or member of the owner role is refused. Existing independently
+provisioned ledger logins may remain; their membership is preserved exactly.
+Any drift exits after stopping PostgreSQL and preserves marker10. Retained
+PostgreSQL configuration and local authentication remain trusted inputs that
+the operator must review before maintenance.
+
+Only after those checks does it write `from=10 to=11`, apply the pinned SQL
+transaction, then verify the new function body, configuration and exact EXECUTE
+ACL for its owner and the ledger purpose group. PUBLIC, observer and cleanup
+verifier gain no grant. A before/after catalog snapshot also requires the four
+prerequisite functions, purpose-role attributes, memberships and event-trigger
+count to remain unchanged. The process stops PostgreSQL cleanly before atomically
+publishing marker11 and removing the latch. A SQL or post-verification failure
+leaves marker10 and the pending latch. A preapplied function with a stale marker
+is refused; CREATE FUNCTION is forward-only, and an uncertain result needs
+attended inspection rather than replay. No database credentials are created.
+
+The ledger holds policy/admission locks across external witness reads and
+checks deadline validity after COMMIT. Production composition therefore still
+needs bounded connection/query timeouts and concurrency; sustained readers can
+delay policy revocation. A readback is a serialized snapshot, and later
+consumers must revalidate subsequent revocations. Do not configure the ledger
+until this stage and the independent witness/custody prerequisites are complete.
+
+Local validation uses SQL001–011 from source composition `021d2da4` and the
+exact renderer image
+`postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac`
+(PostgreSQL 17.11 Alpine), running as UID70 with read-only root, no network,
+no capabilities and temporary data. Fifteen scenarios passed: fresh
+initialization; 10→11 with exact retained row hashes preserved; successful
+upgrade with a pre-provisioned ledger login and unchanged membership; refusal of a
+pending latch, preapplied011, NULL prerequisite configuration, LOGIN ledger
+role, altered prerequisite body, event trigger, owner-role membership and
+unrelated SQL artifact; preserved maintenance latch on injected SQL failure,
+extra function ACL and prerequisite ACL drift; and a successful current read
+as the ledger role followed by refusal after policy expiry. Failure injection
+uses a test-owned executable psql wrapper; production accepts no event triggers.
+Each result records the exact maintenance-script and harness SHA256 values.
+The current-read fixtures are synthetic SQL projections, not signed or physical
+evidence; the expiry case exercises the existing read refusal, not every new
+time-bound branch in SQL011. Fifteen offline rendering/startup tests, shell syntax, kustomize
+rendering and diff checks also passed.
+Opus review through LLM Router `pool-claude` ended ALIGNED for inactive merge
+(request `5e830b4d-19ca-4c2c-8549-bb21d41c004e`). Its retained-ledger-membership
+and script-digest evidence suggestions were then added to the final smoke run.
+That source composition is evidence only; substitute the final merged source
+pin before a live change. Raw scenario scripts and logs are in
+`/workspace/archive/relay-provenance-schema11-20261112` on dev-worker-3 and
+follow archive retention. No live Kubernetes or database write was performed.
+
 ## Database credentials
 
 Only after the suspended Job is explicitly run, terminal, and its Pod is gone
@@ -417,7 +511,7 @@ The rendered Deployment never references the mutable issuance Secret.
 
 ## Runtime presence source listener
 
-After Relay SQL 001–010 and the compatible bounded
+After Relay SQL 001–011 and the compatible bounded
 `dist/scripts/serve-runtime-presence-source.js` are reviewed and published,
 render the separate `presence` mode. Its input has exact fields `version`,
 `relaySourceCommit`, `relayImage`, `tlsCertificate`, `clientCa`,

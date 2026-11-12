@@ -96,7 +96,7 @@ def common(config, keys):
 
 
 def initialize(config):
-    return database_job(config, 'initialize', list(range(1, 11)))
+    return database_job(config, 'initialize', list(range(1, 12)))
 
 
 def upgrade(config):
@@ -120,9 +120,16 @@ def upgrade10(config):
     return database_job(config, 'upgrade10', [10])
 
 
+def upgrade11(config):
+    previous = config.get('fromVersion') if isinstance(config, dict) else None
+    if type(previous) is not int or previous != 10:
+        refuse('upgrade-version-invalid')
+    return database_job(config, 'upgrade11', [11])
+
+
 def database_job(config, action, numbers):
     keys = ['schema' + str(n).zfill(3) for n in numbers]
-    is_upgrade = action in ('upgrade', 'upgrade9', 'upgrade10')
+    is_upgrade = action in ('upgrade', 'upgrade9', 'upgrade10', 'upgrade11')
     commit = common(config, keys + (['fromVersion'] if is_upgrade else []))
     pins = [config[key] for key in keys]
     sql = {str(n).zfill(3) + '.sql': pinned(pin, 262144) for n, pin in zip(numbers, pins)}
@@ -142,6 +149,7 @@ def database_job(config, action, numbers):
     job_name = NAME + ('-initialize-once' if action == 'initialize' else
                        '-upgrade-8-to-9' if action == 'upgrade9' else
                        '-upgrade-9-to-10' if action == 'upgrade10' else
+                       '-upgrade-10-to-11' if action == 'upgrade11' else
                        '-upgrade-' + str(config['fromVersion']) + '-to-8')
     job = {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': metadata(job_name, DB_NS, commit),
            'spec': {'suspend': True, 'backoffLimit': 0, 'activeDeadlineSeconds': 600,
@@ -357,10 +365,10 @@ def presence(config):
 
 
 def main(args):
-    if len(args) != 3 or args[0] not in ('initialize', 'upgrade', 'upgrade9', 'upgrade10', 'service', 'presence') or not sha(args[2]):
+    if len(args) != 3 or args[0] not in ('initialize', 'upgrade', 'upgrade9', 'upgrade10', 'upgrade11', 'service', 'presence') or not sha(args[2]):
         refuse('usage-invalid')
     config = parse(pinned({'path': args[1], 'sha256': args[2]}))
-    items = {'initialize': initialize, 'upgrade': upgrade, 'upgrade9': upgrade9, 'upgrade10': upgrade10,
+    items = {'initialize': initialize, 'upgrade': upgrade, 'upgrade9': upgrade9, 'upgrade10': upgrade10, 'upgrade11': upgrade11,
              'service': service, 'presence': presence}[args[0]](config)
     print(json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': items}, separators=(',', ':')))
 
