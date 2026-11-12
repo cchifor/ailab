@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 737d447bb5238fbe6ede0383e135641b7cda7cb6
-        chifor.me/release: router-0.1.0-20261109-workers-quota
+        chifor.me/source-commit: 3c0d78a279cb3994be7e1d86b9f2411ea3ca4e97
+        chifor.me/release: router-0.1.0-20261112-model-cooldown
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,10 +121,10 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source 737d447bb5238fbe6ede0383e135641b7cda7cb6: lifetime accounting,
-          # worker-budget enforcement and isolated readiness quota. Worker authority stays disabled.
-          # Relay run 126503; archive sha256:dfa2ee16e1fb20685f88127a48766bdb68aaf7e4d4d486d3660823c754957b0d.
-          image: registry.chifor.me/llm-router/router@sha256:61100143a90c66219d1e2acb1d7b6cd484dfea3c9622a779c92c8229599b1bb7
+          # Source 3c0d78a279cb3994be7e1d86b9f2411ea3ca4e97: the live 737d447b plus llm-router #179 (a Claude 429
+          # that limited only one model pauses only that model; ROUTER_CLAUDE_MODEL_SCOPED_LIMITS below).
+          # Relay run 129389; archive sha256:1eb78102b44f989a051ebf1d861742480185869498e7ab502df0f3f549c53de9.
+          image: registry.chifor.me/llm-router/router@sha256:05b2d8401e3369ed254baa8572c8099ff8e9249f145cfba22c3985e18290e414
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
@@ -162,6 +162,12 @@ spec:
             # watchdog fires at 57 s, 3 s before the grace ends, so raise the grace before going near it.
             - name: ROUTER_DRAIN_MS
               value: "20000"
+            # A Claude 429 that Claude Code attributes to one model's weekly limit (Fable, Opus or Sonnet) pauses only that
+            # model on the account for 60 s; the account's other models keep serving (llm-router #179). Unset or "0":
+            # every Claude 429 cools the whole account down, as before. Read at start-up and never saved, so an older
+            # image ignores it. Runbook llm-router.md § Model-scoped cooldowns release.
+            - name: ROUTER_CLAUDE_MODEL_SCOPED_LIMITS
+              value: "1"
             # The bearer administrator key: API clients, validate-live and operators. In Keycloak mode it no longer
             # signs a browser in (local sign-in is off); it stays the way to operate during a PostgreSQL outage.
             - name: ROUTER_ADMIN_TOKEN
