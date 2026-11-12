@@ -1174,8 +1174,9 @@ deploy or exclusion/cap/guard config change — each PR's next head after one of
 full once. The PR is not re-read against the new base: a semantic conflict with main is left to
 CI, which runs on the new head and gates the merge. To force a real review, push a commit.
 `reviewbot_reviews_carried_total` counts carries; `journalctl -u reviewbot | grep 'carry '` gives
-the reason a head was not carried (`diff changed`, `latest review is findings at ...`,
-`later review findings at ...`, `the diff has a binary section`, `check failed: ...`).
+the reason a head was not carried (`no clean review of an identical diff`, `latest review is
+findings at ...`, `later review findings at ...`, `the diff has a binary section`, `check failed:
+...`).
 
 **The queue serves repositories round-robin.** The worker claims from the repository it served
 least recently, then that repository's oldest eligible job, so one repo's backlog no longer holds

@@ -7338,6 +7338,40 @@ class CarryCleanVerdictTest(unittest.TestCase):
         self.assertIsNone(c2["carried_from"], "a NEWER sequence-less finding vetoes")
         self.assertEqual(2, len(self.llm_calls))
 
+    def test_a_legacy_overwrite_of_a_sequenced_row_still_vetoes(self):
+        """reviewer-codex on ailab#1731: during a rollback, pre-sequence post_review() re-reviews a
+        row that ALREADY has a verdict_seq - it writes verdict and `updated`, and leaves the old
+        sequence. After the redeploy that finding must still veto a carry from a newer source."""
+        b = self._run(self.B, CARRY_DIFF_2)                  # sequenced, older
+        c = self._run(self.C, CARRY_DIFF)                    # the clean source, sequence higher
+        self.assertLess(b["verdict_seq"], c["verdict_seq"])
+        db = self.m.db()
+        # The legacy UPDATE (3a13ab3b post_review) entering `posting`, then its POST failing.
+        db.execute("UPDATE jobs SET state='posting', verdict='findings', coverage='full', updated=? "
+                   "WHERE id=?", (real_time.time(), b["id"]))
+        db.execute("UPDATE jobs SET state='quarantined', note='ambiguous POST: x', updated=? "
+                   "WHERE id=?", (real_time.time(), b["id"]))
+        db.commit()
+        db.close()
+        d = self._run(self.X, CARRY_DIFF)
+        self.assertIsNone(d["carried_from"])
+        self.assertTrue(any(f"later review findings at {self.B[:9]}" in line for line in self.logs))
+
+    def test_rediscovery_reads_the_complete_history(self):
+        """reviewer-claude on ailab#1731: the review being rediscovered is the newest at its head -
+        exactly the one a truncated listing (ten pages, or a server-capped page size) drops."""
+        self._run(self.A, CARRY_DIFF)
+        self._run(self.B, CARRY_DIFF)                        # carried; its review is the newest
+        b = self._row(self.B)
+        self.reviews[:0] = [self._other("reviewer-codex", self.A, "clean", 100 + i) for i in range(40)]
+        self.page_size = 30                                  # B's carried review is on page 2
+        db = self.m.db()
+        db.execute("UPDATE jobs SET carried_from=NULL WHERE id=?", (b["id"],))
+        db.commit()
+        db.close()
+        self.assertTrue(self.m.record_rediscovered_carry(b["id"], "o/r", 5, self.B))
+        self.assertEqual(self.A, self._row(self.B)["carried_from"])
+
     def test_an_unreadable_rediscovery_retries_instead_of_completing(self):
         """codex, implementation review round 2: if the second read fails, completing would leave
         a countable row for a carry; the job retries (no attempt consumed) and completes later."""

@@ -85,8 +85,11 @@ def review_marker(head_sha, verdict):
 # different exclusion/cap/guard/rubric policy can be a different reviewed input (a file excluded
 # when the source was reviewed may be read now). CARRY_EPOCH binds both, and changes on every
 # deploy of this file or edit of these keys, so each PR's next head after one is reviewed in full
-# once. No version number to remember to bump.
-CARRY_POLICY_KEYS = ("persona", "exclude_globs", "doc_globs", "max_diff_bytes", "unattended_authors",
+# once. No version number to remember to bump. The prompt and the lane rubrics live in this file,
+# so its bytes bind them. The model ladder and effort are DELIBERATELY not bound: the verdict is
+# the persona's, whichever of its tiers served it (reviewer-1 moves between fable and opus with
+# quota, review by review), and binding them would make a carry depend on which tier was free.
+CARRY_POLICY_KEYS =("persona", "exclude_globs", "doc_globs", "max_diff_bytes", "unattended_authors",
                      "guarded_paths", "pin_authors", "dependency_authors")
 # The bot-authored line a carried review carries directly before the instance line and the marker.
 # An HTML comment cannot come from model text (parse_review rewrites `<!--`), and it is recognised
@@ -3579,15 +3582,16 @@ def carry_source(repo, pr, head_sha, fingerprint, raw, coverage):
     with db_lock:
         c = db()
         try:
-            # A non-clean verdict WITHOUT a sequence was written by code that predates it - before
-            # this deploy, or during a rollback to such code. It vetoes when its row was last
-            # touched at or after the source completed: `updated` only ever moves later, so the
-            # error is on the conservative side, and findings from before the deploy (older than
-            # any source with a sequence) do not block a PR's carries forever.
+            # Two ways to be LATER. A higher verdict_seq; or a row touched at or after the source
+            # completed, whatever its sequence says: code that predates verdict_seq (before this
+            # deploy, or during a rollback to it) writes a verdict without one - leaving it NULL,
+            # or leaving a STALE older sequence on a row it re-reviews (reviewer-codex on ailab
+            # #1731). `updated` only ever moves later, so the error is on the conservative side,
+            # and findings from before the source (pre-deploy history included) do not block a
+            # PR's carries forever.
             veto = c.execute("SELECT head_sha,verdict FROM jobs WHERE repo=? AND pr=? "
                              "AND verdict IS NOT NULL AND verdict<>'clean' AND (verdict_seq>? "
-                             "OR (verdict_seq IS NULL AND COALESCE(updated,0)>=?)) "
-                             "ORDER BY id DESC LIMIT 1",
+                             "OR COALESCE(updated,0)>=?) ORDER BY id DESC LIMIT 1",
                              (repo, pr, src_seq, src_done_at or 0)).fetchone()
         finally:
             c.close()
@@ -3626,7 +3630,10 @@ def record_rediscovered_carry(job_id, repo, pr, head_sha):
     (logged); the caller decides whether completing anyway is safe."""
     try:
         origin = None
-        for rv in iter_reviews(repo, pr):
+        # The COMPLETE history (all_reviews fails closed): the review being rediscovered is the
+        # newest at this head, exactly the one a truncated oldest-first listing would drop
+        # (reviewer-claude on ailab#1731).
+        for rv in all_reviews(repo, pr):
             m = marker_of(rv)
             if m and m.group(1) == CFG["persona"] and m.group(2) == head_sha:
                 tail = CARRIED_TAIL_RE.search(rv.get("body") or "")
