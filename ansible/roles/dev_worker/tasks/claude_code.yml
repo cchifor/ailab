@@ -68,19 +68,75 @@
   register: dev_worker_claude_probe
   changed_when: false
   failed_when: false
+  check_mode: false # probe only — must run under --check so the version test below has data
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
 
-- name: Install Claude Code per user (only if absent)
+# `claude --version` prints `X.Y.Z (Claude Code)`; absent, broken (the placeholder exits 1) or older than
+# the floor → (re)install. Always `@latest`, never bare: unversioned, npm picks the newest release whose
+# `engines` accepts this Node, every release since 2.1.198 declares node >=22, and the fleet runs Node 20,
+# so a bare install lands on 2.1.197 (2026-11-05: dev-worker-3 went from 2.1.318 back to 2.1.197 this way,
+# and dev-worker-2's npm copy, which its claude-job@ units run, is the same). A named tag is taken as is,
+# with an EBADENGINE warning only (2.1.3xx runs on Node 20). Measured with `npm install --dry-run` on
+# dev-worker-3, 2026-11-12: bare → 2.1.197, @latest → 2.1.322.
+- name: Install or upgrade Claude Code per user (absent, or below the version floor)
   become: true
   become_user: "{{ item.0.name }}"
-  ansible.builtin.command: "npm install -g {{ dev_worker_claude_code_pkg }}"
+  ansible.builtin.command: "npm install -g {{ dev_worker_claude_code_pkg }}@latest"
   environment:
     npm_config_prefix: "{{ item.0.home }}/{{ dev_worker_npm_dir }}"
-  when: item.1.rc != 0
+  when: >-
+    item.1.rc != 0
+    or (item.1.stdout | regex_search('^[0-9]+[.][0-9]+[.][0-9]+') | default('0', true))
+       is version(dev_worker_claude_code_min_version, '<')
   changed_when: true
   loop: "{{ dev_worker_users | zip(dev_worker_claude_probe.results) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}"
+
+# Skills the owner's claude.ai account syncs to every worker that no agent here can use (the browser and
+# desktop ones need an app this headless VM lacks) or has ever used (2026-11-12 /doctor and /skill-doctor:
+# 0 lifetime uses on every worker). Each costs its listing line in every session, ~2.1k tokens est. in all.
+# Turned off per user with settings.json `skillOverrides` (verified: an `anthropic-skills:<name>` key
+# hides the synced skill). Added only where the user has no choice of their own for that key: a later
+# "on" set with /skills wins. settings.json belongs to the user, so read-merge-write, like the status line.
+# tests/test-npm-prefix-guard.sh runs these three tasks too (fresh home, a user's own choice, idempotence).
+- name: Ensure the per-user Claude config directory (synced-skill overrides)
+  ansible.builtin.file:
+    path: "{{ item.home }}/.claude"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Read each user's Claude settings.json (synced-skill overrides)
+  ansible.builtin.slurp:
+    src: "{{ item.home }}/.claude/settings.json"
+  register: dev_worker_claude_settings_skills
+  failed_when: false
+  changed_when: false
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Turn off the unused claude.ai-synced skills per user
+  vars:
+    dev_worker_current_settings: "{{ (item.1.content | b64decode | from_json) if item.1.content is defined else {} }}"
+  ansible.builtin.copy:
+    content: >-
+      {{ dev_worker_current_settings
+         | combine({'skillOverrides': dict(dev_worker_claude_synced_skills_off | product(['off']))
+                                      | combine(dev_worker_current_settings.skillOverrides | default({}))})
+         | to_nice_json }}
+    dest: "{{ item.0.home }}/.claude/settings.json"
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0644"
+  when: dev_worker_claude_synced_skills_off | length > 0
+  loop: "{{ dev_worker_users | zip(dev_worker_claude_settings_skills.results) | list }}"
   loop_control:
     label: "{{ item.0.name }}"
 

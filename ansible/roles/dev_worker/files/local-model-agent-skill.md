@@ -1,6 +1,10 @@
 ---
 name: local-model-agent
-description: Run a task as an agent on the estate's local model (qwen-27b) through the LLM router, in the background, and collect its answer. Use when the user asks to spawn, start, run or delegate an agent "on qwen", "using qwen-27b" or "on a local model". Claude's own sub-agents (the Task tool) cannot do this: they run on Claude models only.
+description: >-
+  Run a task as an agent on the estate's local model (qwen-27b) through the LLM router, in the background,
+  and collect its answer. Use when the user asks to spawn, start, run or delegate an agent "on qwen",
+  "using qwen-27b" or "on a local model". Claude's own sub-agents (the Task tool) cannot do this: they run
+  on Claude models only.
 ---
 
 # Agents on the local models
