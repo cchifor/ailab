@@ -247,6 +247,24 @@ pr_reviewer_max_timeout_attempts: 2
 # requests for 3+ hours; every job walked its 5 ordinary attempts in half an hour and quarantined.
 pr_reviewer_max_busy_retries: 10
 pr_reviewer_reconcile_s: 300
+# CARRIED VERDICTS (plans/2026-11-12-reviewbot-carry-and-fair-queue-plan.md, feature A; off in the
+# code, on here for both personas). When main is merged into a PR - relay, llm-router and
+# workbricks block outdated branches and dismiss stale approvals, so siblings are updated many
+# times a day - the new head's diff is often byte-identical to the one this persona already
+# approved. If it is, AND this persona's latest review of the PR is that clean one, the bot posts
+# the clean verdict (APPROVED) at the new head without running the model, saying so in the review.
+# Never across a binary section, a partial review, a later finding of ours, or a deploy/policy
+# change (the comparison is bound to reviewbot.py's bytes and the exclusion/cap/guard settings).
+# RESIDUAL RISK, accepted: the PR is not re-read against the new base; CI runs on the new head.
+# reviewbot_reviews_carried_total counts them; `journalctl -u reviewbot | grep 'carry '` says why
+# a head was not carried. Not applied to chunk_review_repos (that lane binds its own snapshots).
+pr_reviewer_carry_clean_verdicts: true
+# QUEUE POLICY (same plan, feature B): `fair` serves repositories round-robin - the repo claimed
+# from least recently, then its oldest eligible job - instead of `fifo`, the globally oldest job.
+# Measured 2026-11-12: one repo was 84% of 575 jobs/day and a platform PR waited behind 30 of them
+# on the serial claude persona. Unknown values run fifo. reviewbot_queue_fair_overrides_total
+# counts the claims where fair chose another repo than fifo would have.
+pr_reviewer_queue_policy: fair
 # codex-only: reasoning effort for reviews (the seeded account default is xhigh - 5-10min
 # per review; medium is the right latency/quality point for a review bot).
 pr_reviewer_llm_effort: medium

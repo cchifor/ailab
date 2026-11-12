@@ -52,5 +52,7 @@
   "max_attempts": {{ pr_reviewer_max_attempts }},
   "max_timeout_attempts": {{ pr_reviewer_max_timeout_attempts }},
   "max_busy_retries": {{ pr_reviewer_max_busy_retries }},
+  "carry_clean_verdicts": {{ pr_reviewer_carry_clean_verdicts | to_json }},
+  "queue_policy": {{ pr_reviewer_queue_policy | to_json }},
   "reconcile_s": {{ pr_reviewer_reconcile_s }}
 }

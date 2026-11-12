@@ -7097,6 +7097,559 @@ class ChunkAdapterContractTest(unittest.TestCase):
         bot.run_llm.assert_called_once()
 
 
+CARRY_DIFF = PLAIN_DIFF
+CARRY_DIFF_2 = (
+    b"diff --git a/src/x.py b/src/x.py\n--- a/src/x.py\n+++ b/src/x.py\n"
+    b"@@ -1,1 +1,1 @@\n-a = 1\n+a = 3\n")
+FINDING = {"path": "src/x.py", "side": "NEW", "line": 1, "severity": "important",
+           "confidence": "high", "body": "this breaks callers"}
+
+
+class CarryCleanVerdictTest(unittest.TestCase):
+    """Feature A of plans/2026-11-12-reviewbot-carry-and-fair-queue-plan.md: a head whose PR diff is
+    byte-identical to the diff this persona last reviewed clean gets the clean verdict again without
+    an LLM run. Driven end to end through enqueue() -> worker_once() -> review_job() -> post_review()
+    against a fake Gitea that keeps the reviews it is sent, so the DB rows, the Gitea history and the
+    posted bodies are all the real ones. Every negative case is a way a carry could approve what the
+    persona never approved."""
+
+    A, B, C, X = "a" * 40, "b" * 40, "c" * 40, "e" * 40
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.diffs, self.reviews, self.posts, self.llm_calls, self.logs = {}, [], [], [], []
+        self.findings, self.head, self.post_fails, self.page_size = [], None, False, 50
+        self.m = self._load(carry_clean_verdicts=True)
+
+    def _load(self, **overrides):
+        m = load(self.tmp.name, **overrides)
+        m.api = self._api
+        m.maybe_merge = lambda repo, pr: None
+        m.run_llm = self._llm
+        m.log = lambda *a: self.logs.append(" ".join(str(x) for x in a))
+        self.m = m
+        return m
+
+    def _llm(self, title, desc, diff, rubric=""):
+        self.llm_calls.append(diff)
+        return {"summary": "looks fine", "findings": [dict(f) for f in self.findings]}
+
+    def _api(self, path, method="GET", body=None, raw=False):
+        if method == "POST" and path == "/repos/o/r/pulls/5/reviews":
+            if self.post_fails:
+                raise urllib.error.URLError("timed out")
+            rid = 1000 + len(self.reviews)
+            self.reviews.append({"id": rid, "body": body["body"], "state": body["event"],
+                                 "user": {"login": "reviewer-test"}, "commit_id": body["commit_id"]})
+            self.posts.append(body)
+            return {"id": rid}
+        if path == "/repos/o/r/pulls/5":
+            return {"state": "open", "draft": False, "head": {"sha": self.head},
+                    "user": {"login": "someone"}, "title": "t", "body": "", "merge_base": "f" * 40}
+        if path == "/repos/o/r/pulls/5.diff":
+            self.assertTrue(raw)
+            return self.diffs[self.head]
+        if path.startswith("/repos/o/r/pulls/5/reviews?"):
+            page = int(re.search(r"page=(\d+)", path).group(1))
+            return self.reviews[(page - 1) * self.page_size: page * self.page_size]
+        self.fail(f"unexpected call {method} {path}")
+
+    def _run(self, head, diff, findings=()):
+        """One review of `head` through the real queue and worker."""
+        self.head, self.diffs[head], self.findings = head, diff, list(findings)
+        self.m.enqueue("o/r", 5, head, "webhook")
+        self.assertIsNotNone(self.m.worker_once())
+        return self._row(head)
+
+    def _row(self, head):
+        c = self.m.db()
+        c.row_factory = sqlite3.Row
+        row = c.execute("SELECT * FROM jobs WHERE head_sha=? ORDER BY id DESC LIMIT 1",
+                        (head,)).fetchone()
+        c.close()
+        return dict(row)
+
+    def _other(self, login, head, verdict, rid):
+        return {"id": rid, "body": "x\n\n" + f"<!-- review-bot:v1 persona={login[9:]} head={head} "
+                f"verdict={verdict} -->", "user": {"login": login}, "state": "COMMENT",
+                "commit_id": head}
+
+    # --- the carry --------------------------------------------------------------------------
+
+    def test_an_identical_diff_is_carried_without_running_the_model(self):
+        a = self._run(self.A, CARRY_DIFF)
+        self.assertEqual(("done", "clean", "full"), (a["state"], a["verdict"], a["coverage"]))
+        self.assertTrue(str(a["diff_digest"]).startswith("sha256:"))
+        b = self._run(self.B, CARRY_DIFF)
+        self.assertEqual(1, len(self.llm_calls), "the model must not run for the carried head")
+        self.assertEqual(("done", "clean", "full", self.A),
+                         (b["state"], b["verdict"], b["coverage"], b["carried_from"]))
+        self.assertEqual(a["diff_digest"], b["diff_digest"])
+        post = self.posts[-1]
+        self.assertEqual(("APPROVED", self.B, []), (post["event"], post["commit_id"], post["comments"]))
+        self.assertIn(f"Carried forward from {self.A[:9]}", post["body"])
+        self.assertTrue(post["body"].endswith(
+            f"<!-- review-bot-carried: from={self.A} -->\n" + self.m.review_marker(self.B, "clean")))
+        # The marker is the canonical one, authenticated like any other review's.
+        m = self.m.marker_of({"body": post["body"], "user": {"login": "reviewer-test"}})
+        self.assertEqual(("test", self.B, "clean"), m.groups())
+        self.assertEqual(1.0, _exported(self.m)['reviewbot_reviews_carried_total{persona="test"}'])
+        self.assertIn(f"reviewed o/r#5 @ {self.B[:9]}: carried clean from {self.A[:9]} (diff unchanged)",
+                      self.logs)
+
+    def test_a_carried_head_does_not_advance_the_review_round(self):
+        self._run(self.A, CARRY_DIFF)
+        self._run(self.B, CARRY_DIFF)
+        self._run(self.X, CARRY_DIFF)
+        self.assertEqual(1, len(self.llm_calls))
+        self.assertEqual(2, self.m.review_round("o/r", 5),
+                         "one real reading; two carries must not buy the round-3 ladder")
+
+    def test_a_chain_names_the_head_the_model_actually_read(self):
+        self._run(self.A, CARRY_DIFF)
+        self._run(self.B, CARRY_DIFF)
+        c = self._run(self.C, CARRY_DIFF)
+        self.assertEqual(self.A, c["carried_from"])
+        self.assertIn(f"<!-- review-bot-carried: from={self.A} -->", self.posts[-1]["body"])
+
+    def test_flag_off_runs_the_model_again(self):
+        self._load()                                  # BASE_CFG: no carry_clean_verdicts
+        self._run(self.A, CARRY_DIFF)
+        b = self._run(self.B, CARRY_DIFF)
+        self.assertEqual(2, len(self.llm_calls))
+        self.assertIsNone(b["carried_from"])
+        self.assertNotIn("review-bot-carried", self.posts[-1]["body"])
+        self.assertTrue(str(b["diff_digest"]).startswith("sha256:"),
+                        "the fingerprint is stored with the flag off, so turning it on finds sources")
+
+    def test_findings_are_never_carried(self):
+        a = self._run(self.A, CARRY_DIFF, findings=[FINDING])
+        self.assertEqual("findings", a["verdict"])
+        self._run(self.B, CARRY_DIFF)
+        self.assertEqual(2, len(self.llm_calls))
+        self.assertTrue(any("no clean review of an identical diff" in line for line in self.logs),
+                        self.logs)
+
+    def test_a_changed_diff_is_reviewed(self):
+        self._run(self.A, CARRY_DIFF)
+        b = self._run(self.B, CARRY_DIFF_2)
+        self.assertEqual(2, len(self.llm_calls))
+        self.assertIsNone(b["carried_from"])
+        self.assertTrue(any("no clean review of an identical diff" in line for line in self.logs))
+
+    def test_a_later_finding_outranks_an_older_clean_review_of_the_same_diff(self):
+        """A clean, B findings (perhaps about code A already had), C reverts to A's diff: the
+        persona's latest word is the finding, so C is read again."""
+        self._run(self.A, CARRY_DIFF)
+        self._run(self.B, CARRY_DIFF_2, findings=[FINDING])
+        c = self._run(self.C, CARRY_DIFF)
+        self.assertEqual(3, len(self.llm_calls))
+        self.assertIsNone(c["carried_from"])
+
+    def test_a_finding_that_never_reached_gitea_still_vetoes(self):
+        """B's findings POST failed (ambiguous -> quarantined), so Gitea's latest review of ours is
+        still A's clean one. Our own record of the finding must veto the carry."""
+        self._run(self.A, CARRY_DIFF)
+        self.post_fails = True
+        b = self._run(self.B, CARRY_DIFF_2, findings=[FINDING])
+        self.assertEqual(("quarantined", "findings"), (b["state"], b["verdict"]))
+        self.post_fails = False
+        c = self._run(self.C, CARRY_DIFF)
+        self.assertEqual(3, len(self.llm_calls))
+        self.assertIsNone(c["carried_from"])
+        self.assertTrue(any(f"later review findings at {self.B[:9]}" in line for line in self.logs))
+
+    def test_an_earlier_finding_at_this_very_head_vetoes(self):
+        """An earlier attempt at THIS head reached a finding whose POST did not land; the operator
+        --requeue --force'd it. A carry must not answer that with a clean verdict."""
+        self._run(self.A, CARRY_DIFF)
+        # What that earlier attempt left behind: post_review() records the verdict on entering
+        # `posting`, and the POST's ambiguous failure quarantined the row.
+        self.head, self.diffs[self.B] = self.B, CARRY_DIFF
+        now = real_time.time()
+        c = self.m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated,verdict,coverage,note,"
+                  "verdict_seq) VALUES('o/r',5,?,'quarantined',?,?,'findings','full',"
+                  "'ambiguous POST: timed out',(SELECT MAX(verdict_seq) FROM jobs)+1)",
+                  (self.B, now, now))
+        c.commit()
+        c.close()
+        self.assertEqual(0, self.m.requeue("o/r", 5, force=True))
+        self.assertIsNotNone(self.m.worker_once())
+        self.assertEqual(2, len(self.llm_calls), "the requeued head must be read, not carried")
+        self.assertTrue(any(f"later review findings at {self.B[:9]}" in line for line in self.logs))
+
+    def test_later_means_the_order_verdicts_were_produced_not_queued(self):
+        """codex, plan round 2: A (queued first, lower row id) fails and waits in retry; B reviews
+        clean; the PR returns to A, whose retry now produces a finding that never lands; C carries
+        B's diff. Gitea's latest review of ours is still B's clean one and A's row id is LOWER than
+        B's - only the production order (verdict_seq) shows the finding is the later word."""
+        now = real_time.time()
+        c = self.m.db()
+        # A is RUNNING when B arrives, so enqueue() does not supersede it ...
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated) "
+                  "VALUES('o/r',5,?,'running',?,?)", (self.A, now - 60, now - 60))
+        c.commit()
+        c.close()
+        b = self._run(self.B, CARRY_DIFF)
+        self.assertEqual("clean", b["verdict"])
+        a_id = self._row(self.A)["id"]
+        self.assertLess(a_id, b["id"])
+        # ... then fails into retry; the PR is force-pushed back to A and A's retry comes due.
+        self.head, self.diffs[self.A], self.findings = self.A, CARRY_DIFF_2, [FINDING]
+        c = self.m.db()
+        c.execute("UPDATE jobs SET state='retry', attempts=1, next_at=0 WHERE id=?", (a_id,))
+        c.commit()
+        c.close()
+        self.post_fails = True
+        self.assertEqual(a_id, self.m.worker_once())
+        self.assertEqual(("quarantined", "findings"), (self._row(self.A)["state"], self._row(self.A)["verdict"]))
+        self.post_fails = False
+        c = self._run(self.C, CARRY_DIFF)
+        self.assertEqual(3, len(self.llm_calls))
+        self.assertIsNone(c["carried_from"])
+        self.assertTrue(any(f"later review findings at {self.A[:9]}" in line for line in self.logs))
+
+    def test_a_rediscovered_carried_review_keeps_its_provenance(self):
+        """codex, plan round 2: a job that finds our carried review already at its head (a database
+        restored from before the carry) must not count that head as a reading."""
+        self._run(self.A, CARRY_DIFF)
+        self._run(self.B, CARRY_DIFF)
+        c = self.m.db()
+        c.execute("DELETE FROM jobs WHERE head_sha=?", (self.B,))   # the restored database
+        c.commit()
+        c.close()
+        b = self._run(self.B, CARRY_DIFF)
+        self.assertEqual(("done", "marker already present", self.A),
+                         (b["state"], b["note"], b["carried_from"]))
+        self.assertEqual(1, len(self.llm_calls))
+        self.assertEqual(2, self.m.review_round("o/r", 5))
+
+    def test_a_failed_carry_post_is_an_ambiguous_quarantine_with_its_provenance(self):
+        self._run(self.A, CARRY_DIFF)
+        self.post_fails = True
+        b = self._run(self.B, CARRY_DIFF)
+        self.assertEqual("quarantined", b["state"])
+        self.assertTrue(b["note"].startswith("ambiguous POST"))
+        self.assertEqual((self.A, "clean"), (b["carried_from"], b["verdict"]))
+        self.assertEqual(0.0, _exported(self.m)['reviewbot_reviews_carried_total{persona="test"}'])
+
+    def test_a_binary_section_is_never_carried(self):
+        """git names a binary file only by abbreviated blob hashes, which an author can grind a
+        collision for: identical bytes would not mean identical content."""
+        diff = CARRY_DIFF + _binsec("assets/logo.png")
+        a = self._run(self.A, diff)
+        self.assertEqual("clean", a["verdict"], "an extension-excluded binary does not cap the verdict")
+        b = self._run(self.B, diff)
+        self.assertEqual(2, len(self.llm_calls))
+        self.assertIsNone(b["carried_from"])
+        self.assertTrue(any("binary section" in line for line in self.logs))
+
+    def test_partial_coverage_now_is_never_carried(self):
+        self._run(self.A, CARRY_DIFF)
+        fp = self.m.review_fingerprint(CARRY_DIFF)
+        self.assertEqual((None, "coverage partial"),
+                         self.m.carry_source("o/r", 5, self.B, fp, CARRY_DIFF, "partial"))
+
+    def test_a_policy_or_code_change_between_heads_is_reviewed(self):
+        """Same bytes, different reviewed input: an exclusion added or removed since the source
+        changes what the model reads. CARRY_EPOCH binds the policy keys and this file's bytes."""
+        self._run(self.A, CARRY_DIFF)
+        self._load(carry_clean_verdicts=True, exclude_globs=["docs/*"])     # same database
+        self._run(self.B, CARRY_DIFF)
+        self.assertEqual(2, len(self.llm_calls))
+        self.m.CARRY_EPOCH = "another build of reviewbot.py"
+        self._run(self.C, CARRY_DIFF)
+        self.assertEqual(3, len(self.llm_calls))
+
+    def test_the_epoch_covers_the_source_bytes_and_the_policy_keys(self):
+        import hashlib
+        policy = json.dumps({k: self.m.CFG.get(k) for k in self.m.CARRY_POLICY_KEYS}, sort_keys=True)
+        self.assertEqual(hashlib.sha256(SRC.read_bytes() + b"\0" + policy.encode()).hexdigest(),
+                         self.m.CARRY_EPOCH)
+        for key in ("exclude_globs", "doc_globs", "max_diff_bytes", "guarded_paths",
+                    "unattended_authors", "pin_authors", "dependency_authors"):
+            self.assertIn(key, self.m.CARRY_POLICY_KEYS)
+
+    def test_no_epoch_means_no_carry(self):
+        self._run(self.A, CARRY_DIFF)
+        self.m.CARRY_EPOCH = None
+        b = self._run(self.B, CARRY_DIFF)
+        self.assertEqual(2, len(self.llm_calls))
+        self.assertIsNone(b["diff_digest"])
+
+    def test_our_latest_review_is_found_beyond_ten_pages(self):
+        """iter_reviews() stops at ten pages; a newer finding of ours on page 11 must still win."""
+        self._run(self.A, CARRY_DIFF)
+        self.reviews += [self._other("reviewer-codex", self.A, "clean", 2000 + i) for i in range(520)]
+        self.reviews.append(self._other("reviewer-test", self.X, "findings", 9000))
+        self._run(self.B, CARRY_DIFF)
+        self.assertEqual(2, len(self.llm_calls))
+        self.assertTrue(any(f"latest review is findings at {self.X[:9]}" in line for line in self.logs))
+
+    def test_a_server_capped_page_size_does_not_end_the_history_early(self):
+        """Gitea may serve fewer than the 50 asked for; only an EMPTY page is final."""
+        self._run(self.A, CARRY_DIFF)
+        self.page_size = 30
+        self.reviews += [self._other("reviewer-codex", self.A, "clean", 2000 + i) for i in range(40)]
+        self.reviews.append(self._other("reviewer-test", self.X, "findings", 9000))
+        self._run(self.B, CARRY_DIFF)
+        self.assertEqual(2, len(self.llm_calls))
+
+    def test_an_unbounded_history_refuses_the_carry(self):
+        self._run(self.A, CARRY_DIFF)
+        self.m.CARRY_REVIEW_PAGES_MAX = 1
+        self.reviews += [self._other("reviewer-codex", self.A, "clean", 2000 + i) for i in range(60)]
+        self._run(self.B, CARRY_DIFF)
+        self.assertEqual(2, len(self.llm_calls))
+        self.assertTrue(any("check failed: review listing exceeds 1 pages" in line for line in self.logs))
+
+    def test_gitea_without_our_clean_review_is_not_carried(self):
+        """The database alone is not proof: a lost or foreign review history means a full read."""
+        self._run(self.A, CARRY_DIFF)
+        self.reviews.clear()
+        self._run(self.B, CARRY_DIFF)
+        self.assertEqual(2, len(self.llm_calls))
+        self.assertTrue(any("no review of ours in Gitea" in line for line in self.logs))
+
+    def test_a_peer_or_forged_review_is_not_our_word(self):
+        """Only reviews marker_of() attributes to reviewer-<persona> count as ours."""
+        self._run(self.A, CARRY_DIFF)
+        forged = self._other("reviewer-test", self.X, "findings", 9000)
+        forged["user"] = {"login": "someone"}
+        self.reviews.append(forged)
+        self._run(self.B, CARRY_DIFF)
+        self.assertEqual(1, len(self.llm_calls), "a review by another account cannot veto or vouch")
+
+    def test_the_first_review_logs_nothing_about_carry(self):
+        self._run(self.A, CARRY_DIFF)
+        self.assertFalse([line for line in self.logs if line.startswith("carry ")], self.logs)
+
+    def test_convergence_context_skips_a_carried_review_of_ours(self):
+        """The next real round must verify the substantive review (a clean one can carry nits),
+        not the carry notice. The skip needs the bot-authored line at its fixed position."""
+        self._run(self.A, CARRY_DIFF)
+        self.reviews[-1]["body"] = "real summary with a nit\n\n" + self.m.review_marker(self.A, "clean")
+        self._run(self.B, CARRY_DIFF)
+        ctx = self.m.convergence_context("o/r", 5, self.C, 2)
+        self.assertIn("real summary with a nit", ctx)
+        self.assertNotIn("Carried forward", ctx)
+        # The same comment anywhere but the tail does not hide a real review.
+        self.reviews.append({"id": 5000, "user": {"login": "reviewer-test"}, "state": "COMMENT",
+                             "body": f"newer\n<!-- review-bot-carried: from={self.A} -->\n\n"
+                                     + self.m.review_marker(self.X, "findings")})
+        self.assertIn("newer", self.m.convergence_context("o/r", 5, self.C, 2))
+
+    def test_the_chunk_lane_is_never_carried(self):
+        """chunk_review_repos binds its own snapshots; review_job hands those repos to the adapter
+        before the carry is ever considered."""
+        m = self._load(carry_clean_verdicts=True, chunk_review_repos=["o/r"])
+        calls = []
+        m.chunk_call = lambda name, *a: calls.append(name) or ("done", None, "chunk")
+        self.assertEqual(("done", None, "chunk"), m.review_job(1, "o/r", 5, self.A))
+        self.assertEqual(["review_job"], calls)
+
+    def test_migration_adds_the_carry_columns(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        old = sqlite3.connect(pathlib.Path(d.name) / "state.sqlite")
+        old.execute("""CREATE TABLE jobs(
+            id INTEGER PRIMARY KEY, repo TEXT, pr INTEGER, head_sha TEXT,
+            state TEXT, attempts INTEGER DEFAULT 0, next_at REAL DEFAULT 0,
+            created REAL, updated REAL, review_id INTEGER, note TEXT)""")
+        old.execute("INSERT INTO jobs(repo,pr,head_sha,state) VALUES('o/r',1,'c','done')")
+        old.commit()
+        old.close()
+        m = load(d.name)
+        c = m.db()
+        cols = {r[1] for r in c.execute("PRAGMA table_info(jobs)")}
+        self.assertTrue({"diff_digest", "carried_from", "verdict_seq"} <= cols)
+        self.assertEqual((None, None, None), c.execute(
+            "SELECT diff_digest,carried_from,verdict_seq FROM jobs").fetchone())
+        c.close()
+
+
+class FairQueueTest(unittest.TestCase):
+    """Feature B of plans/2026-11-12-reviewbot-carry-and-fair-queue-plan.md: queue_policy=fair
+    serves repositories round-robin (least recently claimed first, then the repo's oldest eligible
+    job) instead of the globally oldest job. Every FIFO guarantee is re-asserted under it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.order, self.logs = [], []
+
+    def _load(self, **overrides):
+        m = load(self.tmp.name, repos=["o/a", "o/b", "o/c"], **overrides)
+        m.review_job = lambda jid, repo, pr, head: (self.order.append(f"{repo[2:]}{pr}"),
+                                                    ("done", 1, "ok"))[1]
+        m.log = lambda *a: self.logs.append(" ".join(str(x) for x in a))
+        return m
+
+    def _add(self, m, repo, pr, created, state="queued", next_at=0.0, head=None):
+        c = m.db()
+        c.execute("INSERT INTO jobs(repo,pr,head_sha,state,created,updated,next_at) "
+                  "VALUES(?,?,?,?,?,?,?)", (repo, pr, head or f"{pr:040x}", state, created, created,
+                                            next_at))
+        c.commit()
+        c.close()
+
+    def _drain(self, m):
+        while m.worker_once() is not None:
+            pass
+        return self.order
+
+    def _backlog(self, m):
+        for pr, created in ((1, 100.0), (2, 101.0), (3, 102.0)):
+            self._add(m, "o/a", pr, created)
+        self._add(m, "o/b", 1, 103.0)
+
+    def test_fifo_is_the_code_default(self):
+        m = self._load()
+        self.assertEqual("fifo", m.queue_policy())
+        self._backlog(m)
+        self.assertEqual(["a1", "a2", "a3", "b1"], self._drain(m))
+
+    def test_fair_serves_the_waiting_repository_next(self):
+        m = self._load(queue_policy="fair")
+        self._backlog(m)
+        self.assertEqual(["a1", "b1", "a2", "a3"], self._drain(m))
+
+    def test_three_repositories_rotate(self):
+        m = self._load(queue_policy="fair")
+        self._backlog(m)
+        self._add(m, "o/c", 1, 104.0)
+        self._add(m, "o/b", 2, 105.0)
+        self.assertEqual(["a1", "b1", "c1", "a2", "b2", "a3"], self._drain(m))
+
+    def test_a_repository_with_nothing_eligible_is_not_waited_for(self):
+        m = self._load(queue_policy="fair")
+        self._backlog(m)
+        c = m.db()
+        c.execute("UPDATE jobs SET next_at=? WHERE repo='o/b'", (real_time.time() + 3600,))
+        c.commit()
+        c.close()
+        self.assertEqual(["a1", "a2", "a3"], self._drain(m))
+
+    def test_the_rotation_survives_a_restart(self):
+        m = self._load(queue_policy="fair")
+        self._backlog(m)
+        m.worker_once()                                   # a1
+        m2 = self._load(queue_policy="fair")              # a fresh process on the same database
+        m2.worker_once()
+        self.assertEqual(["a1", "b1"], self.order)
+
+    def test_the_served_sequence_is_compared_as_a_number(self):
+        """meta.v is TEXT: compared as strings, "10" < "9" would serve the same repo twice."""
+        m = self._load(queue_policy="fair")
+        for i in range(8):
+            self._add(m, "o/a", i + 1, 100.0 + i)
+            self._add(m, "o/b", i + 1, 200.0 + i)
+        self.assertEqual([x for i in range(8) for x in (f"a{i + 1}", f"b{i + 1}")], self._drain(m))
+
+    def test_the_park_still_holds_every_job(self):
+        m = self._load(queue_policy="fair")
+        self._backlog(m)
+        m.RATE_LIMITED_UNTIL = real_time.time() + 600
+        self.assertIsNone(m.worker_once())
+        self.assertEqual([], self.order)
+        c = m.db()
+        self.assertIsNone(c.execute("SELECT v FROM meta WHERE k='queue_served_seq'").fetchone())
+        c.close()
+
+    def test_only_queued_and_retry_are_claimable(self):
+        m = self._load(queue_policy="fair")
+        for pr, state in ((1, "quarantined"), (2, "superseded"), (3, "done"), (4, "running")):
+            self._add(m, "o/b", pr, 50.0 + pr, state=state)
+        self._add(m, "o/a", 1, 100.0)
+        self._add(m, "o/c", 1, 101.0, state="retry")
+        self.assertEqual(["a1", "c1"], self._drain(m))
+
+    def test_a_requeued_quarantine_joins_the_rotation(self):
+        m = self._load(queue_policy="fair")
+        self._backlog(m)
+        self._add(m, "o/c", 7, 50.0, state="quarantined")
+        m.worker_once()                                   # a1
+        c = m.db()
+        c.execute("UPDATE jobs SET note='attempts exhausted: x' WHERE repo='o/c'")
+        c.commit()
+        c.close()
+        self.assertEqual(0, m.requeue("o/c", 7))
+        # c and b were never served; c's job is the older of the two, so c goes first.
+        self.assertEqual(["a1", "c7", "b1", "a2", "a3"], self._drain(m))
+
+    def test_an_older_head_back_in_retry_beside_a_newer_one_is_still_claimable(self):
+        """enqueue() leaves a RUNNING head alone, so a failed older head can sit in `retry` next to
+        its PR's newer queued head; both stay claimable, as under FIFO."""
+        m = self._load(queue_policy="fair")
+        self._add(m, "o/a", 1, 100.0, state="retry", head="1" * 40)
+        self._add(m, "o/a", 1, 101.0, head="2" * 40)
+        self.assertEqual(["a1", "a1"], self._drain(m))
+
+    def test_an_active_chunk_snapshot_keeps_the_worker(self):
+        """codex, plan round 2: a chunk review binds its snapshot to the base sha and requeues
+        itself after every part. Rotating other repos in between gives the base time to move and
+        restart it; a job holding a chunk_jobs receipt continues first, as it did under FIFO."""
+        m = self._load(queue_policy="fair")
+        self._backlog(m)
+        self._add(m, "o/c", 9, 104.0)
+        c = m.db()
+        cid = c.execute("SELECT id FROM jobs WHERE repo='o/c'").fetchone()[0]
+        c.execute("CREATE TABLE IF NOT EXISTS chunk_jobs(job INTEGER PRIMARY KEY, binding TEXT NOT NULL)")
+        c.execute("INSERT INTO chunk_jobs VALUES(?,'b')", (cid,))
+        c.commit()
+        c.close()
+        parts = iter([("progress", None, "part 1"), ("progress", None, "part 2"), ("done", 1, "final")])
+
+        def review_job(jid, repo, pr, head):
+            self.order.append(f"{repo[2:]}{pr}")
+            return next(parts) if repo == "o/c" else ("done", 1, "ok")
+        m.review_job = review_job
+        self.assertEqual(["c9", "c9", "c9", "a1", "b1", "a2", "a3"], self._drain(m))
+
+    def test_an_unknown_policy_runs_fifo(self):
+        m = self._load(queue_policy="round-robin")
+        self.assertEqual("fifo", m.queue_policy())
+        self._backlog(m)
+        self.assertEqual(["a1", "a2", "a3", "b1"], self._drain(m))
+
+    def test_an_override_is_counted_and_logged(self):
+        m = self._load(queue_policy="fair")
+        self._backlog(m)
+        self._drain(m)
+        # a1 (fifo agrees), b1 (fifo would take a2), a2, a3 (fifo agrees again)
+        self.assertEqual(1.0, _exported(m)['reviewbot_queue_fair_overrides_total{persona="test"}'])
+        self.assertEqual(["queue: fair pick o/b#1 ahead of fifo o/a#2"],
+                         [line for line in self.logs if line.startswith("queue:")])
+
+
+class CarryAndQueueRoleTest(unittest.TestCase):
+    """Off in the code, on in the role: both personas get both features from one deploy."""
+
+    def test_role_enables_both_and_the_template_renders_them(self):
+        import jinja2
+
+        role = ROOT / "ansible" / "roles" / "pr_reviewer"
+        defaults = AllowlistDefaultsTest._strict_yaml(
+            (role / "defaults" / "main.yml").read_text(encoding="utf-8"))
+        self.assertIs(True, defaults["pr_reviewer_carry_clean_verdicts"])
+        self.assertEqual("fair", defaults["pr_reviewer_queue_policy"])
+        env = jinja2.Environment(undefined=jinja2.StrictUndefined)
+        env.filters["to_json"] = json.dumps
+        template = env.from_string((role / "templates" / "config.json.j2").read_text(encoding="utf-8"))
+        config = json.loads(template.render(defaults))
+        self.assertIs(True, config["carry_clean_verdicts"])
+        self.assertEqual("fair", config["queue_policy"])
+
+    def test_the_code_defaults_are_off(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        m = load(tmp.name)
+        self.assertNotIn("carry_clean_verdicts", m.CFG)
+        self.assertEqual("fifo", m.queue_policy())
+
+
 def tearDownModule() -> None:  # noqa: N802 - unittest's hook name
     subprocess.run = _SUBPROCESS_RUN_AT_IMPORT
 
