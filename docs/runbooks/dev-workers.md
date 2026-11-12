@@ -1159,6 +1159,33 @@ request, and it can do so *after* the requeued worker checks for the marker and 
 its own — which double-posts the review. Open the PR in Gitea and confirm no review from that
 persona is present at that head; only then use `--force`.
 
+### Carried reviews and the fair queue
+
+Both are on for both personas from the role defaults (`pr_reviewer_carry_clean_verdicts: true`,
+`pr_reviewer_queue_policy: fair`; off in the code). Design and review record:
+`plans/2026-11-12-reviewbot-carry-and-fair-queue-plan.md`.
+
+**A review that says "Carried forward from <sha>" was not re-run.** When main is merged into a PR,
+the new head's diff (Gitea's `.diff`, merge base vs head) is often byte-identical to the one the
+persona already approved. If it is, and the persona's LATEST review of the PR is that clean one,
+the persona posts `verdict=clean` (APPROVED) at the new head without the model. Never across a
+binary section, a partial review, a later finding of its own (posted or not), or a reviewbot.py
+deploy or exclusion/cap/guard config change — each PR's next head after one of those is read in
+full once. The PR is not re-read against the new base: a semantic conflict with main is left to
+CI, which runs on the new head and gates the merge. To force a real review, push a commit.
+`reviewbot_reviews_carried_total` counts carries; `journalctl -u reviewbot | grep 'carry '` gives
+the reason a head was not carried (`no clean review of an identical diff`, `latest review is
+findings at ...`, `later review findings at ...`, `the diff has a binary section`, `check failed:
+...`).
+
+**The queue serves repositories round-robin.** The worker claims from the repository it served
+least recently, then that repository's oldest eligible job, so one repo's backlog no longer holds
+every other repo's PRs (2026-11-12: relay was 84% of 575 jobs/day and a platform PR waited behind
+30 of them). Parks, `next_at`, quarantine and `--requeue` behave as before; a chunk-review job that
+has bound its snapshot keeps the worker until it finishes. The rotation lives in `meta`
+(`queue_served:<repo>`), so a restart keeps it. `queue: fair pick ...` journal lines and
+`reviewbot_queue_fair_overrides_total` show when it served a repo FIFO would not have.
+
 ### When a PR is "skipped" (diff over the size cap)
 
 A diff over `pr_reviewer_max_diff_bytes` (400 KB) is not reviewed. Since 2026-09-06 the skip is
