@@ -569,6 +569,153 @@ tests:
         exp_alerts: []
 
   - interval: 1m
+    name: every claude account limited, one of them still serving with only the Fable window full, is not a provider outage
+    # The 2026-11-12 shape: claude-3/-4 at their weekly wall; claude and claude-2 under theirs with
+    # the Fable window (seven_day_overage_included) full, so all four read `limited`. claude-2 keeps
+    # completing Opus requests: not exhausted. claude is idle, so it counts; 3 of 4 is no page.
+    input_series:
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude",provider="claude",status="limited"}'
+        values: "1x40"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude-2",provider="claude",status="limited"}'
+        values: "1x40"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude-3",provider="claude",status="limited"}'
+        values: "1x40"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude-4",provider="claude",status="limited"}'
+        values: "1x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "91x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "83x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-3",provider="claude",window="weekly"}'
+        values: "100x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-4",provider="claude",window="weekly"}'
+        values: "100x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",model="overage_included",window="weekly · overage included"}'
+        values: "100x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",model="overage_included",window="weekly · overage included"}'
+        values: "100x40"
+      # Resets ahead of the evaluation (promtool's clock starts at 0): the own windows are live.
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="claude-3",provider="claude",window="weekly"}'
+        values: "1794686400x40"
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="claude-4",provider="claude",window="weekly"}'
+        values: "1794535200x40"
+      - series: 'llm_router_requests_total{job="llm-router",account="claude-2",provider="claude",route="pool-claude",status="complete"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts: []
+
+  - interval: 1m
+    name: every claude account limited and none completing pages, whichever windows are full
+    # Same windows, nothing completes: every usable model full, or account-wide refusals behind a
+    # model window that happens to be full. The labels cannot tell those from the shape above; the
+    # completions can. claude-2 served until 5m, so it counts from 35m (30m without a completion).
+    input_series:
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude",provider="claude",status="limited"}'
+        values: "1x50"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude-2",provider="claude",status="limited"}'
+        values: "1x50"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "91x50"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "83x50"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",model="opus",window="weekly · opus"}'
+        values: "100x50"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",model="opus",window="weekly · opus"}'
+        values: "100x50"
+      - series: 'llm_router_requests_total{job="llm-router",account="claude-2",provider="claude",route="pool-claude",status="complete"}'
+        values: "0+1x5 5x45"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts: []
+      - eval_time: 45m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              provider: claude
+            exp_annotations:
+              summary: "llm-router: every claude account is limited"
+              description: >-
+                All 2 claude accounts the router holds are at 100 % of a limit
+                window. Requests on that provider's routes now fail (or run on credits where an
+                account has them) until the earliest reset. The dev workers' Codex CLI cannot fall
+                back to another provider through the router. Runbook: docs/runbooks/llm-router.md
+                § Overload handling.
+
+  - interval: 1m
+    name: an expired own window does not stop a serving account from being excluded
+    # The weekly windows still read 100 but reset at 60 s; statusOf ignores them, and so does this.
+    input_series:
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude",provider="claude",status="limited"}'
+        values: "1x20"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude-2",provider="claude",status="limited"}'
+        values: "1x20"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "100x20"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "100x20"
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "60x20"
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "60x20"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",model="overage_included",window="weekly · overage included"}'
+        values: "100x20"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",model="overage_included",window="weekly · overage included"}'
+        values: "100x20"
+      - series: 'llm_router_requests_total{job="llm-router",account="claude",provider="claude",route="pool-claude",status="complete"}'
+        values: "0+1x20"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts: []
+
+  - interval: 1m
+    name: every account at its own live limit pages even while it completed requests
+    input_series:
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude",provider="claude",status="limited"}'
+        values: "1x20"
+      - series: 'llm_router_account_limit_status{job="llm-router",account="claude-2",provider="claude",status="limited"}'
+        values: "1x20"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",window="weekly"}'
+        values: "100x20"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-2",provider="claude",window="weekly"}'
+        values: "100x20"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude",provider="claude",model="overage_included",window="weekly · overage included"}'
+        values: "100x20"
+      # Served right up to the wall: the completions do not hide an own window at 100.
+      - series: 'llm_router_requests_total{job="llm-router",account="claude",provider="claude",route="pool-claude",status="complete"}'
+        values: "0+1x20"
+      - series: 'llm_router_requests_total{job="llm-router",account="claude-2",provider="claude",route="pool-claude",status="complete"}'
+        values: "0+1x20"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: LlmRouterProviderExhausted
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              provider: claude
+            exp_annotations:
+              summary: "llm-router: every claude account is limited"
+              description: >-
+                All 2 claude accounts the router holds are at 100 % of a limit
+                window. Requests on that provider's routes now fail (or run on credits where an
+                account has them) until the earliest reset. The dev workers' Codex CLI cannot fall
+                back to another provider through the router. Runbook: docs/runbooks/llm-router.md
+                § Overload handling.
+
+  - interval: 1m
     name: one limited account warns; every account of a provider limited is critical
     input_series:
       # codex: both accounts limited -> provider exhausted. claude: one of two -> account alert only.

@@ -286,15 +286,51 @@ spec:
         # without limit headers) has no series and is invisible here. The `>= 2` floor keeps that
         # from turning one limited account into a critical page; an always-present per-account
         # series from the exporter would be the complete fix.
+        # A `limited` account that is still SERVING is not counted: it completed a request in the
+        # last 30m and none of its own live windows (no `model` label, reset still ahead) is full.
+        # The exporter derives `limited` from the reading's live windows (statusOf), a model's window
+        # included. The Claude CLI's Fable limit (seven_day_overage_included, exported as
+        # model="overage_included") matches no deployment model; a Fable 429 pauses Fable alone
+        # (llm-router #179) and Opus keeps serving. On 2026-11-12 that paged this alert about 40
+        # times between 01:19Z and 12:28Z while claude-2 completed 10 to 25 requests an hour.
+        # Completions, not the window labels, decide: an account whose every usable model is full,
+        # or that gets account-wide refusals with only a model window showing full, completes
+        # nothing and still counts. An own window at its wall counts at once, whatever it served.
+        # An expired own window does not (statusOf ignores it too). Cost: a provider idle for 30m
+        # with every account reading `limited` pages, as it did before.
         - alert: LlmRouterProviderExhausted
           expr: |
             (
-              count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"} == 1)
+              count by (provider) (
+                (llm_router_account_limit_status{job="llm-router",status="limited"} == 1)
+                unless on (job, provider, account)
+                (
+                  (sum by (job, provider, account) (increase(llm_router_requests_total{job="llm-router",status="complete"}[30m])) > 0)
+                  unless on (job, provider, account)
+                  max by (job, provider, account) (
+                    (llm_router_account_limit_used_percent{job="llm-router",model=""} >= 100)
+                    unless on (job, provider, account, window)
+                    ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
+                  )
+                )
+              )
                 ==
               count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"})
             )
             and
-            count by (provider) (llm_router_account_limit_status{job="llm-router",status="limited"} == 1) >= 2
+            count by (provider) (
+              (llm_router_account_limit_status{job="llm-router",status="limited"} == 1)
+              unless on (job, provider, account)
+              (
+                (sum by (job, provider, account) (increase(llm_router_requests_total{job="llm-router",status="complete"}[30m])) > 0)
+                unless on (job, provider, account)
+                max by (job, provider, account) (
+                  (llm_router_account_limit_used_percent{job="llm-router",model=""} >= 100)
+                  unless on (job, provider, account, window)
+                  ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
+                )
+              )
+            ) >= 2
           for: 5m
           labels: { severity: critical }
           annotations:
