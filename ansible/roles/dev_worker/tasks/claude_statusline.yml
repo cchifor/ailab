@@ -32,12 +32,15 @@
 
 # settings.json belongs to the USER (model, theme, permissions, plugins, MCP approvals). Read it,
 # add our one key, write it back — a template here would silently discard whatever they had. A
-# missing file is the normal case on a worker nobody has configured yet, hence failed_when: false.
+# missing file is the normal case on a worker nobody has configured yet, so `file not found` is not a
+# failure; any other read failure is, so the merge below never replaces a config it could not read.
 - name: Read each user's existing Claude settings.json
   ansible.builtin.slurp:
     src: "{{ item.home }}/.claude/settings.json"
   register: dev_worker_claude_settings
-  failed_when: false
+  failed_when: >-
+    dev_worker_claude_settings is failed
+    and 'file not found' not in (dev_worker_claude_settings.msg | default('') | lower)
   changed_when: false
   loop: "{{ dev_worker_users }}"
   loop_control:

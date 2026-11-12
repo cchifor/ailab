@@ -101,7 +101,8 @@
 # Turned off per user with settings.json `skillOverrides` (verified: an `anthropic-skills:<name>` key
 # hides the synced skill). Added only where the user has no choice of their own for that key: a later
 # "on" set with /skills wins. settings.json belongs to the user, so read-merge-write, like the status line.
-# tests/test-npm-prefix-guard.sh runs these three tasks too (fresh home, a user's own choice, idempotence).
+# tests/test-npm-prefix-guard.sh runs these three tasks too (fresh home, a user's own choice, idempotence,
+# and a settings.json that cannot be read, which must stop the run and leave it untouched).
 - name: Ensure the per-user Claude config directory (synced-skill overrides)
   ansible.builtin.file:
     path: "{{ item.home }}/.claude"
@@ -116,7 +117,12 @@
   ansible.builtin.slurp:
     src: "{{ item.home }}/.claude/settings.json"
   register: dev_worker_claude_settings_skills
-  failed_when: false
+  # Only a MISSING file means "no settings yet" (slurp: `File not found: <path>`; the case differs between
+  # ansible-core releases, hence `lower`). Any other read failure (a directory, a symlink loop, unreadable,
+  # I/O) stops here, before the copy below replaces a config it never read.
+  failed_when: >-
+    dev_worker_claude_settings_skills is failed
+    and 'file not found' not in (dev_worker_claude_settings_skills.msg | default('') | lower)
   changed_when: false
   loop: "{{ dev_worker_users }}"
   loop_control:

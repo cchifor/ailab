@@ -165,7 +165,7 @@ ln -s ../lib/node_modules/npm/bin/npx-cli.js "$P1/bin/npx"
 set +e
 
 run() { PATH="$P1/bin:$T/sysbin:$PATH" ANSIBLE_NOCOLOR=1 ANSIBLE_LOCALHOST_WARNING=0 \
-	ANSIBLE_INVENTORY_UNPARSED_WARNING=0 ansible-playbook -i localhost, "$T/play.yml" 2>&1; }
+	ANSIBLE_INVENTORY_UNPARSED_WARNING=0 ansible-playbook -i localhost, "$T/play.yml" "$@" 2>&1; }
 # The recap's changed= count for localhost; empty when there is no recap line (the callers reject that).
 changed() { sed -n 's/^localhost[[:space:]]*:.*[[:space:]]changed=\([0-9][0-9]*\)[[:space:]].*/\1/p' <<<"$1" | tail -1; }
 
@@ -231,6 +231,19 @@ if [ "$rc" -eq 0 ] && [ "$(changed "$out")" = 0 ] && [ ! -s "$LOG" ]; then
 	ok "second run changes nothing and installs nothing"
 else
 	bad "second run: rc=$rc changed='$(changed "$out")' npm calls: $(tr '\n' ';' <"$LOG")" "$out"
+fi
+
+# ---- 4. a settings.json that exists but cannot be read stops the run and is left alone -------------------
+# Only `file not found` means "no settings yet". Here settings.json is a symlink to itself (ELOOP; even root
+# cannot read it): with every read failure ignored, the merge "succeeded" by replacing the link with a fresh
+# file holding only the overrides. It must fail instead, and leave the link in place.
+mkdir -p "$T/home4/.claude"
+ln -s settings.json "$T/home4/.claude/settings.json"
+out="$(run -e "{\"dev_worker_users\": [{\"name\": \"u4\", \"home\": \"$T/home4\"}]}")"; rc=$?
+if [ "$rc" -ne 0 ] && grep -qi 'unable to slurp' <<<"$out" && [ -L "$T/home4/.claude/settings.json" ]; then
+	ok "an unreadable settings.json fails the run and is left untouched"
+else
+	bad "an unreadable settings.json did not stop the run (rc=$rc, still a link: $([ -L "$T/home4/.claude/settings.json" ] && echo yes || echo no))" "$out"
 fi
 
 echo
