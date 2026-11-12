@@ -4540,3 +4540,18 @@ off without a rollback, remove the variable (or set it to `0`): the router resta
 2. The next Fable refusal on a seat (reviewer-claude asks Fable first): its trajectory has `attempt.failed` with
    `limitScope: "model"`, and the following Opus request is served on the same account. On reviewer-1,
    `journalctl -u reviewbot` shows `reviewed …` right after `primary model failed (… fable)`, with no `deferred` line.
+
+### Results of the model-scoped cooldowns release (2026-11-12)
+
+- ailab #1727 merged at 12:08:05Z. Flux applied `507164ac` after a source nudge, and the new pod started at 12:09:34Z:
+  image `sha256:05b2d840…`, both annotations, `ROUTER_CLAUDE_MODEL_SCOPED_LIMITS=1` in the container, 0 restarts.
+- `validate-live`: 6/9, the same three Codex checks failing as before the roll (`codex text`, `codex stream`,
+  `codex tool call`); Claude streaming and the image checks passed.
+- The first Fable refusal, at 12:10:06Z (reviewer-claude, both attempts, `claude` then `claude-2`): `attempt.failed` with
+  `RATE_LIMITED`, `limitScope: "model"` and `pausedUntil` 60 s later. On real traffic, this confirms that Claude Code
+  reports the Fable refusal as a model limit (`seven_day_overage_included`).
+- The Opus fallback at 12:10:11Z found `claude` and `claude-2` eligible and was served on `claude-2`. Before the roll this
+  request got `CAPACITY_UNAVAILABLE` with `account_cooldown` on both accounts.
+- reviewer-1: no `deferred: subscription rate-limited` line since the roll. It completed 13 reviews between 12:09 and
+  12:24Z, where it had managed about four an hour since 04:00Z.
+- Fable stays spent on `claude` and `claude-2` until their weekly resets, so reviewer-claude reviews on Opus until then.
