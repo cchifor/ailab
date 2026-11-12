@@ -4488,3 +4488,55 @@ traffic.
 2. The router-ab gate with cloud1 not on the route: `--providers qwen,qwen-cloud3,codex --pairs 6`, plus `claude` if a
    seat has headroom.
 3. The cloud1 steps of that section.
+
+## Model-scoped cooldowns release (2026-11-12, llm-router #179)
+
+Release `router-0.1.0-20261112-model-cooldown`: source `3c0d78a279cb3994be7e1d86b9f2411ea3ca4e97` (llm-router branch
+`release/router-20261112-model-cooldown`: the live `737d447b` plus [#179](https://git.chifor.me/cchifor/llm-router/pulls/179)
+cherry-picked; `main` carries unreleased provenance work), archive `router-0.1.0-20261112-model-cooldown.tar.gz`, SHA-256
+`1eb78102b44f989a051ebf1d861742480185869498e7ab502df0f3f549c53de9`, Relay branch `release/router-20261112-model-cooldown`,
+[Relay run 129389](https://git.chifor.me/cchifor/relay/actions/runs/129389), packaging commit
+`895286dc63b6e0bcfae8a1c179209197bd76c00e`, image `registry.chifor.me/llm-router/router@sha256:05b2d8401e3369ed254baa8572c8099ff8e9249f145cfba22c3985e18290e414`.
+An anonymous pull of the index, both manifests and all 12 blobs verified their digests.
+
+**Why.** On 2026-11-12 Fable was spent on `claude` and `claude-2`, the two Claude accounts with weekly room left. Opus
+kept serving on both. Each Fable 429 still cooled both accounts down for 60 s (`account_cooldown`), so reviewer-claude's
+immediate Opus fallback was refused with `CAPACITY_UNAVAILABLE`, and so were other keys' Opus requests that landed in
+that minute. reviewer-claude managed about four reviews an hour. Claude Code itself names the refused limit in its
+`rate_limit_event` and calls `seven_day_opus`, `seven_day_sonnet` and `seven_day_overage_included` (the Fable limit)
+model limits; the router treated every 429 as account-wide.
+
+**What it adds.**
+- With `ROUTER_CLAUDE_MODEL_SCOPED_LIMITS=1` (set in `router.yaml` by this roll), a Claude 429 is model-scoped when the
+  last `rate_limit_event` before the result refused one of those three types and none refused the account. Such a 429
+  pauses only that model on the account's pool for 60 s (routing reason `model_cooldown`). The account's other models keep
+  serving.
+- The account itself records nothing: no `cooldownUntil` and no `account.health_changed`. The pause is in memory and a
+  restart forgets it.
+- `attempt.failed` in the journal carries `limitScope: "model"` and `pausedUntil`.
+- Any other 429, including one with no limit report, cools the account down as before. With the variable unset, the
+  image behaves exactly like the live release.
+
+**No storage change.** No schema, migration, KV or plugin-settings change between `737d447b` and `3c0d78a2`, so no backup
+is taken and a rollback needs no restore. The switch is a process variable, never saved: the old image ignores it.
+
+**Verified on the release tree.**
+- Docker, Node 24: `tsc --noEmit` clean, 2,637 tests passed (14 skipped). On the PR head (`main` + #179), 3,104 passed.
+- The production smoke passed in the pinned Node 26.10.0 runtime.
+- The archive has the live archive's layout: the same top-level entries, owner 1000:1000, and 18,214 entries against
+  18,214.
+- `validate-live` before the roll: 6/9, the known three Codex checks failing (baseline).
+
+**Rollback.** Revert the image, the three-line comment above it, both annotations and the
+`ROUTER_CLAUDE_MODEL_SCOPED_LIMITS` entry together, to image
+`registry.chifor.me/llm-router/router@sha256:61100143a90c66219d1e2acb1d7b6cd484dfea3c9622a779c92c8229599b1bb7`,
+source `737d447bb5238fbe6ede0383e135641b7cda7cb6`, release `router-0.1.0-20261109-workers-quota`. To turn the behaviour
+off without a rollback, remove the variable (or set it to `0`): the router restarts on the old behaviour.
+
+**At the roll.** One replica with `Recreate`: the router restarts, and streams in flight are cut, as at every release.
+
+**After the roll.**
+1. `validate-live`: 6/9 is the known baseline.
+2. The next Fable refusal on a seat (reviewer-claude asks Fable first): its trajectory has `attempt.failed` with
+   `limitScope: "model"`, and the following Opus request is served on the same account. On reviewer-1,
+   `journalctl -u reviewbot` shows `reviewed …` right after `primary model failed (… fable)`, with no `deferred` line.
