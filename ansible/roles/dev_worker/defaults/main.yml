@@ -77,10 +77,33 @@ dev_worker_caddy_version: "2.11.4" # GitHub release .deb (tasks/ttyd_caddy.yml);
 dev_worker_tpm_version: "v3.1.0"
 
 # ---- npm package ids ----
-# Claude Code self-updates at runtime, so presence is enough. Codex does NOT (it only nags), and a
-# model can require a newer CLI than the one on disk, so codex carries a version pin (below).
+# Claude Code self-updates at runtime, so it only needs a floor (below). Codex does NOT (it only nags),
+# and a model can require a newer CLI than the one on disk, so codex carries a version pin (below).
 dev_worker_claude_code_pkg: "@anthropic-ai/claude-code"
 dev_worker_codex_pkg: "@openai/codex"
+
+# ---- Claude Code version floor (tasks/claude_code.yml) ----
+# A user whose installed claude is OLDER than this is reinstalled at @latest (never downgraded). Not a
+# pin: the CLI keeps updating itself; the floor catches a copy that stopped, or that a bare npm install put
+# back at 2.1.197 (the last release whose `engines` accept the fleet's Node 20). 2.1.311 = npm's `stable`
+# tag on 2026-11-12. Bump only to pull a stuck fleet forward.
+dev_worker_claude_code_min_version: "2.1.311"
+
+# claude.ai-synced skills turned off for every worker user (tasks/claude_code.yml). Keep
+# `anthropic-skills:docs`: dev-worker-2's agents use the Claude Docs connector it goes with. Empty = no-op.
+dev_worker_claude_synced_skills_off:
+  - anthropic-skills:built-in-browser
+  - anthropic-skills:chrome-browser
+  - anthropic-skills:computer-use
+  - anthropic-skills:deep-research
+  - anthropic-skills:docx
+  - anthropic-skills:google-workspace
+  - anthropic-skills:import-memory
+  - anthropic-skills:morning
+  - anthropic-skills:pdf
+  - anthropic-skills:pptx
+  - anthropic-skills:skill-creator
+  - anthropic-skills:xlsx
 
 # ---- Codex CLI version + model (bump deliberately; tasks/codex.yml) ----
 # Any user whose installed codex is OLDER than this is upgraded to exactly it (never downgraded).

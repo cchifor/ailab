@@ -32,33 +32,40 @@
 
 # settings.json belongs to the USER (model, theme, permissions, plugins, MCP approvals). Read it,
 # add our one key, write it back — a template here would silently discard whatever they had. A
-# missing file is the normal case on a worker nobody has configured yet, hence failed_when: false.
+# missing file is the normal case on a worker nobody has configured yet, so `file not found` is not a
+# failure; any other read failure is, so the merge below never replaces a config it could not read.
 - name: Read each user's existing Claude settings.json
   ansible.builtin.slurp:
     src: "{{ item.home }}/.claude/settings.json"
   register: dev_worker_claude_settings
-  failed_when: false
+  failed_when: >-
+    dev_worker_claude_settings is failed
+    and 'file not found' not in (dev_worker_claude_settings.msg | default('') | lower)
   changed_when: false
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
 
-# First run rewrites the file as sorted, 4-space JSON (to_nice_json); every run after is a no-op. A
+# Written (as sorted, 4-space JSON) only when the merge changes the CONTENT: Claude Code saves the file in
+# its own format, so comparing bytes would rewrite it on every run after a user changes a setting. A
 # settings.json that exists but does not parse fails the task on purpose — better a loud stop than
 # silently replacing a config we could not read.
 - name: Merge the statusLine key into each user's Claude settings.json
-  ansible.builtin.copy:
-    content: >-
-      {{ ((item.1.content | b64decode | from_json) if item.1.content is defined else {})
+  vars:
+    dev_worker_current_settings: "{{ (item.1.content | b64decode | from_json) if item.1.content is defined else {} }}"
+    dev_worker_merged_settings: >-
+      {{ dev_worker_current_settings
          | combine({'statusLine': {
              'type': 'command',
              'command': '/usr/bin/node ' ~ item.0.home ~ '/.claude/statusline.js',
-             'refreshInterval': dev_worker_statusline_refresh_interval }})
-         | to_nice_json }}
+             'refreshInterval': dev_worker_statusline_refresh_interval }}) }}
+  ansible.builtin.copy:
+    content: "{{ dev_worker_merged_settings | to_nice_json }}"
     dest: "{{ item.0.home }}/.claude/settings.json"
     owner: "{{ item.0.name }}"
     group: "{{ item.0.name }}"
     mode: "0644"
+  when: dev_worker_merged_settings != dev_worker_current_settings
   loop: "{{ dev_worker_users | zip(dev_worker_claude_settings.results) | list }}"
   loop_control:
     label: "{{ item.0.name }}"
