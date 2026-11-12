@@ -96,7 +96,7 @@ def common(config, keys):
 
 
 def initialize(config):
-    return database_job(config, 'initialize', list(range(1, 10)))
+    return database_job(config, 'initialize', list(range(1, 11)))
 
 
 def upgrade(config):
@@ -113,16 +113,23 @@ def upgrade9(config):
     return database_job(config, 'upgrade9', [9])
 
 
+def upgrade10(config):
+    previous = config.get('fromVersion') if isinstance(config, dict) else None
+    if type(previous) is not int or previous != 9:
+        refuse('upgrade-version-invalid')
+    return database_job(config, 'upgrade10', [10])
+
+
 def database_job(config, action, numbers):
     keys = ['schema' + str(n).zfill(3) for n in numbers]
-    is_upgrade = action in ('upgrade', 'upgrade9')
+    is_upgrade = action in ('upgrade', 'upgrade9', 'upgrade10')
     commit = common(config, keys + (['fromVersion'] if is_upgrade else []))
     pins = [config[key] for key in keys]
     sql = {str(n).zfill(3) + '.sql': pinned(pin, 262144) for n, pin in zip(numbers, pins)}
     if any(len(re.findall(r'^BEGIN;$', raw, re.M)) != 1 or
            len(re.findall(r'^COMMIT;$', raw, re.M)) != 1 for raw in sql.values()):
         refuse('schema-transaction-invalid')
-    filename = ('upgrade9' if action == 'upgrade9' else action) + '.sh'
+    filename = action + '.sh'
     script = (ROOT / 'initialize' / filename).read_text()
     suffix = hashlib.sha256(''.join(pin['sha256'] for pin in pins).encode()).hexdigest()[:16]
     schema_name, script_name = NAME + '-schema-' + suffix, NAME + '-' + action + '-' + hashlib.sha256(script.encode()).hexdigest()[:16]
@@ -134,6 +141,7 @@ def database_job(config, action, numbers):
              ('script', '/initialize'), ('run', '/var/run/postgresql'), ('tmp', '/tmp')]]
     job_name = NAME + ('-initialize-once' if action == 'initialize' else
                        '-upgrade-8-to-9' if action == 'upgrade9' else
+                       '-upgrade-9-to-10' if action == 'upgrade10' else
                        '-upgrade-' + str(config['fromVersion']) + '-to-8')
     job = {'apiVersion': 'batch/v1', 'kind': 'Job', 'metadata': metadata(job_name, DB_NS, commit),
            'spec': {'suspend': True, 'backoffLimit': 0, 'activeDeadlineSeconds': 600,
@@ -349,10 +357,10 @@ def presence(config):
 
 
 def main(args):
-    if len(args) != 3 or args[0] not in ('initialize', 'upgrade', 'upgrade9', 'service', 'presence') or not sha(args[2]):
+    if len(args) != 3 or args[0] not in ('initialize', 'upgrade', 'upgrade9', 'upgrade10', 'service', 'presence') or not sha(args[2]):
         refuse('usage-invalid')
     config = parse(pinned({'path': args[1], 'sha256': args[2]}))
-    items = {'initialize': initialize, 'upgrade': upgrade, 'upgrade9': upgrade9,
+    items = {'initialize': initialize, 'upgrade': upgrade, 'upgrade9': upgrade9, 'upgrade10': upgrade10,
              'service': service, 'presence': presence}[args[0]](config)
     print(json.dumps({'apiVersion': 'v1', 'kind': 'List', 'items': items}, separators=(',', ':')))
 
