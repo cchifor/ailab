@@ -1,75 +1,120 @@
 # Implementation review — dev-worker-cleanup-gc-reflog-and-link-guard — round 1
 
-<!-- codex-impl-review-status: pending -->
+<!-- codex-impl-review-status: finalized -->
 
-## Summary
-
-- The implementation broadly follows the finalized plan and stays within its intended scope. Leaving disk-guard unchanged is justified by its existing failure classification and test.
-- Approval is blocked by incomplete nested-worktree ownership information and slow inventory refreshes invalidating the safety checks immediately preceding deletion.
-- Inventory failure handling and final reporting have several gaps, including a reproducible crash and missing execution-time refusal details.
-- Tests cover many planned cases but miss important destructive-boundary scenarios. Local verification passed 38 tests and skipped 95 Linux-only tests; Linux, real-git integration, CI and canary results were not independently verified here.
+All 12 findings were accepted and fixed in `c3803d53`. Each regression test below fails against
+the pre-review implementation (`4b3ff63a`) and passes now. 231 tests pass, both as root and as
+uid 1000.
 
 ## Findings
 
 ### Slow inventory refreshes invalidate the preceding deletion checks
-**Location:** ansible/roles/dev_worker/files/cleanup:953, ansible/roles/dev_worker/files/cleanup:1597
+**Location:** ansible/roles/dev_worker/files/cleanup (remove_deps, remove_worktree)
 **Severity:** blocker
-<!-- codex: Both removal functions finish their activity, contents, process and mount checks before recheck(), which can spend minutes rebuilding the inventory; a checkout added inside node_modules or a valuable ignored file added to a worktree during that interval can consequently be deleted, and git worktree remove does not protect ignored files. Refresh the inventory before the final safety checks, then perform a cached link check immediately before deletion, restarting validation if another refresh becomes necessary; add mutation-during-refresh regressions for both removal paths. -->
+**Resolution:**
+- A removal now calls `Inventory.ready()` BEFORE its safety checks (activity, contents, processes,
+  mounts, git state). That call rebuilds the inventory when it is older than 120 s.
+- Right before deleting, the removal calls `recheck()` against that same index and never rebuilds
+  there.
+- An index that aged past 120 s during the checks refuses the removal ("link inventory aged during
+  the safety checks"), and the next run retries it.
+- Tests: `test_recheck_never_rebuilds_and_refuses_an_index_that_aged_during_the_checks`,
+  `test_a_link_made_after_the_scan_is_caught_at_the_removal`,
+  `test_a_link_made_after_the_scan_stops_the_worktree_removal`.
 
 ### Nested consumers beyond discovery limits are treated as internal links
-**Location:** ansible/roles/dev_worker/files/cleanup:1962, ansible/roles/dev_worker/files/cleanup:1179
+**Location:** cleanup (owner, link_index)
 **Severity:** blocker
-<!-- codex: Inventory.worktrees comes from find_worktrees(), whose depth-six limit and skipped directory names omit legitimate nested worktrees even though the link inventory walks their links; owner() then returns the enclosing candidate worktree and exempts those consumers, allowing deletion of their shared dependencies. Discover ownership boundaries during the full inventory walk, or conservatively withhold the internal-link exemption when ownership is unproven, and test a nested consumer beyond DISCOVERY_DEPTH through main() rather than manually supplying its owner. -->
+**Resolution:**
+- Ownership now comes from the inventory's own walk: every dir that holds a `.git`, at any depth.
+- `find_worktrees` no longer decides it.
+- Test: `test_a_nested_consumer_deeper_than_discovery_is_still_another_tree`, run through `main()`.
 
 ### The inode check does not pin the directory that is deleted
-**Location:** ansible/roles/dev_worker/files/cleanup:923
+**Location:** cleanup (remove_dep_dir)
 **Severity:** important
-<!-- codex: This pre-existing root deletion race remains outside the plan's safeguards: another process can replace name with a different real directory between os.stat() and os.rename(), after which rmtree deletes the replacement without comparing it to the planned inode; descriptor-relative access and O_NOFOLLOW do not prevent directory replacement. Move into protected staging and verify the moved inode before recursion, avoiding an attacker-writable trash pathname, and test replacement specifically between the identity check and rename. -->
+**Resolution:**
+- After the rename, the dir now under the trash name is checked against the planned
+  `(st_dev, st_ino)`. Anything else stays where it is and is reported; nothing is deleted.
+- The trash name has a random suffix.
+- Test: `test_a_dir_replaced_between_the_check_and_the_rename_is_not_deleted`.
 
 ### Internal-link exemptions can break externally referenced subtrees
-**Location:** ansible/roles/dev_worker/files/cleanup:1179
+**Location:** cleanup (linked_from)
 **Severity:** important
-<!-- codex: The planned predicate misses an indirect consumer such as C/pkg -> W/packages/p together with W/packages/p/node_modules -> W/node_modules: the external link does not reach the candidate directly, the internal link is exempted, and deleting W/node_modules breaks C/pkg/node_modules despite both links being inventoried. Extend protection through internal links reachable beneath externally referenced subtrees, or conservatively retain the affected dependencies, and add this regression as a correction to the plan's internal-link assumption. -->
+**Resolution:**
+- A worktree's own link stops being exempt once another tree's link reaches the part of the
+  worktree it sits in. The per-worktree "exposed" set is cached on the index.
+- This corrects the plan's internal-link assumption.
+- Test: `test_a_worktrees_own_link_counts_when_another_tree_reaches_its_part`.
 
 ### Unhandled inventory errors bypass the sticky failure state
-**Location:** ansible/roles/dev_worker/files/cleanup:1123, ansible/roles/dev_worker/files/cleanup:1217
+**Location:** cleanup (link_index, Inventory.get)
 **Severity:** important
-<!-- codex: The root and child fstat calls can raise outside the inventory error handlers, leaving Inventory.get() with its previous complete index and no poisoned state; a read-only injected-error probe confirmed that a later successful recheck permits removal after such a failure. Convert these errors into an incomplete inventory and latch that failure before returning to callers, with tests covering root and child fstat failures during planning and refresh. -->
+**Resolution:**
+- The child and root `fstat` calls are handled as inventory errors.
+- `Inventory.get` turns a raising walk into an incomplete index.
+- The first incomplete index latches `Inventory.failed`.
+- Test: `test_a_walk_that_raises_is_an_incomplete_inventory`.
 
 ### Reporting crashes when the fresh scan needs no inventory
-**Location:** ansible/roles/dev_worker/files/cleanup:1982
+**Location:** cleanup (main.report)
 **Severity:** important
-<!-- codex: reset() clears inventory.index but preserves inventory.walks, so an initial eligible candidate followed by a fresh scan with no eligible candidates reaches len(index.links) with index=None; this was reproduced through main(), turning a legitimate skip into an AttributeError and losing the final summary. Preserve separate reporting metadata for the last completed walk, or handle an absent current index explicitly, and add a two-scan CLI regression. -->
+**Resolution:**
+- The report reads `links_seen`, `seconds` and `walks`, which are kept across `reset()`, and no
+  longer the current index.
+- Test: `test_a_run_whose_fresh_scan_needs_no_inventory_still_reports`, a two-scan run through
+  `main()`.
 
 ### Execution-time link refusals disappear from the final report
-**Location:** ansible/roles/dev_worker/files/cleanup:1986
+**Location:** cleanup (Inventory.recheck, main.report)
 **Severity:** important
-<!-- codex: The report counts only refused and kept from planning, while remove_deps/remove_worktree discard recheck reasons, so newly discovered links can produce a final count of zero and an incomplete refresh loses its error path and cause; the accompanying “removed nothing” assertion is also false when earlier actions succeeded. Accumulate execution-time refusals and inventory diagnostics, report actual partial progress, and emit the linked summary last across the output retained by disk-guard. -->
+**Resolution:**
+- `recheck()` records every refusal in `at_removal`.
+- The last line now reads "… at planning, N at removal (e.g. …)".
+- The incomplete-inventory message no longer claims nothing was removed. It now reads "every
+  --deps/--worktrees removal from then on was refused".
 
 ### Inventory failures are forgotten across scans and bypassed by early returns
-**Location:** ansible/roles/dev_worker/files/cleanup:1208, ansible/roles/dev_worker/files/cleanup:2024
+**Location:** cleanup (Inventory.reset, main)
 **Severity:** important
-<!-- codex: reset() clears an earlier incomplete inventory, allowing a mixed Docker/walk run to encounter an inventory failure, complete a healthy second scan and exit zero, while abort and other early-return paths bypass report() entirely. Keep a run-wide failure latch separate from per-scan state and route post-scan exits through a common finalizer so an observed incomplete inventory consistently produces exit 1 and the required reporting. -->
+**Resolution:**
+- `failed` is the run's: `reset()` keeps it, and every later answer is that refusal.
+- The abort and no-terminal exits now pass through `report()`.
+- Test: `test_an_incomplete_refresh_refuses_every_later_removal`.
 
 ### An aligned tail window drops a complete reflog record
-**Location:** ansible/roles/dev_worker/files/cleanup:622
+**Location:** cleanup (reflog_time)
 **Severity:** important
-<!-- codex: Every nonzero starting offset discards the first record, including when the 64 KiB window begins exactly at a record boundary; a read-only probe confirmed that a newer complete first record followed by older entries is incorrectly ignored, which is outside the documented limitation concerning entries before the window. Check whether the starting offset actually cuts a record before discarding it, and add an exact-boundary regression with nonmonotonic timestamps. -->
+**Resolution:**
+- The read takes one byte before the window. The first record is dropped only when that byte is
+  not a newline.
+- Test: `test_a_window_that_starts_exactly_on_a_record_keeps_it`.
 
 ### Destructive-boundary coverage is incomplete
-**Location:** scripts/tests/test_dev_worker_cleanup.py:1575
+**Location:** scripts/tests/test_dev_worker_cleanup.py
 **Severity:** important
-<!-- codex: The new execution tests exercise a single dependency directory and Inventory helpers, but do not exercise removal-time link protection through remove_worktree or the explicitly planned still_planned case where one newly linked directory skips an entire multi-directory dependency action. Add both integration cases, including an incomplete refresh after an earlier successful removal and assertions covering filesystem preservation, exit status and final diagnostics. -->
+**Resolution:** added tests for:
+- the `remove_worktree` removal-time link
+  (`test_a_link_made_after_the_scan_stops_the_worktree_removal`);
+- the multi-dir deps action skipped whole (`test_one_newly_linked_dir_skips_its_whole_deps_action`);
+- an incomplete refresh after an earlier successful removal
+  (`test_an_incomplete_refresh_after_a_removal_stops_the_rest`).
 
 ### Non-root permission handling differs between walking and resolving
-**Location:** ansible/roles/dev_worker/files/cleanup:1143
+**Location:** cleanup (traverse, link_index)
 **Severity:** nit
-<!-- codex: strict=False suppresses PermissionError during the directory walk, but traverse() converts resolution errors to strings and link_index() unconditionally records them, so an accessible symlink into an unreadable home can invalidate the entire non-root dry run. Preserve error types or errno through resolution and apply the same permission exception in both phases, with a non-root regression. -->
+**Resolution:**
+- `traverse` returns the `OSError` itself.
+- `link_index` applies the same strict and non-strict rule to resolution errors as to walk errors.
+- Test: `test_a_permission_error_resolving_a_link_is_skipped_only_when_not_strict`.
 
 ### Worktree inventories are built before full eligibility is established
-**Location:** ansible/roles/dev_worker/files/cleanup:1558
+**Location:** cleanup (plan_worktrees)
 **Severity:** nit
-<!-- codex: plan_worktrees checks links before inspect_worktree, so a tree containing recently modified dependencies, another checkout or otherwise disallowed contents can trigger an expensive inventory and be reported as link-protected despite never being removable. Move the link check after successful inspection to match the plan's lazy, otherwise-eligible-only contract and test that inspection failures do not build an inventory. -->
+**Resolution:**
+- The link check runs only after `inspect_worktree` passes.
+- Test: `test_a_worktree_that_fails_inspection_never_costs_an_inventory`.
 
 ## Diff stat
 
