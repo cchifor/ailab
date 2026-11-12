@@ -7372,9 +7372,11 @@ class CarryCleanVerdictTest(unittest.TestCase):
         self.assertTrue(self.m.record_rediscovered_carry(b["id"], "o/r", 5, self.B))
         self.assertEqual(self.A, self._row(self.B)["carried_from"])
 
-    def test_an_unreadable_rediscovery_retries_instead_of_completing(self):
-        """codex, implementation review round 2: if the second read fails, completing would leave
-        a countable row for a carry; the job retries (no attempt consumed) and completes later."""
+    def test_an_unreadable_rediscovery_completes_but_is_not_counted(self):
+        """codex, implementation review round 2: if the second read fails, a plain completion would
+        leave a countable row for a carry. reviewer-claude on ailab#1731: a retry loops forever on a
+        history that stays unreadable. So the job completes, as it always has, with the row marked
+        `unread` - not a counted round."""
         self._run(self.A, CARRY_DIFF)
         self._run(self.B, CARRY_DIFF)
         c = self.m.db()
@@ -7386,21 +7388,16 @@ class CarryCleanVerdictTest(unittest.TestCase):
         def flaky(path, method="GET", body=None, raw=False):
             if "/reviews?" in path and method == "GET":
                 calls.append(path)
-                if len(calls) == 2:                                  # rediscovery's own read
+                if len(calls) >= 2:                  # rediscovery's own read, and for good
                     raise urllib.error.URLError("reset")
             return api(path, method, body, raw)
         self.m.api = flaky
         b = self._run(self.B, CARRY_DIFF)
-        self.assertEqual(("retry", 0), (b["state"], b["attempts"]))
-        self.assertIn("provenance could not be read", b["note"])
-        c = self.m.db()
-        c.execute("UPDATE jobs SET next_at=0 WHERE id=?", (b["id"],))
-        c.commit()
-        c.close()
-        self.assertIsNotNone(self.m.worker_once())
-        b = self._row(self.B)
-        self.assertEqual(("done", self.A), (b["state"], b["carried_from"]))
-        self.assertEqual(2, self.m.review_round("o/r", 5))
+        self.assertEqual(("done", 0, "unread", None),
+                         (b["state"], b["attempts"], b["verdict"], b["carried_from"]))
+        self.assertIn("provenance unread", b["note"])
+        self.assertIsNone(self.m.worker_once(), "nothing left to retry")
+        self.assertEqual(2, self.m.review_round("o/r", 5), "A is counted, the unread B is not")
 
     def test_a_rediscovered_carried_review_keeps_its_provenance(self):
         """codex, plan round 2: a job that finds our carried review already at its head (a database

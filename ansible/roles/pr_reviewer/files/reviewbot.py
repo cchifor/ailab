@@ -3664,10 +3664,21 @@ def review_job(job_id, repo, pr, head_sha):
         return ("superseded", None, f"head moved to {d['moved_to'][:9]}")
     if existing_marker(repo, pr, head_sha):
         # No model ran in this job, so the row's countability rests entirely on what is recorded
-        # about the review that is already there. Unreadable: try again later rather than complete
-        # a row review_round() would count as a reading (no attempt is consumed).
+        # about the review that is already there. This path completes unconditionally, as it
+        # always has - a retry here would loop forever on a history that stays unreadable
+        # (reviewer-claude on ailab#1731). Unreadable provenance instead marks a row that carries
+        # no verdict of its own `unread`, which review_round() does not count: at worst a real
+        # reading goes uncounted, which only keeps the ladder stricter.
         if not record_rediscovered_carry(job_id, repo, pr, head_sha):
-            return ("retry", None, "marker already present; its provenance could not be read")
+            with db_lock:
+                c = db()
+                try:
+                    c.execute("UPDATE jobs SET verdict='unread' WHERE id=? AND verdict IS NULL",
+                              (job_id,))
+                    c.commit()
+                finally:
+                    c.close()
+            return ("done", None, "marker already present (provenance unread: not a counted round)")
         return ("done", None, "marker already present")
 
     diff_bytes = api(f"/repos/{repo}/pulls/{pr}.diff", raw=True)
