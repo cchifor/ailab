@@ -1,0 +1,223 @@
+#!/usr/bin/env python3
+"""agent-usage-report: how one user's Claude Code sessions used subagents. Read-only.
+
+Plan 2026-11-13-agent-subagent-model-routing, Phase 0.1 (baseline) and Phase 2 (the canary's comparison).
+It reads Claude Code's transcripts under ~/.claude/projects and changes nothing:
+
+  <project>/<session>.jsonl                               main transcript of a session
+  <project>/<session>/subagents/agent-<id>.jsonl          one subagent's transcript
+  <project>/<session>/subagents/agent-<id>.meta.json      {"agentType": ..., ...} for that subagent
+
+and reports, over the last --days days (by each line's own timestamp):
+  * subagent launches: Agent/Task tool calls by `subagent_type`, with the per-call `model` and `effort`
+    when one was passed (a per-call value overrides the definition's frontmatter);
+  * subagents that ran, by the `agentType` in their .meta.json;
+  * tokens (input, cache creation, cache read, output) by `message.model`, main and subagent apart, and the
+    share of tokens spent in subagents. A response is counted once: its lines share one `message.id`;
+  * main sessions per day.
+
+Usage: agent-usage-report [--days 14] [--root ~/.claude/projects] [--json]
+"""
+from __future__ import annotations
+
+import argparse
+import collections
+import datetime as dt
+import json
+import os
+import sys
+from pathlib import Path
+
+AGENT_TOOLS = ("Agent", "Task")
+TOKEN_KINDS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+
+
+def parse_ts(value: object) -> dt.datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def lines(path: Path):
+    """The JSON objects of a transcript; an unreadable or malformed line is skipped, never fatal."""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                try:
+                    obj = json.loads(raw)
+                except ValueError:
+                    continue
+                if isinstance(obj, dict):
+                    yield obj
+    except OSError:
+        return
+
+
+class Totals:
+    def __init__(self) -> None:
+        self.tokens: dict[str, dict[str, collections.Counter]] = {
+            "main": collections.defaultdict(collections.Counter),
+            "subagent": collections.defaultdict(collections.Counter),
+        }
+        self.launches: collections.Counter = collections.Counter()  # (subagent_type, model, effort)
+        self.ran: collections.Counter = collections.Counter()  # agentType from .meta.json
+        self.sessions_per_day: collections.Counter = collections.Counter()
+        self.seen_messages: set[tuple[str, str]] = set()
+        self.seen_calls: set[str] = set()
+        self.files = {"main": 0, "subagent": 0}
+
+    def add_usage(self, scope: str, obj: dict, path: Path) -> None:
+        msg = obj.get("message")
+        if not isinstance(msg, dict) or obj.get("type") != "assistant":
+            return
+        usage = msg.get("usage")
+        if not isinstance(usage, dict):
+            return
+        key = (str(path), str(msg.get("id") or obj.get("uuid") or id(obj)))
+        if key in self.seen_messages:
+            return
+        self.seen_messages.add(key)
+        model = str(msg.get("model") or "unknown")
+        counter = self.tokens[scope][model]
+        for kind in TOKEN_KINDS:
+            value = usage.get(kind)
+            if isinstance(value, int):
+                counter[kind] += value
+
+    def add_launches(self, obj: dict) -> None:
+        msg = obj.get("message")
+        if obj.get("type") != "assistant" or not isinstance(msg, dict):
+            return
+        for index, block in enumerate(msg.get("content") or []):
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") in AGENT_TOOLS:
+                # A launch is counted once even when its response is written over several lines.
+                call_id = str(block.get("id") or f"{msg.get('id')}#{index}")
+                if call_id in self.seen_calls:
+                    continue
+                self.seen_calls.add(call_id)
+                inp = block.get("input") if isinstance(block.get("input"), dict) else {}
+                self.launches[(
+                    str(inp.get("subagent_type") or "general-purpose"),
+                    str(inp.get("model") or "-"),
+                    str(inp.get("effort") or "-"),
+                )] += 1
+
+
+def scan(root: Path, since: dt.datetime) -> Totals:
+    t = Totals()
+    cutoff = since.timestamp()
+    for project in sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []:
+        for main in sorted(project.glob("*.jsonl")):
+            sub_dir = project / main.stem / "subagents"
+            subs = sorted(sub_dir.glob("agent-*.jsonl")) if sub_dir.is_dir() else []
+            newest = max([main.stat().st_mtime] + [s.stat().st_mtime for s in subs])
+            if newest < cutoff:
+                continue
+            first_day = None
+            counted = False
+            for obj in lines(main):
+                ts = parse_ts(obj.get("timestamp"))
+                if ts is None or ts < since:
+                    continue
+                first_day = first_day or ts.date().isoformat()
+                counted = True
+                # Older builds wrote subagent turns into the main file, marked isSidechain.
+                t.add_usage("subagent" if obj.get("isSidechain") else "main", obj, main)
+                t.add_launches(obj)
+            if counted:
+                t.files["main"] += 1
+                t.sessions_per_day[first_day] += 1
+            for sub in subs:
+                ran = False
+                for obj in lines(sub):
+                    ts = parse_ts(obj.get("timestamp"))
+                    if ts is None or ts < since:
+                        continue
+                    ran = True
+                    t.add_usage("subagent", obj, sub)
+                    t.add_launches(obj)  # nested launches (a subagent spawning another)
+                if ran:
+                    t.files["subagent"] += 1
+                    meta = sub.with_name(sub.name[: -len(".jsonl")] + ".meta.json")
+                    try:
+                        agent_type = json.loads(meta.read_text(encoding="utf-8")).get("agentType") or "unknown"
+                    except (OSError, ValueError, AttributeError):
+                        agent_type = "unknown"
+                    t.ran[str(agent_type)] += 1
+    return t
+
+
+def summarise(t: Totals, days: int, root: Path) -> dict:
+    def total(scope: str) -> int:
+        return sum(sum(c.values()) for c in t.tokens[scope].values())
+
+    main_total, sub_total = total("main"), total("subagent")
+    out_main = sum(c["output_tokens"] for c in t.tokens["main"].values())
+    out_sub = sum(c["output_tokens"] for c in t.tokens["subagent"].values())
+    return {
+        "host": os.uname().nodename if hasattr(os, "uname") else "",
+        "user": os.environ.get("USER", ""),
+        "root": str(root),
+        "days": days,
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "main_sessions": t.files["main"],
+        "subagent_transcripts": t.files["subagent"],
+        "launches": [
+            {"subagent_type": k[0], "model": k[1], "effort": k[2], "count": n}
+            for k, n in sorted(t.launches.items(), key=lambda kv: -kv[1])
+        ],
+        "ran_by_agent_type": dict(sorted(t.ran.items(), key=lambda kv: -kv[1])),
+        "tokens": {
+            scope: {model: dict(c) for model, c in sorted(t.tokens[scope].items())} for scope in ("main", "subagent")
+        },
+        "subagent_share_all_tokens": round(sub_total / (main_total + sub_total), 4) if main_total + sub_total else 0.0,
+        "subagent_share_output_tokens": round(out_sub / (out_main + out_sub), 4) if out_main + out_sub else 0.0,
+        "sessions_per_day": dict(sorted(t.sessions_per_day.items())),
+    }
+
+
+def render(s: dict) -> str:
+    rows = [
+        f"agent-usage-report: {s['user']}@{s['host']}, last {s['days']} days ({s['generated_at']})",
+        f"main sessions {s['main_sessions']}, subagent transcripts {s['subagent_transcripts']}",
+        f"subagent share: {s['subagent_share_all_tokens']:.1%} of all tokens, "
+        f"{s['subagent_share_output_tokens']:.1%} of output tokens",
+        "",
+        "subagent launches (subagent_type / per-call model / per-call effort):",
+    ]
+    rows += [f"  {l['count']:>6}  {l['subagent_type']}  model={l['model']}  effort={l['effort']}" for l in s["launches"]] or ["  none"]
+    rows += ["", "subagents that ran, by agentType:"]
+    rows += [f"  {n:>6}  {k}" for k, n in s["ran_by_agent_type"].items()] or ["  none"]
+    for scope in ("main", "subagent"):
+        rows += ["", f"{scope} tokens by model (input / cache-create / cache-read / output):"]
+        models = s["tokens"][scope]
+        rows += [
+            f"  {m}: {c.get('input_tokens', 0):,} / {c.get('cache_creation_input_tokens', 0):,} / "
+            f"{c.get('cache_read_input_tokens', 0):,} / {c.get('output_tokens', 0):,}"
+            for m, c in models.items()
+        ] or ["  none"]
+    rows += ["", "main sessions per day:"]
+    rows += [f"  {d}  {n}" for d, n in s["sessions_per_day"].items()] or ["  none"]
+    return "\n".join(rows)
+
+
+def main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--days", type=int, default=14)
+    ap.add_argument("--root", type=Path, default=Path.home() / ".claude" / "projects")
+    ap.add_argument("--json", action="store_true", help="print the summary as JSON")
+    ap.add_argument("--now", help=argparse.SUPPRESS)  # tests: a fixed 'now' (ISO 8601)
+    a = ap.parse_args(argv)
+    now = parse_ts(a.now) if a.now else dt.datetime.now(dt.timezone.utc)
+    if now is None or a.days < 1:
+        ap.error("--days must be >= 1 and --now an ISO 8601 time")
+    summary = summarise(scan(a.root, now - dt.timedelta(days=a.days)), a.days, a.root)
+    print(json.dumps(summary, indent=2) if a.json else render(summary))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

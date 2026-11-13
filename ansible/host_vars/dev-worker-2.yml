@@ -31,3 +31,10 @@ relay_connector_claude_messaging: absent
 # relay-agent-skill`; docs/runbooks/relay-connectors.md, "The relay-bus skill"). Installs the skill and its
 # hook for c4; agents ask for their own keys, which a person approves by code in Relay.
 relay_agent_skill_enabled: true
+
+# Subagent routing canary (plans/2026-11-13-agent-subagent-model-routing-plan.md, Phase 2): the worker with the
+# most Claude usage in the Phase 0 baseline (486 subagent launches in 14 days, 83% of its Claude tokens in
+# subagents). The role defaults are off for the rest of the fleet; this slot gets the estate agents and the
+# delegation policy for one weekly-limit window (from 2026-11-13). Rollback = delete these two lines, converge.
+dev_worker_claude_subagents: [scout, bulk-worker]
+dev_worker_delegation_policy_enabled: true

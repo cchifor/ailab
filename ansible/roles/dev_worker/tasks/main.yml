@@ -148,6 +148,12 @@
   when: dev_worker_enable_statusline | bool
   tags: [statusline]
 
+# Estate subagents (model + effort pinned per definition), the delegation policy blocks, and the gated Codex
+# roles (plans/2026-11-13-agent-subagent-model-routing-plan.md). Own tag: --tags subagents.
+- name: Subagent routing (Claude Code agents, delegation policy, Codex roles)
+  ansible.builtin.import_tasks: subagents.yml
+  tags: [subagents]
+
 - name: Gitea (git.chifor.me) forge git credentials — Gitea is master (ADR 0017)
   ansible.builtin.import_tasks: git_forge.yml
 
