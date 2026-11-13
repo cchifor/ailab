@@ -40,7 +40,7 @@ spec:
     seccompProfile: {type: RuntimeDefault}
   containers:
     - name: stage
-      image: docker.io/library/node@sha256:438603bbb5cda404b9416f0b5c8026f61501ab911760d861ec28c36b5d675725
+      image: docker.io/library/node@sha256:e18c3ccdf7d71619990b0e85639f506e2028a95410999cab24cc373cbd10e0ac
       # Room for a whole release (staging, smoke tests, review, rollout, pruning); delete the pod when done.
       command: ["sh", "-c", "sleep 43200"]
       securityContext:
