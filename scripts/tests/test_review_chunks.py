@@ -787,6 +787,28 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual("COMMENT", self.posts[-1]["event"])
         self.assertEqual("findings", adapter.marker(self.history[-1], self.binding)["verdict"])
 
+    def test_the_chunk_marker_names_no_agent_and_reads_both_forms(self):
+        """Owner, 2026-11-13: the document's persona is the neutral id; the kind comes from the account."""
+        import hashlib
+        for kind in ("claude", "codex"):
+            self.assertEqual("r-" + hashlib.sha256(kind.encode()).hexdigest()[:8], adapter.persona_id(kind))
+        def with_persona(review, value):
+            token = re.search(r"chunks:v1 (\S+) -->", review["body"]).group(1)
+            doc = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
+            doc["persona"] = value
+            new = base64.urlsafe_b64encode(chunks.canonical(doc)).decode().rstrip("=")
+            return dict(review, body="Review result.\n<!-- review-bot:chunks:v1 " + new + " -->")
+
+        legacy = self.peer_review("codex", "final")
+        neutral = with_persona(legacy, adapter.persona_id("codex"))
+        for review in (neutral, legacy):
+            with self.subTest(form=review["body"][-30:]):
+                doc = adapter.marker(review, self.binding)
+                self.assertIsNotNone(doc)
+                self.assertEqual("codex", doc["persona"])
+        copied = with_persona(legacy, adapter.persona_id("claude"))
+        self.assertIsNone(adapter.marker(copied, self.binding))
+
     def test_marker_authentication_binding_and_commit_cannot_be_spoofed(self):
         valid = self.peer_review(stage="final")
         self.assertIsNotNone(adapter.marker(valid, self.binding))

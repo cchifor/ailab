@@ -69,10 +69,18 @@ MARKER_RE = re.compile(r"<!-- review-bot:v1 persona=(\S+) head=([0-9a-f]{40})(?:
 INSTANCE = re.sub(r"[^A-Za-z0-9._-]", "_", socket.gethostname().split(".")[0]) or "unknown"
 
 
+def persona_id(kind):
+    """The NEUTRAL id a marker carries for a persona kind. Owner, 2026-11-13: no agent or model name in a hidden
+    PR/comment marker; the account (reviewer-<kind>) is the only attribution. Opaque and deterministic, so every
+    instance - and review_chunk_adapter.py and cchifor/reviewer, which compute the same - agrees without a table.
+    Readers learn the kind from the posting account, never from the marker (marker_of)."""
+    return "r-" + hashlib.sha256(kind.encode()).hexdigest()[:8]
+
+
 def review_marker(head_sha, verdict):
     """The instance line, then the canonical marker. Every marker this bot writes comes from here."""
     return (f"<!-- review-bot-instance: {INSTANCE} -->\n"
-            f"<!-- review-bot:v1 persona={CFG['persona']} head={head_sha} verdict={verdict} -->")
+            f"<!-- review-bot:v1 persona={persona_id(CFG['persona'])} head={head_sha} verdict={verdict} -->")
 
 
 # ── carried reviews (plans/2026-11-12-reviewbot-carry-and-fair-queue-plan.md, feature A) ────
@@ -2881,21 +2889,54 @@ def iter_reviews(repo, pr):
         page += 1
 
 
+class _Marker:
+    """A marker match whose group(1) is the persona KIND (from the posting account), whichever form the marker
+    carried: the neutral persona_id(kind) written since 2026-11-13, or the kind itself in older reviews.
+    Everything else is the underlying re.Match's (span, start, end, string, further groups), so callers can keep
+    treating it as a match."""
+
+    def __init__(self, m, kind):
+        self._m, self._kind = m, kind
+
+    def group(self, *idx):
+        if not idx:
+            return self._m.group()
+        out = tuple(self._kind if i == 1 else self._m.group(i) for i in idx)
+        return out[0] if len(out) == 1 else out
+
+    __getitem__ = group
+
+    def groups(self, default=None):
+        return (self._kind,) + self._m.groups(default)[1:]
+
+    def __getattr__(self, name):
+        return getattr(self._m, name)
+
+
 def marker_of(rv):
     """A marker is only credible from the persona's own bot account: reviewer-<persona>.
     Anyone can paste marker TEXT into a review body (reviewer-codex finding on ailab#463 -
     a forged verdict=clean pair would have automerged); the author check is the gate.
     The LAST match wins: the canonical marker is appended after the LLM-authored summary,
     and model output is untrusted (round-3 finding: an injected diff could make the model
-    emit a forged marker ahead of the real one) - it is also sanitized at generation."""
+    emit a forged marker ahead of the real one) - it is also sanitized at generation.
+    The kind comes from the account; the marker must name that kind's neutral id (or, in a review from before
+    2026-11-13, the kind itself), so a marker copied from the other persona's review still does not count."""
     m = None
     for m in MARKER_RE.finditer(rv.get("body") or ""):
         pass  # last match wins
     if not m:
         return None
-    if ((rv.get("user") or {}).get("login") or "") != f"reviewer-{m.group(1)}":
+    login = (rv.get("user") or {}).get("login") or ""
+    if not login.startswith("reviewer-"):
         return None
-    return m
+    kind = login[len("reviewer-"):]
+    # The bare kind is the pre-2026-11-13 form. SUNSET: drop it (here and in review_chunk_adapter.marker) once no
+    # open PR has a review from before that date, i.e. once every PR open then has merged or had its next head
+    # reviewed; check with a search of open PRs' reviews for "persona=claude" / "persona=codex".
+    if not kind or m.group(1) not in (kind, persona_id(kind)):
+        return None
+    return _Marker(m, kind)
 
 
 def existing_marker(repo, pr, head_sha):
