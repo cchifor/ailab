@@ -149,6 +149,8 @@ is part of the goal.
    - commit trailers `Worker: <slot>`, `Agent: claude|codex` and `Run: <id>`;
    - a final line `<!-- worker: <slot> agent: <agent> run: <id> -->` in every PR body, comment and
      review the agent writes. This mirrors AgentForge's `af:run` marker.
+   - *Superseded 2026-11-13 by the owner: no `Agent` trailer and no agent in the marker, only `Worker` and `Run`;
+     no AI attribution anywhere (ailab #1746).*
 
    The run ID comes from the launcher:
    - Claude Code's session ID, or Codex's thread ID;

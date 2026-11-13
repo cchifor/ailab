@@ -697,8 +697,6 @@ gh pr create --base main --title "feat(monitoring): Grafana improvements — run
 
 ## Validation
 Local: generators re-run cleanly; JSON parse + datasource/overlap/grid lint + `kubectl kustomize` all pass. Post-merge live verification per plan Task 6.
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
 BODY
 )"
 ```
