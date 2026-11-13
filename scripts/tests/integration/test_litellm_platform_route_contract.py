@@ -162,10 +162,31 @@ class DocumentRouteContract(unittest.TestCase):
         asyncio.run(run_cases())
 
 
+def chat_config_source(package):
+    """(class name, module path relative to `package`) of the chat config LiteLLM selects for this
+    route's upstream model. Asked of LiteLLM, not hard-coded: v1.109.0 renamed llms/openai/chat/
+    gpt_5_transformation.py to gpt_reasoning_transformation.py (the class is still
+    OpenAIGPT5Config), and a fixed path broke this evidence line before any contract ran. The class
+    name goes into the evidence too, so a version that selects another config shows it."""
+    import inspect
+
+    from litellm.utils import ProviderConfigManager
+
+    config = ProviderConfigManager.get_provider_chat_config(
+        model=UPSTREAM_MODEL, provider=litellm.LlmProviders.OPENAI)
+    if config is None:
+        raise RuntimeError(f"LiteLLM {importlib.metadata.version('litellm')} selects no chat config "
+                           f"for openai/{UPSTREAM_MODEL}")
+    return (type(config).__name__,
+            pathlib.Path(inspect.getfile(type(config))).relative_to(package).as_posix())
+
+
 if __name__ == "__main__":
     package = pathlib.Path(litellm.__file__).parent
-    sources = ("router.py", "llms/openai/openai.py", "llms/openai/chat/gpt_5_transformation.py")
+    chat_config, chat_config_path = chat_config_source(package)
+    sources = ("router.py", "llms/openai/openai.py", chat_config_path)
     print(json.dumps({
+        "chat_config": chat_config,
         "python": sys.version,
         "packages": {name: importlib.metadata.version(name)
                      for name in ("litellm", "openai", "httpx", "pydantic")},

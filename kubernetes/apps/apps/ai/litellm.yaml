@@ -1168,6 +1168,14 @@ spec:
           # chunk raises in the iteration on every version. The 1.108.0 notes' breaking-marked
           # changes (prompt_token_calculator removed, cerebras, Lens no longer bundled) touch nothing
           # this config uses.
+          # v1.109.0 (measured 2026-11-13, ailab#1709) moved the chatgpt/ device-code refusal from
+          # Router construction to the request: over a missing, empty or unparseable auth.json the
+          # proxy keeps gpt-6-astra-realjaynesage listed and each request to it answers 400 with the
+          # refusal, where up to v1.108.x the route was dropped (see the chatgpt-auth volume below).
+          # test_litellm_chatgpt_route_contract.py case (c) asserts the site each version has. The
+          # 1.109.0 notes' action-required items (the disk cache backend removed, string fallback
+          # targets rejected, the deployment rpm pre-call filter, Gemini sampling params, DALL-E)
+          # touch nothing this config uses: its one fallback target is a list.
           image: ghcr.io/berriai/litellm:v1.108.5@sha256:008a5916c0a0ca6f4f6ad64969f6a4ef6f03ce885a639f3d97fd53665754ce48
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
@@ -1236,15 +1244,18 @@ spec:
         # auth.json, always valid JSON with a NON-EMPTY token and a far-future expires_at (the header
         # there explains why that exact shape is load-bearing).
         # `optional: false` IS THE GUARD, not a default left alone. A pod WITHOUT this file cannot
-        # build this route: Router construction calls the chatgpt/ authenticator and finds no token.
-        # Up to v1.105.1 that reached for auth.openai.com in a synchronous poll of up to 15 minutes
+        # serve this route: the chatgpt/ authenticator finds no token. Up to v1.105.1 Router
+        # construction then reached for auth.openai.com in a synchronous poll of up to 15 minutes
         # (measured 2026-09-19 with sockets denied: a missing file made Router(...) attempt
         # auth.openai.com immediately). Since v1.106.0 the authenticator refuses the device-code login
-        # inside the proxy's event loop (upstream #39585) and LiteLLM drops the deployment instead:
-        # measured 2026-10-19, a proxy over an empty directory went live and served every OTHER route
-        # while gpt-6-astra-realjaynesage answered 400 "no healthy deployments". With
-        # `optional: true` kubelet would start the container over an EMPTY directory, and that pod
-        # would hang (up to v1.105.1) or pass readiness WITHOUT the route (since v1.106.0); with
+        # inside the proxy's event loop (upstream #39585). Up to v1.108.x construction meets that
+        # refusal and LiteLLM drops the deployment: measured 2026-10-19, a proxy over an empty
+        # directory went live and served every OTHER route while gpt-6-astra-realjaynesage answered
+        # 400 "no healthy deployments". From v1.109.0 the refusal comes from the request instead:
+        # measured 2026-11-13, the same proxy keeps the route listed in /v1/models and each request
+        # to it answers 400 with the refusal itself. With `optional: true` kubelet would start the
+        # container over an EMPTY directory, and that pod would hang (up to v1.105.1) or pass
+        # readiness WITHOUT a working route (since v1.106.0); with
         # `optional: false` the pod stays ContainerCreating on a visible MountVolume "secret not
         # found" event and, under maxUnavailable: 0, the old replicas keep serving. A pod must not
         # start without the file. The Secret exists BEFORE this Deployment change lands:
