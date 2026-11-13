@@ -54,6 +54,9 @@ off only for some jobs, so the routing has to be deterministic and narrow.
   ran on every worker (counted per `tool_use` id, and from each subagent's `.meta.json`). Seats: dw2 and dw4
   report identical limits (`weekly_all` 78%, the Fable-scoped limit 87%, same reset), so they share one
   account; dw1 and dw3 had hit their weekly limit (the usage endpoint answered 429).
+  **D8 baseline (dw2+dw4 seat):** window 2026-11-08 23:00 UTC (reset) to the reading at 2026-11-13 12:43 UTC:
+  `weekly_all` 78%, merged PRs 97 (dev-worker-2-bot 97, dev-worker-4-bot 0): **0.80% per merged PR**. The
+  seat's next reset is 2026-11-15 23:00 UTC.
 
 ## Evidence (summary)
 
@@ -184,6 +187,15 @@ the fleet runs `xhigh`. Changing that is a separate owner decision (Phase 3.3).
 
 **D8. Measure weekly-limit burn per completed task, not tokens per request.** Phase 2's acceptance compares
 the canary's subscription usage per merged PR and its review outcomes against its own baseline.
+
+How it is computed, because `weekly_all` is a percentage of the seat's CURRENT reset window, not a counter:
+- read `weekly_all` and `resets_at` from the usage endpoint (`pr_reviewer/files/claude-usage.py`, no quota);
+- a measurement window starts at a reset (`resets_at` minus 7 days) and ends at a reading taken inside that
+  window; its burn is the `weekly_all` of that reading;
+- count the merged PRs of **every worker on that seat** (dw2 and dw4 share one) with `merged_at` inside the
+  window, from the Gitea API;
+- burn per merged PR = `weekly_all` / that count. Windows of different length compare, because both terms
+  scale with the work done in them.
 
 ## Scope
 
@@ -456,8 +468,10 @@ depend on the model, but Codex is measured separately in Phase 2.
    - launches that pass a per-call `model` fall to near zero (baseline 231 of 486);
    - launches other than `scout` and `bulk-worker` per merged PR not higher than baseline, and `scout` takes
      searches that went to `Explore` or `general-purpose` before;
-   - `weekly_all` burn per merged PR not higher than baseline. dw2 shares its account with dw4, so read the two
-     workers' merged PRs together.
+   - `weekly_all` burn per merged PR (D8) not higher than baseline (0.80%). The canary window is the first FULL
+     reset window after the canary converge, 2026-11-15 23:00 to 2026-11-22 23:00 UTC, read shortly before its
+     reset; the days between the converge and 2026-11-15 23:00 are a transition and are not measured. dw2
+     shares its seat with dw4, so their merged PRs count together.
 
    Then change the role defaults to the canary's values; the next daily converge (or `-l dev_workers -t
    subagents`, after `--check --diff`) rolls the fleet.
