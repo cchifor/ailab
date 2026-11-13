@@ -107,7 +107,9 @@ spec:
               app.kubernetes.io/name: llm-router-edge
       containers:
         - name: caddy
-          # Docker Hub library/caddy 2.11.7-alpine (multi-arch index digest, resolved 2026-10-11).
+          # Docker Hub library/caddy, tag plus multi-arch index digest. The tag names the version;
+          # Renovate keeps both current and moves them with the edge proxy's two references
+          # (edge/proxy/daemonset.yaml) in one pull request, as it did for 2.11.9 (2026-11-06).
           image: caddy:2.11.9-alpine@sha256:0bbb055bda6793c999bde78b1b5ce3e89f829fb031af2cf50056ea1246559fee
           imagePullPolicy: IfNotPresent
           command: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
