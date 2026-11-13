@@ -1,0 +1,312 @@
+---
+# Subagent routing (plans/2026-11-13-agent-subagent-model-routing-plan.md). Own tag: --tags subagents.
+#
+# 1. Estate Claude Code agents in ~/.claude/agents/: the definition pins the model and effort, so routing
+#    does not depend on what the main agent passes per call (plan D1/D2). A file is managed when its
+#    frontmatter carries MANAGED_MARKER; only managed files are replaced or removed, never a user's own agent.
+# 2. A "Delegation" managed block in ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md (plan D4): delegate rarely,
+#    never to verify your own work, do not pass a model per call.
+# 3. Codex [agents] defaults and the `scout` role, behind dev_worker_codex_subagent_roles_enabled (plan D6).
+# Nothing here touches managed-settings.json or settings.json: no CLAUDE_CODE_SUBAGENT_MODEL (plan D3), and
+# the main session's model and effort stay each user's choice (D5).
+# tests/test-subagent-routing.sh converges this file into a temporary home.
+
+- name: Resolve the dev-worker user(s) when running tag-limited (users.yml was skipped)
+  ansible.builtin.set_fact:
+    dev_worker_users: >-
+      {{ [{'name': dev_worker_admin_user, 'home': '/home/' + dev_worker_admin_user}] +
+         ([{'name': dev_worker_agent_user, 'home': '/home/' + dev_worker_agent_user}]
+          if dev_worker_agent_user != dev_worker_admin_user else []) }}
+  when: dev_worker_users is not defined
+
+- name: Install the agent usage report (read-only; plan Phase 0 and Phase 2)
+  ansible.builtin.copy:
+    src: agent-usage-report
+    dest: "{{ dev_worker_agent_usage_report_path }}"
+    mode: "0755"
+
+# Like openbao.yml: blockinfile and copy create files but not their parents, and a parent created by a task
+# running as root would be root-owned.
+- name: Ensure each user's ~/.claude and ~/.codex exist (subagent routing)
+  ansible.builtin.file:
+    path: "{{ item.0.home }}/{{ item.1 }}"
+    state: directory
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0700"
+  loop: "{{ dev_worker_users | product(['.claude', '.codex']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"
+
+# ---- 1. Claude Code agents ---------------------------------------------------------------------------
+- name: Ensure each user's ~/.claude/agents exists
+  ansible.builtin.file:
+    path: "{{ item.home }}/.claude/agents"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0755"
+  when: dev_worker_claude_subagents | length > 0
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Install the estate subagents
+  ansible.builtin.copy:
+    src: "subagents/{{ item.1 }}.md"
+    dest: "{{ item.0.home }}/.claude/agents/{{ item.1 }}.md"
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0644"
+  loop: "{{ dev_worker_users | product(dev_worker_claude_subagents) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"
+
+# The same find-by-header pattern as the local-model Codex profiles (codex.yml). A missing directory is not an
+# error: find returns no files for it.
+- name: Find the managed subagent files per user
+  ansible.builtin.find:
+    paths: "{{ item.home }}/.claude/agents"
+    patterns: "*.md"
+    contains: "# Managed by ansible \\(role: dev_worker, subagent routing\\)"
+  register: dev_worker_managed_subagents
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Remove managed subagents that are no longer listed
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  when: (item.path | basename | regex_replace('\.md$', '')) not in dev_worker_claude_subagents
+  loop: "{{ dev_worker_managed_subagents.results | map(attribute='files') | flatten }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+# ---- 2. Delegation policy blocks -----------------------------------------------------------------------
+# A managed block, not a whole file, so the operator's notes and the other managed blocks (openbao
+# credentials, local models) survive. HTML-comment markers: the files are markdown.
+- name: Publish the delegation policy to each user's Claude Code instructions
+  ansible.builtin.blockinfile:
+    path: "{{ item.home }}/.claude/CLAUDE.md"
+    marker: "<!-- {mark} ANSIBLE MANAGED - delegation policy -->"
+    create: true
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0644"
+    block: |
+      ## Delegation (subagents)
+
+      Subagents cost time and the same subscription limits as this session: each one rebuilds context and
+      reports back, and you then read its report. Delegate only when the payoff clearly beats that.
+
+      Delegate:
+      - A search whose raw output you will not need again (many files, logs, call sites): the `scout` agent.
+      - One mechanical change across many files, with an exact rule and a check: the `bulk-worker` agent.
+      - Genuinely independent, sizeable tracks (unrelated modules, a wide investigation): a general-purpose
+        subagent. Launch independent agents in one message.
+
+      Do it yourself:
+      - Anything you can finish in a few tool calls, and sequential steps that share context.
+      - Design, non-mechanical implementation, debugging conclusions and code review.
+      - Verification of your own work. Do not spawn a subagent to double-check.
+
+      When you delegate, brief once with the paths, constraints and report format; keep spawn counts low; do
+      not redo the subagent's work. Do not pass a model or effort on the call unless the user asks: the agent
+      definitions choose them.
+  when: dev_worker_delegation_policy_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Publish the delegation policy to each user's Codex instructions
+  ansible.builtin.blockinfile:
+    path: "{{ item.home }}/.codex/AGENTS.md"
+    marker: "<!-- {mark} ANSIBLE MANAGED - delegation policy -->"
+    create: true
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0644"
+    block: |
+      ## Delegation (sub-agents)
+
+      Sub-agents cost time and context: each one rebuilds context, runs on this session's quota, and reports
+      back. Spawn one only for a search whose raw output you will not reuse, for genuinely independent and
+      sizeable tracks, or for work too large for one context. Do small tasks, sequential steps that share
+      context, design, review and verification of your own work yourself. Brief once, keep spawn counts low,
+      and do not redo a sub-agent's work.
+      {% if dev_worker_codex_subagent_roles_enabled | bool %}
+      For searches, spawn the `scout` agent.
+      {% endif %}
+      {% if (dev_worker_codex_router_enabled | bool) and (dev_worker_codex_local_models_enabled | bool) %}
+      Agents on the local models are unaffected: they run through `local-agent` (see "Local models through
+      the router").
+      {% endif %}
+  when: dev_worker_delegation_policy_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Removal, when off: blockinfile `state: absent` fails on a missing file, so only files that exist are edited.
+- name: Find the instruction files that may carry the delegation policy block
+  ansible.builtin.stat:
+    path: "{{ item.0.home }}/{{ item.1 }}"
+  register: dev_worker_delegation_files
+  when: not (dev_worker_delegation_policy_enabled | bool)
+  loop: "{{ dev_worker_users | product(['.claude/CLAUDE.md', '.codex/AGENTS.md']) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"
+
+- name: No delegation policy block while the policy is off
+  ansible.builtin.blockinfile:
+    path: "{{ item.stat.path }}"
+    marker: "<!-- {mark} ANSIBLE MANAGED - delegation policy -->"
+    state: absent
+  when: not (dev_worker_delegation_policy_enabled | bool)
+  loop: >-
+    {{ dev_worker_delegation_files.results | default([]) | selectattr('stat', 'defined')
+       | selectattr('stat.exists') | list }}
+  loop_control:
+    label: "{{ item.stat.path }}"
+
+# ---- 3. Codex [agents] defaults and roles (plan Phase 3.2; off until the Phase 0.3 spike passes) --------
+# Table-aware, in place, `key = "value"` like the model pin in codex.yml. A variable that is "" is neither
+# written nor removed: a value someone set by hand stays (review of the plan, #1744).
+- name: Codex [agents] subagent defaults per user
+  community.general.ini_file:
+    path: "{{ item.0.home }}/.codex/config.toml"
+    section: agents
+    option: "{{ item.1.key }}"
+    value: '"{{ item.1.value }}"'
+    no_extra_spaces: false
+    create: true
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0600"
+  when: (dev_worker_codex_subagent_roles_enabled | bool) and (item.1.value | length > 0)
+  loop: >-
+    {{ dev_worker_users | product([
+         {'key': 'default_subagent_model', 'value': dev_worker_codex_subagent_model},
+         {'key': 'default_subagent_reasoning_effort', 'value': dev_worker_codex_subagent_reasoning_effort}
+       ]) | list }}
+  loop_control:
+    label: "{{ item.0.name }}: agents.{{ item.1.key }}"
+
+# Removal edits only a config.toml that exists on the worker (a stat, not a controller-side `is file` test).
+- name: Find each user's Codex config.toml (subagent roles off)
+  ansible.builtin.stat:
+    path: "{{ item.home }}/.codex/config.toml"
+  register: dev_worker_codex_config_for_roles
+  when: not (dev_worker_codex_subagent_roles_enabled | bool)
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# Off: remove a default only where it still holds the managed value (exclusive: false removes only that
+# key = value pair); a value set by hand, or any value while the variable is "", stays.
+- name: Codex [agents] subagent defaults removed while the roles are off (managed value only)
+  community.general.ini_file:
+    path: "{{ item.0.stat.path }}"
+    section: agents
+    option: "{{ item.1.key }}"
+    value: '"{{ item.1.value }}"'
+    exclusive: false
+    state: absent
+  when: not (dev_worker_codex_subagent_roles_enabled | bool) and (item.1.value | length > 0)
+  loop: >-
+    {{ dev_worker_codex_config_for_roles.results | default([]) | selectattr('stat', 'defined')
+       | selectattr('stat.exists') | list | product([
+         {'key': 'default_subagent_model', 'value': dev_worker_codex_subagent_model},
+         {'key': 'default_subagent_reasoning_effort', 'value': dev_worker_codex_subagent_reasoning_effort}
+       ]) | list }}
+  loop_control:
+    label: "{{ item.0.stat.path }}: agents.{{ item.1.key }}"
+
+- name: Ensure each user's ~/.codex/agents exists (Codex roles)
+  ansible.builtin.file:
+    path: "{{ item.home }}/.codex/agents"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0700"
+  when: dev_worker_codex_subagent_roles_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: The Codex scout role's config file per user
+  ansible.builtin.copy:
+    dest: "{{ item.home }}/.codex/agents/scout.toml"
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0600"
+    content: |
+      # Managed by ansible (role: dev_worker, subagent routing). Local edits are overwritten on the next converge.
+      {% if dev_worker_codex_scout_model | length > 0 %}
+      model = "{{ dev_worker_codex_scout_model }}"
+      {% endif %}
+      {% if dev_worker_codex_scout_reasoning_effort | length > 0 %}
+      model_reasoning_effort = "{{ dev_worker_codex_scout_reasoning_effort }}"
+      {% endif %}
+      developer_instructions = """
+      You find things in a codebase, its config, or its log files, and report where they are. Answer only what
+      was asked; for each hit give path:line and a one-line excerpt. Change nothing: no edits, no file writes,
+      no git command that changes state, no installs. When something is not found, say so and list where you
+      searched. No analysis or recommendations beyond what identifies each hit.
+      """
+  when: dev_worker_codex_subagent_roles_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: The Codex scout role per user ([agents.scout])
+  community.general.ini_file:
+    path: "{{ item.0.home }}/.codex/config.toml"
+    section: agents.scout
+    option: "{{ item.1.key }}"
+    value: '"{{ item.1.value }}"'
+    no_extra_spaces: false
+    create: true
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0600"
+  when: dev_worker_codex_subagent_roles_enabled | bool
+  loop: >-
+    {{ dev_worker_users | product([
+         {'key': 'description', 'value': 'Read-only search of code, config and log files: locations and short excerpts, never edits, never conclusions.'},
+         {'key': 'config_file', 'value': 'agents/scout.toml'}
+       ]) | list }}
+  loop_control:
+    label: "{{ item.0.name }}: agents.scout.{{ item.1.key }}"
+
+- name: No Codex scout role while the roles are off
+  community.general.ini_file:
+    path: "{{ item.stat.path }}"
+    section: agents.scout
+    state: absent
+  when: not (dev_worker_codex_subagent_roles_enabled | bool)
+  loop: >-
+    {{ dev_worker_codex_config_for_roles.results | default([]) | selectattr('stat', 'defined')
+       | selectattr('stat.exists') | list }}
+  loop_control:
+    label: "{{ item.stat.path }}"
+
+- name: Find the managed Codex role files per user
+  ansible.builtin.find:
+    paths: "{{ item.home }}/.codex/agents"
+    patterns: "*.toml"
+    contains: "# Managed by ansible \\(role: dev_worker, subagent routing\\)"
+  register: dev_worker_managed_codex_roles
+  when: not (dev_worker_codex_subagent_roles_enabled | bool)
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Remove the managed Codex role files while the roles are off
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  when: not (dev_worker_codex_subagent_roles_enabled | bool)
+  loop: "{{ dev_worker_managed_codex_roles.results | default([]) | selectattr('files', 'defined') | map(attribute='files') | flatten }}"
+  loop_control:
+    label: "{{ item.path }}"

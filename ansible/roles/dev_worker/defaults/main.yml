@@ -105,6 +105,28 @@ dev_worker_claude_synced_skills_off:
   - anthropic-skills:skill-creator
   - anthropic-skills:xlsx
 
+# ---- Subagent routing (tasks/subagents.yml; plans/2026-11-13-agent-subagent-model-routing-plan.md) ----
+# Estate Claude Code agents: files/subagents/<name>.md -> ~/.claude/agents/<name>.md for every user in
+# dev_worker_users. The definition pins the model and effort (scout: haiku/low, read-only tools; bulk-worker:
+# sonnet). [] removes every managed agent file. A file without the managed marker (a user's own agent, such as
+# dev-worker-2's pr-shepherd) is never touched. No CLAUDE_CODE_SUBAGENT_MODEL anywhere (plan D3).
+# OFF for the fleet while the canary runs (plan Phase 2): the scheduled daily converge applies the full role
+# from origin/main to every worker, so a default here IS a fleet rollout. The canary enables both in its
+# host_vars (dev-worker-2.yml). The fleet rollout after acceptance sets: [scout, bulk-worker] and true.
+dev_worker_claude_subagents: []
+# The "Delegation" managed block in ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md. false removes both blocks.
+dev_worker_delegation_policy_enabled: false
+# Codex [agents] defaults and the `scout` role (plan Phase 3.2). Stays false until the Phase 0.3 spike shows a
+# role's model and effort are applied on the fleet's Codex and the router. "" = the key is neither written nor
+# touched: a value someone set by hand stays.
+dev_worker_codex_subagent_roles_enabled: false
+dev_worker_codex_subagent_model: ""
+dev_worker_codex_subagent_reasoning_effort: ""
+dev_worker_codex_scout_model: ""
+dev_worker_codex_scout_reasoning_effort: "low"
+# The read-only usage report (files/agent-usage-report): plan Phase 0 baseline and the Phase 2 comparison.
+dev_worker_agent_usage_report_path: /usr/local/bin/agent-usage-report
+
 # ---- Codex CLI version + model (bump deliberately; tasks/codex.yml) ----
 # Any user whose installed codex is OLDER than this is upgraded to exactly it (never downgraded).
 # gpt-6-astra needs >= 0.153.0 (measured 2026-09-05: 0.152.1 rejected, 0.153.0 accepted): an

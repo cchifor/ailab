@@ -1203,6 +1203,60 @@ decoded tolerantly — platform#1074 (a PDF corpus diffed as text) used to raise
 cumulative gauge — the cumulative one never falls for a PR that was closed rather than pushed
 to, so alerting on it would latch on forever.
 
+## Subagent routing (estate agents and the delegation policy)
+
+Plan: `plans/2026-11-13-agent-subagent-model-routing-plan.md`. Role: `tasks/subagents.yml`, tag `subagents`.
+Standard for repositories: [`docs/standards/agent-delegation.md`](../standards/agent-delegation.md).
+
+**What is installed** for every user in `dev_worker_users`, when switched on:
+
+- `~/.claude/agents/scout.md`: Haiku, effort `low`, tools `Read, Grep, Glob` only. Read-only searches whose raw
+  output the main session will not reuse.
+- `~/.claude/agents/bulk-worker.md`: Sonnet. One mechanical change across many files, with an exact rule and a
+  check.
+- A "Delegation" block in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md` (marker `ANSIBLE MANAGED -
+  delegation policy`): delegate rarely, never to verify your own work, and pass no per-call model or effort
+  (a per-call value overrides the definition).
+- `/usr/local/bin/agent-usage-report` on every worker, on or off: a read-only report of subagent launches and
+  tokens by model from the user's transcripts. `agent-usage-report --days 7`, `--json` for the raw numbers.
+
+Nothing is written to `managed-settings.json` or `settings.json`. There is no `CLAUDE_CODE_SUBAGENT_MODEL`, and
+there must be no `CLAUDE_CODE_EFFORT_LEVEL` on a worker: it overrides every definition's `effort`. The main
+session's model and effort stay each user's choice.
+
+**Switches** (`defaults/main.yml`): `dev_worker_claude_subagents` (list of estate agents; `[]` removes them),
+`dev_worker_delegation_policy_enabled`, and the Codex roles behind `dev_worker_codex_subagent_roles_enabled`
+(off until the plan's Phase 0.3 spike passes). **The defaults are off for the fleet**: the daily converge below
+applies the full role from `origin/main`, so a default that is on is a fleet rollout the next morning. The
+canary, dev-worker-2, turns both on in `host_vars/dev-worker-2.yml` (from 2026-11-13, one weekly window).
+
+**Managed files only.** An agent file is the role's when its frontmatter carries `# Managed by ansible (role:
+dev_worker, subagent routing)`. Only those are replaced or removed; a user's own agent (dev-worker-2's
+`pr-shepherd.md`) is never touched. Local edits to a managed file are overwritten on the next converge.
+
+**Add an estate agent:** add `files/subagents/<name>.md` with the marker, `name: <name>`, a `description` of at
+most 400 characters, `model` (`haiku`, `sonnet`, `opus`, `fable` or `inherit`) and, if needed, `effort`; add
+`<name>` to `dev_worker_claude_subagents`; `tests/test-subagent-routing.sh` checks the frontmatter.
+
+**A repository overrides an estate agent** with a project agent of the same name in its `.claude/agents/`
+(project beats user, measured 2026-11-13). Do that only to specialise, and say why in the file.
+
+**Verify on a worker** (`/agents` does not list agents or models in current builds):
+
+```bash
+agent-usage-report --days 1                              # launches by type, tokens by model, main vs subagent
+ls ~/.claude/agents/                                     # scout.md, bulk-worker.md, plus the user's own
+grep -c 'ANSIBLE MANAGED - delegation policy' ~/.claude/CLAUDE.md ~/.codex/AGENTS.md   # 2 each (BEGIN + END)
+# one subagent's model and type: <project>/<session>/subagents/agent-<id>.jsonl (message.model) and .meta.json (agentType)
+```
+
+New sessions read the agents and the block; running sessions keep what they started with.
+
+**Rollback:** for the canary, delete its two lines in `host_vars/dev-worker-2.yml`; for the fleet, set
+`dev_worker_claude_subagents: []` and `dev_worker_delegation_policy_enabled: false`. Then
+`ansible-playbook dev-workers.yml -l <host> -t subagents` (after `--check --diff`), or wait for the daily
+converge. That removes the managed agent files and both blocks; nothing else holds state.
+
 ## Daily fleet converge (scheduled, GitOps-true)
 
 Windows Task Scheduler task **ailab-fleet-converge** on the operator workstation runs
