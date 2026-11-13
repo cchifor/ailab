@@ -15,8 +15,11 @@ off only for some jobs, so the routing has to be deterministic and narrow.
 - **Claude Code** is at or above the role's floor (`dev_worker_claude_code_min_version: "2.1.311"`; dw4 runs
   2.1.318). Each user picks the main model and effort: dw4 has `"model": "opus[1m]"` in
   `~/.claude/settings.json` and runs at `xhigh`. The role sets neither.
-  - There are no custom agents (`~/.claude/agents/` is absent) and no `CLAUDE_CODE_SUBAGENT_MODEL`, so every
-    subagent runs on the main session's model.
+  - There are no estate agents and no `CLAUDE_CODE_SUBAGENT_MODEL` or `CLAUDE_CODE_EFFORT_LEVEL` anywhere
+    (managed settings, user settings, shell profiles, running processes; checked on all four workers
+    2026-11-13). dev-worker-2 has one user agent of its own, `~/.claude/agents/pr-shepherd.md` (`model: sonnet`,
+    written by its agent 2026-11-12); the role must never touch it. Without a definition or a per-call model,
+    a subagent runs on the main session's model.
   - The built-in `Explore` runs on whatever the `opus` alias resolves to when the session is on a
     subscription. `Plan` and `general-purpose` inherit the main model.
   - `/etc/claude-code/managed-settings.json` carries only `BASH_ENV` (`templates/claude-managed-settings.json.j2`).
@@ -29,15 +32,28 @@ off only for some jobs, so the routing has to be deterministic and narrow.
     "Unknown model `qwen-27b` for spawn_agent").
 - **Cost** is the subscription's **weekly usage limits** (`weekly_all`, plus a `weekly_scoped` entry for
   Fable; ADR 0025), not dollars. Claude Code's docs say subagents "count toward the same usage limits as your
-  main conversation".
+  main conversation". Codex runs `gpt-6-astra` through llm-router: its limits are the router's ChatGPT seats,
+  not Claude's `weekly_all`.
 - **Instruction files**: the role already writes managed blocks into `~/.claude/CLAUDE.md` and
   `~/.codex/AGENTS.md` with `blockinfile` and HTML-comment markers (`tasks/openbao.yml`, `tasks/codex.yml`).
   It installs skills by copying files into `~/.claude/skills/` (`tasks/claude_code.yml`, tag `skills`).
 - **Repositories**: org `cchifor` has 27 repositories. No checkout on dw4 has a `.claude/agents/` or
   `.codex/agents/` directory, and no `CLAUDE.md` or `AGENTS.md` within three levels mentions delegation
   (`find`, 2026-11-13).
-- **First data point, which may not be representative**: dw4 over the last 14 days had 9 main Claude Code
-  transcripts and **0 subagent calls**. That is one worker. Phase 0 measures the fleet before anything changes.
+- **Phase 0 baseline, measured 2026-11-13** (`agent-usage-report --days 14` on each worker; merged PRs by
+  author from the Gitea API; raw output in `/workspace/archive/2026-11-subagent-baseline/` on each worker):
+
+  | worker | main sessions | subagent launches | model passed per call | tokens in subagents (all / output) | merged PRs |
+  |---|---|---|---|---|---|
+  | dev-worker-1 | 16 | 29 (24 general-purpose, 5 Explore) | opus 14, fable 11 | 57% / 66% | 0 |
+  | dev-worker-2 | 8 | 486 (456 general-purpose, 22 fork, 5 Explore, 3 Plan) | opus 138, fable 76, sonnet 17 | 83% / 91% | 216 |
+  | dev-worker-3 | 29 | 9 (general-purpose) | none | 46% / 59% | 147 |
+  | dev-worker-4 | 9 | 0 | none | 0% | 0 |
+
+  The first draft's single data point (dw4, 0 calls) was not representative. Launches equal the subagents that
+  ran on every worker (counted per `tool_use` id, and from each subagent's `.meta.json`). Seats: dw2 and dw4
+  report identical limits (`weekly_all` 78%, the Fable-scoped limit 87%, same reset), so they share one
+  account; dw1 and dw3 had hit their weekly limit (the usage endpoint answered 429).
 
 ## Evidence (summary)
 
@@ -91,8 +107,15 @@ of a single agent.
   2. the definition's `model` frontmatter (`inherit` = the main model);
   3. `CLAUDE_CODE_SUBAGENT_MODEL`;
   4. the main model.
-- `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` forces one model on every subagent except forks.
-- Frontmatter accepts `effort` (`low`..`max`). Claude can also pass `effort` per call (2.1.292+).
+- `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` (2.1.257+) makes Claude Code ignore both the frontmatter `model` and
+  the per-call `model`: subagents then run on `CLAUDE_CODE_SUBAGENT_MODEL` if set, else on the main model.
+- Frontmatter accepts `effort` (`low`..`max`). Claude can also pass `effort` per call (2.1.292+), which
+  overrides the frontmatter; `CLAUDE_CODE_EFFORT_LEVEL` overrides both.
+- Same-named agents: managed settings, then `--agents`, then `.claude/agents/` (project), then
+  `~/.claude/agents/` (user), then plugins. Verified 2026-11-13 on 2.1.322: with a `sonnet` user agent and a
+  `haiku` project agent of the same name, the project's ran on Haiku.
+- `/agents` in current builds only prints where agent files live; it does not list agents or models.
+  Verification uses the transcripts (`message.model`, and `agentType` in each subagent's `.meta.json`).
 - A user or project agent named `Explore` replaces the built-in.
 - Up to 20 subagents run concurrently, nested up to 3 deep.
 
@@ -118,17 +141,21 @@ of a single agent.
   because a per-call value overrides the frontmatter.
 
 **D2. Two estate agents for Claude Code:**
-- `scout` (Haiku, effort `low`, read-only tool set) for searches whose raw output the main session will not
-  reuse.
+- `scout` (Haiku, effort `low`) for searches whose raw output the main session will not reuse. Its tools are
+  `Read, Grep, Glob` and nothing else: no shell, so "read-only" is enforced by the tool set rather than by the
+  prompt (review of this plan: a `Bash` tool would allow `git commit`, `rm` and installs). A question that
+  needs a command (git history, a journal) goes back to the main session.
 - `bulk-worker` (Sonnet, default effort) for one mechanical change across many files with an exact rule and a
   check. This is the "larger than one context" case where Anthropic measured a saving.
 
 Everything else (design, non-mechanical implementation, debugging conclusions, review) stays on the main
 model.
 
-**D3. No fleet-wide `CLAUDE_CODE_SUBAGENT_MODEL`, and never `_FORCE`.** Either would move `general-purpose` and
-`Plan` subagents, which do implementation and review, onto a cheaper model. Anthropic's coding numbers say
-that costs quality. A test asserts that the managed settings never set either variable.
+**D3. No fleet-wide `CLAUDE_CODE_SUBAGENT_MODEL`, and never `_FORCE`.** The first would move `general-purpose`
+and `Plan` subagents, which do implementation and review, onto a cheaper model; Anthropic's coding numbers say
+that costs quality. `_FORCE` would also override the estate definitions themselves. A test asserts that the
+role's templates, tasks and defaults never set either variable, and the fleet must not set
+`CLAUDE_CODE_EFFORT_LEVEL`, which would override the definitions' `effort`.
 
 **D4. A delegation policy block in both instruction files.**
 - It is a managed block in `~/.claude/CLAUDE.md` and in `~/.codex/AGENTS.md`, adapted from Anthropic's
@@ -170,7 +197,8 @@ the canary's subscription usage per merged PR and its review outcomes against it
 - The reviewer VMs (`pr_reviewer`; they review through llm-router with their own model ladder).
 - dsh and llm-router routing.
 - `claude-job@` units: they run `claude -p --allowed-tools <list>`, so subagents apply only if a job's
-  `allowed-tools.txt` lists `Agent`.
+  `allowed-tools.txt` lists `Agent`. They do load `~/.claude/CLAUDE.md`, so the policy block (about 300
+  tokens est.) reaches every job; Phase 2 checks one unit's token count before and after.
 - Credentials, VMs, IPs, RAM and network.
 
 ## Authority
@@ -182,6 +210,10 @@ is **frozen until Relay workers are validated**. This plan changes only per-user
 managed instruction blocks. It makes no VM, IP, RAM, threshold or credential change, but it is still a
 dev-worker converge. **The implementer confirms with the owner that this request is an exception to the freeze
 before converging any worker**, and records that confirmation in the PR.
+
+**Confirmed 2026-11-13.** The owner, to the operator: "Analyze, validate, implement and apply the following plan:
+https://git.chifor.me/cchifor/ailab/pulls/1744". That is the exception for this plan's scope (agent files,
+managed instruction blocks, the report script), nothing wider.
 
 ## Phase 0: baseline and spikes (read-only)
 
@@ -206,11 +238,16 @@ the PR.
 and `scout` cost little and guard against over-delegation. Phase 3 tuning then waits for a reason.
 
 **0.2 Claude Code spike** (one worker, a throwaway user-level agent, then delete it):
-- A `model: haiku` / `effort: low` agent's transcript shows `message.model` = `claude-haiku-5-5`.
+- A `model: haiku` / `effort: low` agent's transcript shows a `message.model` that starts with `claude-haiku-`
+  and differs from the main session's, and `effort` `low`. Record the actual ID; never assert a fixed one.
 - A same-named project agent overrides the user agent.
-- `/agents` lists both estate agents with their models.
-- Record which model the `fable`, `sonnet` and `haiku` aliases resolve to on the installed CLI. The `fable`
-  alias should now be Fable 5.2.
+- Record which model the `fable`, `sonnet` and `haiku` aliases resolve to on the installed CLI.
+
+**Result (2026-11-13, workstation, Claude Code 2.1.322; the same CLI the fleet runs):** a project agent with
+`model: haiku`, `effort: low` and a YAML comment line in its frontmatter loaded and ran on `claude-haiku-5-5`
+at effort `low` while the main session ran `claude-opus-5-5` at `xhigh`; the main agent passed no per-call
+model. A same-named user agent (`sonnet`) lost to the project agent. `sonnet` resolves to `claude-sonnet-5-5`.
+`fable` was not exercised (its scoped limit is the scarce one; the docs map it to Fable 5.2).
 
 **0.3 Codex spike** (codex at or above the floor, router provider, a scratch `CODEX_HOME`):
 - (a) Does `agents.default_subagent_reasoning_effort` apply to spawned agents?
@@ -221,6 +258,9 @@ and `scout` cost little and guard against over-delegation. Phase 3 tuning then w
 - (d) Is `features.multi_agent_v2` still off on the fleet version, and does turning it on change (a) and (b)?
 
 Record the codex version. If (b) or (c) fails, Codex keeps only the policy block and D6 stays gated.
+
+**Status (2026-11-13): not run.** Its only consumer is Phase 3.2, and until it passes the outcome is the same
+as a failed spike: the Codex roles stay off and Codex gets the policy block only. Run it before Phase 3.2.
 
 ## Phase 1: the role change (one PR, tag `subagents`)
 
@@ -236,14 +276,22 @@ Record the codex version. If (b) or (c) fails, Codex keeps only the policy block
    # ---- Subagent routing (plans/2026-11-13-agent-subagent-model-routing-plan.md) ----
    # Estate Claude Code agents, files/subagents/<name>.md -> ~/.claude/agents/<name>.md for every user in
    # dev_worker_users. [] removes every managed agent file; files without the managed marker are never touched.
-   dev_worker_claude_subagents: [scout, bulk-worker]
+   dev_worker_claude_subagents: []                  # the canary's host_vars: [scout, bulk-worker]
    # The "Delegation" managed block in ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md. false removes both blocks.
-   dev_worker_delegation_policy_enabled: true
+   dev_worker_delegation_policy_enabled: false      # the canary's host_vars: true
    # Codex [agents] defaults + roles (Phase 3.2). Stays false until the Phase 0.3 spike passes.
    dev_worker_codex_subagent_roles_enabled: false
-   dev_worker_codex_subagent_model: ""             # "" = inherit (key not written)
-   dev_worker_codex_subagent_reasoning_effort: ""  # "" = inherit (key not written)
+   dev_worker_codex_subagent_model: ""             # "" = neither written nor touched
+   dev_worker_codex_subagent_reasoning_effort: ""  # "" = neither written nor touched
+   dev_worker_codex_scout_model: ""                # the scout role's model; "" = not written
+   dev_worker_codex_scout_reasoning_effort: "low"
+   dev_worker_agent_usage_report_path: /usr/local/bin/agent-usage-report
    ```
+
+   **The defaults are off for the fleet.** The scheduled daily converge (`ailab-fleet-converge`, 06:35, runbook
+   § "Daily fleet converge") applies the full role from `origin/main` to every worker, so a default that is on
+   IS a fleet rollout the next morning. The canary turns both on in its `host_vars`; the fleet rollout after
+   Phase 2 acceptance changes the defaults.
 
 3. **`ansible/roles/dev_worker/tasks/subagents.yml`**, imported from `tasks/main.yml` with `tags: [subagents]`:
    - **Agent files.** For every user in `dev_worker_users`:
@@ -262,34 +310,43 @@ Record the codex version. If (b) or (c) fails, Codex keeps only the policy block
      `state: absent` for both blocks when `dev_worker_delegation_policy_enabled` is false.
    - **Codex `[agents]` keys** (only when `dev_worker_codex_subagent_roles_enabled`, Phase 3.2):
      - Write them with `community.general.ini_file`, `section: agents`, in place and table-aware, like the model
-       pin. A key whose variable is `""` is removed, not written.
+       pin. A key whose variable is `""` is neither written nor touched: a value someone set by hand stays.
      - The `scout` role is `[agents.scout]` with `description` and `config_file`, plus
        `~/.codex/agents/scout.toml` from a template. The template's header marks it as managed.
-     - When the flag is false, remove the role table and file. The two `default_subagent_*` keys are removed
-       only if their value equals the managed value; they are never removed blindly.
+     - When the flag is false, remove the role table and the managed role file. A `default_subagent_*` key is
+       removed only while its variable is non-empty and the key still holds exactly that value; with the
+       variable `""` it is left alone. Removal edits only a `config.toml` that exists on the worker (a `stat`,
+       not a controller-side test).
    - **Settings.** Nothing is added to `/etc/claude-code/managed-settings.json` or to `~/.claude/settings.json`
      (D3, D5).
+   - **The report.** `files/agent-usage-report` is installed at `dev_worker_agent_usage_report_path` on every
+     worker (read-only, harmless while the agents are off), so Phase 2 re-runs it in place.
 
 4. **`ansible/roles/dev_worker/tests/test-subagent-routing.sh`**, plus a step in
    `.gitea/workflows/dev-worker-scripts.yaml` (add the new paths to its `paths:` triggers). It follows
    `test-npm-prefix-guard.sh`: converge into a temporary HOME with the repo's ansible venv.
    - Each `files/subagents/*.md` has frontmatter that parses as YAML. `name` equals the file name.
      `description` is non-empty and at most 400 characters. `model` is one of `haiku|sonnet|opus|fable|inherit`.
-     `effort` is absent or one of `low|medium|high|xhigh|max`. The managed marker is present. `scout` has no
-     `Edit`, `Write` or `NotebookEdit` in `tools`.
+     `effort` is absent or one of `low|medium|high|xhigh|max`. The managed marker is present. `scout`'s `tools`
+     is a non-empty subset of `Read, Grep, Glob` (no `Bash`, `Edit`, `Write`, `NotebookEdit`; omitting `tools`
+     would grant every tool).
    - Running the converge twice is idempotent: the second run reports `changed=0`.
    - A user's own `~/.claude/agents/mine.md` survives every run. Dropping `bulk-worker` from the list removes
      only `bulk-worker.md`, and `[]` removes both estate files.
    - `dev_worker_delegation_policy_enabled: false` removes both policy blocks and leaves the
      `openbao credentials` block in the same file byte-identical.
-   - `templates/claude-managed-settings.json.j2` never contains `CLAUDE_CODE_SUBAGENT_MODEL` (D3).
+   - No non-comment line of the role's templates, tasks or defaults sets `CLAUDE_CODE_SUBAGENT_MODEL` (D3).
+   - With roles on and a managed default set, turning the roles off removes that default, the role table and the
+     role file, and keeps a hand-set key.
+   - `agent-usage-report` on synthetic transcripts: launches counted once per `tool_use` id, a response's
+     usage once per `message.id`, the window honoured, `agentType` read from `.meta.json`.
    - With roles disabled, `~/.codex/config.toml` gains no `[agents]` table. With roles enabled and the variables
      `""`, it gains only the role table, and the scout role file parses as TOML (`python3 -c 'import tomllib'`).
 
 5. **Docs:**
    - `docs/runbooks/dev-workers.md` gets a § "Subagent routing": what is installed, how to add an estate agent,
-     how a repository overrides one, how to verify on a worker (`/agents`, transcript `message.model`), and
-     rollback.
+     how a repository overrides one, how to verify on a worker (`agent-usage-report`, transcript
+     `message.model` and `.meta.json`; not `/agents`, which no longer lists agents), and rollback.
    - New `docs/standards/agent-delegation.md`, the repository standard for D7: what a repository may add under
      `.claude/agents/` or `.codex/`, naming, and the guidance it must not add.
 
@@ -301,15 +358,16 @@ Record the codex version. If (b) or (c) fails, Codex keeps only the policy block
 ---
 # Managed by ansible (role: dev_worker, subagent routing). Local edits are overwritten on the next converge.
 name: scout
-description: Read-only search of code, config and logs. Use when you need locations and short excerpts back (files, symbols, call sites, config values, log lines) and will not reuse the raw output. Never edits. Not for review, design, or debugging conclusions.
-tools: Read, Grep, Glob, Bash
+description: Read-only search of code, config and log files. Use when you need locations and short excerpts back (files, symbols, call sites, config values, log lines) and will not reuse the raw output. Never edits. Not for review, design, or debugging conclusions.
+tools: Read, Grep, Glob
 model: haiku
 effort: low
 ---
-You find things in a codebase, its config, or its logs, and report where they are.
+You find things in a codebase, its config, or its log files, and report where they are.
 
 - Answer only what was asked. For each hit give `path:line` and a one-line excerpt.
-- Change nothing: no edits, no file writes, no git command that changes state, no installs.
+- You have no shell and no write tools. If the answer needs a command (git history, a service's journal, a
+  build), say so and stop: the main session runs it.
 - When something is not found, say so and list where you searched.
 - No analysis or recommendations beyond what identifies each hit. Keep the report under 40 lines unless asked for more.
 ```
@@ -362,13 +420,15 @@ definitions choose them.
 ```markdown
 ## Delegation (sub-agents)
 
-Sub-agents cost time and the same usage limits as this session: each one rebuilds context and reports back.
-Spawn one only for a search whose raw output you will not reuse, for genuinely independent and sizeable
-tracks, or for work too large for one context. Do small tasks, sequential steps that share context, design,
-review and verification of your own work yourself. Brief once, keep spawn counts low, and do not redo a
-sub-agent's work.
+Sub-agents cost time and context: each one rebuilds context, runs on this session's quota, and reports
+back. Spawn one only for a search whose raw output you will not reuse, for genuinely independent and
+sizeable tracks, or for work too large for one context. Do small tasks, sequential steps that share
+context, design, review and verification of your own work yourself. Brief once, keep spawn counts low,
+and do not redo a sub-agent's work.
 {% if dev_worker_codex_subagent_roles_enabled %}For searches, spawn the `scout` agent.{% endif %}
-Agents on local models are unaffected: they run through `local-agent` (see "Agents on the local models").
+{% if (dev_worker_codex_router_enabled | bool) and (dev_worker_codex_local_models_enabled | bool) %}
+Agents on the local models are unaffected: they run through `local-agent` (see "Local models through the
+router").{% endif %}
 ```
 
 The Codex text applies Anthropic's evidence by analogy. Coordination overhead and context isolation do not
@@ -376,7 +436,9 @@ depend on the model, but Codex is measured separately in Phase 2.
 
 ## Phase 2: canary, then the fleet
 
-1. **Canary.** Pick the worker with the most Claude usage in Phase 0.
+1. **Canary.** Pick the worker with the most Claude usage in Phase 0: **dev-worker-2** (486 launches, 83% of
+   its tokens in subagents). Its `host_vars/dev-worker-2.yml` sets `dev_worker_claude_subagents: [scout,
+   bulk-worker]` and `dev_worker_delegation_policy_enabled: true`; the daily converge then keeps it so.
    - Dry run first: `ansible-playbook dev-workers.yml -l <canary> -t subagents --check --diff`.
    - Then converge the same command without `--check`.
    - Only new sessions read the new agents and blocks. Running sessions, including the operator's, are not
@@ -388,12 +450,17 @@ depend on the model, but Codex is measured separately in Phase 2.
    - `weekly_all` burn per merged PR;
    - quality signals: the share of the canary's PRs with changes requested by the reviewers, reverts, and owner
      reports.
-3. **Acceptance:**
+3. **Acceptance** (rates per merged PR, so a low or zero baseline still has a meaning):
    - no quality signal worse than baseline;
-   - `scout` handles the canary's delegated searches;
-   - the total number of subagent calls is not higher than baseline.
+   - subagent launches per merged PR not higher than baseline (dw2: 486 / 216 = 2.25);
+   - launches that pass a per-call `model` fall to near zero (baseline 231 of 486);
+   - launches other than `scout` and `bulk-worker` per merged PR not higher than baseline, and `scout` takes
+     searches that went to `Explore` or `general-purpose` before;
+   - `weekly_all` burn per merged PR not higher than baseline. dw2 shares its account with dw4, so read the two
+     workers' merged PRs together.
 
-   Then converge the remaining workers in one run (`-l dev_workers -t subagents`, after `--check --diff`).
+   Then change the role defaults to the canary's values; the next daily converge (or `-l dev_workers -t
+   subagents`, after `--check --diff`) rolls the fleet.
 4. **Report.** Post the before and after table in the PR, or in a follow-up issue if the PR has merged.
 
 ## Phase 3: follow-ups (each is its own decision)
@@ -402,8 +469,9 @@ depend on the model, but Codex is measured separately in Phase 2.
   runs on Opus, decide whether to ship a user-level `Explore.md` on Haiku. A user agent named `Explore`
   replaces the built-in.
   - Risk: it replaces Anthropic's tuned Explore prompt.
-  - A/B it on the canary first: half of the canary's sessions get the user-level `Explore.md`, half keep the
-    built-in.
+  - Measure it sequentially on the canary: one weekly window with the built-in `Explore`, then one with the
+    user-level `Explore.md`, compared with the Phase 0 report. A user-level file applies to every session of
+    that user, so the sessions of one window cannot be split.
 - **3.2 Codex roles.** After spike 0.3 passes, set `dev_worker_codex_subagent_roles_enabled: true` and the
   chosen model and effort variables in `group_vars`. Converge `-t subagents`, then run
   `codex app-server daemon restart` per user (the same restart `-t codex` changes need; never forced).
@@ -424,7 +492,7 @@ depend on the model, but Codex is measured separately in Phase 2.
 
 - **Per worker, or the whole fleet:** set `dev_worker_claude_subagents: []` and
   `dev_worker_delegation_policy_enabled: false` (and `dev_worker_codex_subagent_roles_enabled: false`) in
-  `host_vars` or `group_vars`, then converge `-t subagents`. That removes the managed files, the blocks and the
+  `host_vars` or `group_vars` (for the canary: delete its two lines), then converge `-t subagents`. That removes the managed files, the blocks and the
   Codex keys and role. Nothing else holds state.
 - **Emergency without Ansible:** delete `~/.claude/agents/{scout,bulk-worker}.md` and the managed block. The
   next converge puts them back unless the variables are flipped.
@@ -452,7 +520,8 @@ depend on the model, but Codex is measured separately in Phase 2.
 
 ## Open questions for the owner
 
-1. Is this request the exception to the dev-worker freeze (§ Authority), and which worker is the canary?
+1. ~~Is this request the exception to the dev-worker freeze (§ Authority), and which worker is the canary?~~
+   Answered 2026-11-13: yes (§ Authority); the canary is dev-worker-2 by the Phase 0 rule.
 2. Phase 3.3: should the main-session effort change? This plan does not change it.
 3. Phase 3.1: should a Haiku `Explore` override ship if the canary shows the built-in still takes the searches?
 4. Phase 0.3(c): which cheaper Codex model, if any, should Codex sub-agents use?
