@@ -6369,6 +6369,11 @@ class ReviewInstanceLineTest(unittest.TestCase):
                 m = self.m.marker_of({"body": "x\n\n" + body, "user": {"login": "reviewer-test"}})
                 self.assertEqual(("test", self.head, "clean"), m.groups())
                 self.assertEqual("test", m.group(1))
+                # a faithful stand-in for the re.Match: indexing, several groups, and the match's own attributes
+                self.assertEqual("test", m[1])
+                self.assertEqual(("test", self.head), m.group(1, 2))
+                self.assertEqual(body, m.group(0))
+                self.assertEqual(m.string[m.start():m.end()], body)
         # the other persona's id (or kind), posted by this account, is not this persona's verdict
         for other in (self.canon("clean", "codex"), self.canon_id("clean", "codex")):
             with self.subTest(other=other[:40]):

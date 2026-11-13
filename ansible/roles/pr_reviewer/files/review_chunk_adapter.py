@@ -105,7 +105,9 @@ def marker(review, value):
     except (ValueError, UnicodeError):
         return None
     # The kind comes from the posting account; the document names that kind's neutral id (persona_id, since
-    # 2026-11-13: no agent or model name in a hidden marker) or, in an older review, the kind itself.
+    # 2026-11-13: no agent or model name in a hidden marker) or, in an older review, the kind itself. Both hosts
+    # deploy from one commit in one run; until the second restarts, it refuses the first's new documents, which
+    # only keeps the merge gate closed for those minutes. SUNSET for the bare kind: as in reviewbot.marker_of.
     login = (review.get("user") or {}).get("login") or ""
     kind = login[len("reviewer-"):] if login.startswith("reviewer-") else ""
     if (not isinstance(doc, dict) or doc.get("binding") != value

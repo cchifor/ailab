@@ -2891,16 +2891,26 @@ def iter_reviews(repo, pr):
 
 class _Marker:
     """A marker match whose group(1) is the persona KIND (from the posting account), whichever form the marker
-    carried: the neutral persona_id(kind) written since 2026-11-13, or the kind itself in older reviews."""
+    carried: the neutral persona_id(kind) written since 2026-11-13, or the kind itself in older reviews.
+    Everything else is the underlying re.Match's (span, start, end, string, further groups), so callers can keep
+    treating it as a match."""
 
     def __init__(self, m, kind):
         self._m, self._kind = m, kind
 
-    def group(self, i):
-        return self._kind if i == 1 else self._m.group(i)
+    def group(self, *idx):
+        if not idx:
+            return self._m.group()
+        out = tuple(self._kind if i == 1 else self._m.group(i) for i in idx)
+        return out[0] if len(out) == 1 else out
 
-    def groups(self):
-        return (self._kind, self._m.group(2), self._m.group(3))
+    __getitem__ = group
+
+    def groups(self, default=None):
+        return (self._kind,) + self._m.groups(default)[1:]
+
+    def __getattr__(self, name):
+        return getattr(self._m, name)
 
 
 def marker_of(rv):
@@ -2921,6 +2931,9 @@ def marker_of(rv):
     if not login.startswith("reviewer-"):
         return None
     kind = login[len("reviewer-"):]
+    # The bare kind is the pre-2026-11-13 form. SUNSET: drop it (here and in review_chunk_adapter.marker) once no
+    # open PR has a review from before that date, i.e. once every PR open then has merged or had its next head
+    # reviewed; check with a search of open PRs' reviews for "persona=claude" / "persona=codex".
     if not kind or m.group(1) not in (kind, persona_id(kind)):
         return None
     return _Marker(m, kind)
