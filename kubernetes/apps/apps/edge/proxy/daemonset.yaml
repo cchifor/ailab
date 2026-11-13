@@ -61,7 +61,7 @@ spec:
       terminationGracePeriodSeconds: 120
       containers:
         - name: caddy
-          image: caddy:2.11.9-alpine@sha256:0bbb055bda6793c999bde78b1b5ce3e89f829fb031af2cf50056ea1246559fee
+          image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
           imagePullPolicy: IfNotPresent
           # /config is an emptyDir that survives a container restart (a liveness kill also runs preStop),
           # so the shutdown marker is cleared here or the restarted Caddy would stay unready forever.
@@ -111,7 +111,7 @@ spec:
         - name: cert-reloader
           # Same image: the reloader validates the config (which loads and pairs the new cert and
           # key) and reloads through the localhost admin API. cert-reloader.sh has the details.
-          image: caddy:2.11.9-alpine@sha256:0bbb055bda6793c999bde78b1b5ce3e89f829fb031af2cf50056ea1246559fee
+          image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
           imagePullPolicy: IfNotPresent
           command: [sh, /etc/caddy/cert-reloader.sh]
           env:
