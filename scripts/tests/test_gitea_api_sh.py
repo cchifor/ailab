@@ -297,7 +297,7 @@ class GiteaApiShTest(unittest.TestCase):
         self.assertEqual(twice, once)
         self.assertEqual(1, json.loads(twice)["body"].count("<!-- worker:"))
         # A dev-worker agent's own final marker counts as one too.
-        dw = json.dumps({"body": "x\n<!-- worker: dev-worker-1 agent: claude run: abc -->\n"}).encode()
+        dw = json.dumps({"body": "x\n<!-- worker: dev-worker-1 run: abc -->\n"}).encode()
         _, sent = self.send("POST", self.COMMENTS, dw, AILAB_RUN_ID=self.RUN)
         self.assertEqual(sent, dw)
 

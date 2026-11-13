@@ -310,6 +310,14 @@ fi
 grep -q '"BASH_ENV": "{{ dev_worker_agent_shell_env_path }}"' "$SETTINGS_TMPL" 2>/dev/null
 check $? "managed settings point Claude Code's BASH_ENV at the script"
 
+# No AI attribution from Claude Code itself (owner rule, 2026-11-13): no Co-Authored-By trailer, no "Generated
+# with Claude Code" PR footer, no Claude-Session link. The object form, which every 2.x reads; managed settings
+# outrank the user's, so no user file can turn it back on.
+python3 -c 'import json, sys
+d = json.loads(open(sys.argv[1]).read().replace("{{ dev_worker_agent_shell_env_path }}", "/x"))
+sys.exit(d.get("attribution") != {"commit": "", "pr": "", "sessionUrl": False})' "$SETTINGS_TMPL" 2>/dev/null
+check $? "managed settings switch off Claude Code's own attribution (commit, pr, sessionUrl)"
+
 # Managed settings, not the user's settings.json: that file belongs to the user (claude_statusline.yml
 # merges a single key into it), and the managed file outranks it, so a user edit cannot disarm this.
 grep -q 'dest: /etc/claude-code/managed-settings\.json' "$TASKS" &&
