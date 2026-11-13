@@ -412,10 +412,15 @@ for state, v in (("off", OFF), ("on", ON)):
     for target, agent in ((".claude/CLAUDE.md", "claude"), (".codex/AGENTS.md", "codex")):
         g = guide(v, target)
         lines = [l.strip() for l in g.splitlines()]
-        check("Worker: %s" % HOST in lines and "Agent: %s" % agent in lines and "Run: <run id>" in lines,
-              "G5 gate %s, %s: the Worker/Agent/Run trailers" % (state, agent))
-        check("<!-- worker: %s agent: %s run: <run id> -->" % (HOST, agent) in lines,
-              "G6 gate %s, %s: the run marker line" % (state, agent))
+        check("Worker: %s" % HOST in lines and "Run: <run id>" in lines
+              and not any(l.startswith("Agent:") for l in lines),
+              "G5 gate %s, %s: the Worker/Run trailers, and no Agent: trailer (no AI attribution)" % (state, agent))
+        check("<!-- worker: %s run: <run id> -->" % HOST in lines
+              and not any("agent:" in l.lower() for l in lines if l.startswith("<!-- worker:")),
+              "G6 gate %s, %s: the run marker line names no agent" % (state, agent))
+        check("never include AI, LLM, or Claude" in " ".join(lines)
+              and "solely to the active" in " ".join(lines),
+              "G8 gate %s, %s: the no-AI-attribution rule" % (state, agent))
         check("`%s`" % BOT in g and "`unknown`" in g and "approve-pin <sha>" in g and "no marker" in g,
               "G7 gate %s, %s: commit identity, `unknown` run id, the command-comment exemption" % (state, agent))
 
