@@ -162,9 +162,23 @@ class DocumentRouteContract(unittest.TestCase):
         asyncio.run(run_cases())
 
 
+def chat_config_source(package):
+    """The module of the chat config LiteLLM selects for this route's upstream model, relative to
+    `package`. Asked of LiteLLM, not hard-coded: v1.109.0 renamed llms/openai/chat/
+    gpt_5_transformation.py to gpt_reasoning_transformation.py (the class is still
+    OpenAIGPT5Config), and a fixed path broke this evidence line before any contract ran."""
+    import inspect
+
+    from litellm.utils import ProviderConfigManager
+
+    config = ProviderConfigManager.get_provider_chat_config(
+        model=UPSTREAM_MODEL, provider=litellm.LlmProviders.OPENAI)
+    return pathlib.Path(inspect.getfile(type(config))).relative_to(package).as_posix()
+
+
 if __name__ == "__main__":
     package = pathlib.Path(litellm.__file__).parent
-    sources = ("router.py", "llms/openai/openai.py", "llms/openai/chat/gpt_5_transformation.py")
+    sources = ("router.py", "llms/openai/openai.py", chat_config_source(package))
     print(json.dumps({
         "python": sys.version,
         "packages": {name: importlib.metadata.version(name)

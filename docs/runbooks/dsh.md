@@ -419,9 +419,11 @@ unparseable or file-expired token sends LiteLLM into the OAuth device flow (a sy
 `auth.openai.com` for up to 15 min, at Router construction), while the placeholder and the
 far-future sentinel built the Router in 0.07 s with no network and failed FAST upstream. Since
 LiteLLM v1.106.0 (upstream #39585) the authenticator refuses that device flow inside the proxy's
-event loop instead: a missing, empty or unparseable file fails Router construction at once with no
-network, and a proxy over a missing file came up serving every other route while this one answered
-400 "no healthy deployments" (measured 2026-10-19). Never remove any of the three from that
+event loop instead. Up to v1.108.x a missing, empty or unparseable file fails Router construction at
+once with no network, and a proxy over a missing file came up serving every other route while this
+one answered 400 "no healthy deployments" (measured 2026-10-19). From v1.109.0 the proxy keeps the
+route and each request to it answers 400 with the device-code refusal (measured 2026-11-13). Never
+remove any of the three from that
 template. The real expiry is `CHATGPT_EXPIRES_AT` in the vault
 and `dsh_codex_projection_token_expires_at_seconds` on the textfile below.
 

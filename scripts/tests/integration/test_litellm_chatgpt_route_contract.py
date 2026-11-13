@@ -21,13 +21,15 @@ What this proves, in the order the cases run:
       response.completed frame, a non-streaming one the aggregated response;
   (b) a JWT whose exp is in the PAST behaves identically under the sentinel: the
       file's expires_at is what keeps LiteLLM out of the device flow;
-  (c) a MISSING file, an EMPTY token and a MALFORMED file each fail Router
-      construction with LiteLLM's device-code REFUSAL and no socket attempt: since
-      1.106.0 (upstream #39585) the authenticator refuses the OAuth device flow
-      inside a running event loop, which is where the proxy builds its Router.
-      Up to 1.105.1 the same three reached for auth.openai.com there. Either way
-      the route cannot be built without (a) -- the executable record of why the
-      ESO template must ALWAYS render it;
+  (c) a MISSING file, an EMPTY token and a MALFORMED file each raise LiteLLM's
+      device-code REFUSAL with no socket attempt: since 1.106.0 (upstream #39585)
+      the authenticator refuses the OAuth device flow inside a running event loop,
+      which is where the proxy runs it. Up to 1.108.x the refusal fails Router
+      construction, so the proxy drops the route; from 1.109.0 the Router builds
+      and every call to the route raises it (REFUSAL_RAISED_IN, asserted per
+      installed version). Up to 1.105.1 the same three reached for auth.openai.com.
+      Either way the route cannot serve without (a) -- the executable record of why
+      the ESO template must ALWAYS render it;
   (d) upstream 401 / 429 map to AuthenticationError / RateLimitError in seconds;
   (e) ONE Router, three calls, the file rewritten atomically between them: each
       call carries the token and account id of the file current at call time,
@@ -128,6 +130,13 @@ CONTAINER_ENV = {item["name"]: item.get("value") for item in CONTAINER["env"]}
 UPSTREAM_URL = "https://chatgpt.com/backend-api/codex/responses"
 # The authenticator's refusal of the device-code login inside an event loop (1.106.0, #39585).
 DEVICE_CODE_REFUSAL = "device-code login needs a human"
+# Where that refusal surfaces follows the installed LiteLLM. Up to 1.108.x Router(...) resolves
+# every deployment's provider, so the refusal fails construction (measured 1.106.0 and 1.108.5).
+# From 1.109.0 Router(...) builds, and the same refusal is raised by each call to the route
+# (measured 1.109.0 and 1.109.1, 2026-11-13). A move in either direction fails case (c).
+LITELLM_VERSION = tuple(int(part) for part in
+                        re.findall(r"\d+", importlib.metadata.version("litellm"))[:3])
+REFUSAL_RAISED_IN = "call" if LITELLM_VERSION >= (1, 109, 0) else "construction"
 # The sentinel litellm-chatgpt-eso.yaml renders (2100-01-01T00:00:00Z). The provider
 # trusts a numeric expires_at over the token's own exp claim, so this is what keeps
 # a stale or placeholder token on the fail-fast (401 upstream) path (plan finding 2).
@@ -386,19 +395,25 @@ class ChatGPTRouteContract(unittest.TestCase):
         error = None
         detail = ""
         router = None
+        raised_in = None
         with mock.patch.object(AsyncHTTPHandler, "post", _mock_post(sent, "success")):
             try:
-                # Construction is where both the 2026-09-19 probe (1.105.1: the
-                # device-flow attempt) and the 2026-10-19 one (1.106.0: the refusal)
-                # measured it -- get_llm_provider runs the authenticator. A pin that
-                # moves it to the first call fails the refusal assertion below and
-                # gets re-measured.
+                # Construction is where the 2026-09-19 probe (1.105.1: the device-flow
+                # attempt) and the 2026-10-19 one (1.106.0: the refusal) measured it --
+                # get_llm_provider runs the authenticator. 1.109.0 moved it to the first
+                # call. The call is made here, not through _call(), so the refusal's
+                # text is kept wherever it is raised.
+                raised_in = "construction"
                 router = self._router()
-                _, error = await self._call(router)
+                raised_in = "call"
+                await asyncio.wait_for(router.aresponses(**copy.deepcopy(REQUEST)), timeout=25)
+                raised_in = None
             except Exception as exc:
                 error, detail = type(exc).__name__, str(exc)
             finally:
                 if router is not None:
+                    # Drain callbacks before the case resets its Router callbacks.
+                    await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
                     router.reset()
         elapsed = time.monotonic() - started
         # Taken and cleared BEFORE any assertion: a failure here must not fail the later cases'
@@ -407,11 +422,15 @@ class ChatGPTRouteContract(unittest.TestCase):
         NETWORK_ATTEMPTS.clear()
         self.assertIsNotNone(error, f"{name}: Router construction or the first call must raise")
         self.assertIn(DEVICE_CODE_REFUSAL, detail,
-                      f"{name}: Router construction refuses the device-code login: {error}: {detail[:300]}")
+                      f"{name}: the {raised_in} refuses the device-code login: {error}: {detail[:300]}")
+        self.assertEqual(raised_in, REFUSAL_RAISED_IN,
+                         f"{name}: LiteLLM {'.'.join(map(str, LITELLM_VERSION))} raises the refusal "
+                         f"in the {REFUSAL_RAISED_IN}; it moved, so re-measure the proxy's behaviour "
+                         "and the comments that describe it (litellm-chatgpt-eso.yaml, litellm.yaml)")
         self.assertEqual(attempts, [], f"{name}: the refused device flow makes no socket attempt")
         self.assertEqual(sent, [], f"{name}: nothing may reach the upstream without a token")
         self.assertLess(elapsed, 10, f"{name}: the refusal fails fast")
-        print(json.dumps({"case": f"c-{name}", "error": error,
+        print(json.dumps({"case": f"c-{name}", "error": error, "raised_in": raised_in,
                           "network_attempts": attempts, "elapsed_s": round(elapsed, 2)}))
 
     async def _case_d_upstream_rejection(self, status, error_name, attempts):
