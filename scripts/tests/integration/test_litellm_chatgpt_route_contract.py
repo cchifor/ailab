@@ -396,6 +396,7 @@ class ChatGPTRouteContract(unittest.TestCase):
         detail = ""
         router = None
         raised_in = None
+        flush_error = None
         with mock.patch.object(AsyncHTTPHandler, "post", _mock_post(sent, "success")):
             try:
                 # Construction is where the 2026-09-19 probe (1.105.1: the device-flow
@@ -406,21 +407,30 @@ class ChatGPTRouteContract(unittest.TestCase):
                 raised_in = "construction"
                 router = self._router()
                 raised_in = "call"
-                await asyncio.wait_for(router.aresponses(**copy.deepcopy(REQUEST)), timeout=25)
+                # The same 10 s the case allows the refusal: a hang ends here as TimeoutError.
+                await asyncio.wait_for(router.aresponses(**copy.deepcopy(REQUEST)), timeout=10)
                 raised_in = None
             except Exception as exc:
                 error, detail = type(exc).__name__, str(exc)
             finally:
                 if router is not None:
-                    # Drain callbacks before the case resets its Router callbacks.
-                    await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
+                    # Drain callbacks before the case resets its Router callbacks. A flush that
+                    # fails is judged after the attempts snapshot below, so it cannot skip the
+                    # reset or leak this case's attempts into the next ones.
+                    try:
+                        await asyncio.wait_for(GLOBAL_LOGGING_WORKER.flush(), timeout=5)
+                    except Exception as exc:  # noqa: BLE001
+                        flush_error = exc
                     router.reset()
         elapsed = time.monotonic() - started
         # Taken and cleared BEFORE any assertion: a failure here must not fail the later cases'
         # no-socket checks too.
         attempts = list(NETWORK_ATTEMPTS)
         NETWORK_ATTEMPTS.clear()
+        self.assertIsNone(flush_error, f"{name}: the logging worker drained after the case")
         self.assertIsNotNone(error, f"{name}: Router construction or the first call must raise")
+        self.assertNotEqual(error, "TimeoutError",
+                            f"{name}: the {raised_in} hung for 10 s instead of refusing at once")
         self.assertIn(DEVICE_CODE_REFUSAL, detail,
                       f"{name}: the {raised_in} refuses the device-code login: {error}: {detail[:300]}")
         self.assertEqual(raised_in, REFUSAL_RAISED_IN,
