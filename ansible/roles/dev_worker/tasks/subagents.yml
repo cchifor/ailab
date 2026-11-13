@@ -51,19 +51,19 @@
   loop_control:
     label: "{{ item.name }}"
 
-- name: Install the estate subagents
-  ansible.builtin.copy:
-    src: "subagents/{{ item.1 }}.md"
-    dest: "{{ item.0.home }}/.claude/agents/{{ item.1 }}.md"
-    owner: "{{ item.0.name }}"
-    group: "{{ item.0.name }}"
-    mode: "0644"
-  loop: "{{ dev_worker_users | product(dev_worker_claude_subagents) | list }}"
-  loop_control:
-    label: "{{ item.0.name }}: {{ item.1 }}"
-
+# Ownership is the marker, for replacing as much as for removing: an existing agent file WITHOUT the marker is
+# the user's own, even when it has an estate name, and blocks that estate agent for that user (review of #1745).
 # The same find-by-header pattern as the local-model Codex profiles (codex.yml). A missing directory is not an
 # error: find returns no files for it.
+- name: Find every subagent file per user
+  ansible.builtin.find:
+    paths: "{{ item.home }}/.claude/agents"
+    patterns: "*.md"
+  register: dev_worker_all_subagents
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: Find the managed subagent files per user
   ansible.builtin.find:
     paths: "{{ item.home }}/.claude/agents"
@@ -73,6 +73,35 @@
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
+
+- name: Note the user-owned agent files that hold an estate agent's name
+  ansible.builtin.set_fact:
+    dev_worker_unmanaged_subagent_paths: >-
+      {{ dev_worker_all_subagents.results | map(attribute='files') | flatten | map(attribute='path') | list
+         | difference(dev_worker_managed_subagents.results | map(attribute='files') | flatten
+                      | map(attribute='path') | list) }}
+
+- name: Install the estate subagents (not over a user's own file of the same name)
+  ansible.builtin.copy:
+    src: "subagents/{{ item.1 }}.md"
+    dest: "{{ item.0.home }}/.claude/agents/{{ item.1 }}.md"
+    owner: "{{ item.0.name }}"
+    group: "{{ item.0.name }}"
+    mode: "0644"
+  when: (item.0.home ~ '/.claude/agents/' ~ item.1 ~ '.md') not in dev_worker_unmanaged_subagent_paths
+  loop: "{{ dev_worker_users | product(dev_worker_claude_subagents) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"
+
+- name: Report estate agents blocked by a user's own file
+  ansible.builtin.debug:
+    msg: >-
+      NOT installed: {{ item.0.home }}/.claude/agents/{{ item.1 }}.md has no managed marker, so it is
+      {{ item.0.name }}'s own agent and stays. Rename it, or delete it to get the estate {{ item.1 }}.
+  when: (item.0.home ~ '/.claude/agents/' ~ item.1 ~ '.md') in dev_worker_unmanaged_subagent_paths
+  loop: "{{ dev_worker_users | product(dev_worker_claude_subagents) | list }}"
+  loop_control:
+    label: "{{ item.0.name }}: {{ item.1 }}"
 
 - name: Remove managed subagents that are no longer listed
   ansible.builtin.file:
@@ -234,6 +263,72 @@
   loop_control:
     label: "{{ item.name }}"
 
+# Ownership of the Codex scout role is its role file: ~/.codex/agents/scout.toml carrying the managed marker.
+# A user's own scout.toml (no marker), or an [agents.scout] table that exists without the managed file, is the
+# user's role: the role is then neither written nor removed for that user (review of #1745).
+- name: Find every Codex role file per user
+  ansible.builtin.find:
+    paths: "{{ item.home }}/.codex/agents"
+    patterns: "*.toml"
+  register: dev_worker_all_codex_roles
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Find the managed Codex role files per user
+  ansible.builtin.find:
+    paths: "{{ item.home }}/.codex/agents"
+    patterns: "*.toml"
+    contains: "# Managed by ansible \\(role: dev_worker, subagent routing\\)"
+  register: dev_worker_managed_codex_roles
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Note the managed and the user-owned Codex role files
+  ansible.builtin.set_fact:
+    dev_worker_managed_codex_role_paths: >-
+      {{ dev_worker_managed_codex_roles.results | map(attribute='files') | flatten | map(attribute='path') | list }}
+    dev_worker_unmanaged_codex_role_paths: >-
+      {{ dev_worker_all_codex_roles.results | map(attribute='files') | flatten | map(attribute='path') | list
+         | difference(dev_worker_managed_codex_roles.results | map(attribute='files') | flatten
+                      | map(attribute='path') | list) }}
+    dev_worker_codex_scout_table_homes: []
+
+- name: Read each user's Codex config.toml (scout role ownership)
+  ansible.builtin.slurp:
+    src: "{{ item.home }}/.codex/config.toml"
+  register: dev_worker_codex_config_text
+  failed_when: >-
+    dev_worker_codex_config_text is failed
+    and 'file not found' not in (dev_worker_codex_config_text.msg | default('') | lower)
+  when: dev_worker_codex_subagent_roles_enabled | bool
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Note the users whose Codex config already has an [agents.scout] table
+  ansible.builtin.set_fact:
+    dev_worker_codex_scout_table_homes: "{{ dev_worker_codex_scout_table_homes + [item.item.home] }}"
+  when: item.content is defined and (item.content | b64decode) is search('(?m)^\[agents\.scout\][ \t]*$')
+  loop: "{{ dev_worker_codex_config_text.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name | default('') }}"
+
+- name: Report a Codex scout role that is the user's own
+  ansible.builtin.debug:
+    msg: >-
+      NOT written: {{ item.name }} has their own Codex scout role ({{ item.home }}/.codex/agents/scout.toml
+      without the managed marker, or an [agents.scout] table without the managed file); it stays.
+  when: >-
+    (dev_worker_codex_subagent_roles_enabled | bool)
+    and ((item.home ~ '/.codex/agents/scout.toml') in dev_worker_unmanaged_codex_role_paths
+         or (item.home in dev_worker_codex_scout_table_homes
+             and (item.home ~ '/.codex/agents/scout.toml') not in dev_worker_managed_codex_role_paths))
+  loop: "{{ dev_worker_users }}"
+  loop_control:
+    label: "{{ item.name }}"
+
 - name: The Codex scout role's config file per user
   ansible.builtin.copy:
     dest: "{{ item.home }}/.codex/agents/scout.toml"
@@ -254,7 +349,11 @@
       no git command that changes state, no installs. When something is not found, say so and list where you
       searched. No analysis or recommendations beyond what identifies each hit.
       """
-  when: dev_worker_codex_subagent_roles_enabled | bool
+  when: >-
+    (dev_worker_codex_subagent_roles_enabled | bool)
+    and (item.home ~ '/.codex/agents/scout.toml') not in dev_worker_unmanaged_codex_role_paths
+    and (item.home not in dev_worker_codex_scout_table_homes
+         or (item.home ~ '/.codex/agents/scout.toml') in dev_worker_managed_codex_role_paths)
   loop: "{{ dev_worker_users }}"
   loop_control:
     label: "{{ item.name }}"
@@ -270,7 +369,11 @@
     owner: "{{ item.0.name }}"
     group: "{{ item.0.name }}"
     mode: "0600"
-  when: dev_worker_codex_subagent_roles_enabled | bool
+  when: >-
+    (dev_worker_codex_subagent_roles_enabled | bool)
+    and (item.0.home ~ '/.codex/agents/scout.toml') not in dev_worker_unmanaged_codex_role_paths
+    and (item.0.home not in dev_worker_codex_scout_table_homes
+         or (item.0.home ~ '/.codex/agents/scout.toml') in dev_worker_managed_codex_role_paths)
   loop: >-
     {{ dev_worker_users | product([
          {'key': 'description', 'value': 'Read-only search of code, config and log files: locations and short excerpts, never edits, never conclusions.'},
@@ -279,34 +382,26 @@
   loop_control:
     label: "{{ item.0.name }}: agents.scout.{{ item.1.key }}"
 
-- name: No Codex scout role while the roles are off
+# Off: the table goes only where this role registered it, i.e. where the managed scout.toml exists (the table
+# is removed before the file, so an interrupted run still finds the marker next time). A hand-written table
+# stays, whatever it points at.
+- name: No Codex scout role while the roles are off (only the one this role registered)
   community.general.ini_file:
     path: "{{ item.stat.path }}"
     section: agents.scout
     state: absent
-  when: not (dev_worker_codex_subagent_roles_enabled | bool)
+  when: >-
+    not (dev_worker_codex_subagent_roles_enabled | bool)
+    and ((item.stat.path | dirname) ~ '/agents/scout.toml') in dev_worker_managed_codex_role_paths
   loop: >-
     {{ dev_worker_codex_config_for_roles.results | default([]) | selectattr('stat', 'defined')
        | selectattr('stat.exists') | list }}
   loop_control:
     label: "{{ item.stat.path }}"
 
-- name: Find the managed Codex role files per user
-  ansible.builtin.find:
-    paths: "{{ item.home }}/.codex/agents"
-    patterns: "*.toml"
-    contains: "# Managed by ansible \\(role: dev_worker, subagent routing\\)"
-  register: dev_worker_managed_codex_roles
-  when: not (dev_worker_codex_subagent_roles_enabled | bool)
-  loop: "{{ dev_worker_users }}"
-  loop_control:
-    label: "{{ item.name }}"
-
 - name: Remove the managed Codex role files while the roles are off
   ansible.builtin.file:
-    path: "{{ item.path }}"
+    path: "{{ item }}"
     state: absent
   when: not (dev_worker_codex_subagent_roles_enabled | bool)
-  loop: "{{ dev_worker_managed_codex_roles.results | default([]) | selectattr('files', 'defined') | map(attribute='files') | flatten }}"
-  loop_control:
-    label: "{{ item.path }}"
+  loop: "{{ dev_worker_managed_codex_role_paths }}"

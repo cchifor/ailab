@@ -8,6 +8,9 @@
 #      valid; the managed marker present; scout carries only read-only tools (no Bash, Edit, Write, NotebookEdit);
 #   2. a converge installs both agents, the report and both policy blocks; a user's own agent, the openbao block,
 #      the operator's notes and a hand-set Codex [agents] key are untouched; no Codex role while roles are off;
+#      COLLISIONS (review of #1745): tester2's own scout.md (no marker), own Codex scout.toml and [agents.scout]
+#      table, and tester3's hand-written [agents.scout] table (no role file) survive every run below, roles on
+#      and off, and each blocked install is reported;
 #   3. the second run reports changed=0;
 #   4. dropping bulk-worker removes only bulk-worker.md; [] removes both; the user's own agent survives;
 #   5. the policy off removes both blocks and leaves the openbao block byte-identical;
@@ -31,6 +34,8 @@ fails=0
 ok() { echo "  PASS: $1"; }
 bad() { echo "  FAIL: $1"; fails=$((fails + 1)); [ -z "${2:-}" ] || printf '    %s\n' "$2"; }
 H="$T/home"
+H2="$T/home2" # collisions: an own scout.md, an own Codex scout.toml + [agents.scout]
+H3="$T/home3" # collision: a hand-written [agents.scout] table pointing at another role file
 
 # ---- 1. the agent definitions -------------------------------------------------------------------------------
 out="$(python3 - "$ROLE/files/subagents" <<'PY'
@@ -87,7 +92,7 @@ cat >"$T/play.yml" <<EOF
   connection: local
   gather_facts: false
   vars:
-    dev_worker_users: [{name: tester, home: "$H"}]
+    dev_worker_users: [{name: tester, home: "$H"}, {name: tester2, home: "$H2"}, {name: tester3, home: "$H3"}]
     dev_worker_agent_usage_report_path: "$T/bin/agent-usage-report"
     # The role defaults keep the fleet off while the canary runs; this play is the canary's settings.
     dev_worker_claude_subagents: [scout, bulk-worker]
@@ -109,6 +114,34 @@ block "$H/.claude/CLAUDE.md" "openbao credentials" >"$T/openbao.orig"
 printf '%s\n' '# codex notes' >"$H/.codex/AGENTS.md"
 printf '%s\n' 'model = "gpt-6-astra"' '' '[features]' 'api_key_model_discovery = false' '' '[agents]' \
 	'default_subagent_model = "hand-set"' >"$H/.codex/config.toml"
+mkdir -p "$H2/.claude/agents" "$H2/.codex/agents" "$H3/.codex"
+printf '%s\n' '---' 'name: scout' 'description: tester2s own scout' 'model: opus' '---' 'Mine.' >"$H2/.claude/agents/scout.md"
+printf '%s\n' 'model_reasoning_effort = "medium"' 'developer_instructions = "mine"' >"$H2/.codex/agents/scout.toml"
+printf '%s\n' 'model = "gpt-6-astra"' '' '[agents.scout]' 'description = "my own scout"' 'config_file = "agents/scout.toml"' \
+	>"$H2/.codex/config.toml"
+printf '%s\n' '[agents.scout]' 'description = "hand-registered"' 'config_file = "roles/my-scout.toml"' >"$H3/.codex/config.toml"
+mkdir -p "$T/orig2" "$T/orig3"
+cp "$H2/.claude/agents/scout.md" "$H2/.codex/agents/scout.toml" "$H2/.codex/config.toml" "$T/orig2/"
+cp "$H3/.codex/config.toml" "$T/orig3/"
+# collisions: prints "ok" when every user-owned piece is as it was ([agents.scout] compared as TOML: a managed
+# [agents] default may come and go around it).
+collisions() {
+	python3 - "$H2" "$H3" "$T/orig2" "$T/orig3" <<'PY'
+import filecmp, sys, tomllib
+h2, h3, o2, o3 = sys.argv[1:]
+bad = []
+if not filecmp.cmp(f"{o2}/scout.md", f"{h2}/.claude/agents/scout.md", shallow=False):
+    bad.append("tester2 scout.md")
+if not filecmp.cmp(f"{o2}/scout.toml", f"{h2}/.codex/agents/scout.toml", shallow=False):
+    bad.append("tester2 scout.toml")
+for name, orig, cur in (("tester2", f"{o2}/config.toml", f"{h2}/.codex/config.toml"), ("tester3", f"{o3}/config.toml", f"{h3}/.codex/config.toml")):
+    want = tomllib.load(open(orig, "rb"))["agents"]["scout"]
+    got = tomllib.load(open(cur, "rb")).get("agents", {}).get("scout")
+    if got != want:
+        bad.append(f"{name} [agents.scout] = {got}")
+print("ok" if not bad else "changed: " + ", ".join(bad))
+PY
+}
 
 # ---- 2. first converge ---------------------------------------------------------------------------------------
 out="$(run)"; rc=$?
@@ -120,6 +153,13 @@ else
 	bad "estate agents missing or different" "$(ls -la "$H/.claude/agents" 2>&1)"
 fi
 cmp -s "$T/mine.orig" "$H/.claude/agents/mine.md" && ok "the user's own agent is untouched" || bad "mine.md changed or removed"
+c="$(collisions)"
+if [ "$c" = ok ] && cmp -s "$ROLE/files/subagents/bulk-worker.md" "$H2/.claude/agents/bulk-worker.md" &&
+	grep -q "NOT installed: $H2/.claude/agents/scout.md" <<<"$out"; then
+	ok "collision: tester2's own scout.md stays (reported), bulk-worker installed; own Codex roles untouched"
+else
+	bad "collision on first converge: $c" "$(grep -n 'NOT installed' <<<"$out")"
+fi
 [ -x "$T/bin/agent-usage-report" ] && ok "agent-usage-report installed, executable" || bad "agent-usage-report not installed"
 n1="$(grep -c 'BEGIN ANSIBLE MANAGED - delegation policy' "$H/.claude/CLAUDE.md")"
 n2="$(grep -c 'BEGIN ANSIBLE MANAGED - delegation policy' "$H/.codex/AGENTS.md")"
@@ -152,6 +192,9 @@ out="$(run -e '{"dev_worker_claude_subagents": []}')"; rc=$?
 left="$(ls -A "$H/.claude/agents" | tr '\n' ' ')"
 [ "$rc" -eq 0 ] && [ "$left" = "mine.md " ] && ok "[] removes both estate agents; the user's own agent survives" ||
 	bad "[] left: $left (rc=$rc)" "$out"
+left2="$(ls -A "$H2/.claude/agents" | tr '\n' ' ')"
+[ "$left2" = "scout.md " ] && [ "$(collisions)" = ok ] && ok "[]: tester2's own scout.md survives, its estate bulk-worker goes" ||
+	bad "[] for tester2 left: $left2; $(collisions)"
 
 # ---- 5. the policy off ---------------------------------------------------------------------------------------
 out="$(run -e '{"dev_worker_delegation_policy_enabled": false}')"; rc=$?
@@ -180,6 +223,12 @@ if [ "$rc" -eq 0 ] && [ "$cfg" = "hand-set ['default_subagent_model'] agents/sco
 else
 	bad "roles on (rc=$rc): $cfg" "$out"
 fi
+c="$(collisions)"
+if [ "$c" = ok ] && grep -q 'NOT written: tester2' <<<"$out" && grep -q 'NOT written: tester3' <<<"$out"; then
+	ok "roles on: tester2's own scout role and tester3's hand-written table are kept and reported"
+else
+	bad "roles on overwrote a user's Codex scout role: $c" "$(grep -n 'NOT written' <<<"$out")"
+fi
 out="$(run -e '{"dev_worker_codex_subagent_roles_enabled": true, "dev_worker_codex_subagent_reasoning_effort": "low"}')"; rc=$?
 out="$(run -e '{"dev_worker_codex_subagent_roles_enabled": false, "dev_worker_codex_subagent_reasoning_effort": "low"}')"; rc2=$?
 cfg="$(python3 -c 'import sys, tomllib; a = tomllib.load(open(sys.argv[1], "rb")).get("agents", {}); print(sorted(a), a.get("default_subagent_model"))' "$H/.codex/config.toml" 2>&1)"
@@ -188,6 +237,8 @@ if [ "$rc" -eq 0 ] && [ "$rc2" -eq 0 ] && [ "$cfg" = "['default_subagent_model']
 else
 	bad "roles off after on (rc=$rc/$rc2): $cfg" "$out"
 fi
+c="$(collisions)"
+[ "$c" = ok ] && ok "roles off: the users' own [agents.scout] tables and role file survive" || bad "roles off removed a user's Codex scout role: $c"
 
 # ---- 7. no fleet-wide subagent model (plan D3) ---------------------------------------------------------------
 # Comment lines may name it (to say it is not set); any other line is a setting.
