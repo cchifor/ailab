@@ -120,6 +120,12 @@ printf '%s\n' 'model_reasoning_effort = "medium"' 'developer_instructions = "min
 printf '%s\n' 'model = "gpt-6-astra"' '' '[agents.scout]' 'description = "my own scout"' 'config_file = "agents/scout.toml"' \
 	>"$H2/.codex/config.toml"
 printf '%s\n' '[agents.scout]' 'description = "hand-registered"' 'config_file = "roles/my-scout.toml"' >"$H3/.codex/config.toml"
+# tester3 keeps bulk-worker.md as a symlink into a dotfiles repo: a link is always the user's (find sees regular
+# files only for the marker), so neither the link nor its target may be replaced.
+mkdir -p "$H3/dotfiles" "$H3/.claude/agents" "$T/orig3"
+printf '%s\n' '---' 'name: bulk-worker' 'description: tester3s own' 'model: sonnet' '---' 'Mine.' >"$H3/dotfiles/bulk-worker.md"
+ln -s ../../dotfiles/bulk-worker.md "$H3/.claude/agents/bulk-worker.md"
+cp "$H3/dotfiles/bulk-worker.md" "$T/orig3/bulk-worker.target"
 mkdir -p "$T/orig2" "$T/orig3"
 cp "$H2/.claude/agents/scout.md" "$H2/.codex/agents/scout.toml" "$H2/.codex/config.toml" "$T/orig2/"
 cp "$H3/.codex/config.toml" "$T/orig3/"
@@ -127,7 +133,7 @@ cp "$H3/.codex/config.toml" "$T/orig3/"
 # [agents] default may come and go around it).
 collisions() {
 	python3 - "$H2" "$H3" "$T/orig2" "$T/orig3" <<'PY'
-import filecmp, sys, tomllib
+import filecmp, os, sys, tomllib
 h2, h3, o2, o3 = sys.argv[1:]
 bad = []
 if not filecmp.cmp(f"{o2}/scout.md", f"{h2}/.claude/agents/scout.md", shallow=False):
@@ -139,6 +145,11 @@ for name, orig, cur in (("tester2", f"{o2}/config.toml", f"{h2}/.codex/config.to
     got = tomllib.load(open(cur, "rb")).get("agents", {}).get("scout")
     if got != want:
         bad.append(f"{name} [agents.scout] = {got}")
+link = f"{h3}/.claude/agents/bulk-worker.md"
+if not os.path.islink(link) or os.readlink(link) != "../../dotfiles/bulk-worker.md":
+    bad.append("tester3 bulk-worker.md symlink")
+if not filecmp.cmp(f"{o3}/bulk-worker.target", f"{h3}/dotfiles/bulk-worker.md", shallow=False):
+    bad.append("tester3 symlink target")
 print("ok" if not bad else "changed: " + ", ".join(bad))
 PY
 }
@@ -159,6 +170,12 @@ if [ "$c" = ok ] && cmp -s "$ROLE/files/subagents/bulk-worker.md" "$H2/.claude/a
 	ok "collision: tester2's own scout.md stays (reported), bulk-worker installed; own Codex roles untouched"
 else
 	bad "collision on first converge: $c" "$(grep -n 'NOT installed' <<<"$out")"
+fi
+if cmp -s "$ROLE/files/subagents/scout.md" "$H3/.claude/agents/scout.md" &&
+	grep -q "NOT installed: $H3/.claude/agents/bulk-worker.md" <<<"$out"; then
+	ok "collision: tester3's symlinked bulk-worker.md and its target stay (reported); scout installed"
+else
+	bad "symlink collision on first converge" "$(ls -la "$H3/.claude/agents" 2>&1)"
 fi
 [ -x "$T/bin/agent-usage-report" ] && ok "agent-usage-report installed, executable" || bad "agent-usage-report not installed"
 n1="$(grep -c 'BEGIN ANSIBLE MANAGED - delegation policy' "$H/.claude/CLAUDE.md")"

@@ -54,11 +54,13 @@
 # Ownership is the marker, for replacing as much as for removing: an existing agent file WITHOUT the marker is
 # the user's own, even when it has an estate name, and blocks that estate agent for that user (review of #1745).
 # The same find-by-header pattern as the local-model Codex profiles (codex.yml). A missing directory is not an
-# error: find returns no files for it.
+# error: find returns no files for it. `file_type: any` so a symlink (a user's agent kept in a dotfiles repo) counts
+# as an existing file; the managed find below sees regular files only, so a link is always the user's.
 - name: Find every subagent file per user
   ansible.builtin.find:
     paths: "{{ item.home }}/.claude/agents"
     patterns: "*.md"
+    file_type: any
   register: dev_worker_all_subagents
   loop: "{{ dev_worker_users }}"
   loop_control:
@@ -270,6 +272,7 @@
   ansible.builtin.find:
     paths: "{{ item.home }}/.codex/agents"
     patterns: "*.toml"
+    file_type: any # a symlinked role file is the user's too
   register: dev_worker_all_codex_roles
   loop: "{{ dev_worker_users }}"
   loop_control:
