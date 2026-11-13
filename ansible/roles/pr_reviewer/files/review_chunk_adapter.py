@@ -4,6 +4,7 @@ There is no legacy-clean fallback. Both services must independently advertise th
 implementation/snapshot before either service runs a part or publishes an approval.
 """
 import base64
+import hashlib
 import json
 import os
 import re
@@ -20,6 +21,12 @@ from pathlib import Path
 import review_chunks as chunks
 
 MARKER = re.compile(r"<!-- review-bot:chunks:v1 ([A-Za-z0-9_-]+) -->")
+
+
+def persona_id(kind):
+    """The neutral id a chunk marker carries for a persona kind: the same as reviewbot.persona_id (a test pins
+    that), so no agent or model name sits in a hidden marker. The kind is read from the posting account."""
+    return "r-" + hashlib.sha256(kind.encode()).hexdigest()[:8]
 
 
 def enabled(bot, repo):
@@ -97,10 +104,14 @@ def marker(review, value):
         doc = json.loads(base64.urlsafe_b64decode(token + "=" * (-len(token) % 4)))
     except (ValueError, UnicodeError):
         return None
+    # The kind comes from the posting account; the document names that kind's neutral id (persona_id, since
+    # 2026-11-13: no agent or model name in a hidden marker) or, in an older review, the kind itself.
+    login = (review.get("user") or {}).get("login") or ""
+    kind = login[len("reviewer-"):] if login.startswith("reviewer-") else ""
     if (not isinstance(doc, dict) or doc.get("binding") != value
-            or (review.get("user") or {}).get("login") != "reviewer-" + str(doc.get("persona"))
+            or kind not in ("claude", "codex")
+            or doc.get("persona") not in (kind, persona_id(kind))
             or review.get("commit_id") != value["head_sha"]
-            or doc.get("persona") not in ("claude", "codex")
             or doc.get("stage") not in ("ready", "final")
             or not chunks.DIGEST.fullmatch(str(doc.get("snapshot", "")))
             or not chunks.SHA.fullmatch(str(doc.get("merge_base", "")))
@@ -112,7 +123,7 @@ def marker(review, value):
                                      or type(doc.get("files")) is not int or doc["files"] < 1
                                      or (doc["verdict"] == "clean" and review.get("state") != "APPROVED")):
         return None
-    return doc
+    return dict(doc, persona=kind)
 
 
 def latest(bot, value):
@@ -340,7 +351,7 @@ def _post(bot, job_id, plan, stage, body, comments, aggregate=None):
     if mine and mine[1]["snapshot"] == plan["id"] and mine[1]["stage"] == stage:
         return ("done" if stage == "final" else "waiting", mine[0]["id"], "chunk marker already present")
     doc = dict(binding=value, snapshot=plan["id"], merge_base=plan["merge_base"],
-               raw_sha256=plan["raw_sha256"], persona=bot.CFG["persona"], stage=stage)
+               raw_sha256=plan["raw_sha256"], persona=persona_id(bot.CFG["persona"]), stage=stage)
     if aggregate:
         doc.update(verdict=aggregate["verdict"], complete=True,
                    parts=aggregate["parts"], files=aggregate["files"])

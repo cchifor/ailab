@@ -18,6 +18,7 @@ import base64
 import copy
 import importlib
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -71,6 +72,11 @@ BASE_CFG = {
     "max_timeout_attempts": 2,
     "reconcile_s": 300,
 }
+
+
+def pid(kind):
+    """The neutral marker id for a persona kind, pinned here independently of reviewbot.persona_id."""
+    return "r-" + hashlib.sha256(kind.encode()).hexdigest()[:8]
 
 
 def load(tmp, **overrides):
@@ -2099,7 +2105,7 @@ class SizeCapTest(unittest.TestCase):
         self.assertEqual(body["comments"], [])
         self.assertIn(f"{len(raw):,} bytes", body["body"])
         self.assertIn("over the size cap", body["body"])
-        self.assertIn(f"<!-- review-bot:v1 persona=test head={head} verdict=skipped -->",
+        self.assertIn(f"<!-- review-bot:v1 persona={pid('test')} head={head} verdict=skipped -->",
                       body["body"])
         # The marker the skip carries is credible from the persona's own account and
         # reads back as a non-clean verdict, which is what keeps the automerge lane shut.
@@ -6249,7 +6255,12 @@ class ReviewInstanceLineTest(unittest.TestCase):
         self.head = "a" * 40
 
     def canon(self, verdict, persona="test"):
+        """The marker as reviews before 2026-11-13 carry it: the persona kind itself."""
         return f"<!-- review-bot:v1 persona={persona} head={self.head} verdict={verdict} -->"
+
+    def canon_id(self, verdict, persona="test"):
+        """The marker this bot writes since 2026-11-13: the neutral id, no agent or model name."""
+        return f"<!-- review-bot:v1 persona={pid(persona)} head={self.head} verdict={verdict} -->"
 
     def test_the_canonical_marker_is_byte_identical_and_last(self):
         for verdict in ("clean", "findings", "partial", "skipped"):
@@ -6257,9 +6268,9 @@ class ReviewInstanceLineTest(unittest.TestCase):
                 out = self.m.review_marker(self.head, verdict)
                 self.assertEqual(out.splitlines(),
                                  [f"<!-- review-bot-instance: {self.m.INSTANCE} -->",
-                                  self.canon(verdict)])
+                                  self.canon_id(verdict)])
                 self.assertEqual([x.group(0) for x in self.m.MARKER_RE.finditer(out)],
-                                 [self.canon(verdict)])
+                                 [self.canon_id(verdict)])
 
     def test_recognition_is_identical_with_and_without_the_line(self):
         for verdict in ("clean", "findings", "partial", "skipped"):
@@ -6287,7 +6298,7 @@ class ReviewInstanceLineTest(unittest.TestCase):
     def test_every_writer_puts_the_line_directly_before_the_marker(self):
         body = self.m.skip_body(self.head, 123456)
         self.assertTrue(body.endswith(f"<!-- review-bot-instance: {self.m.INSTANCE} -->\n"
-                                      + self.canon("skipped")), body[-200:])
+                                      + self.canon_id("skipped")), body[-200:])
 
     def test_the_approval_upgrade_carries_the_line_too(self):
         """maybe_merge's 405 path posts its own APPROVED review - the third marker writer."""
@@ -6321,7 +6332,7 @@ class ReviewInstanceLineTest(unittest.TestCase):
         self.assertEqual(2, len(merges))
         self.assertEqual(1, len(posted))
         self.assertTrue(posted[0]["body"].endswith(
-            f"<!-- review-bot-instance: {m.INSTANCE} -->\n" + self.canon("clean")))
+            f"<!-- review-bot-instance: {m.INSTANCE} -->\n" + self.canon_id("clean")))
 
     def test_old_and_new_reviews_of_one_head_dedupe_as_one(self):
         """existing_marker (the pre-POST dedupe) and persona_verdicts (the merge gate) must treat
@@ -6329,7 +6340,7 @@ class ReviewInstanceLineTest(unittest.TestCase):
         old = {"id": 1, "body": "ok\n\n" + self.canon("clean"),
                "user": {"login": "reviewer-test"}}
         new_peer = {"id": 2, "body": "ok\n\n" + self.m.review_marker(self.head, "clean").replace(
-            "persona=test", "persona=codex"), "user": {"login": "reviewer-codex"}}
+            f"persona={pid('test')}", f"persona={pid('codex')}"), "user": {"login": "reviewer-codex"}}
         new_mine = {"id": 3, "body": "ok\n\n" + self.m.review_marker(self.head, "findings"),
                     "user": {"login": "reviewer-test"}}
         for reviews, want_id, want in (
@@ -6340,6 +6351,30 @@ class ReviewInstanceLineTest(unittest.TestCase):
                 self.m.api = lambda path, *a, _r=reviews, **k: _r if "page=1" in path else []
                 self.assertEqual(want_id, self.m.existing_marker("o/r", 7, self.head))
                 self.assertEqual(want, self.m.persona_verdicts("o/r", 7, self.head))
+
+    def test_the_marker_names_no_agent_or_model(self):
+        """Owner, 2026-11-13: no agent or model name in a hidden marker; the account is the attribution."""
+        self.assertEqual("r-c857d09d", self.m.persona_id("claude"))
+        self.assertEqual("r-57de4cf4", self.m.persona_id("codex"))
+        for kind in ("claude", "codex", "test"):
+            self.assertEqual(pid(kind), self.m.persona_id(kind))
+        for verdict in ("clean", "findings", "partial", "skipped"):
+            out = self.m.review_marker(self.head, verdict)
+            self.assertNotIn("persona=test", out)
+            self.assertIn(f"persona={pid('test')} ", out)
+
+    def test_old_and_new_markers_read_as_the_kind_and_a_copied_id_does_not_count(self):
+        for body in (self.canon("clean"), self.canon_id("clean")):
+            with self.subTest(body=body[:40]):
+                m = self.m.marker_of({"body": "x\n\n" + body, "user": {"login": "reviewer-test"}})
+                self.assertEqual(("test", self.head, "clean"), m.groups())
+                self.assertEqual("test", m.group(1))
+        # the other persona's id (or kind), posted by this account, is not this persona's verdict
+        for other in (self.canon("clean", "codex"), self.canon_id("clean", "codex")):
+            with self.subTest(other=other[:40]):
+                self.assertIsNone(self.m.marker_of({"body": other, "user": {"login": "reviewer-test"}}))
+        # and a marker from an account that is not a reviewer counts for nobody
+        self.assertIsNone(self.m.marker_of({"body": self.canon_id("clean"), "user": {"login": "someone"}}))
 
     def test_a_hostname_cannot_close_the_comment_or_spell_a_marker(self):
         for host, want in (
