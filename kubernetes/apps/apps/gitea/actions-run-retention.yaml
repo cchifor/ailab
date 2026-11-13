@@ -97,7 +97,7 @@ spec:
             seccompProfile: { type: RuntimeDefault }
           containers:
             - name: retention
-              image: docker.io/alpine/k8s:1.34.13@sha256:dea899fe8ac3fa25bcf8a9c7e1dee4caad82ef18e84922a3b159dedc9cabee9f
+              image: docker.io/alpine/k8s:1.34.13@sha256:4011c68d73de6803987509ad1ab9520124a27e31484e3f0e45f95a74ecac7a45
               imagePullPolicy: IfNotPresent
               resources:
                 requests: { cpu: 50m, memory: 64Mi }
