@@ -157,6 +157,20 @@ class InclusionGate(unittest.TestCase):
             self.assertTrue({"relay-router-connection", "relay-worker-profiles"} <= comps,
                             "the control plane comes with the Router connection, last (step H6)")
 
+    def test_control_plane_never_brings_environments_gitea_or_notifications(self):
+        # Owner decision G2 (relay#277 comment 122379): RELAY_AGENT_CONTROL_PLANE with its full scope,
+        # but the environments, Gitea authority and notification components stay out.
+        comps = relay_components()
+        if not any(c.rsplit("/", 1)[-1] == "relay-agent-control-plane" for c in comps):
+            return
+        for c in comps:
+            self.assertNotIn("relay-gitea-authority", c)
+            self.assertNotIn("relay-notifications", c)
+        for path in (ROOT / "kubernetes/apps/apps/relay").rglob("*.yaml"):
+            self.assertNotIn("RELAY_ENVIRONMENTS", path.read_text(encoding="utf-8"), path)
+        patch = (COMPONENTS / "relay-agent-control-plane/deployment.yaml").read_text(encoding="utf-8")
+        self.assertNotIn("RELAY_ENVIRONMENTS", patch)
+
 
 class InstallationStage(unittest.TestCase):
     """The objects equal what Relay's prepare-pod-installation.ts renders from the template."""
@@ -257,6 +271,31 @@ class InstallationStage(unittest.TestCase):
             self.assertEqual(net.prefixlen, 32, cidr)
             self.assertTrue(net.is_global, f"{cidr} is not a public address")
             self.assertNotIn("except", edge["to"][cidrs.index(cidr)]["ipBlock"])
+
+    def test_cloudflare_allow_list_is_marked_enrollment_stage_only(self):
+        # Owner decision G3: qualification moves to internal TLS terminators (pending series).
+        text = (TREE / "installation/execution-egress.yaml").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("# ENROLLMENT-STAGE ONLY."), "the header must say so first")
+
+    def test_ceilings_admit_relay_researcher_baseline(self):
+        # Relay packages/infrastructure-protocol/baselines.ts ROLE_BASELINES.researcher, which the
+        # sealed researcher template is built from (owner decision G4). Relay's templatePolicyViolations
+        # refuses resources above the ceiling, a lease above maxLeaseSeconds, a lifetime above
+        # maxLifetimeSeconds and egress slugs outside allowedEgressDestinations.
+        baseline = {"resources": {"milliCpu": 1000, "memoryMiB": 2048, "scratchMiB": 4096, "retainedGiB": 0,
+                                  "cacheGiB": 0, "maxProcesses": 512},
+                    "leaseSeconds": 900, "maxLifetimeSeconds": 8 * 3600, "idleStopSeconds": 1800,
+                    "egressDestinations": []}
+        policy = self.d["installationPolicy"]
+        self.assertEqual(policy["resourceCeiling"], {"milliCpu": 2000, "memoryMiB": 4096, "scratchMiB": 10240,
+                                                     "retainedGiB": 0, "cacheGiB": 0, "maxProcesses": 512})
+        self.assertEqual((policy["maxLeaseSeconds"], policy["maxLifetimeSeconds"]), (900, 28800))
+        self.assertEqual(policy["allowedEgressDestinations"], [])
+        for key, value in baseline["resources"].items():
+            self.assertLessEqual(value, policy["resourceCeiling"][key], key)
+        self.assertLessEqual(baseline["leaseSeconds"], policy["maxLeaseSeconds"])
+        self.assertLessEqual(baseline["maxLifetimeSeconds"], policy["maxLifetimeSeconds"])
+        self.assertLessEqual(set(baseline["egressDestinations"]), set(policy["allowedEgressDestinations"]))
 
     def test_egress_artifact_digest(self):
         egress = self.objects[("NetworkPolicy", SLOT, "relay-researcher-egress")]

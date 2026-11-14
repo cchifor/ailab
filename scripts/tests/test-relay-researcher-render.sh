@@ -15,7 +15,8 @@
 #     current Relay Deployment and changes nothing but the relay container's env, mounts and added
 #     volumes plus its own generated ConfigMap;
 #   * the whole H3-H6 set together (those five plus relay-router-connection, relay-control-monitoring
-#     and relay-worker-monitoring) builds with no env, volume or mount collision.
+#     and relay-worker-monitoring) builds with no env, volume or mount collision, and still sets no
+#     RELAY_ENVIRONMENTS, Gitea issuer or notification file (owner decision G2).
 # Requires docker. Exit non-zero on the first broken expectation.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -179,6 +180,9 @@ for n in ("RELAY_INFRASTRUCTURE_INSTALLATIONS", "RELAY_RECOVERY_GENERATION_FILE"
           "RELAY_WORKER_BUDGET_DSN_FILE", "RELAY_ROUTER_CONNECTIONS_FILE", "RELAY_AGENT_CONTROL_PLANE",
           "RELAY_CONTROL_METRICS_FILE", "RELAY_AGENT_COMMUNICATION"):
     assert n in names, f"all: {n} missing"
+# Owner decision G2: the control plane comes without environments, Gitea issuers or notifications.
+for n in ("RELAY_ENVIRONMENTS", "RELAY_GITEA_ISSUERS_FILE", "RELAY_NOTIFICATION_DESTINATIONS_FILE"):
+    assert n not in names, f"all: {n} must stay unset with the control plane"
 vnames = [v["name"] for v in allr["volumes"]]
 assert len(vnames) == len(set(vnames)), f"volume collision {vnames}"
 paths = [m["mountPath"] for m in c["volumeMounts"]]

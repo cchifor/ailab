@@ -1,3 +1,13 @@
+# ENROLLMENT-STAGE ONLY. Owner decision relay#277 comment 122379 (G3): this Cloudflare rule serves
+# enrollment and nothing after it. No qualification scenario runs against it, because the hub-only
+# partition evidence cannot be waived and cannot be measured here (rule 1 below). Before qualification
+# a separate, pending ailab PR series replaces this policy: workers keep the public names, resolved
+# through measured hostAliases to two distinct in-cluster TLS terminators (ailab-ca certificates for
+# relay.chifor.me and router.chifor.me; ailab-ca becomes the CA the runtime, the holder's Router
+# client and the inference proxy trust; the terminators overwrite client-address headers), with two
+# separate 443 rules (hub, Router) and no DNS rule once hostAliases covers both names. That is a new
+# policy digest and a new definition, reviewed then.
+#
 # The execution slot's ONLY egress allowance: the reviewed external CNI artifact that Relay's
 # installation definition names in executionEgressArtifacts (namespace relay-researcher-1, name
 # relay-researcher-egress, sha256 = Relay's candidateMeasurementDigest of this object, recorded in
@@ -23,7 +33,8 @@
 # worker CLOSED (refused), never open; re-read both names before every rollout (runbook step I5).
 #
 # Kubernetes unions allowances: the qualification drivers refuse a slot with any NetworkPolicy beyond
-# relay-default-deny and this one. Add nothing else to relay-researcher-1.
+# relay-default-deny and the one egress policy. Add nothing else to relay-researcher-1; the
+# qualification-stage policy replaces this one rather than joining it.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

@@ -81,10 +81,12 @@ when they exist; do not fill in or infer pins from the feasibility spike:
    qualification evidence.
 
 Steps 2 and 3, and the hub half of step 4, are expanded into exact settings, order, readbacks and
-rollback in [relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md). Its decision G1 matters
-for step 3: on current Relay source the only way to create the first generation is the full restore
-fence, which retires every live connector, agent key and channel membership. The installation for
-step 4 (namespaces, containment, egress allow-list, deny gate, agent, trust bundle) is staged, inert,
+rollback in [relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md). For step 3 the owner
+decided (relay#277 comment 122379, G1) that the first generation comes from a one-shot
+`recovery:initialize` command in the pinned release (a Relay PR, pending), with a receipt of
+`kind: "initial"`, never from `recovery:fence`, which would retire every live connector, agent key and
+channel membership; every restore still uses the fence. The installation for step 4 (namespaces,
+containment, the enrollment-stage egress allow-list, deny gate, agent, trust bundle) is staged, inert,
 in `kubernetes/apps/relay-researcher` with [relay-researcher-installation.md](relay-researcher-installation.md).
 Both are source only; the owner confirmation below still applies to every step.
 

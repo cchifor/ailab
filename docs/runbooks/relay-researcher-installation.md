@@ -66,34 +66,54 @@ no capabilities, projected 3600 s token) and the `relay-researcher-installation`
 Quota, limits and the RBAC are the enrollment state. Opening the slot is a later, separately reviewed
 activation (see "Beyond enrollment").
 
-### Egress: what this allows and what it cannot separate
+### Egress: enrollment stage only
 
-The slot's only allowance: DNS to the CoreDNS pods (UDP/TCP 53), and TCP 443 to `104.21.86.245/32`
-and `172.67.138.98/32`. `relay.chifor.me` and `router.chifor.me` are Cloudflare-proxied and resolve
-to exactly those two addresses (read through 1.1.1.1 on 2026-11-14; CoreDNS forwards Pods to the
-public resolvers, so Pods see the same answer). Everything else is denied: the LAN `192.168.0.0/23`,
-every node address, the API server, the `cloud-power` WoL listener, the NAS `10.55.0.254`, the metadata
-address and every other namespace. The policy's measured digest,
+**This allow-list serves enrollment and nothing after it** (owner decision G3, relay#277 comment
+122379). Enrollment needs only the agent's own egress (control namespace) and a slot that admits no
+Pod. No qualification scenario runs against this policy.
+
+The slot's enrollment-stage allowance: DNS to the CoreDNS pods (UDP/TCP 53), and TCP 443 to
+`104.21.86.245/32` and `172.67.138.98/32`. `relay.chifor.me` and `router.chifor.me` are
+Cloudflare-proxied and resolve to exactly those two addresses (read through 1.1.1.1 on 2026-11-14;
+CoreDNS forwards Pods to the public resolvers, so Pods see the same answer). Everything else is
+denied: the LAN `192.168.0.0/23`, every node address, the API server, the `cloud-power` WoL listener,
+the NAS `10.55.0.254`, the metadata address and every other namespace. The policy's measured digest,
 `aa11c2299af12acc886696480b5800ac0b568a0b6e2813609d4ed2f7eea38405`
 (Relay `candidateMeasurementDigest(candidateNetworkPolicy(...))`), is the definition's
-`executionEgressArtifacts[0].sha256` and what the qualification drivers pin.
+`executionEgressArtifacts[0].sha256`.
 
-Three limits, stated rather than hidden:
+Why it cannot carry qualification:
 
-1. **One rule reaches both the hub and the Router.** They share both addresses, so a NetworkPolicy
-   cannot cut one without the other. The hub-partition drill
-   (`researcher-hub-partition-observation`) removes one egress rule by index: for this slot the
-   operator's reviewed declaration must say that rule 1 is hub **and** Router, so the drill measures a
-   partition from both. A hub-only partition is not measurable on this path.
-2. **The two addresses are Cloudflare anycast, shared with other Cloudflare customers.** A worker can
-   open TLS to them with another SNI. Relay's and the Router's own authentication bound what it can
-   do on ours; nothing at layer 3 bounds which Cloudflare-fronted zone it reaches through them. An
-   FQDN or SNI rule would need a CiliumNetworkPolicy, which the drivers do not measure (they refuse any
-   policy beyond the two pinned NetworkPolicies and reason only about those).
+1. **One rule reaches both the hub and the Router.** They share both addresses, so no NetworkPolicy
+   can cut one without the other, and the hub-only partition evidence
+   (`researcher-hub-partition-observation`) cannot be waived.
+2. **The two addresses are Cloudflare anycast, shared with other Cloudflare customers**, so a worker
+   could open TLS to another zone through them.
 3. **DNS goes to the public resolvers through CoreDNS**, so queries themselves can carry data out.
 
-A Cloudflare address change breaks the worker **closed**: re-read both names before each inclusion PR
-(step I5) and treat a change as a policy change (new digest, new definition, re-review).
+**Qualification stage (pending, a separate ailab PR series with its Relay part in the pinned
+release).** Workers keep the public names `https://relay.chifor.me` and `https://router.chifor.me`,
+resolved through measured `hostAliases` to two distinct in-cluster TLS terminators. Their
+certificates for the public names come from `ailab-ca`, which becomes the CA the runtime, the holder's
+Router client and the inference proxy trust; the terminators overwrite client-address headers. The
+slot's egress policy then has two separate 443 rules (hub, Router) and no DNS rule once `hostAliases`
+covers both names. It **replaces** `relay-researcher-egress` (the drivers refuse a third policy):
+a new measured digest, a new definition and a re-run of step I4's check, reviewed in that series.
+
+A Cloudflare address change breaks the enrollment-stage slot **closed**: re-read both names before
+each inclusion PR (step I5) and treat a change as a policy change (new digest, new definition,
+re-review).
+
+### Template and ceilings
+
+The researcher template is Relay's `ROLE_BASELINES.researcher`
+(`packages/infrastructure-protocol/baselines.ts`): 1000m CPU, 2048 MiB memory, 4096 MiB scratch, 512
+processes, lease 900 s, lifetime 8 h, idle stop 1800 s, no egress destination slugs. The
+installation's ceilings (owner decision G4) sit above it: 2000m / 4096 MiB / 10240 MiB scratch / 512
+processes, `maxLeaseSeconds` 900, `maxLifetimeSeconds` 28800, `allowedEgressDestinations: []`. A
+lease ceiling below the template's 900 s makes `prepare-pod-installation.ts` refuse the template; the
+test checks the baseline fits. The slot quota is the ceiling plus the gVisor overhead, so one worker
+of the baseline size uses about half of it. The canary has its own shorter deadline.
 
 ## Operator-filled values
 
@@ -105,7 +125,7 @@ Every source and image pin is a single value, written once:
 | `agentImage` | `pins.yaml` | `publication.image` of the agent's `deploy/worker-images/publish.py` receipt |
 | `sourceCommit` | `pins.yaml` | the reviewer-merged Relay commit everything was built from |
 | `installationPublicKey` | the operator's copy of the definition, then `agent/config.json` (generated) | step I3 |
-| `installationPolicy.allowedImageDigests`, `allowedHarnessAdapters`, `allowedEgressDestinations`, `binding` | the operator's copy of the definition | the runtime image's publish receipt and the release's sealed researcher template and `PodRuntimeBinding` |
+| `installationPolicy.allowedImageDigests`, `allowedHarnessAdapters`, `binding` | the operator's copy of the definition | the runtime image's publish receipt and the release's sealed researcher template (built from the baseline) and `PodRuntimeBinding` |
 | `policy.*` release fields in `agent/config.json` | generated by Relay's tool | never typed by hand |
 | `identity.fenceObjectUid` | regenerated `agent/config.json` (step I10) | the live fence ConfigMap after enrollment |
 
@@ -117,7 +137,7 @@ nothing else is edited by hand except the step I10 removal of the enrollment mou
 A failed readback stops the sequence. Use `kubectl --context admin@ai` throughout.
 
 **I1. Preconditions.** Hub steps H1-H3 are done and read back: the reviewed release is live with its
-migrations, the first recovery generation is fenced, and `GET /api/infrastructure/installations`
+migrations, the first recovery generation is initialized (receipt `kind: "initial"`), and `GET /api/infrastructure/installations`
 answers 200 with `[]`. The agent and worker-runtime images are published from the pinned
 `sourceCommit` and both receipts are verified (`kind: relay-worker-image`, digest-only
 `publication.image`, raw manifest readback). The release contains `scripts/prepare-pod-installation.ts`
@@ -265,12 +285,14 @@ silently undo a drill or a ceremony.
 
 Enrollment is not worker readiness. Before the first worker Pod:
 
-1. Pool and template approval in Relay (exact pool revision, policy digest = the local one).
-2. The nineteen qualification scenarios on this slot with the merged drivers (delivery plan step 9):
+1. The qualification-stage egress and trust (G3, pending series): internal TLS terminators,
+   `hostAliases`, `ailab-ca` trust and the two-rule policy replacing `relay-researcher-egress`.
+2. Pool and template approval in Relay (exact pool revision, policy digest = the local one).
+3. The nineteen qualification scenarios on this slot with the merged drivers (delivery plan step 9):
    they need the signed candidate run (`candidateRuntime` values: candidate ConfigMaps,
    `bootstrapSecrets: true`, journal egress) and the independent candidate journal, each its own
    reviewed change.
-3. The finite ordinary canary (step 10) and then `scripts/activate-ordinary-pod-policy.ts`'s outputs:
+4. The finite ordinary canary (step 10) and then `scripts/activate-ordinary-pod-policy.ts`'s outputs:
    staged guards, Secret quota, the in-place gate replacement and the **one-Pod quota**, plus agent
    values with `ordinaryNamespacePins` (the UIDs of step I6) and `bootstrapSecrets: true`, committed
    here, each through its own reviewed PR with the I6-style readbacks.

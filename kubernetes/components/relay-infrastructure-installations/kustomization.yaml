@@ -6,8 +6,10 @@ kind: Component
 # Include it ONLY together with ../relay-restore-fencing, in the same PR: Relay refuses to start with
 # this flag and no RELAY_RECOVERY_GENERATION_FILE ("RELAY_INFRASTRUCTURE_INSTALLATIONS requires
 # RELAY_RECOVERY_GENERATION_FILE"), and it refuses to start with that file unless the database holds
-# the matching active fence row, which only the operator's recovery:fence run creates (step H3's
-# first half). scripts/tests/test_relay_researcher_installation.py refuses one without the other.
+# the matching active generation row. On the live hub that row comes from the operator's one-shot
+# recovery:initialize run (step H3, receipt kind "initial", owner decision G1 in relay#277 comment
+# 122379), never from recovery:fence, which is for restores only.
+# scripts/tests/test_relay_researcher_installation.py refuses one component without the other.
 #
 # What it enables: approval, enrollment and fence routes for installations and the worker routes. It
 # issues no offer, grant or workload; profiles, budgets, qualification and the router connection
