@@ -1,0 +1,17 @@
+[
+  {
+    "id": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+    "name": "ailab llm-router",
+    "tenants": ["00000000-0000-4000-8000-000000000001"],
+    "origin": "https://router.chifor.me",
+    "issuer": "relay.chifor.me",
+    "kid": "relay-admin-2026-11",
+    "signingKeyFile": "/run/relay-router/admin-key.pem",
+    "reconcilerKid": "relay-reconciler-2026-11",
+    "reconcilerKeyFile": "/run/relay-router/reconciler-key.pem",
+    "baoOrigin": "https://openbao.openbao.svc.cluster.local:8200",
+    "baoTokenFile": "/run/relay-router-escrow/token",
+    "baoMount": "af",
+    "baoPrefix": "relay-router/escrow"
+  }
+]

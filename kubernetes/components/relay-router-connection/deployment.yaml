@@ -1,0 +1,66 @@
+# Paths are under /run, never /var/run (a symlink). The signer PEMs and the record are subPath files:
+# they never update in place, so a new key pair (which also needs a new kid in connections.json and the
+# Router trust) reaches Relay only through a deliberate rollout. The escrow token is the exception: a
+# directory mount, so the kubelet swaps a rotated token in place and Relay's next escrow call reads it.
+# Secret volumes are root:1000 (fsGroup) mode 0440; Relay runs as 1000:1000.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: relay
+spec:
+  template:
+    spec:
+      containers:
+      - name: relay
+        env:
+        - name: RELAY_ROUTER_CONNECTIONS_FILE
+          value: /run/relay-router/connections.json
+        - name: NODE_EXTRA_CA_CERTS
+          value: /run/relay-router/openbao-ca.crt
+        volumeMounts:
+        - name: router-connection
+          mountPath: /run/relay-router/connections.json
+          subPath: connections.json
+          readOnly: true
+        - name: router-signers
+          mountPath: /run/relay-router/admin-key.pem
+          subPath: admin-key.pem
+          readOnly: true
+        - name: router-signers
+          mountPath: /run/relay-router/reconciler-key.pem
+          subPath: reconciler-key.pem
+          readOnly: true
+        - name: router-openbao-ca
+          mountPath: /run/relay-router/openbao-ca.crt
+          subPath: ca.crt
+          readOnly: true
+        - name: router-escrow-token
+          mountPath: /run/relay-router-escrow
+          readOnly: true
+      volumes:
+      - name: router-connection
+        configMap:
+          name: relay-router-connection
+          defaultMode: 0444
+      - name: router-signers
+        secret:
+          secretName: relay-router-files
+          defaultMode: 0440
+          items:
+          - {key: admin-key.pem, path: admin-key.pem}
+          - {key: reconciler-key.pem, path: reconciler-key.pem}
+      - name: router-escrow-token
+        secret:
+          secretName: relay-router-files
+          defaultMode: 0440
+          items:
+          - {key: escrow-token, path: token}
+      # Only the CA certificate of cert-manager's throwaway ailab-ca leaf (credentials/relay.yaml); the
+      # leaf's key and certificate are not projected.
+      - name: router-openbao-ca
+        secret:
+          secretName: relay-router-openbao-tls
+          defaultMode: 0444
+          items:
+          - {key: ca.crt, path: ca.crt}

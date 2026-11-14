@@ -196,10 +196,14 @@ Do not enable application consumers until every gate below is satisfied.
    retained evidence, and expiry covering the **whole original worker lifetime**.
    There is intentionally no example qualifying policy or automatic seed.
    The deployment digest comes from the Relay router deployment record (see
-   Consumer wiring), so that record must be fixed before the `readers` row. The
-   connection UUID exists only once the Relay connection is created; if the owner
-   orders that after activation, the `clients` row follows it and allocation stays
-   impossible until then.
+   Consumer wiring), so that record must be fixed before the `readers` row. It is
+   fixed: `docs/runbooks/relay-router-connection.md` records connection
+   `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8` (issuer `relay.chifor.me`) and digest
+   `547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad`, and orders
+   these rows within the connection's steps. The UUID is in git before Relay is
+   configured with it, so the `clients` row waits only for its `max_tokens`
+   (8 × (I + 8192), relay#277 comment 120818 D); allocation stays impossible until
+   that row exists.
 8. Include the router reader component (Consumer wiring) so the router's files
    can be verified; the plugin stays disabled.
    Prove TLS hostname verification, TLS-only login, different role permissions,
@@ -271,7 +275,11 @@ else in its Deployment.
   `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` with the 64-hex digest of the reviewed
   Relay router deployment record: SHA-256 of canonical JSON of `{id, origin,
   issuer, baoOrigin, baoMount, baoPrefix}` (Relay `deploymentDigest`), the value of
-  `readers.deployment_digest`. The activation test refuses the inclusion while the
+  `readers.deployment_digest`. For the record in
+  `kubernetes/components/relay-router-connection/connections.json` that is
+  `547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad`
+  (`docs/runbooks/relay-router-connection.md`, "Deployment digest"; recompute it
+  before use). The activation test refuses the inclusion while the
   placeholder remains. Inclusion is a `Recreate` rollout of the router. The
   plugin stays disabled until step 9.
 - `kubernetes/components/relay-worker-budget-client`: inert on the live Relay
@@ -279,8 +287,9 @@ else in its Deployment.
   not yet released). A Relay that has them starts the authority only with
   `RELAY_INFRASTRUCTURE_INSTALLATIONS`, a router connection
   (`RELAY_ROUTER_CONNECTIONS_FILE`, still refused by
-  `test_relay_v060_activation_gate.py`) and a pinned worker-profile registry.
-  Include it with that reviewed Relay release, not before.
+  `test_relay_v060_activation_gate.py`; the reviewed record is the un-included
+  `kubernetes/components/relay-router-connection`, included last) and a pinned
+  worker-profile registry. Include it with that reviewed Relay release, not before.
 
 Including either before its Secret exists leaves the new Pod unable to mount the
 volume. Both use `Recreate`, so that is an outage: check `kubectl get
