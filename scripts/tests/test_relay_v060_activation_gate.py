@@ -37,13 +37,13 @@ class ActivationGate(unittest.TestCase):
             "llm-router-relay-keys-trust",
             "relay-router-connection",
             # The researcher hub upgrade (docs/runbooks/relay-researcher-hub-upgrade.md). Installation
-            # stays disabled until step H3, which removes the first four of these deliberately and
-            # together (RELAY_INFRASTRUCTURE_INSTALLATIONS without a fenced recovery generation does
-            # not start); H4 removes the profile registry pair, H6 the control-plane component.
+            # stays disabled until step H3, which removes the first two of these deliberately; H4
+            # removes the profile registry pair, H6 the control-plane component. The recovery
+            # generation (relay-restore-fencing, RELAY_RECOVERY_GENERATION_FILE) is NOT refused here:
+            # a restore of the current hub needs it on its own (relay-recovery-verification.md), and
+            # test_relay_researcher_hub_upgrade.py requires it whenever installations are on.
             "RELAY_INFRASTRUCTURE_INSTALLATIONS",
-            "RELAY_RECOVERY_GENERATION_FILE",
             "relay-infrastructure-installations",
-            "relay-restore-fencing",
             "RELAY_WORKER_PROFILES_FILE",
             "relay-worker-profiles",
             "relay-agent-control-plane",

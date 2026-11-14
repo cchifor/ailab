@@ -10,6 +10,7 @@ renders them onto the live Deployment.
 from __future__ import annotations
 
 import hashlib
+import re
 import unittest
 from pathlib import Path
 
@@ -77,45 +78,101 @@ class Components(unittest.TestCase):
             self.assertEqual(env["RELAY_WORKER_PROFILES_SHA256"], hashlib.sha256(body).hexdigest())
 
 
+def order_violations(comps: set[str]) -> list[str]:
+    """The runbook's order as a pure check over the overlay's component names.
+
+    One way only: installations need the recovery generation, but the generation may stand alone,
+    because every restore (relay-recovery-verification.md) and the H3 rollback (revert installations,
+    keep the generation) include relay-restore-fencing without installations."""
+    out = []
+    if "relay-infrastructure-installations" in comps and "relay-restore-fencing" not in comps:
+        out.append("installations without the recovery generation (step H3)")
+    if "relay-worker-profiles" in comps and not {"relay-infrastructure-installations",
+                                                 "relay-worker-budget-client"} <= comps:
+        out.append("profiles without installations and the budget client (step H4)")
+    if "relay-agent-control-plane" in comps and not {"relay-router-connection", "relay-worker-profiles"} <= comps:
+        out.append("control plane without the Router connection and profiles (step H6)")
+    if "relay-agent-control-plane" in comps and comps & {"relay-gitea-authority", "relay-notifications"}:
+        out.append("control plane with Gitea authority or notifications (owner decision G2)")
+    return out
+
+
+def included_component_dirs() -> list[Path]:
+    return [(RELAY / c).resolve() for c in doc(RELAY / "kustomization.yaml").get("components", [])]
+
+
 class InclusionGate(unittest.TestCase):
     """The order of docs/runbooks/relay-researcher-hub-upgrade.md, enforced on the live overlay."""
 
-    def test_installations_and_generation_together(self):
-        comps = set(relay_components())
-        if comps & {"relay-infrastructure-installations", "relay-restore-fencing"}:
-            self.assertTrue({"relay-infrastructure-installations", "relay-restore-fencing"} <= comps,
-                            "installations need the recovery generation and vice versa (step H3)")
+    def test_live_overlay_follows_the_order(self):
+        names = set(relay_components())
+        # relay-notifications is included as components/relay-notifications/relay: match the path too.
+        names |= {"relay-notifications" for d in included_component_dirs() if "relay-notifications" in d.parts}
+        self.assertEqual(order_violations(names), [])
 
-    def test_profiles_with_budget_client_after_installations(self):
-        comps = set(relay_components())
-        if "relay-worker-profiles" in comps:
-            self.assertIn("relay-infrastructure-installations", comps)
-            self.assertIn("relay-worker-budget-client", comps)
+    def test_order_states(self):
+        ok = [
+            set(),
+            {"relay-restore-fencing"},                                  # a restore, or the H3 rollback
+            {"relay-restore-fencing", "relay-infrastructure-installations"},
+            {"relay-restore-fencing", "relay-infrastructure-installations", "relay-worker-budget-client",
+             "relay-worker-profiles"},
+            {"relay-restore-fencing", "relay-infrastructure-installations", "relay-worker-budget-client",
+             "relay-worker-profiles", "relay-router-connection", "relay-agent-control-plane",
+             "relay-control-monitoring", "relay-worker-monitoring"},
+        ]
+        for comps in ok:
+            self.assertEqual(order_violations(comps), [], comps)
+        bad = [
+            {"relay-infrastructure-installations"},
+            {"relay-restore-fencing", "relay-worker-profiles", "relay-worker-budget-client"},
+            {"relay-restore-fencing", "relay-infrastructure-installations", "relay-worker-profiles"},
+            {"relay-restore-fencing", "relay-infrastructure-installations", "relay-agent-control-plane"},
+            ok[-1] | {"relay-gitea-authority"},
+            ok[-1] | {"relay-notifications"},
+        ]
+        for comps in bad:
+            self.assertTrue(order_violations(comps), comps)
+
+    def test_placeholder_registry_is_never_included(self):
+        if "relay-worker-profiles" in relay_components():
             self.assertNotIn(b"OPERATOR-FILLS", (COMPONENTS / "relay-worker-profiles/profiles.json").read_bytes())
 
-    def test_control_plane_last_and_without_environments_gitea_or_notifications(self):
-        # Owner decision G2: the control plane with its full scope, at H6 with the Router connection,
-        # and without the environments, Gitea authority and notification components.
-        comps = relay_components()
-        if "relay-agent-control-plane" not in comps:
-            return
-        self.assertTrue({"relay-router-connection", "relay-worker-profiles"} <= set(comps))
-        all_comps = doc(RELAY / "kustomization.yaml").get("components", [])
-        for c in all_comps:
-            self.assertNotIn("relay-gitea-authority", c)
-            self.assertNotIn("relay-notifications", c)
-        for path in RELAY.rglob("*.yaml"):
-            self.assertNotIn("RELAY_ENVIRONMENTS", path.read_text(encoding="utf-8"), path)
+    def test_no_environments_anywhere_in_the_live_relay(self):
+        # Owner decision G2: environments stay off with the control plane. Scan the overlay AND every
+        # component it includes, so a component cannot smuggle the flag in.
+        for root in [RELAY, *included_component_dirs()]:
+            for path in root.rglob("*.yaml"):
+                self.assertNotIn("RELAY_ENVIRONMENTS", path.read_text(encoding="utf-8"), path)
+        self.assertNotIn("RELAY_ENVIRONMENTS",
+                         (COMPONENTS / "relay-agent-control-plane/deployment.yaml").read_text(encoding="utf-8"))
+
+
+def code_blocks(text: str) -> list[str]:
+    # Fenced blocks, also the ones indented inside list items.
+    return re.findall(r"^[ \t]*```[a-z]*\n(.*?)^[ \t]*```", text, flags=re.M | re.S)
 
 
 class Runbook(unittest.TestCase):
     def test_h3_initializes_and_never_fences_the_live_database(self):
         # Owner decision G1: the first generation comes from recovery:initialize; the fence is for
-        # restores only, so no runbook command runs the fence script against the live hub.
+        # restores only. Relay's fence is `npm run recovery:fence` (package.json), compiled as
+        # dist/scripts/fence-recovery.js (scripts/fence-recovery.ts): no command block of this
+        # runbook may run either.
         text = RUNBOOK.read_text(encoding="utf-8")
         self.assertIn("recovery:initialize", text)
         self.assertIn('kind: "initial"', text)
-        self.assertNotIn("fence-recovery.js", text)
+        blocks = code_blocks(text)
+        self.assertTrue(any("recovery:initialize" in b for b in blocks), "H3 must run the initializer")
+        for block in blocks:
+            self.assertNotIn("recovery:fence", block)
+            self.assertNotIn("fence-recovery", block)
+
+    def test_generation_configmap_is_excluded_from_velero(self):
+        text = RUNBOOK.read_text(encoding="utf-8")
+        [create] = [b for b in code_blocks(text) if "create configmap relay-recovery-generation" in b]
+        self.assertIn("velero.io/exclude-from-backup=true", create)
+        self.assertIn('.metadata.labels["velero.io/exclude-from-backup"] == "true"', create)
 
 
 if __name__ == "__main__":

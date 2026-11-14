@@ -25,9 +25,11 @@ owner's direct confirmation for the exact reviewed rollout.
 | `relay-agent-control-plane` (new) | `RELAY_AGENT_CONTROL_PLANE=1` | H6 |
 | `relay-control-monitoring`, `relay-worker-monitoring` (existing) | control metrics and worker alerts | H6 |
 
-`scripts/tests/test_relay_v060_activation_gate.py` refuses all of them in the live overlay; each step's
-PR removes exactly its own entries from that list. `test_relay_researcher_hub_upgrade.py` pins each
-patch, and refuses installations without the recovery generation (and the reverse), the profile
+`scripts/tests/test_relay_v060_activation_gate.py` refuses the three new components and their
+settings, and the Router connection and control plane, in the live overlay; each step's PR removes
+exactly its own entries from that list. `relay-restore-fencing` stays includable on its own, because
+a restore of the hub needs it with or without installations. `test_relay_researcher_hub_upgrade.py`
+pins each patch, and refuses installations without the recovery generation (one way only), the profile
 registry without the installations and budget client or with a placeholder or wrong SHA, the control
 plane without the Router connection or next to `RELAY_ENVIRONMENTS`, `relay-gitea-authority` or
 `relay-notifications`, and an H3 that runs the fence script. `test-relay-researcher-hub-render.sh`
@@ -175,14 +177,21 @@ Readback:
 
    ```sh
    python3 -c 'import json,uuid; print(json.dumps({"version":1,"generation":str(uuid.uuid4())}))' > generation.json
-   kubectl --context admin@ai -n relay create configmap relay-recovery-generation --from-file=generation.json
+   kubectl --context admin@ai -n relay create configmap relay-recovery-generation --from-file=generation.json \
+     --dry-run=client -o yaml \
+     | kubectl --context admin@ai label --local -f - velero.io/exclude-from-backup=true -o yaml \
+     | kubectl --context admin@ai create -f -
    kubectl --context admin@ai -n relay get configmap relay-recovery-generation -o json \
-     | jq --slurpfile expected generation.json -e '(.data["generation.json"] | fromjson) == $expected[0]'
+     | jq --slurpfile expected generation.json -e '((.data["generation.json"] | fromjson) == $expected[0])
+         and .metadata.labels["velero.io/exclude-from-backup"] == "true"'
    ```
 
-   It is created by hand on purpose: it stays out of Flux, git and every backup selection
-   ([relay-recovery-verification.md](relay-recovery-verification.md)). Record its UUID with the
-   owner's evidence, outside the cluster.
+   It is created by hand on purpose: it stays out of Flux and git, and the
+   `velero.io/exclude-from-backup=true` label keeps it out of both Velero schedules, which otherwise
+   back up every resource of namespace `relay` (H1 step 3). The coordinated logical dump contains only
+   the database. Restoring a copy of the generation next to the database would defeat the restore
+   detection ([relay-recovery-verification.md](relay-recovery-verification.md)). Record its UUID with
+   the owner's evidence, outside the cluster.
 3. **Freeze Relay for the window.** Once a generation row exists, a Relay process started without
    the generation file refuses to start, so no Relay may restart between step 4 and step 5:
    `flux suspend kustomization apps -n flux-system`, then
@@ -229,7 +238,8 @@ Readback:
    `pg_read_all_stats` if step 3 granted it.
 5. **Enable together.** One PR includes `../../../components/relay-restore-fencing` and
    `../../../components/relay-infrastructure-installations` in `kubernetes/apps/apps/relay` and removes
-   their four entries from the activation gate's forbidden list. Merge, then
+   `RELAY_INFRASTRUCTURE_INSTALLATIONS` and `relay-infrastructure-installations` from the activation
+   gate's forbidden list (the recovery generation itself is never refused there: a restore needs it). Merge, then
    `flux resume kustomization apps -n flux-system` (Relay starts with a fresh pre-migration backup;
    migrate finds nothing to do).
 
