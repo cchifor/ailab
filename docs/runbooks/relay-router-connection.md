@@ -120,10 +120,12 @@ inference policy's grant (`routes`, `access`, `lifetimeSeconds`) must be a subse
 The owner chose a dedicated route ([relay#277 comment 121330](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-121330)):
 the shared `gpt-6-luna` route stays untouched. The selection is
 `{kind: "model", model: "relay-researcher-luna"}` with no route, and the profile pins
-`adaptedResponses: {catalogModel: "gpt-6-luna", maxOutputTokens: 8192, reasoningEffort: ...}`.
-**`reasoningEffort` is not decided yet**: it waits for the owner's cross-validated decision, expected
-`none` because OpenAI allows function calling on Chat Completions for `gpt-6-luna` only with
-`reasoning_effort: none`. The profile cannot be composed until it is set.
+`adaptedResponses: {catalogModel: "gpt-6-luna", maxOutputTokens: 8192, reasoningEffort: "none"}`.
+The effort is `none` by owner decision D
+([relay#277 comment 121597](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-121597)):
+OpenAI allows function calling on Chat Completions for `gpt-6-luna` only with
+`reasoning_effort: none`. Relay's contract admits no other value. Trial results are "pipeline
+qualified, reasoning off", not evidence of research quality.
 Relay's design note `docs/plans/2026-11-08-infrastructure-workers/researcher-budgeted-codex-route.md`
 (relay#487) holds the reasoning. Why the alias works:
 
@@ -160,14 +162,24 @@ Append this entry to `policies`, then `PUT /admin/v1/config` with the edited doc
 ```
 
 - `native: []`: Codex's protocol is never passed through on this route. A Router release with
-  llm-router #189 then lists it with `adaptedResponses`, which Relay's holder requires.
-- The same edit sets account `openai-2`'s `baseUrl` to `https://api.openai.com/v1` explicitly. The
-  budget authority compares `account.baseUrl` with the policy's required `baseUrl`, so an account
-  relying on the provider default never qualifies. This is the only change to a shared object, and it
-  changes no request: `https://api.openai.com/v1` is already the `openai` provider's default
-  (llm-router `provider-openai` and `adapters/providers/url.ts`), so `codex-api-1` and
-  `pool-codex-api` keep reaching the same endpoint. Readback: those routes still list their
-  `openai-2` target.
+  llm-router #189 then lists it with `adaptedResponses`, which Relay's holder requires. The same
+  release needs llm-router #190: without it the Router drops the Relay MCP tools (Codex sends them as
+  one `mcp__relay` namespace) and invents `cached_tokens: 0` in usage.
+- The same edit sets two settings on the shared account `openai-2`:
+  - `baseUrl: "https://api.openai.com/v1"`, explicitly. The budget authority compares
+    `account.baseUrl` with the policy's required `baseUrl`, so an account relying on the provider
+    default never qualifies. It changes no request: it is already the `openai` provider's default
+    (llm-router `provider-openai` and `adapters/providers/url.ts`), so `codex-api-1` and
+    `pool-codex-api` keep reaching the same endpoint. Readback: those routes still list their
+    `openai-2` target.
+  - `reasoningEffort: "none"`, the Router's enforcement layer for the effort; Relay's launcher and
+    proxy are the other. The Router sends it on every request in place of any client value. This
+    one does change shared traffic: every route on `openai-2`, `codex-api-1` and `pool-codex-api`
+    included, loses reasoning, which the owner accepted (decision D). The `QualifiedTokenPolicy`
+    does not bind the effort, so the setting is recorded with the policy digest, and any change to it
+    requires requalification. Readback: the journal's `request.parameters_adjusted` shows
+    `reasoning_effort:passed` or `reasoning_effort:overridden` on every attempt, and reported
+    reasoning tokens are 0.
 - `affinity` stays `none`: `strict` requires an `agent_id`, which Codex does not send.
 
 The qualification evidence and every `QualifiedTokenPolicy` name the account and deployment ID of
