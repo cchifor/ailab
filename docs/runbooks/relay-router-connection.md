@@ -120,7 +120,10 @@ inference policy's grant (`routes`, `access`, `lifetimeSeconds`) must be a subse
 The owner chose a dedicated route ([relay#277 comment 121330](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-121330)):
 the shared `gpt-6-luna` route stays untouched. The selection is
 `{kind: "model", model: "relay-researcher-luna"}` with no route, and the profile pins
-`adaptedResponses: {catalogModel: "gpt-6-luna", maxOutputTokens: 8192, reasoningEffort: <decided>}`.
+`adaptedResponses: {catalogModel: "gpt-6-luna", maxOutputTokens: 8192, reasoningEffort: ...}`.
+**`reasoningEffort` is not decided yet**: it waits for the owner's cross-validated decision, expected
+`none` because OpenAI allows function calling on Chat Completions for `gpt-6-luna` only with
+`reasoning_effort: none`. The profile cannot be composed until it is set.
 Relay's design note `docs/plans/2026-11-08-infrastructure-workers/researcher-budgeted-codex-route.md`
 (relay#487) holds the reasoning. Why the alias works:
 
@@ -135,8 +138,10 @@ Relay's design note `docs/plans/2026-11-08-infrastructure-workers/researcher-bud
 - Model mode (`selection.route`) is not available to a budgeted worker: the preflight checks route
   aliases only ("Model selectors/default routes are not currently issued by this bridge").
 
-Before step 6 the operator creates the route with `GET /admin/v1/config`, adds the entry to
-`policies`, and `PUT /admin/v1/config` with `If-Match: <revision>`:
+Before step 6 the operator creates the route. `GET /admin/v1/config` returns the whole Router
+configuration; its `policies` array holds the routes (each entry is one route, a `RoutePolicy`).
+Append this entry to `policies`, then `PUT /admin/v1/config` with the edited document and
+`If-Match: <revision>`:
 
 ```json
 {
@@ -158,7 +163,11 @@ Before step 6 the operator creates the route with `GET /admin/v1/config`, adds t
   llm-router #189 then lists it with `adaptedResponses`, which Relay's holder requires.
 - The same edit sets account `openai-2`'s `baseUrl` to `https://api.openai.com/v1` explicitly. The
   budget authority compares `account.baseUrl` with the policy's required `baseUrl`, so an account
-  relying on the provider default never qualifies.
+  relying on the provider default never qualifies. This is the only change to a shared object, and it
+  changes no request: `https://api.openai.com/v1` is already the `openai` provider's default
+  (llm-router `provider-openai` and `adapters/providers/url.ts`), so `codex-api-1` and
+  `pool-codex-api` keep reaching the same endpoint. Readback: those routes still list their
+  `openai-2` target.
 - `affinity` stays `none`: `strict` requires an `agent_id`, which Codex does not send.
 
 The qualification evidence and every `QualifiedTokenPolicy` name the account and deployment ID of
