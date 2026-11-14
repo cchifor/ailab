@@ -4610,3 +4610,64 @@ source `3c0d78a279cb3994be7e1d86b9f2411ea3ca4e97`, release `router-0.1.0-2026111
 2. Relay qualification resumes as run 2 (relay#277). Its first call, chat with `max_completion_tokens: 16` through
    `codex-api-1`, returns 200 instead of `unsupported_parameter`.
 3. A request with an output limit to a local route (cloud3) still succeeds: llama.cpp still gets `max_tokens`.
+
+## Adapted-Codex release (2026-11-14, llm-router #189 and #190)
+
+Release `router-0.1.0-20261114-adapted-codex`: source `5a5181b78350a6f740cc65fb7412e1c009732a32` (llm-router branch
+`release/router-20261114-adapted-codex`: the live `a17f60db` plus [#189](https://git.chifor.me/cchifor/llm-router/pulls/189)
+and [#190](https://git.chifor.me/cchifor/llm-router/pulls/190) cherry-picked; `main` still carries unreleased provenance
+work), archive `router-0.1.0-20261114-adapted-codex.tar.gz`, SHA-256
+`3b5ffcee4bbdf66687809d66d2134abae12aa1e7c0b75c5e3de5f75f9523afeb`, Relay branch
+`release/router-20261114-adapted-codex`, [Relay run 132490](https://git.chifor.me/cchifor/relay/actions/runs/132490),
+packaging commit `21d38924c3fa2c08d53d8f6391906d7e086c8906`, image
+`registry.chifor.me/llm-router/router@sha256:54735b64a017d46c2828d1d421acf7696e036e0259eefae827785fcb8db0eb0b`.
+An anonymous pull of the index, both manifests and all 12 blobs verified their digests, and the image's
+`org.opencontainers.image.revision` label is the source commit.
+
+**Why.** Relay's budgeted researcher runs the Codex CLI on an API-key route where the router adapts Codex's Responses
+request to chat (relay#277, comments 121330 and 121932). It needs three things the live release lacks:
+- Relay's holder admits `codex-responses` only on a route that `/v1/routes` says is adapted.
+- Codex sends its MCP tools as one `mcp__relay` namespace, which the adapter dropped, so the researcher had no Relay tools.
+- Responses usage reported `cached_tokens: 0` when the provider reported nothing, so a client-visible 0 proved nothing.
+
+**What it changes.**
+- #189: `GET /v1/routes` lists `adaptedResponses: { "protocol": "codex-responses" }` on a route whose own configuration
+  never passes the Codex protocol through (`native` set without `codex-responses`, in practice `native: []`; no
+  `nativeWires`; `translate` not `never`). A pointer is listed with what its route does. The marker comes from route
+  configuration only, grants no access, and changes neither routing nor authorization. The roll changes no route
+  configuration: a route gains the marker only once an administrator sets `native: []` on it.
+- #190: on an adapted route, the function tools of an MCP namespace (`mcp__<server>`) join the request's tools under
+  their own names, and the namespace's description is appended to the instructions once. For a Codex caller, every
+  `function_call` the router returns names that namespace again, which Codex requires before it runs the call. A name
+  defined twice is refused (400 `INVALID_REQUEST`). Built-in namespaces are still dropped.
+- #190: cached input tokens are reported only when the provider reports them. That means Chat
+  `prompt_tokens_details.cached_tokens`, and Responses `input_tokens_details.cached_tokens`. For a Codex caller, an
+  unreported count leaves `input_tokens_details` out. The router's internal usage, which budgets and billing use, is
+  unchanged.
+- Nothing else changes. Against the live archive, only `dist/packages/modules/protocol/index.*` and
+  `dist/packages/plugins/api-openai/index.*` differ, apart from `SOURCE_COMMIT`, pnpm's own bookkeeping files and the
+  `.bin` shims that name the staging directory. The web bundle and every dependency file are byte-identical.
+
+**No storage change.** No schema, migration, KV, plugin-settings or configuration change between `a17f60db` and
+`5a5181b7`, so no backup is taken and a rollback needs no restore. `ROUTER_CLAUDE_MODEL_SCOPED_LIMITS=1` stays.
+
+**Verified on the release tree.**
+- The changed lines are exactly those of the merged #189 (`09a16602`) and #190 (`46f2130e`).
+- Node 24.22.0: `tsc --noEmit` clean, 2,654 tests passed (14 skipped). `main` CI passed for both merges.
+- The archive was built from `git archive 5a5181b7` in the pinned Node 26.10.0 runtime. The production smoke passed
+  there with no network, uid 1000, a read-only root and all capabilities dropped. The publisher's smoke and backup
+  checks passed again in run 132490.
+- The archive has the live archive's 18,214 entries, the same paths, modes and owner 1000:1000 (31.8 MB).
+- The image's seven runtime layers are the live image's. Only the `WORKDIR` and application layers differ.
+
+**Rollback.** Revert the image, the three-line comment above it and both annotations together, to image
+`registry.chifor.me/llm-router/router@sha256:0064706f905dc35f3d63f775d04b62f22d904ec16f34e74021f7f139c9566f05`,
+source `a17f60dbd19a10f1de7b0d259a60126acf227e27`, release `router-0.1.0-20261114-max-completion-tokens`.
+
+**At the roll.** One replica with `Recreate`: the router restarts, and streams in flight are cut, as at every release.
+
+**After the roll.**
+1. `validate-live`: 6/9 is the known baseline.
+2. `GET /v1/routes` lists `adaptedResponses` only on a route whose own configuration sets `native` without
+   `codex-responses` (the researcher's API-key route, once an administrator sets `native: []` there).
+3. Relay's researcher on that route sees its `mcp__relay` tools, and Codex runs the calls the router returns.
