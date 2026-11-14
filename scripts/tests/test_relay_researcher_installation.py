@@ -601,6 +601,8 @@ class BundleCheck(unittest.TestCase):
                                          "bindingDigest": "9" * 64, "installationId": self.IID,
                                          "clusterUid": d["identity"]["clusterUid"], "policyDigest": "f" * 64}},
         }
+        # The reviewed shape carries G3 in both stages (the binding never changes between them).
+        self.g3(files)
         if mutate:
             mutate(files)
         out = Path(tempfile.mkdtemp())
@@ -642,22 +644,36 @@ class BundleCheck(unittest.TestCase):
             "artifacts": [{"role": "hub-ca", **pem}, {"role": "holder", "installPath": "/opt/relay/relay-holder",
                                                       "sha256": "1" * 64}],
             "holderProfiles": {"workerTemplates": [{"definition": {"holder": holder}}]}}
-        if stage == "qualification":
-            (egress,) = docs(EGRESS / "qualification.yaml")
-            d["executionEgressArtifacts"][0]["sha256"] = bundle_module().measurement_digest(egress)
+        BundleCheck.g3_pin(files, stage)
+
+    @staticmethod
+    def g3_pin(files, stage):
+        (egress,) = docs(EGRESS / f"{stage}.yaml")
+        files["00-definition.json"]["executionEgressArtifacts"][0]["sha256"] = bundle_module().measurement_digest(egress)
 
     def test_accepts_the_g3_binding_in_both_stages(self):
-        self.assertEqual(self.run_check(self.make_bundle(self.g3)), 0)
+        self.assertEqual(self.run_check(self.make_bundle()), 0)
         self.assertEqual(self.run_check(self.make_bundle(lambda f: self.g3(f, "qualification")), "qualification"), 0)
 
-    def test_qualification_stage_requires_the_g3_binding_and_its_own_pin(self):
-        def pin_only(files):
-            (egress,) = docs(EGRESS / "qualification.yaml")
-            files["00-definition.json"]["executionEgressArtifacts"][0]["sha256"] = \
-                bundle_module().measurement_digest(egress)
-        self.assertEqual(self.run_check(self.make_bundle(pin_only), "qualification"), 1)
+    def test_both_stages_require_the_g3_binding_and_their_own_pin(self):
+        # The binding never changes between the stages: a binding without G3 is refused at enrollment
+        # (step I4), not first discovered at the qualification switch (reviewer-codex, #1769).
+        def no_aliases(files, stage):
+            self.g3(files, stage)
+            del files["00-definition.json"]["binding"]["hostAliases"]
+        def null_aliases(files, stage):
+            self.g3(files, stage)
+            files["00-definition.json"]["binding"]["hostAliases"] = None
+        def no_g3_at_all(files, stage):
+            files["00-definition.json"]["binding"].pop("hostAliases")
+            files["00-definition.json"]["binding"]["runtime"].pop("manifest")
+            self.g3_pin(files, stage)
+        for mutate in (no_aliases, null_aliases, no_g3_at_all):
+            for stage in ("enrollment", "qualification"):
+                with self.subTest(mutate.__name__, stage=stage):
+                    self.assertEqual(self.run_check(self.make_bundle(lambda f, m=mutate, s=stage: m(f, s)), stage), 1)
         # The enrollment pin with the qualification stage selected, and the reverse.
-        self.assertEqual(self.run_check(self.make_bundle(self.g3), "qualification"), 1)
+        self.assertEqual(self.run_check(self.make_bundle(), "qualification"), 1)
         self.assertEqual(self.run_check(self.make_bundle(lambda f: self.g3(f, "qualification"))), 1)
 
     def test_refuses_each_g3_difference(self):

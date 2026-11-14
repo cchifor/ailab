@@ -336,8 +336,8 @@ built with:
 - a runtime base image whose `/etc/nsswitch.conf` reads `/etc/hosts` before DNS (`hosts: files dns`).
 
 The binding is the same in both stages (qualification evidence binds the exact binding), so step
-I4's `check` already verified the first three; it refuses different values in either stage and, once
-Q4 selects the qualification stage, a binding without them. The candidate journal
+I4's `check` already verified the first three: it refuses a binding without them, or with different
+values, in either stage, so an enrollment that could never reach this stage stops at I4. The candidate journal
 ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) renders its Service at the
 pinned `10.96.0.42`.
 
@@ -388,7 +388,7 @@ never switch stages inside a window) and while the slot holds no Pod
   `f6d3187c2fa3843ef54ed5d6026093c00a8fe487ab54263b7ce6db140d51282f`.
 
 The tests refuse one without the other. Re-run step I4 with the operator's definition updated the
-same way: `check --chart` must pass (it now requires the binding's G3 fields), and `import` changes
+same way: `check --chart` must pass (the binding's G3 fields are unchanged since I4), and `import` changes
 nothing (the egress artifact is only in the definition and the report). Keep the new bundle and the
 definition's SHA-256 in the evidence. Merging is one Flux apply of one object, same name, new body:
 the slot is never without its allow-list.

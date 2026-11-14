@@ -17,8 +17,8 @@ installation is exactly what was reviewed here, and then copies the only two thi
          execution egress artifact digest against the egress stage the installation tree includes
          (egress/enrollment.yaml or egress/qualification.yaml, exactly one); the binding's G3 fields
          (hostAliases equal to the pinned internal TLS and journal Service addresses, the hub CA and the
-         templates' Router/communication CA pins equal to docs/relay-workers/researcher-runtime-ca.crt)
-         whenever the binding carries hostAliases, and required with the qualification stage; 30-agent-values.json and
+         templates' Router/communication CA pins equal to docs/relay-workers/researcher-runtime-ca.crt),
+         required in both stages because the binding never changes between them; 30-agent-values.json and
          31-agent-config.json against the committed agent objects and config, and the generated
          agent policy against the definition it came from (installationPolicy verbatim, podTiers and
          allowedTemplates from the binding, the same policy in values and config, report.json's
@@ -173,18 +173,18 @@ def internal_tls_addresses() -> dict:
 
 
 def check_internal_tls(definition: dict, stage: str) -> None:
-    """G3 in the release's binding. The binding is the same in both egress stages (qualification
-    receipts bind the exact binding), so its fields are checked whenever present and required once the
-    qualification stage is selected: exactly the pinned addresses, the hub origin and CA of the
-    runtime, and every worker template's Router and communication clients pinned to the same CA."""
+    """G3 in the release's binding: exactly the pinned addresses, the hub origin and CA of the runtime,
+    and every worker template's Router and communication clients pinned to the same CA. Required in
+    BOTH stages: the binding is never changed between them (qualification receipts bind the exact
+    binding), so an enrollment-stage bundle without these fields could never reach the qualification
+    stage; it is refused at step I4, not discovered at Q4."""
     binding = definition["binding"]
     if not isinstance(binding, dict):
         fail("the definition's binding is not an object")
     aliases = binding.get("hostAliases")
     if aliases is None:
-        if stage == "qualification":
-            fail("the qualification egress stage needs the binding's hostAliases (DNS-less slot)")
-        return
+        fail(f"the binding has no hostAliases: the {stage}-stage binding must already carry G3 "
+             "(the qualification stage reuses it unchanged and its slot has no DNS)")
     if aliases != internal_tls_addresses():
         fail(f"binding hostAliases {aliases!r} are not the pinned internal TLS and journal addresses")
     ca_sha = hashlib.sha256(RUNTIME_CA.read_bytes()).hexdigest()
