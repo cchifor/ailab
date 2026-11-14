@@ -163,7 +163,9 @@ class TheProceduresStayDocumented(unittest.TestCase):
         for anchor in ("## External witness: the owner-accepted OpenBao exception",
                        "### Offline issuance record", "### Who writes it", "### Changing the witness",
                        "### After an OpenBao restore", "### Drills before production `ready=true`",
-                       "`af/relay-budget/witness`", "at least 20 seconds", "`refreshInterval: 1h`"):
+                       "`af/relay-budget/witness`", "at least 20 seconds", "`refreshInterval: 1h`",
+                       # A negative drill counts only with the gate proven open at the observation.
+                       "**Drill protocol.**", "**Prove the gate is open, immediately before observing.**"):
             self.assertIn(anchor, runbook)
         recovery = RECOVERY.read_text()
         self.assertIn("### After any restore: the Relay budget witness", recovery)

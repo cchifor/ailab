@@ -408,20 +408,41 @@ witness" before anything reopens. In short:
 Run these after step 7's rows and step 8's proofs, in a drill window **before**
 the production opening. That means no Relay router connection or credential
 binding exists yet, so no allocation is possible whatever the gate says.
-- **Window setup.** The owner sets `ready=true` for the window, and the operator
-  enables the Router plugin.
-- **Window end.** Both are withdrawn at the end of every drill.
 - **Why rotation is cheap here.** Rotating the epoch at this point fences no
   allocation, because none exists.
 - **Relay.** The Relay consumer cannot be wired yet (see Consumer wiring). Its
   half of drills A–C runs when it is included, before Relay's first allocation.
+- **Drills are not restores.** They inject witness states on purpose; § After
+  an OpenBao restore does not apply inside a drill.
 
-| Drill | Do | Pass |
+**Drill protocol.** Installing a witness ("Changing the witness") withdraws the
+gate, so a refusal seen at that point proves nothing about the witness. Every
+negative drill (A–C) therefore re-opens the gate for the drill alone and proves
+it is open, at the moment of the observation:
+
+1. **Install** the drill's witness state ("Changing the witness" steps 1–6). It
+   ends withdrawn, with both consumers rolled onto the drill's file.
+2. **Re-open for the drill only.** The owner sets `ready=true` and the operator
+   enables the Router plugin. Allocation stays impossible: no Relay connection
+   or binding exists.
+3. **Prove the gate is open, immediately before observing.** Capture:
+   - `SELECT ready, instance_id, recovery_epoch, witness_digest FROM worker_budget.authority`
+     shows `ready = t`;
+   - `GET /admin/v1/plugins` shows `worker-budget-authority` enabled;
+   - a positive control: `worker_budget.current_epoch(<the record's CURRENT ids>)`
+     as `relay_budget_router`, from the operator client Pod, returns the epoch.
+4. **Observe the refusal** (the Pass column). It must name the drill's witness:
+   `current_epoch(<the ids in the MOUNTED file>)` returns SQLSTATE 42501 while
+   step 3's control still succeeds.
+5. **Withdraw** (`ready=false`, plugin disabled). Restore the current witness
+   from the record before the next drill.
+
+| Drill | Do | Pass, with the gate open (protocol step 3) |
 | --- | --- | --- |
 | A, stale | Issue A (step 6). Rotate to B: owner updates the row's `recovery_epoch` and `witness_digest`, operator records and writes B ("Changing the witness"). Then restore A in OpenBao (`bao kv rollback -mount=af -version=<A> relay-budget/witness`), force-sync and roll | Router log `Worker budget authority unavailable: …`, still unavailable after waiting ≥20 s. `worker_budget.current_epoch(<A ids>)` as `relay_budget_router` from an operator client Pod returns SQLSTATE 42501. Relay, once wired: `worker_budget_ledger_unavailable`, allocation refused |
-| B, missing | Write an empty `witness` (the only "missing" a running consumer can receive), force-sync and roll. Separately, soft-delete the document (`bao kv delete`) | Empty: Router unavailable, as in A. Soft-delete: the ExternalSecret goes not Ready while the Secret is retained (ESO Retain), and nothing changes until a deliberate roll |
+| B, missing | Write an empty `witness` (the only "missing" a running consumer can receive), force-sync and roll. Separately, soft-delete the document (`bao kv delete`) | Empty: Router unavailable, as in A; the positive control still succeeds. Soft-delete: the ExternalSecret goes not Ready while the Secret is retained (ESO Retain), and nothing changes until a deliberate roll |
 | C, malformed | Write JSON that fails the schema (for example `{"version":1}`, or an uppercase digest), force-sync and roll | Router unavailable, as in A |
-| D, older snapshot, unchanged witness | Write B again (a new KV version, same bytes). Roll back to the previous version, force-sync and roll | Authorization may succeed (Router `available`). Allocations, `token_limit`, `original_deadline`, `recovery_epoch`, outbox sequences and receipts are identical before and after (`SELECT` captures) |
+| D, older snapshot, unchanged witness | Write B again (a new KV version, same bytes). Roll back to the previous version, force-sync and roll; re-open as in protocol step 2 | Authorization may succeed (Router `available`). Allocations, `token_limit`, `original_deadline`, `recovery_epoch`, outbox sequences and receipts are identical before and after (`SELECT` captures) |
 
 - **Restoring B.** After A–C, restore B from the record and verify `available`
   before the next drill.
@@ -433,8 +454,14 @@ binding exists yet, so no allocation is possible whatever the gate says.
 - **Where.** Post each drill's non-secret readbacks as a comment on the ceremony
   thread (ailab #1753), titled "Witness drill A/B/C/D". Keep raw captures with
   the offline issuance record.
-- **What a readback holds:** Router log lines, plugin state, the mounted witness
-  SHA-256 in both Pods, the SQL outputs and the before/after `SELECT` diffs.
+- **What a readback holds:**
+  - the protocol step-3 captures, timestamped just before the observation: the
+    authority row with `ready`, the plugin state and the positive control;
+  - Router log lines;
+  - the mounted witness SHA-256 in both Pods;
+  - the SQL outputs and the before/after `SELECT` diffs.
+
+  A refusal without step-3 captures from the same window does not count.
 - **Never include** DSNs, passwords or admin tokens.
 
 The production `ready=true` (step 8) waits for all four drills to be reviewed.
