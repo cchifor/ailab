@@ -4666,8 +4666,36 @@ source `a17f60dbd19a10f1de7b0d259a60126acf227e27`, release `router-0.1.0-2026111
 
 **At the roll.** One replica with `Recreate`: the router restarts, and streams in flight are cut, as at every release.
 
-**After the roll.**
-1. `validate-live`: 6/9 is the known baseline.
-2. `GET /v1/routes` lists `adaptedResponses` only on a route whose own configuration sets `native` without
-   `codex-responses` (the researcher's API-key route, once an administrator sets `native: []` there).
-3. Relay's researcher on that route sees its `mcp__relay` tools, and Codex runs the calls the router returns.
+**Before the roll.** Take the `validate-live` baseline, and save `GET /v1/routes` as the administrator for comparison.
+
+**After the roll.** This roll changes no route, so the checks are about what stays the same.
+1. `validate-live`: 6/9, the known baseline.
+2. `GET /v1/routes` matches the pre-roll copy, and no route lists `adaptedResponses`. The only exception would be a
+   route whose saved configuration already sets `native` without `codex-responses`. If one shows the marker, check
+   that route's configuration rather than assuming the roll changed it.
+3. Usage shape for Codex on chat routes. This affects every Codex caller on a chat-backed route, not only Relay's
+   researcher. If the provider does not report `prompt_tokens_details.cached_tokens`, Responses usage now leaves out
+   `input_tokens_details` (before the roll it carried `cached_tokens: 0`). A provider that reports the count still
+   gets it. #190 checked the pinned Codex 0.159.1 binary: it reads a missing object as 0, and only an empty
+   `input_tokens_details: {}`, which the router never sends, fails to parse. Check one Codex turn on an existing
+   local chat route, such as a dev worker's qwen route on cloud3:
+   - the turn completes;
+   - the CLI shows no `failed to parse ResponseCompleted`;
+   - the trajectory's usage is the upstream's.
+
+### Follow-up, separate from the roll: open the researcher's route to adapted Codex
+
+The roll itself changes nothing that clients can see in routing. The change that does is setting `native: []` on
+Relay's researcher route, the API-key route that serves the budgeted researcher. That change is not part of this PR,
+and it needs its own go-ahead.
+- **Who and when.** The operator, after the owner approves the Relay researcher qualification step that needs it.
+- **How.** Ask the setup chat to `configure_route` that route with `native: false`, which saves `native: []`, or
+  make the same change with `PUT /admin/v1/config`. Change nothing else on the route.
+- **Verify.**
+  - `GET /v1/routes` lists `adaptedResponses: { "protocol": "codex-responses" }` on that route only, along with its
+    `available`, `capabilities.tools` and `targets`, which Relay's holder checks.
+  - A Codex request naming the route gets `x-router-adapted: codex-responses`.
+  - The researcher sees its `mcp__relay` tools, and Codex runs a call the router returns.
+- **Revert.** Run `configure_route` on that route with `native: null`, which removes the setting, or restore its
+  previous configuration revision. `GET /v1/routes` then no longer lists the marker, and Relay's holder stops
+  admitting `codex-responses` there.
