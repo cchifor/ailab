@@ -1,6 +1,7 @@
 # QUALIFICATION STAGE. Owner decision relay#277 comment 122379 (G3). The same object as
-# ./enrollment.yaml (relay-researcher-egress, the definition's executionEgressArtifacts entry), with
-# a different body; ../kustomization.yaml includes exactly one of the two. Selecting this one is the
+# ./execution-egress.yaml (relay-researcher-egress, the definition's executionEgressArtifacts entry),
+# with a different body, in a separate file; ./kustomization.yaml includes exactly one of the two, and
+# the enrollment file is never edited in place. Selecting this one is the
 # runbook's "Qualification stage" PR, which also moves the definition pin to this file's digest:
 #   f6d3187c2fa3843ef54ed5d6026093c00a8fe487ab54263b7ce6db140d51282f (recomputed by the tests)
 #

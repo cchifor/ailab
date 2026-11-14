@@ -4,7 +4,7 @@ kind: Kustomization
 # the two dedicated namespaces with everything that contains them, and nothing that runs.
 #   namespaces.yaml        restricted PSA, retention annotations          (Relay 10-namespaces.json)
 #   containment.yaml       quotas (zero Pods in the slot), limits, deny   (Relay 20-containment.json)
-#   egress/<stage>.yaml    the slot's one allow-list, relay-researcher-egress (ailab-owned CNI artifact)
+#   execution-egress.yaml  the slot's DNS + Relay/Router allow-list        (ailab-owned CNI artifact)
 #   admission-deny.yaml    the deny-all Pod gate                          (Relay 21-admission-deny.json)
 #
 # INERT: no Flux Kustomization in kubernetes/apps/clusters/ai references this path. The reviewed one
@@ -13,11 +13,11 @@ kind: Kustomization
 resources:
 - namespaces.yaml
 - containment.yaml
-# EXACTLY ONE egress stage (the definition's executionEgressArtifacts pin is its digest; the tests
-# refuse zero, two, or a pin that is not the included stage's):
-#   egress/enrollment.yaml     DNS + the two Cloudflare addresses; enrollment only (removable)
-#   egress/qualification.yaml  the internal TLS terminators and the candidate journal; no DNS (G3)
-- egress/enrollment.yaml
+# EXACTLY ONE egress stage of relay-researcher-egress (the definition's executionEgressArtifacts pin is
+# its digest; the tests refuse zero, two, or a pin that is not the included stage's):
+#   execution-egress.yaml      DNS + the two Cloudflare addresses; enrollment only (removable)
+#   qualification-egress.yaml  the internal TLS terminators and the candidate journal; no DNS (G3)
+- execution-egress.yaml
 - admission-deny.yaml
 components:
 - ../pins

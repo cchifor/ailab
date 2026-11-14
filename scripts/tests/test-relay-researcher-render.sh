@@ -32,10 +32,10 @@ build /repo/kubernetes/apps/relay-researcher/agent "$WORK/out/agent.yaml"
 ALT="$WORK/alt/relay-researcher"
 mkdir -p "$WORK/alt"
 cp -r "$REPO_ROOT/kubernetes/apps/relay-researcher" "$ALT"
-if grep -qx -- '- egress/enrollment.yaml' "$ALT/installation/kustomization.yaml"; then
-  sed -i 's#^- egress/enrollment.yaml$#- egress/qualification.yaml#' "$ALT/installation/kustomization.yaml"
+if grep -qx -- '- execution-egress.yaml' "$ALT/installation/kustomization.yaml"; then
+  sed -i 's#^- execution-egress.yaml$#- qualification-egress.yaml#' "$ALT/installation/kustomization.yaml"
 else
-  sed -i 's#^- egress/qualification.yaml$#- egress/enrollment.yaml#' "$ALT/installation/kustomization.yaml"
+  sed -i 's#^- qualification-egress.yaml$#- execution-egress.yaml#' "$ALT/installation/kustomization.yaml"
 fi
 chmod -R a+rX "$WORK"
 docker run --rm --network none -v "$WORK/alt:/alt:ro" -w / "$KUSTOMIZE_IMAGE" build /alt/relay-researcher/installation \
@@ -94,8 +94,8 @@ for k in inst:
     if k != key:
         assert inst[k] == other[k], f"switching the egress stage changed {k}"
 stages = {}
-for stage in ("enrollment", "qualification"):
-    (doc,) = [d for d in yaml.safe_load_all(open(f"{tree}/installation/egress/{stage}.yaml", encoding="utf-8")) if d]
+for stage, name in (("enrollment", "execution-egress.yaml"), ("qualification", "qualification-egress.yaml")):
+    (doc,) = [d for d in yaml.safe_load_all(open(f"{tree}/installation/{name}", encoding="utf-8")) if d]
     stages[stage] = doc
 rendered = sorted([inst[key], other[key]], key=lambda d: json.dumps(d, sort_keys=True))
 assert rendered == sorted(stages.values(), key=lambda d: json.dumps(d, sort_keys=True)), "a stage rendered differently"

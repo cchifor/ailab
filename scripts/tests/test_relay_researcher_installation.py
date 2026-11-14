@@ -30,7 +30,9 @@ TEMPLATE = ROOT / "docs/relay-workers/researcher-installation-definition.json"
 CONTROL, SLOT = "relay-infra-control", "relay-researcher-1"
 MOZILLA_SHA256 = "427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285"
 # The slot's two egress stages (owner decision G3): exactly one is included; the definition pins its digest.
-EGRESS = TREE / "installation/egress"
+# One file per stage, side by side; the enrollment file is never edited in place.
+EGRESS = {"enrollment": TREE / "installation/execution-egress.yaml",
+          "qualification": TREE / "installation/qualification-egress.yaml"}
 ENROLLMENT_EGRESS_SHA256 = "aa11c2299af12acc886696480b5800ac0b568a0b6e2813609d4ed2f7eea38405"
 QUALIFICATION_EGRESS_SHA256 = "f6d3187c2fa3843ef54ed5d6026093c00a8fe487ab54263b7ce6db140d51282f"
 # The ailab root CA the qualification-stage runtime pins (hub-ca.pem, Router and communication caFile).
@@ -92,7 +94,7 @@ def installation_resources() -> list[str]:
 
 
 def selected_egress() -> Path:
-    stages = [r for r in installation_resources() if r.startswith("egress/")]
+    stages = [r for r in installation_resources() if r in {p.name for p in EGRESS.values()}]
     assert len(stages) == 1, f"exactly one egress stage must be included, found {stages}"
     return TREE / "installation" / stages[0]
 
@@ -237,7 +239,7 @@ class InstallationStage(unittest.TestCase):
                     self.assertNotEqual(doc["metadata"].get("namespace"), SLOT, path)
 
     def test_enrollment_allow_list_is_dns_plus_the_two_public_edge_addresses(self):
-        (egress,) = docs(EGRESS / "enrollment.yaml")
+        (egress,) = docs(EGRESS["enrollment"])
         spec = egress["spec"]
         self.assertEqual(spec["podSelector"], {})
         self.assertEqual(spec["policyTypes"], ["Egress"])
@@ -257,7 +259,7 @@ class InstallationStage(unittest.TestCase):
 
     def test_cloudflare_allow_list_is_marked_enrollment_stage_only(self):
         # Owner decision G3: qualification moves to internal TLS terminators (pending series).
-        text = (EGRESS / "enrollment.yaml").read_text(encoding="utf-8")
+        text = EGRESS["enrollment"].read_text(encoding="utf-8")
         self.assertTrue(text.startswith("# ENROLLMENT-STAGE ONLY."), "the header must say so first")
 
     def test_ceilings_admit_relay_researcher_baseline(self):
@@ -294,9 +296,9 @@ class InstallationStage(unittest.TestCase):
                 for v in value:
                     walk(v)
         measure = bundle_module().measurement_digest
-        for name, want in (("enrollment.yaml", ENROLLMENT_EGRESS_SHA256),
-                           ("qualification.yaml", QUALIFICATION_EGRESS_SHA256)):
-            (egress,) = docs(EGRESS / name)
+        for name, want in (("enrollment", ENROLLMENT_EGRESS_SHA256),
+                           ("qualification", QUALIFICATION_EGRESS_SHA256)):
+            (egress,) = docs(EGRESS[name])
             self.assertEqual((egress["metadata"]["name"], egress["metadata"]["namespace"]),
                              ("relay-researcher-egress", SLOT), name)
             walk(egress["spec"]["egress"])
@@ -304,7 +306,7 @@ class InstallationStage(unittest.TestCase):
                 for port in rule["ports"]:
                     self.assertIn("protocol", port)
             self.assertEqual(measure(egress), want, name)
-        self.assertIn(QUALIFICATION_EGRESS_SHA256, (EGRESS / "qualification.yaml").read_text(encoding="utf-8"))
+        self.assertIn(QUALIFICATION_EGRESS_SHA256, EGRESS["qualification"].read_text(encoding="utf-8"))
         # The definition pins the INCLUDED stage, and the tree renders that one object.
         egress = self.objects[("NetworkPolicy", SLOT, "relay-researcher-egress")]
         (selected,) = docs(selected_egress())
@@ -325,7 +327,7 @@ class QualificationStage(unittest.TestCase):
     journal through three distinct pinned endpoints, one rule each, and nothing else (no DNS)."""
 
     def setUp(self):
-        (self.policy,) = docs(EGRESS / "qualification.yaml")
+        (self.policy,) = docs(EGRESS["qualification"])
         tls = {(d["kind"], d["metadata"]["name"]): d for f in ("terminators.yaml", "network-policy.yaml")
                for d in docs(INTERNAL_TLS / f)}
         journal = journal_render()
@@ -621,8 +623,8 @@ class BundleCheck(unittest.TestCase):
         module = bundle_module()
         if stage is not None:
             # As after that stage's switch PR: the tree includes it and the template pins its digest.
-            module.egress_stage = lambda: (stage, EGRESS / f"{stage}.yaml")
-            (egress,) = docs(EGRESS / f"{stage}.yaml")
+            module.egress_stage = lambda: (stage, EGRESS[stage])
+            (egress,) = docs(EGRESS[stage])
             reviewed = module.template()
             reviewed["executionEgressArtifacts"][0]["sha256"] = module.measurement_digest(egress)
             module.template = lambda: copy.deepcopy(reviewed)
@@ -648,7 +650,7 @@ class BundleCheck(unittest.TestCase):
 
     @staticmethod
     def g3_pin(files, stage):
-        (egress,) = docs(EGRESS / f"{stage}.yaml")
+        (egress,) = docs(EGRESS[stage])
         files["00-definition.json"]["executionEgressArtifacts"][0]["sha256"] = bundle_module().measurement_digest(egress)
 
     def test_accepts_the_g3_binding_in_both_stages(self):

@@ -18,7 +18,7 @@ the evidence; its read-only `platform` credential cannot do any of this.
 | `kubernetes/apps/relay-researcher/installation/` | none; staged as `flux/relay-researcher-installation.yaml` | Nothing |
 | `kubernetes/apps/relay-researcher/agent/` | none; staged as `flux/relay-researcher-agent.yaml` | Nothing |
 | `kubernetes/apps/relay-researcher/pins/pins.yaml` | read by both trees at build time | Nothing; three placeholders |
-| `kubernetes/apps/relay-researcher/installation/egress/qualification.yaml` | not included (the tree includes `egress/enrollment.yaml`) | Nothing; selected by step Q4 |
+| `kubernetes/apps/relay-researcher/installation/qualification-egress.yaml` | not included (the tree includes `execution-egress.yaml`) | Nothing; selected by step Q4 |
 | `kubernetes/apps/relay-internal-tls/` (ailab PR "stage two in-cluster TLS terminators", included here until it merges) | none; staged as `flux/relay-internal-tls.yaml` | Nothing |
 | `docs/relay-workers/researcher-runtime-ca.crt` | not a manifest | The pinned ailab root CA for the release build (step Q1) |
 | `docs/relay-workers/researcher-installation-definition.json` | not a manifest | The reviewed input template for Relay's tool |
@@ -102,8 +102,9 @@ re-review).
 
 ### Egress: the qualification stage
 
-`installation/egress/qualification.yaml`, selected by step Q4 (it **replaces** the enrollment body of
-the same object, `relay-researcher-egress`: the drivers refuse a third policy). Measured digest
+`installation/qualification-egress.yaml`, a separate file next to the enrollment stage's
+`execution-egress.yaml`, which is never edited in place. Step Q4 selects it instead of that file: the
+same object, `relay-researcher-egress`, with this body (the drivers refuse a third policy). Measured digest
 `f6d3187c2fa3843ef54ed5d6026093c00a8fe487ab54263b7ce6db140d51282f`.
 
 Workers keep the public names `https://relay.chifor.me` and `https://router.chifor.me`: the hub origin
@@ -341,8 +342,9 @@ values, in either stage, so an enrollment that could never reach this stage stop
 ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) renders its Service at the
 pinned `10.96.0.42`.
 
-**Q2. Read-only checks.** The three addresses are free (each line must print nothing, except the
-journal's own Service once it exists), the issuer is ready, and the pinned PEM is the root:
+**Q2. Read-only checks.** Who holds the three reserved addresses (`docs/network-plan.md`): every
+printed line must be that address's own Service (the journal's, once it exists), and `10.96.0.40` and
+`.41` must print nothing; then the issuer is ready and the pinned PEM is the root:
 
 ```sh
 kubectl --context admin@ai get svc -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.spec.clusterIP}{"\n"}{end}' \
@@ -354,6 +356,8 @@ openssl x509 -in docs/relay-workers/researcher-runtime-ca.crt -noout -subject -f
 ```
 
 A taken address stops here: changing one is a new binding, a new release input and a re-review.
+`clusterIP` is immutable, so a reserved Service that already exists on another address keeps it until
+it is deleted and created again (network plan; the journal runbook has the procedure).
 
 **Q3. Terminators PR.** One PR:
 `git mv kubernetes/apps/relay-internal-tls/flux/relay-internal-tls.yaml kubernetes/apps/clusters/ai/`.
@@ -383,7 +387,7 @@ suspended for a drill or the activation ceremony, finish it, confirm the restore
 never switch stages inside a window) and while the slot holds no Pod
 (`kubectl -n relay-researcher-1 get pods` empty; the quota is still 0):
 
-- `installation/kustomization.yaml`: `- egress/enrollment.yaml` becomes `- egress/qualification.yaml`;
+- `installation/kustomization.yaml`: `- execution-egress.yaml` becomes `- qualification-egress.yaml`;
 - the template's `executionEgressArtifacts[0].sha256` becomes
   `f6d3187c2fa3843ef54ed5d6026093c00a8fe487ab54263b7ce6db140d51282f`.
 

@@ -15,7 +15,7 @@ installation is exactly what was reviewed here, and then copies the only two thi
          tool's 10-namespaces, 20-containment and 21-admission-deny objects against
          kubernetes/apps/relay-researcher/installation with the bundle's installation ID; the
          execution egress artifact digest against the egress stage the installation tree includes
-         (egress/enrollment.yaml or egress/qualification.yaml, exactly one); the binding's G3 fields
+         (execution-egress.yaml or qualification-egress.yaml, exactly one); the binding's G3 fields
          (hostAliases equal to the pinned internal TLS and journal Service addresses, the hub CA and the
          templates' Router/communication CA pins equal to docs/relay-workers/researcher-runtime-ca.crt),
          required in both stages because the binding never changes between them; 30-agent-values.json and
@@ -51,7 +51,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 TREE = ROOT / "kubernetes/apps/relay-researcher"
 TEMPLATE = ROOT / "docs/relay-workers/researcher-installation-definition.json"
-EGRESS_STAGES = {"egress/enrollment.yaml": "enrollment", "egress/qualification.yaml": "qualification"}
+EGRESS_STAGES = {"execution-egress.yaml": "enrollment", "qualification-egress.yaml": "qualification"}
 # Owner decision G3 (relay#277 comment 122379): the qualification stage's workers reach these three
 # pinned Services through measured hostAliases, and trust only the ailab root CA for them.
 INTERNAL_TLS_TERMINATORS = ROOT / "kubernetes/apps/relay-internal-tls/terminators.yaml"
@@ -156,7 +156,7 @@ def egress_stage() -> tuple[str, Path]:
     """The one egress stage kubernetes/apps/relay-researcher/installation includes."""
     resources = yaml.safe_load((TREE / "installation/kustomization.yaml").read_text(encoding="utf-8"))["resources"]
     stages = [r for r in resources if r in EGRESS_STAGES]
-    if len(stages) != 1 or any(r.startswith("egress/") and r not in EGRESS_STAGES for r in resources):
+    if len(stages) != 1:
         fail(f"the installation tree must include exactly one egress stage, found {stages}")
     return EGRESS_STAGES[stages[0]], TREE / "installation" / stages[0]
 
