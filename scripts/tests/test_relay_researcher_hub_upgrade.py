@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -97,6 +98,27 @@ def order_violations(comps: set[str]) -> list[str]:
     return out
 
 
+def sets_environments(path: Path) -> list[str]:
+    """Every parsed scalar of a YAML file that names RELAY_ENVIRONMENTS (an env entry's name or an
+    inline patch string). Comments are not parsed values, so they never match."""
+    hits: list[str] = []
+
+    def walk(value):
+        if isinstance(value, dict):
+            for k, v in value.items():
+                walk(k)
+                walk(v)
+        elif isinstance(value, list):
+            for v in value:
+                walk(v)
+        elif isinstance(value, str) and "RELAY_ENVIRONMENTS" in value:
+            hits.append(value)
+
+    for d in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+        walk(d)
+    return hits
+
+
 def included_component_dirs() -> list[Path]:
     return [(RELAY / c).resolve() for c in doc(RELAY / "kustomization.yaml").get("components", [])]
 
@@ -139,13 +161,28 @@ class InclusionGate(unittest.TestCase):
             self.assertNotIn(b"OPERATOR-FILLS", (COMPONENTS / "relay-worker-profiles/profiles.json").read_bytes())
 
     def test_no_environments_anywhere_in_the_live_relay(self):
-        # Owner decision G2: environments stay off with the control plane. Scan the overlay AND every
-        # component it includes, so a component cannot smuggle the flag in.
+        # Owner decision G2: environments stay off with the control plane. Check the overlay AND every
+        # component it includes, so a component cannot smuggle the flag in. Parsed values only (env
+        # entries, inline patch strings), never comments: the control-plane component explains the
+        # flag in its header and must stay includable.
         for root in [RELAY, *included_component_dirs()]:
             for path in root.rglob("*.yaml"):
-                self.assertNotIn("RELAY_ENVIRONMENTS", path.read_text(encoding="utf-8"), path)
-        self.assertNotIn("RELAY_ENVIRONMENTS",
-                         (COMPONENTS / "relay-agent-control-plane/deployment.yaml").read_text(encoding="utf-8"))
+                self.assertEqual(sets_environments(path), [], path)
+        self.assertEqual(sets_environments(COMPONENTS / "relay-agent-control-plane/deployment.yaml"), [])
+        self.assertEqual(sets_environments(COMPONENTS / "relay-agent-control-plane/kustomization.yaml"), [])
+
+    def test_environments_detector(self):
+        with tempfile.TemporaryDirectory() as d:
+            cases = {
+                "comment.yaml": "# RELAY_ENVIRONMENTS stays unset\nkind: Component\n",
+                "env.yaml": "spec:\n  containers:\n  - name: relay\n    env:\n    - {name: RELAY_ENVIRONMENTS, value: '1'}\n",
+                "inline.yaml": "patches:\n- patch: |-\n    - op: add\n      path: /x\n      value: {name: RELAY_ENVIRONMENTS, value: '1'}\n",
+            }
+            found = {}
+            for name, body in cases.items():
+                (Path(d) / name).write_text(body, encoding="utf-8")
+                found[name] = bool(sets_environments(Path(d) / name))
+        self.assertEqual(found, {"comment.yaml": False, "env.yaml": True, "inline.yaml": True})
 
 
 def code_blocks(text: str) -> list[str]:

@@ -9,7 +9,9 @@ kind: Component
 # the matching active generation row. On the live hub that row comes from the operator's one-shot
 # recovery:initialize run (step H3, receipt kind "initial", owner decision G1 in relay#277 comment
 # 122379), never from recovery:fence, which is for restores only.
-# scripts/tests/test_relay_researcher_hub_upgrade.py refuses one component without the other.
+# scripts/tests/test_relay_researcher_hub_upgrade.py refuses this component without
+# ../relay-restore-fencing; the reverse is allowed (a restore, or the H3 rollback, keeps the
+# generation alone).
 #
 # What it enables: approval, enrollment and fence routes for installations and the worker routes. It
 # issues no offer, grant or workload; profiles, budgets, qualification and the router connection
