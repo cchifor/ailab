@@ -1,0 +1,53 @@
+# One ailab-ca certificate per terminator, for exactly its public name. Only Relay workers are pointed
+# at these Services (hostAliases); every other client of relay.chifor.me / router.chifor.me still gets
+# Cloudflare's or the edge proxy's publicly trusted certificate. ECDSA P-256, rotated key, 90 days,
+# renewed 30 days early; the terminators' cert-reloader sidecar loads a renewal without a restart.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: relay-hub-tls
+  namespace: relay-internal-tls
+  labels:
+    app.kubernetes.io/name: relay-hub-tls
+    app.kubernetes.io/component: internal-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  secretName: relay-hub-tls-cert
+  duration: 2160h
+  renewBefore: 720h
+  dnsNames:
+  - relay.chifor.me
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [server auth, digital signature]
+  issuerRef:
+    name: ailab-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: relay-router-tls
+  namespace: relay-internal-tls
+  labels:
+    app.kubernetes.io/name: relay-router-tls
+    app.kubernetes.io/component: internal-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  secretName: relay-router-tls-cert
+  duration: 2160h
+  renewBefore: 720h
+  dnsNames:
+  - router.chifor.me
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages: [server auth, digital signature]
+  issuerRef:
+    name: ailab-ca
+    kind: ClusterIssuer
+    group: cert-manager.io

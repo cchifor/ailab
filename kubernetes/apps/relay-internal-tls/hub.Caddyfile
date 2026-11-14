@@ -1,0 +1,60 @@
+# relay-hub-tls: the in-cluster TLS endpoint that Relay researcher workers reach as
+# https://relay.chifor.me through their Pod's measured hostAliases entry (Service ClusterIP 10.96.0.40).
+# kustomization.yaml in this directory has the design; router.Caddyfile is the same shape for router.chifor.me.
+#
+# Exactly one name: the only certificate is the ailab-ca one for relay.chifor.me, so any other SNI fails
+# the handshake, and strict_sni_host answers 421 when Host differs from SNI. Every client-address header
+# a worker could send is removed, then CF-Connecting-IP / X-Real-IP / X-Forwarded-For are set to the
+# TCP peer (the worker Pod's own address): Relay trusts CF-Connecting-IP (RELAY_CLIENT_ADDRESS_HEADER),
+# so a worker must never choose it. The JSON access log on stdout (ts, status, request.remote_ip,
+# request.host) records every worker request; credentials are deleted from it.
+{
+	admin localhost:2019
+	auto_https off
+	grace_period 90s
+	servers :443 {
+		protocols h1 h2
+		strict_sni_host on
+		timeouts {
+			read_header 10s
+			idle 5m
+		}
+		max_header_size 64KB
+	}
+}
+
+https://relay.chifor.me:443 {
+	tls /certs/tls.crt /certs/tls.key
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp `\?.*$` `?REDACTED`
+				request>headers>Authorization delete
+				request>headers>Proxy-Authorization delete
+				request>headers>Cookie delete
+				request>headers>X-Api-Key delete
+				resp_headers>Set-Cookie delete
+			}
+		}
+	}
+	route {
+		request_header -Forwarded
+		request_header -X-Forwarded-*
+		request_header -X-Real-Ip
+		request_header -True-Client-Ip
+		request_header -Cdn-Loop
+		request_header -Remote-*
+		request_header -Cf-*
+		header -Server
+		reverse_proxy http://relay.relay.svc.cluster.local:80 {
+			header_up CF-Connecting-IP {remote_host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Forwarded-Host {host}
+			stream_close_delay 5m
+		}
+	}
+}

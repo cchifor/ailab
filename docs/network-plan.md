@@ -169,6 +169,23 @@ allocated from it by the apiserver.
 > must fall inside `10.96.0.0/12` and must not collide with a live allocation; the apiserver rejects
 > both, leaving the Service uncreated.
 
+**Pinned ClusterIPs (reserved).** Relay researcher workers resolve their Relay, Router and candidate
+journal names through measured `hostAliases` (owner decision G3, relay#277), so these Services need
+addresses that exist before the Service does. They are chosen from the static band `10.96.0.0/24`
+(the first 256 addresses of a /12, which the apiserver's dynamic allocator leaves for static
+assignment and uses only when the rest is exhausted). Changing one is a new Relay binding and a
+re-qualification, not an edit. Before a manifest that creates one is included, the operator confirms
+it is free (read-only; must print nothing):
+`kubectl --context admin@ai get svc -A -o jsonpath='{range .items[*]}{.spec.clusterIP}{"\n"}{end}' | grep -xE '10\.96\.0\.4[0-2]'`
+
+| ClusterIP | Service | Source |
+|---|---|---|
+| `10.96.0.1` | `default/kubernetes` | apiserver (first address) |
+| `10.96.0.10` | `kube-system/kube-dns` | Talos |
+| `10.96.0.40` | `relay-internal-tls/relay-hub-tls` (`relay.chifor.me` for workers) | `kubernetes/apps/relay-internal-tls/terminators.yaml` (staged) |
+| `10.96.0.41` | `relay-internal-tls/relay-router-tls` (`router.chifor.me` for workers) | `kubernetes/apps/relay-internal-tls/terminators.yaml` (staged) |
+| `10.96.0.42` | `relay-candidate-journal/relay-candidate-journal` | `kubernetes/optional/relay-candidate-journal/render.py` (optional) |
+
 ## Dedicated storage fabric — `10.55.0.0/24`
 
 > ⚠️ **The /30 design below was the original plan and was NOT realized.** Live reality (verified; source of

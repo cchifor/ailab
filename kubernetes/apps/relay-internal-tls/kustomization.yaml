@@ -1,0 +1,64 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Dedicated in-cluster TLS endpoints for Relay researcher workers: owner decision G3
+# (https://git.chifor.me/cchifor/relay/issues/277#issuecomment-122379).
+#
+# Workers keep the public names https://relay.chifor.me (the hub) and https://router.chifor.me (the
+# Router): the hub origin is baked into the measured runtime and must equal the hub's RELAY_URL origin,
+# and the Router origin must equal the profile's attested origin. A worker Pod resolves both names
+# through its measured hostAliases (Relay PodRuntimeBinding.hostAliases, rendered and admission-checked
+# by Relay; dnsPolicy stays ClusterFirst and nothing else may be aliased) to two DISTINCT Services here,
+# instead of the two Cloudflare anycast addresses that serve both names. That makes a hub-only cut
+# measurable (one NetworkPolicy rule per endpoint, separate Pods behind each) and lets the slot run with
+# no DNS egress at all.
+#
+#   relay.chifor.me   -> Service relay-hub-tls    ClusterIP 10.96.0.40 -> Pods relay-hub-tls
+#                        -> http://relay.relay.svc.cluster.local:80 (Relay, 8788)
+#   router.chifor.me  -> Service relay-router-tls ClusterIP 10.96.0.41 -> Pods relay-router-tls
+#                        -> http://llm-router-edge.llm-router.svc.cluster.local:80 (hold proxy, 8080)
+#
+# The ClusterIPs are pinned because hostAliases need fixed addresses. They sit in the static band of the
+# Service CIDR 10.96.0.0/12 (10.96.0.0/24, which the apiserver's dynamic allocator avoids) and are
+# recorded in docs/network-plan.md with the candidate journal's 10.96.0.42. The apiserver refuses a
+# colliding address and leaves the Service uncreated (fail closed); the inclusion runbook step checks
+# for a live collision first.
+#
+# Each terminator holds an ailab-ca certificate for exactly its public name (certificates.yaml). Workers
+# trust ailab-ca for these names through Relay's pinned CA files (the runtime's hub-ca.pem and the
+# template's router/communication caFile+caSha256: the ailab root, sha256 3d109e83...4ad4c3); nothing
+# else in the estate is pointed at these Services. Each terminator strips every client-address header
+# and sets CF-Connecting-IP / X-Real-IP / X-Forwarded-For to the TCP peer, so Relay's and the Router's
+# trust in CF-Connecting-IP keeps holding (the comments in apps/relay/network-policy.yaml and
+# apps/llm-router/{edge,router}.yaml name these sources).
+#
+#   namespace.yaml          relay-internal-tls (restricted PSA) and its default-deny
+#   certificates.yaml       the two ailab-ca Certificates
+#   terminators.yaml        two Caddy Deployments (with a cert-reloader sidecar), Services, PDBs
+#   network-policy.yaml     terminator ingress (ONLY managed worker Pods of relay-researcher-1, TCP 443)
+#                           and egress (their upstream Pods, cluster DNS)
+#   upstream-ingress.yaml   ADDITIVE ingress in relay and llm-router admitting the terminators
+#
+# INERT: no Flux Kustomization in kubernetes/apps/clusters/ai references this path. The reviewed one
+# waits in flux/relay-internal-tls.yaml; the qualification-stage step of
+# docs/runbooks/relay-researcher-installation.md moves it into clusters/ai.
+# scripts/tests/test_relay_internal_tls.py pins the shapes; scripts/tests/test-relay-internal-tls-render.sh
+# builds and validates the tree, and scripts/tests/relay_internal_tls_runtime.py runs both Caddyfiles
+# under the pinned Caddy against forged headers, a wrong Host and SNI, and a certificate renewal.
+resources:
+- namespace.yaml
+- certificates.yaml
+- terminators.yaml
+- network-policy.yaml
+- upstream-ingress.yaml
+# Hashed names: a Caddyfile or reloader change rolls the Pods.
+configMapGenerator:
+- name: relay-hub-tls-caddy
+  namespace: relay-internal-tls
+  files:
+  - Caddyfile=hub.Caddyfile
+  - cert-reloader.sh
+- name: relay-router-tls-caddy
+  namespace: relay-internal-tls
+  files:
+  - Caddyfile=router.Caddyfile
+  - cert-reloader.sh

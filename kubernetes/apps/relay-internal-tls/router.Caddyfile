@@ -1,0 +1,59 @@
+# relay-router-tls: the in-cluster TLS endpoint that Relay researcher workers reach as
+# https://router.chifor.me through their Pod's measured hostAliases entry (Service ClusterIP 10.96.0.41).
+# Same shape as hub.Caddyfile (design: kustomization.yaml). The upstream is llm-router-edge, the Caddy
+# hold proxy the public path also uses (edge proxy, ADR 0040), so a worker's request is held across a
+# Router restart exactly as a public one. The Router trusts CF-Connecting-IP
+# (ROUTER_AUTH_CLIENT_ADDRESS_HEADER, router.yaml), so it is overwritten here with the worker Pod's
+# address; no cf-ray is sent, so in-pod deadlines apply, not the edge's 90 s image deadline.
+# Relay's hub-partition driver counts this access log's lines from the worker Pod's address after the
+# hub cut (ts, status, request.remote_ip, request.host): Router traffic that kept flowing.
+{
+	admin localhost:2019
+	auto_https off
+	grace_period 90s
+	servers :443 {
+		protocols h1 h2
+		strict_sni_host on
+		timeouts {
+			read_header 10s
+			idle 5m
+		}
+		max_header_size 64KB
+	}
+}
+
+https://router.chifor.me:443 {
+	tls /certs/tls.crt /certs/tls.key
+	log {
+		output stdout
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp `\?.*$` `?REDACTED`
+				request>headers>Authorization delete
+				request>headers>Proxy-Authorization delete
+				request>headers>Cookie delete
+				request>headers>X-Api-Key delete
+				resp_headers>Set-Cookie delete
+			}
+		}
+	}
+	route {
+		request_header -Forwarded
+		request_header -X-Forwarded-*
+		request_header -X-Real-Ip
+		request_header -True-Client-Ip
+		request_header -Cdn-Loop
+		request_header -Remote-*
+		request_header -Cf-*
+		header -Server
+		reverse_proxy http://llm-router-edge.llm-router.svc.cluster.local:80 {
+			header_up CF-Connecting-IP {remote_host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Forwarded-Host {host}
+			stream_close_delay 5m
+		}
+	}
+}

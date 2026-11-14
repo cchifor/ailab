@@ -1,0 +1,358 @@
+# The two terminators. Each is a 2-replica Caddy Deployment modelled on llm-router-edge
+# (apps/llm-router/edge.yaml): same pinned image, non-root, read-only root, every capability dropped
+# but NET_BIND_SERVICE (the image's caddy binary carries that file capability; with ALL dropped the
+# kernel refuses to exec it, and it is what lets UID 1000 bind 443), no API token. Caddy listens on 443
+# itself, so the Service port, the Pod port and the worker slot's NetworkPolicy port are all 443.
+# The cert-reloader sidecar (cert-reloader.sh) reloads Caddy when cert-manager renews the certificate.
+# Service ClusterIPs are pinned for the workers' hostAliases (kustomization.yaml, docs/network-plan.md).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-hub-tls
+  namespace: relay-internal-tls
+  labels:
+    app.kubernetes.io/name: relay-hub-tls
+    app.kubernetes.io/component: internal-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: relay-hub-tls
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: relay-hub-tls
+        app.kubernetes.io/component: internal-tls
+        app.kubernetes.io/part-of: relay
+    spec:
+      automountServiceAccountToken: false # Caddy needs no API access
+      enableServiceLinks: false
+      tolerations:
+      - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000 # the certificate Secret is mounted group-readable for uid 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # Open streams finish on a rollout (Caddy grace_period 90s); new ones go to the other replica.
+      terminationGracePeriodSeconds: 100
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: relay-hub-tls
+      containers:
+      - name: caddy
+        image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+        imagePullPolicy: IfNotPresent
+        command: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
+        env:
+        - {name: XDG_DATA_HOME, value: /data}
+        - {name: XDG_CONFIG_HOME, value: /config}
+        ports:
+        - name: https
+          containerPort: 443
+          protocol: TCP
+        readinessProbe:
+          tcpSocket:
+            port: https
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: https
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command: [sleep, "5"]
+        resources:
+          requests:
+            cpu: 25m
+            memory: 48Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+            add: [NET_BIND_SERVICE]
+        volumeMounts:
+        - {name: caddyfile, mountPath: /etc/caddy, readOnly: true}
+        - {name: certs, mountPath: /certs, readOnly: true}
+        - {name: data, mountPath: /data}
+        - {name: config, mountPath: /config}
+      - name: cert-reloader
+        # Same image: validates the config (which loads and pairs the new certificate and key) and
+        # reloads through the localhost admin API. cert-reloader.sh has the details.
+        image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+        imagePullPolicy: IfNotPresent
+        command: [sh, /etc/caddy/cert-reloader.sh]
+        env:
+        - {name: XDG_DATA_HOME, value: /data}
+        - {name: XDG_CONFIG_HOME, value: /config}
+        - {name: RELOAD_INTERVAL, value: "60"}
+        resources:
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+            add: [NET_BIND_SERVICE]
+        volumeMounts:
+        - {name: caddyfile, mountPath: /etc/caddy, readOnly: true}
+        - {name: certs, mountPath: /certs, readOnly: true}
+        - {name: data, mountPath: /data}
+        - {name: config, mountPath: /config}
+      volumes:
+      - name: caddyfile
+        configMap:
+          name: relay-hub-tls-caddy # configMapGenerator: a Caddyfile change rolls the Deployment
+      - name: certs
+        secret:
+          secretName: relay-hub-tls-cert # Certificate relay-hub-tls; a directory mount, never subPath
+          defaultMode: 0440
+      - name: data
+        emptyDir: {}
+      - name: config
+        emptyDir: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: relay-hub-tls
+  namespace: relay-internal-tls
+  labels:
+    app.kubernetes.io/name: relay-hub-tls
+    app.kubernetes.io/component: internal-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: relay-hub-tls
+---
+# PUBLIC_relay-hub-tls resolves to this address in a worker Pod (Relay hostAliases). Pinned: changing it is a
+# new Relay binding and a re-qualification, not an edit.
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay-hub-tls
+  namespace: relay-internal-tls
+  labels:
+    app.kubernetes.io/name: relay-hub-tls
+    app.kubernetes.io/component: internal-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  type: ClusterIP
+  clusterIP: 10.96.0.40
+  clusterIPs:
+  - 10.96.0.40
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+  - IPv4
+  selector:
+    app.kubernetes.io/name: relay-hub-tls
+  ports:
+  - name: https
+    protocol: TCP
+    port: 443
+    targetPort: 443
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-router-tls
+  namespace: relay-internal-tls
+  labels:
+    app.kubernetes.io/name: relay-router-tls
+    app.kubernetes.io/component: internal-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  replicas: 2
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: relay-router-tls
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: relay-router-tls
+        app.kubernetes.io/component: internal-tls
+        app.kubernetes.io/part-of: relay
+    spec:
+      automountServiceAccountToken: false # Caddy needs no API access
+      enableServiceLinks: false
+      tolerations:
+      - {key: dedicated, operator: Equal, value: agent, effect: NoSchedule}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000 # the certificate Secret is mounted group-readable for uid 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # Open streams finish on a rollout (Caddy grace_period 90s); new ones go to the other replica.
+      terminationGracePeriodSeconds: 100
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: relay-router-tls
+      containers:
+      - name: caddy
+        image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+        imagePullPolicy: IfNotPresent
+        command: [caddy, run, --config, /etc/caddy/Caddyfile, --adapter, caddyfile]
+        env:
+        - {name: XDG_DATA_HOME, value: /data}
+        - {name: XDG_CONFIG_HOME, value: /config}
+        ports:
+        - name: https
+          containerPort: 443
+          protocol: TCP
+        readinessProbe:
+          tcpSocket:
+            port: https
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        livenessProbe:
+          tcpSocket:
+            port: https
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 3
+        lifecycle:
+          preStop:
+            exec:
+              command: [sleep, "5"]
+        resources:
+          requests:
+            cpu: 25m
+            memory: 48Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+            add: [NET_BIND_SERVICE]
+        volumeMounts:
+        - {name: caddyfile, mountPath: /etc/caddy, readOnly: true}
+        - {name: certs, mountPath: /certs, readOnly: true}
+        - {name: data, mountPath: /data}
+        - {name: config, mountPath: /config}
+      - name: cert-reloader
+        # Same image: validates the config (which loads and pairs the new certificate and key) and
+        # reloads through the localhost admin API. cert-reloader.sh has the details.
+        image: caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+        imagePullPolicy: IfNotPresent
+        command: [sh, /etc/caddy/cert-reloader.sh]
+        env:
+        - {name: XDG_DATA_HOME, value: /data}
+        - {name: XDG_CONFIG_HOME, value: /config}
+        - {name: RELOAD_INTERVAL, value: "60"}
+        resources:
+          requests:
+            cpu: 5m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: [ALL]
+            add: [NET_BIND_SERVICE]
+        volumeMounts:
+        - {name: caddyfile, mountPath: /etc/caddy, readOnly: true}
+        - {name: certs, mountPath: /certs, readOnly: true}
+        - {name: data, mountPath: /data}
+        - {name: config, mountPath: /config}
+      volumes:
+      - name: caddyfile
+        configMap:
+          name: relay-router-tls-caddy # configMapGenerator: a Caddyfile change rolls the Deployment
+      - name: certs
+        secret:
+          secretName: relay-router-tls-cert # Certificate relay-router-tls; a directory mount, never subPath
+          defaultMode: 0440
+      - name: data
+        emptyDir: {}
+      - name: config
+        emptyDir: {}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: relay-router-tls
+  namespace: relay-internal-tls
+  labels:
+    app.kubernetes.io/name: relay-router-tls
+    app.kubernetes.io/component: internal-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: relay-router-tls
+---
+# PUBLIC_relay-router-tls resolves to this address in a worker Pod (Relay hostAliases). Pinned: changing it is a
+# new Relay binding and a re-qualification, not an edit.
+apiVersion: v1
+kind: Service
+metadata:
+  name: relay-router-tls
+  namespace: relay-internal-tls
+  labels:
+    app.kubernetes.io/name: relay-router-tls
+    app.kubernetes.io/component: internal-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  type: ClusterIP
+  clusterIP: 10.96.0.41
+  clusterIPs:
+  - 10.96.0.41
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+  - IPv4
+  selector:
+    app.kubernetes.io/name: relay-router-tls
+  ports:
+  - name: https
+    protocol: TCP
+    port: 443
+    targetPort: 443

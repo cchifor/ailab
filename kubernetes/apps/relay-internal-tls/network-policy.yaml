@@ -1,0 +1,110 @@
+# The terminators' only allowances (namespace.yaml denies everything else).
+#
+# Ingress: ONLY Relay-managed worker Pods (label relay.infrastructure/managed: "true", set by Relay's
+# infrastructure agent on every worker Pod it creates) in the researcher execution slot
+# relay-researcher-1, namespace AND Pod in one peer, TCP 443. A further slot is added here explicitly.
+# Socket LB is off cluster-wide (kubernetes/infra/bootstrap/cilium-values.yaml), so a worker's packet
+# to the ClusterIP is translated per packet before policy: the slot's egress rule selects these Pods
+# and this rule sees the worker Pod as the source.
+#
+# Egress: the one upstream each terminator proxies to, on its container port (the Service front door
+# is 80), and cluster DNS for the upstream's Service name.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-hub-tls
+  namespace: relay-internal-tls
+  labels:
+    app.kubernetes.io/name: relay-hub-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: relay-hub-tls
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: relay-researcher-1
+      podSelector:
+        matchLabels:
+          relay.infrastructure/managed: "true"
+    ports:
+    - protocol: TCP
+      port: 443
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: relay
+      podSelector:
+        matchLabels:
+          app: relay
+    ports:
+    - protocol: TCP
+      port: 8788
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-router-tls
+  namespace: relay-internal-tls
+  labels:
+    app.kubernetes.io/name: relay-router-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: relay-router-tls
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: relay-researcher-1
+      podSelector:
+        matchLabels:
+          relay.infrastructure/managed: "true"
+    ports:
+    - protocol: TCP
+      port: 443
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: llm-router
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: llm-router-edge
+    ports:
+    - protocol: TCP
+      port: 8080
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
