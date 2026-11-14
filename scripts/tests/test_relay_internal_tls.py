@@ -208,8 +208,15 @@ class Terminators(unittest.TestCase):
             self.assertEqual(url, f"http://{svc['metadata']['name']}.{up_ns}.svc.cluster.local:{svc['spec']['ports'][0]['port']}")
             pod_labels = dep["spec"]["template"]["metadata"]["labels"]
             self.assertTrue(selects({"matchLabels": up_labels}, pod_labels), name)
-            ports = {p["containerPort"] for c in dep["spec"]["template"]["spec"]["containers"] for p in c.get("ports", [])}
-            self.assertIn(up_port, ports, name)
+            self.assertTrue(selects({"matchLabels": svc["spec"]["selector"]}, pod_labels), name)
+            # The terminator's egress port is the container port the Service's port actually targets
+            # (named or numeric), so a change of either Service's targetPort fails here, not in the cluster.
+            target = svc["spec"]["ports"][0]["targetPort"]
+            ports = {p.get("name"): p["containerPort"]
+                     for c in dep["spec"]["template"]["spec"]["containers"] for p in c.get("ports", [])}
+            resolved = ports.get(target) if isinstance(target, str) else target
+            self.assertIn(resolved, ports.values(), name)
+            self.assertEqual(resolved, up_port, name)
 
     def test_additive_upstream_ingress(self):
         for key, (up_labels, name, port) in {

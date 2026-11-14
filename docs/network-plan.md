@@ -174,9 +174,14 @@ journal names through measured `hostAliases` (owner decision G3, relay#277), so 
 addresses that exist before the Service does. They are chosen from the static band `10.96.0.0/24`
 (the first 256 addresses of a /12, which the apiserver's dynamic allocator leaves for static
 assignment and uses only when the rest is exhausted). Changing one is a new Relay binding and a
-re-qualification, not an edit. Before a manifest that creates one is included, the operator confirms
-it is free (read-only; must print nothing):
-`kubectl --context admin@ai get svc -A -o jsonpath='{range .items[*]}{.spec.clusterIP}{"\n"}{end}' | grep -xE '10\.96\.0\.4[0-2]'`
+re-qualification, not an edit. Before a manifest that creates one is included, the operator lists
+who holds the three addresses (read-only):
+`kubectl --context admin@ai get svc -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.spec.clusterIP}{"\n"}{end}' | grep -E ' 10\.96\.0\.4[0-2]$'`
+Every printed line must be that address's own Service from the table below (one already created);
+any other Service on one of them is a collision, and the address being created must print nothing.
+`clusterIP` is immutable: a Service of the table that already exists on ANOTHER address (this grep does
+not show it; `kubectl get svc -n <namespace> <name>` does) keeps it until it is deleted and created
+again from the pinned manifest.
 
 | ClusterIP | Service | Source |
 |---|---|---|
