@@ -136,6 +136,10 @@ class SchemaBundle(unittest.TestCase):
             container = spec['containers'][0]
             self.assertEqual(container['image'], server_image)
             self.assertEqual(container['command'], ['/bin/sh', '/initialize/' + command])
+            # verify-schema.sh is sourced and finds relay-source.env beside "$0", so the
+            # Job must invoke its script by absolute path inside the script ConfigMap mount.
+            mounts = {m['name']: m['mountPath'] for m in container['volumeMounts']}
+            self.assertEqual(mounts['scripts'], '/initialize')
             env = {item['name']: item['value'] for item in container['env']}
             self.assertEqual(env['RELAY_BUDGET_SCHEMA_MANIFEST_SHA256'], '')
             if command == 'upgrade.sh':
@@ -145,9 +149,6 @@ class SchemaBundle(unittest.TestCase):
             projection = next(v['configMap'] for v in spec['volumes'] if v['name'] == 'schema')
             self.assertEqual({v['key'] for v in projection['items']}, {'source-commit', 'SHA256SUMS', *MODULE.SCHEMAS})
 
-
-if __name__ == '__main__':
-    unittest.main()
 
 
 class ScriptsAgreeWithTheRenderer(unittest.TestCase):
@@ -173,3 +174,7 @@ class ScriptsAgreeWithTheRenderer(unittest.TestCase):
         start = self.shell('start.sh')
         self.assertIn(f'!= {MODULE.SCHEMA_VERSION} ]', start)
         self.assertNotIn('!= 4 ]', start)
+
+
+if __name__ == '__main__':
+    unittest.main()

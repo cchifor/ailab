@@ -1,10 +1,13 @@
 #!/bin/sh
 # Sourced by the two offline operator Jobs, before touching retained storage.
 # The reviewed source pin ships beside this script in the same script ConfigMap.
+# Being sourced, "$0" is the calling Job script: both Jobs run it by absolute path
+# from the /initialize mount (the same assumption the caller's own `.` of this file
+# makes; test_relay_budget_schema_bundle pins both). Any other invocation fails closed.
 pin_file="$(dirname "$0")/relay-source.env"
 
 pinned_source_commit() {
-  [ -f "$pin_file" ] || return 78
+  [ -f "$pin_file" ] || { echo "Reviewed source pin not found at $pin_file" >&2; return 78; }
   # Only comments, blank lines and exactly one assignment of a full SHA (or empty).
   if grep -Evq '^(#.*|[[:space:]]*|RELAY_BUDGET_SOURCE_COMMIT=([0-9a-f]{40})?)$' "$pin_file"; then
     return 78
