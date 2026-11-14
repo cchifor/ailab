@@ -63,9 +63,25 @@ password, authority row, witness, qualification, consumer or enabled plugin.
 
 The schema source is Relay's `deploy/worker-budget-ledger/` at a single final
 reviewer-merged commit: `001-authority.sql`, `002-preflight.sql`,
-`003-scoped-requests.sql`, and `004-preflight-errors.sql`, applied in that order.
-The initializer requires all four; a version-1 database needs the offline upgrade
-below. Do not vendor the SQL into ailab or run it as a Relay app migration.
+`003-scoped-requests.sql`, `004-preflight-errors.sql` and
+`005-provenance-purpose.sql`, applied in that order. 005 adds the protected
+provenance purpose and **replaces** `worker_budget.prepare()` and
+`prepare_token_only()`, which Relay's ordinary path calls, so a ledger serving
+that Relay needs all five. The initializer requires all five and writes marker
+`5`; the server wrapper refuses every other marker. The earlier 001–004-only
+initializer (marker `4`) is **retired**: no ailab ledger was initialized with it,
+the wrapper refuses its marker, and there is no 4→5 upgrade. A version-1 database
+needs the offline upgrade below. Do not vendor the SQL into ailab or run it as a
+Relay app migration.
+
+The source commit is one reviewed pin:
+`RELAY_BUDGET_SOURCE_COMMIT` in
+`kubernetes/optional/relay-budget-authority/initialize/relay-source.env`. It is
+empty until the operator sets the full SHA of the reviewer-merged release commit
+in a reviewed PR. The bundle renderer reads it, and it ships in the script
+ConfigMap, so both standalone Jobs refuse a bundle whose `source-commit` differs
+or a pin that is unset.
+
 The authoritative role/recovery design is the adjacent Relay README;
 [llm-router #158](https://git.chifor.me/cchifor/llm-router/pulls/158) provides the
 default-disabled runtime plugin and qualification-policy schema.
@@ -107,33 +123,40 @@ Do not enable application consumers until every gate below is satisfied.
    (`kubectl kustomize kubernetes/apps/relay-budget-authority/ledger`) and the merge
    is the apply. Flux's health check waits for the PVC to bind and the Certificate
    to be issued. Wait for its retained PVC and Certificate. Record PVC UID, PV
-   name/UID, QNAP LUN identity, Retain policy, image digest and issued certificate SANs.
+   name/UID, QNAP LUN identity, Retain policy, image digest and issued
+   certificate SANs.
    The backing PV is not created by this repo, so its exclusion is an operator
    gate. Do not delete or replace an existing claim to make initialization pass.
-3. Export the four files from one **reviewer-merged full Relay commit SHA** using
-   the local-only bundle renderer. It reads committed objects, not working-tree
-   files, and refuses an existing output directory:
+3. Set `RELAY_BUDGET_SOURCE_COMMIT` in `initialize/relay-source.env` to the
+   **reviewer-merged full Relay commit SHA** in a reviewed PR, and wait for it to
+   merge. Then, from that merged ailab commit, export the five files using the
+   local-only bundle renderer. It reads the pin and committed objects, not
+   working-tree files, and refuses an unset pin or an existing output directory:
 
    ```sh
    python3 scripts/relay-budget-schema-bundle.py /path/to/relay \
-     "$REVIEWED_RELAY_COMMIT" /private/operator/relay-budget-schema
+     /private/operator/relay-budget-schema
    ```
 
-   Review the source commit and every SQL change. Record the returned
-   `manifestSha256` independently in the operator evidence and in
+   The receipt must say `"pinned": true` and `"schemaVersion": 5`.
+   `--validation-commit` renders an unpinned bundle for local validation only;
+   the Jobs refuse it. Review the source commit and every SQL change. Record the
+   returned `manifestSha256` independently in the operator evidence and in
    `RELAY_BUDGET_SCHEMA_MANIFEST_SHA256` of a local copy of `initialize/job.yaml`.
    Do not derive this pin from an unreviewed live ConfigMap. The bundle includes
-   source identity, ordered `SHA256SUMS`, four SQL files, and an **immutable**
+   source identity, ordered `SHA256SUMS`, five SQL files, and an **immutable**
    `configmap.json` named `relay-budget-reviewed-schema-once`, excluded from
    backup. It contains no credentials, authority row or witness. Apply that
-   ConfigMap and render/apply the script-only `initialize/` Kustomization.
+   ConfigMap and render/apply the script-only `initialize/` Kustomization from the
+   same merged ailab commit (it carries the pin).
    Create the reviewed standalone Job explicitly, verify the mounted bundle and
    pin, then unsuspend it once. The Job is outside all Flux inventories, has no
    automatic retry, and uses only a local Unix socket. Missing/changed files or
-   a mismatched pin refuse before creating the initialization-attempt marker.
+   a mismatched manifest or source pin refuse before creating the
+   initialization-attempt marker.
    A failed attempt after that point requires owner investigation; do not delete
    the marker or data and retry. Successful initialization leaves both application
-   passwords NULL and no authority/witness/qualification rows. Record version `4`,
+   passwords NULL and no authority/witness/qualification rows. Record version `5`,
    the copied source/manifest receipt in PGDATA, and the completed Job identity.
    Preserve the retained database and initialization marker.
 4. After Job success and its Pod termination, delete the completed Job and its
@@ -289,10 +312,10 @@ externalsecret` Ready first.
 ## Offline upgrade of a retained version-1 database
 
 This is an operator-owned schema upgrade, not initialization or history recovery.
-It applies only `002`–`004` and retains authority identity, debits, original
+It applies only `002`–`005` and retains authority identity, debits, original
 lifetimes, outbox requests and receipts. It never changes `ready=false` to true,
 seeds request scopes, refunds allocations, rotates witnesses, or alters login
-passwords. The server wrapper now requires marker `4`: coordinate the config
+passwords. The server wrapper now requires marker `5`: coordinate the config
 rollout with this maintenance window rather than restarting a version-1 server
 under the new wrapper.
 
@@ -329,13 +352,16 @@ under the new wrapper.
    Do not delete the PID file or replace the schema marker to force this upgrade.
    Apply the immutable schema ConfigMap and script-only Kustomization, create the
    suspended standalone upgrade Job, review its image/pins and unsuspend once.
-   It checks withdrawn authority and the absence of already applied `002`/`003`
-   before creating the durable attempt marker. A refusal in those SQL checks
+   It checks withdrawn authority and the absence of already applied
+   `002`/`003`/`005` before creating the durable attempt marker. 005 itself
+   refuses if a retained allocation ID already has its reserved `72776131-`
+   prefix; that refusal comes after 002–004 committed, so it is the
+   partial-migration case below. A refusal in those SQL checks
    cleanly stops PostgreSQL and leaves no migration-attempt marker; correct the
    prerequisite and review a fresh standalone Job. The preflight changes no ledger
    rows or schema, but normal PostgreSQL startup/shutdown still writes WAL and
    checkpoints. Once checks pass, it records
-   the attempt, runs migrations in order, and writes marker `4` only after all
+   the attempt, runs migrations in order, and writes marker `5` only after all
    commits, clean PostgreSQL shutdown and source receipts complete. The current
    reviewed Relay SQL files contain their own `BEGIN`/`COMMIT`; the script trusts
    those pinned bytes and does not impose transaction boundaries. Verify those
@@ -351,16 +377,18 @@ under the new wrapper.
    termination grace can still interrupt it and requires the same inspection.
    Both Jobs explicitly allow up to 3600 seconds for `pg_ctl` fast shutdown
    instead of its implicit 60-second wait. Exceeding that wait still fails without
-   recording version 4; the operator must investigate before retry or recovery.
+   recording version 5; the operator must investigate before retry or recovery.
 4. Confirm the same allocation IDs, token ceilings, original deadlines, outbox
    operations, receipts, witness and withdrawn authority. Ordinary old allocations
-   gain NULL request-scope columns; they must not become new allocations. Confirm
+   gain NULL request-scope and `purpose` columns; they must not become new
+   allocations. Confirm
    client execution on `prepare_token_only` is revoked and the new mediating
    `prepare` entry point is available. Ordinary token-only allocations remain
    intentionally supported through that wrapper; signed candidate requests must
    supply both scope and request allowance. `clients.max_requests` remains NULL
-   until the independent operator ceremony enables request-limited allocations. Do not manually set marker `4` as a repair.
-5. Start the pinned server at version `4`, check TLS/durability and narrow roles,
+   until the independent operator ceremony enables request-limited allocations.
+   Do not manually set marker `5` as a repair.
+5. Start the pinned server at version `5`, check TLS/durability and narrow roles,
    and complete the documented qualification/recovery checks before restoring
    authority or consumers. Archive the public source/manifest, Job UID/result and
    before/after retained-history comparison. Remove only the completed standalone
@@ -431,10 +459,15 @@ local volumes and the approved schema supplied explicitly:
 bash scripts/tests/test-relay-budget-postgres.sh /private/operator/relay-budget-schema
 ```
 
-It refuses empty/wrong-major/recovery/legacy startup and altered/missing schema
-files, initializes only once, and starts with a root-owned 0440 TLS key. It checks
-enforced durability, TLS/plaintext boundaries, role isolation, retained version-1
-upgrade, authority refusal and partial-migration replay refusal, then removes all
+Before the pin is set, render that bundle with `--validation-commit`. The harness
+pins the supplied bundle's own commit over `relay-source.env` inside its
+containers, and separately proves that the committed pin (while unset) and a
+different pin both refuse before any storage change.
+It refuses empty/wrong-major/recovery/legacy/retired-marker-4 startup and
+altered/missing schema files, initializes 001–005 only once, and starts with a
+root-owned 0440 TLS key. It checks enforced durability, TLS/plaintext boundaries,
+role isolation, the 005 entry points and grants, retained version-1 upgrade to 5,
+authority refusal and partial-migration replay refusal, then removes all
 test containers, volumes and synthetic certificates. It makes no Kubernetes calls.
 Docker does not exercise kubelet fsGroup/CSI behavior: the operator must inspect
 actual PVC ownership and PGDATA mode (0700 or 0750) after mounting. A recursive

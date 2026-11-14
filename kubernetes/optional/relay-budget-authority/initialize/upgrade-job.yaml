@@ -62,7 +62,7 @@ spec:
         configMap: {name: relay-budget-initialize, defaultMode: 292}
       - name: schema
         configMap:
-          name: relay-budget-reviewed-schema-once # Created by owner from reviewed Relay commit.
+          name: relay-budget-reviewed-schema-once # Rendered from the reviewed pin in relay-source.env.
           defaultMode: 292
           items:
           - {key: source-commit, path: source-commit}
@@ -71,6 +71,7 @@ spec:
           - {key: 002-preflight.sql, path: 002-preflight.sql}
           - {key: 003-scoped-requests.sql, path: 003-scoped-requests.sql}
           - {key: 004-preflight-errors.sql, path: 004-preflight-errors.sql}
+          - {key: 005-provenance-purpose.sql, path: 005-provenance-purpose.sql}
       - name: run
         emptyDir: {medium: Memory, sizeLimit: 16Mi}
       - name: tmp

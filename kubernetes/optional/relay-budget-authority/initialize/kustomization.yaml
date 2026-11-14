@@ -7,7 +7,8 @@ generatorOptions:
 configMapGenerator:
 - name: relay-budget-initialize
   namespace: relay-budget-authority
-  files: [initialize.sh, verify-schema.sh, upgrade.sh]
+  # relay-source.env is the single reviewed Relay source pin both Jobs verify the bundle against.
+  files: [initialize.sh, verify-schema.sh, upgrade.sh, relay-source.env]
 labels:
 - pairs:
     app.kubernetes.io/part-of: relay-budget-authority

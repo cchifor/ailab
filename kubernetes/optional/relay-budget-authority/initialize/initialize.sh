@@ -17,7 +17,8 @@ psql -X -h /var/run/postgresql -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL
 CREATE DATABASE relay_budget;
 REVOKE ALL ON DATABASE relay_budget FROM PUBLIC;
 SQL
-for schema in 001-authority.sql 002-preflight.sql 003-scoped-requests.sql 004-preflight-errors.sql; do
+for schema in 001-authority.sql 002-preflight.sql 003-scoped-requests.sql 004-preflight-errors.sql \
+  005-provenance-purpose.sql; do
   psql -X -h /var/run/postgresql -U postgres -d relay_budget -v ON_ERROR_STOP=1 -f "/schema/$schema"
 done
 psql -X -h /var/run/postgresql -U postgres -d relay_budget -v ON_ERROR_STOP=1 <<'SQL'

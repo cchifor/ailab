@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -51,8 +52,45 @@ class SchemaBundle(unittest.TestCase):
             digest, name = line.split('  ')
             self.assertEqual(digest, hashlib.sha256(doc['data'][name].encode()).hexdigest())
         self.assertEqual(receipt['qualification'], 'not-evaluated')
-        self.assertEqual(receipt['schemaVersion'], 4)
-        self.assertEqual(len(self.calls), 5)
+        self.assertEqual(receipt['schemaVersion'], 5)
+        self.assertIs(receipt['pinned'], False)
+        self.assertEqual(len(self.calls), 1 + len(MODULE.SCHEMAS))
+        self.assertEqual(MODULE.SCHEMAS[-1], '005-provenance-purpose.sql')
+
+    def test_receipt_is_pinned_only_for_the_reviewed_commit(self):
+        with patch.object(MODULE.subprocess, 'run', side_effect=self.git):
+            receipt = MODULE.render(Path('/reviewed/relay'), self.commit, self.output, pin=self.commit)
+        self.assertIs(receipt['pinned'], True)
+
+    def test_source_pin_grammar(self):
+        committed = MODULE.pinned_commit()
+        self.assertRegex(committed, r'^(|[0-9a-f]{40})$')
+        pin = Path(self.temp.name) / 'relay-source.env'
+        good = '# reviewed\n\nRELAY_BUDGET_SOURCE_COMMIT=' + 'b' * 40 + '\n'
+        pin.write_text(good)
+        self.assertEqual(MODULE.pinned_commit(pin), 'b' * 40)
+        pin.write_text('RELAY_BUDGET_SOURCE_COMMIT=\n')
+        self.assertEqual(MODULE.pinned_commit(pin), '')
+        for bad in ['', '# only a comment\n',
+                    'RELAY_BUDGET_SOURCE_COMMIT=' + 'b' * 39 + '\n',
+                    'RELAY_BUDGET_SOURCE_COMMIT=' + 'B' * 40 + '\n',
+                    'RELAY_BUDGET_SOURCE_COMMIT=main\n',
+                    good + 'RELAY_BUDGET_SOURCE_COMMIT=' + 'c' * 40 + '\n',
+                    good + 'OTHER=1\n', ' ' + good.splitlines()[2] + '\n']:
+            with self.subTest(bad=bad):
+                pin.write_text(bad)
+                with self.assertRaises(ValueError):
+                    MODULE.pinned_commit(pin)
+
+    def test_unset_pin_refuses_before_git(self):
+        with patch.object(MODULE, 'pinned_commit', return_value=''), \
+                patch.object(MODULE.subprocess, 'run') as git, \
+                patch('sys.argv', ['bundle', '/repo', str(self.output)]), \
+                self.assertRaises(SystemExit) as exit_:
+            MODULE.main()
+        self.assertEqual(exit_.exception.code, 1)
+        git.assert_not_called()
+        self.assertFalse(self.output.exists())
 
     def test_moving_or_ambiguous_source_is_rejected_before_git(self):
         with patch.object(MODULE.subprocess, 'run') as git:
@@ -86,6 +124,8 @@ class SchemaBundle(unittest.TestCase):
         scripts = yaml.safe_load((directory / 'kustomization.yaml').read_text())
         self.assertNotIn('initialize', base['resources'])
         self.assertEqual(scripts.get('resources', []), [])
+        # The single reviewed source pin ships in the script ConfigMap both Jobs mount.
+        self.assertIn('relay-source.env', scripts['configMapGenerator'][0]['files'])
         for name, command in [('job.yaml', 'initialize.sh'), ('upgrade-job.yaml', 'upgrade.sh')]:
             job = yaml.safe_load((directory / name).read_text())
             self.assertTrue(job['spec']['suspend'])
@@ -108,3 +148,28 @@ class SchemaBundle(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ScriptsAgreeWithTheRenderer(unittest.TestCase):
+    """Inventory, apply order and marker live in shell and Python; they must not drift."""
+
+    DIRECTORY = ROOT / 'kubernetes/optional/relay-budget-authority'
+
+    def shell(self, name):
+        return (self.DIRECTORY / name).read_text().replace('\\\n', ' ')
+
+    def test_inventory_apply_order_and_marker(self):
+        names = list(MODULE.SCHEMAS)
+        verify = self.shell('initialize/verify-schema.sh')
+        inventory = re.search(r'sha256sum source-commit ([^)]*)\)', verify).group(1).split()
+        self.assertEqual(inventory, names)
+        self.assertIn(f"printf '{MODULE.SCHEMA_VERSION}\\n'", verify)
+        loop = re.search(r'for schema in ([^;]*);', self.shell('initialize/initialize.sh')).group(1).split()
+        self.assertEqual(loop, names)
+        upgrade = self.shell('initialize/upgrade.sh')
+        self.assertEqual(re.search(r'for schema in ([^;]*);', upgrade).group(1).split(), names[1:])
+        # A retained version-1 ledger is the only accepted upgrade input.
+        self.assertIn('= 1 ] || exit 78', upgrade)
+        start = self.shell('start.sh')
+        self.assertIn(f'!= {MODULE.SCHEMA_VERSION} ]', start)
+        self.assertNotIn('!= 4 ]', start)
