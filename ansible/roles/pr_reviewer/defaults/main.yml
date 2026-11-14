@@ -322,7 +322,9 @@ pr_reviewer_owner_approval_paths_by_repo:
 # reviewbot now reads it only when the head lacks a direct owner Approve and treats a failed read as
 # no carry-over, but the rule cannot work without the scope. Re-enable it here
 # (`cchifor/workbricks: true`) once the reviewer tokens carry read:issue, an owner credential step.
-pr_reviewer_owner_approval_survives_main_merges_by_repo: {}
+pr_reviewer_owner_approval_survives_main_merges_by_repo:
+  # 2026-11-14: re-enabled for workbricks after #1754 reissued both reviewer tokens with read:issue.
+  cchifor/workbricks: true
 # renovate-bot added 2026-09-09 (operator-directed): its PRs automerge on the SAME gate as
 # everyone else's — every persona clean at the current head, CI green, no `no-automerge`
 # label. Deliberately NOT added to pr_reviewer_pin_authors: the pin-lane rubric is written
