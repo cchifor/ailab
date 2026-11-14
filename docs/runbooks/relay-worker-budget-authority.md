@@ -201,12 +201,11 @@ Do not enable application consumers until every gate below is satisfied.
    witness store, outside this repository and **all** ledger/app backup selections.
    The database holds the expected IDs/digest for comparison, not the external
    witness file. The consumers read the witness from OpenBao
-   (`af/relay-budget/witness`, field `witness`); whether OpenBao qualifies as the
-   independently owned witness store is an owner decision recorded before this
-   step (see Credential delivery). Generate the witness digest from fresh
-   independent random bytes; it is an identity fence, not a password and not the
-   SHA of a self-referential JSON file. Keep evidence of its deliberate issuance
-   independently.
+   (`af/relay-budget/witness`, field `witness`), the owner-accepted witness store
+   (External witness). Write the offline issuance record entry first, then the
+   witness, by hand. Generate the witness digest from fresh independent random
+   bytes; it is an identity fence, not a password and not the SHA of a
+   self-referential JSON file.
 7. Insert a reviewed `clients` row for `relay_budget_allocator` with the actual
    Relay issuer, connection UUID, router deployment digest, allowed tenant UUIDs,
    maximum tokens and maximum authority duration (at most 300000 ms). Insert the
@@ -232,7 +231,8 @@ Do not enable application consumers until every gate below is satisfied.
    Prove TLS hostname verification, TLS-only login, different role permissions,
    current primary status, synchronous settings and checksum mode. Verify the
    current external witness, preserved allocation/outbox history, and independent
-   durability/recovery evidence. Failure of any gate keeps `ready=false`.
+   durability/recovery evidence. Run the four witness drills (External witness §
+   Drills) and archive their evidence. Failure of any gate keeps `ready=false`.
    After independent review, set `worker_budget.authority.ready=true` explicitly.
    Authority readiness is an allocation gate; Kubernetes readiness only proves
    PostgreSQL is reachable and must never be treated as qualification.
@@ -265,13 +265,10 @@ ESO renders Secret `relay/relay-worker-budget` and
 `llm-router/llm-router-worker-budget`, each with exactly `dsn`, `ca.crt` and
 `witness.json`, labelled `velero.io/exclude-from-backup=true`. The templates fix
 the login, the full Service hostname, the port and the database; only the password
-comes from OpenBao. **Open question for the owner:** the witness must be outside
-every ledger/app backup selection. The rendered Secrets are excluded, but OpenBao
-itself is captured by its raft snapshots and by Velero (namespace `openbao`). An
-OpenBao restore could therefore bring back an older witness. Against the retained,
-backup-excluded ledger that fails closed (mismatch, authority denied); it is not a
-false match. Record whether OpenBao is accepted as the independently owned witness
-store, or name another store, before step 6.
+comes from OpenBao. OpenBao is the **owner-accepted witness store**, a named
+exception to "outside every backup selection". See "External witness" below for
+the failure model, the offline issuance record, write ownership, the change
+procedure and the drills.
 
 The DSN shape is
 `postgresql://<login>:<percent-encoded-password>@relay-budget-postgres.relay-budget-authority.svc.cluster.local:5432/relay_budget`
@@ -317,6 +314,130 @@ else in its Deployment.
 Including either before its Secret exists leaves the new Pod unable to mount the
 volume. Both use `Recreate`, so that is an outage: check `kubectl get
 externalsecret` Ready first.
+
+## External witness: the owner-accepted OpenBao exception
+
+The owner accepted OpenBao as the witness store on 2026-11-14, with conditions
+([relay#277 comment 120994](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-120994),
+decision in [comment 121330](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-121330)).
+`af/relay-budget/witness` (field `witness`) is therefore a named, deliberate
+exception to "outside all backup selections". OpenBao's raft snapshots and the
+Velero copy of namespace `openbao` contain it. The ESO-rendered Secrets do not:
+they stay labelled `velero.io/exclude-from-backup=true`.
+
+**Failure model.** OpenBao may roll back; ledger history must not.
+- **OpenBao rolls back alone.** The consumers get an older witness, which matches
+  no `ready=true` authority row (`worker_budget.gate()` requires an exact match).
+  The result is denial, an outage, never a grant.
+- **Both roll back to the same era.** A grant can only be forged if the ledger
+  and OpenBao go back together, which is why the ledger must never be rolled
+  back. That covers QNAP/LUN snapshots, LUN clones, replication of the ledger's
+  LUN, and any ledger backup or restore. Before step 6, the operator confirms on
+  the QNAP that no snapshot schedule, clone or replication job covers the ledger
+  LUN (its internal name is in the step-2 evidence), and records that check.
+- **Changing that rule.** This exception must be reviewed again before any ledger
+  backup, restore or failover design is introduced.
+
+### Offline issuance record
+
+Every witness ever issued (step 6, and every rotation) gets one entry in an
+offline issuance record, written **before** the witness reaches OpenBao:
+- the witness JSON (`version`, `instanceId`, `recoveryEpoch`, `witnessDigest`);
+- the UTC issue date;
+- the reason (initial issuance, rotation after `<restore or drill>`, …);
+- the operator;
+- the ailab commit in use.
+
+The record holds no secret; the witness is public identity evidence. Keep it
+**outside this repository and outside every snapshot and backup selection**: not
+OpenBao, not the cluster, not a QNAP share or LUN that is snapshotted or
+replicated. Recovery re-enters the witness **from this record only**, never from
+the ledger's authority row (that is the value being checked) and never from an
+OpenBao or Velero snapshot (that is what may have rolled back).
+
+### Who writes it
+
+Only the operator, by hand, during the ceremony, a drill or a recovery:
+`bao kv put -mount=af relay-budget/witness witness=-` with the JSON on stdin.
+- Relay and Router only read it. Policies `af-app-relay-budget` and
+  `af-app-router-budget` grant `read` and nothing else, and the consumers mount
+  the file read-only.
+- No Job, CronJob, seed or provision script writes it.
+  `relay-budget-provision-job.yaml` creates no KV document.
+- There is no ESO `PushSecret` for it.
+- `scripts/tests/test_relay_budget_witness_store.py` fails if any of this changes.
+
+### Changing the witness
+
+ESO refreshes the rendered Secrets hourly (`refreshInterval: 1h`), and each
+consumer mounts `witness.json` as a `subPath` file, which never updates in a
+running Pod. A new witness therefore reaches a consumer only through this
+sequence:
+
+1. Withdraw authority (`UPDATE worker_budget.authority SET ready=false`), and stop
+   the consumers:
+   - Router: `POST /admin/v1/plugins/worker-budget-authority {"enabled":false}`;
+   - Relay: stop worker allocation.
+2. Wait **at least 20 seconds**, so every cached snapshot (15 s) expires. Verify
+   that streams have drained.
+3. Add the offline record entry, then write the witness to OpenBao.
+4. Force both ExternalSecrets to sync instead of waiting up to an hour:
+   `kubectl annotate externalsecret <name> force-sync=$(date +%s) --overwrite`.
+   - Do it in `relay` and in `llm-router`.
+   - Verify the SHA-256 of each Secret's `witness.json` against the record.
+5. Roll both consumers, which use `Recreate`.
+6. Verify **both mounted** witnesses against the record:
+   `sha256sum /run/*-worker-budget/witness.json` in each Pod.
+7. Only then review reopening: `ready=true`, then the plugin.
+
+The authority row's `recovery_epoch` and `witness_digest` change only as part of
+a reviewed rotation. Never rewrite them to match a witness.
+
+### After an OpenBao restore
+
+After **any** raft snapshot restore or KV version rollback, follow
+`docs/runbooks/openbao-recovery.md` § "After any restore: the Relay budget
+witness" before anything reopens. In short:
+- withdraw authority and stop consumers;
+- compare the OpenBao witness, the live authority row and the latest offline
+  record entry;
+- rewrite and roll deliberately, using "Changing the witness".
+
+### Drills before production `ready=true`
+
+Run these after step 7's rows and step 8's proofs, in a drill window **before**
+the production opening. That means no Relay router connection or credential
+binding exists yet, so no allocation is possible whatever the gate says.
+- **Window setup.** The owner sets `ready=true` for the window, and the operator
+  enables the Router plugin.
+- **Window end.** Both are withdrawn at the end of every drill.
+- **Why rotation is cheap here.** Rotating the epoch at this point fences no
+  allocation, because none exists.
+- **Relay.** The Relay consumer cannot be wired yet (see Consumer wiring). Its
+  half of drills A–C runs when it is included, before Relay's first allocation.
+
+| Drill | Do | Pass |
+| --- | --- | --- |
+| A, stale | Issue A (step 6). Rotate to B: owner updates the row's `recovery_epoch` and `witness_digest`, operator records and writes B ("Changing the witness"). Then restore A in OpenBao (`bao kv rollback -mount=af -version=<A> relay-budget/witness`), force-sync and roll | Router log `Worker budget authority unavailable: …`, still unavailable after waiting ≥20 s. `worker_budget.current_epoch(<A ids>)` as `relay_budget_router` from an operator client Pod returns SQLSTATE 42501. Relay, once wired: `worker_budget_ledger_unavailable`, allocation refused |
+| B, missing | Write an empty `witness` (the only "missing" a running consumer can receive), force-sync and roll. Separately, soft-delete the document (`bao kv delete`) | Empty: Router unavailable, as in A. Soft-delete: the ExternalSecret goes not Ready while the Secret is retained (ESO Retain), and nothing changes until a deliberate roll |
+| C, malformed | Write JSON that fails the schema (for example `{"version":1}`, or an uppercase digest), force-sync and roll | Router unavailable, as in A |
+| D, older snapshot, unchanged witness | Write B again (a new KV version, same bytes). Roll back to the previous version, force-sync and roll | Authorization may succeed (Router `available`). Allocations, `token_limit`, `original_deadline`, `recovery_epoch`, outbox sequences and receipts are identical before and after (`SELECT` captures) |
+
+- **Restoring B.** After A–C, restore B from the record and verify `available`
+  before the next drill.
+- **Not drilled.** Production OpenBao is not raft-restored for a drill: its blast
+  radius is the whole estate. The KV version rollback exercises exactly the path
+  the consumers read; a real raft restore follows the recovery step above.
+
+**Evidence.**
+- **Where.** Post each drill's non-secret readbacks as a comment on the ceremony
+  thread (ailab #1753), titled "Witness drill A/B/C/D". Keep raw captures with
+  the offline issuance record.
+- **What a readback holds:** Router log lines, plugin state, the mounted witness
+  SHA-256 in both Pods, the SQL outputs and the before/after `SELECT` diffs.
+- **Never include** DSNs, passwords or admin tokens.
+
+The production `ready=true` (step 8) waits for all four drills to be reviewed.
 
 ## Offline upgrade of a retained version-1 database
 
@@ -424,8 +545,12 @@ backup, failover or restore Job and archive mode is off. A separate reviewed led
 backup policy can add continuous archival and tested restore, with its own
 retention/inventory and exclusion from app restore. Until then, data loss or an
 uncertain history keeps authority disabled; a nightly snapshot cannot re-enable
-it. Backups may contain the expected witness identity in the authority row, but
-must never contain or recreate the independently current external witness file.
+it. Backups may contain the expected witness identity in the authority row. The
+current external witness lives in OpenBao, whose snapshots do contain it; that is
+the owner-accepted exception (External witness). It holds only because the
+**ledger's history is never rolled back**: no QNAP/LUN snapshot, clone or
+replication of the ledger's LUN, and no ledger restore. Re-review the exception
+before any ledger backup or failover is introduced.
 
 For scheduled image/config changes, withdraw authority (`ready=false`), stop
 allocators/router consumers, wait at least 20 seconds for cached authority to
@@ -439,10 +564,11 @@ projected files; after verifying new SANs/chain/modes, the operator runs
 For router-only or simultaneous Relay/router restore, close the independent gate
 and consumers first. Preserve allocations/outbox/tombstones forever; rotate the
 recovery epoch and external witness deliberately without rewriting old allocation
-epochs. The new witness goes to `af/relay-budget/witness`; consumers read it only
-after a deliberate rollout (subPath). Run Relay's offline `recovery:fence`, check exact release/qualification
-bindings, and review before reopening. Old prepaid worker identities remain
-fenced. A Relay-only restore still runs `recovery:fence`; an intact independent
+epochs. Issue the new witness through the offline record and "Changing the
+witness" (OpenBao, forced ESO sync, deliberate consumer roll, both mounted
+witnesses verified). Run Relay's offline `recovery:fence`, check exact
+release/qualification bindings, and review before reopening. Old prepaid worker
+identities remain fenced. A Relay-only restore still runs `recovery:fence`; an intact independent
 ledger rejects conflicting restored identities and grant regressions.
 
 If the ledger is lost, rolled back or uncertain, keep every consumer disabled.
