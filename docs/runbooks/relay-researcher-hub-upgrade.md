@@ -318,8 +318,9 @@ Readback, as Router connection runbook step 10, plus:
 - `GET /api/router-credentials/connections` lists `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`.
 
 The installation itself can be approved any time after H3 (installation runbook I1-I10); a worker
-session on it needs H6 and the qualification stage (installation runbook Q1-Q6: the internal TLS
-terminators, then the slot's DNS-less egress stage).
+session on it needs H6. The first sessions are the qualification scenarios, and those also need the
+qualification stage read back (installation runbook Q1-Q5: the internal TLS terminators, then the
+slot's DNS-less egress stage); the enrollment-stage slot admits no Pod.
 
 ### H7. Later hub settings, each its own reviewed component and PR
 
@@ -341,8 +342,8 @@ terminators, then the slot's DNS-less egress stage).
 | H5 | escrow token | H4 | `relay-router-files` Ready |
 | H6 | `RELAY_ROUTER_CONNECTIONS_FILE` + `RELAY_AGENT_CONTROL_PLANE` + monitoring; no environments, Gitea or notifications | ledger `ready=true`, plugin on | `agentControlPlane: true`, `environments: false`, connectors and bus keys working, budget `started`, connection listed |
 | I1-I10 | the researcher installation (enrollment-stage egress) | H3; worker sessions need H6 | installation `ready`, fence UID pinned |
-| Q1-Q6 | internal TLS terminators (`relay-internal-tls`), then the slot's qualification egress stage | I10; the release's G3 binding and CA pins | both Certificates Ready and chaining to the pinned root, Services `10.96.0.40`/`.41`, live policy digest `f6d3187c…282f` |
-| H7 | candidate, canary, qualification files | Q6 for the scenarios, the evidence for each | per Relay's documents |
+| Q1-Q6 | internal TLS terminators (`relay-internal-tls`), then the slot's qualification egress stage (Q6 is the drill configuration) | I10; the release's G3 binding and CA pins | Q5: both Certificates Ready and chaining to the pinned root, Services `10.96.0.40`/`.41`, live policy digest `f6d3187c…282f`. The third alias, the candidate journal's Service at `10.96.0.42`, is not created here: it comes with the journal itself ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) before H7's candidate files |
+| H7 | candidate, canary, qualification files | Q5's readback and the journal at `10.96.0.42` for the scenarios, the evidence for each | per Relay's documents |
 
 ## Rollback: migrations are forward-only
 
@@ -385,7 +386,8 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
 4. **Qualification egress (G3):** the installation's Cloudflare rule is enrollment-stage only. The
    internal TLS terminators (ailab #1768) and the qualification egress stage with its runbook steps
    Q1-Q6 (ailab #1769) are staged; the Relay part (hostAliases, CA pins, journal alias, driver) must
-   be in the pinned release. No scenario runs before step Q5's readback.
+   be in the pinned release, and the candidate journal brings its own Service at `10.96.0.42`. No
+   scenario runs before step Q5's readback.
 5. **Qualification 0/19, no canary:** the slot keeps zero Pods and the deny-all gate until the nineteen
    rows are accepted, the canary passes and the activation compiler's outputs (guards, gate
    replacement, one-Pod quota, `ordinaryNamespacePins`, `bootstrapSecrets: true`) are reviewed and
