@@ -1,0 +1,46 @@
+# 10-namespaces.json of Relay's scripts/prepare-pod-installation.ts for this installation, object for
+# object (docs/runbooks/relay-researcher-installation.md). scripts/relay-researcher-bundle.py check
+# compares the operator's generated bundle with this file and refuses any difference.
+#
+# relay-infra-control  the control namespace: the infrastructure agent, its installation key, its
+#                      leader Lease and the agent-owned fence ConfigMap relay-installation-fence.
+# relay-researcher-1   the one execution slot, dedicated to the researcher role.
+#
+# Restricted Pod Security on enforce, warn and audit, pinned to the cluster's minor (v1.35.9 live).
+# The installation-id label value comes from ../pins (placeholder until approval).
+# Retention: Flux never prunes these Namespaces, and deleting them is a separately reviewed final
+# cleanup step after reconciliation, never a way to upgrade or retire the agent. Deleting the control
+# namespace would also delete the fence ConfigMap and unresolved workload evidence.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: relay-infra-control
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+  labels:
+    relay.chifor.me/installation-id: pinned-by-pins-component
+    relay.chifor.me/namespace-role: control
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.35
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.35
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.35
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: relay-researcher-1
+  annotations:
+    kustomize.toolkit.fluxcd.io/prune: disabled
+    helm.sh/resource-policy: keep
+  labels:
+    relay.chifor.me/installation-id: pinned-by-pins-component
+    relay.chifor.me/namespace-role: execution
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.35
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.35
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.35

@@ -1,0 +1,134 @@
+# Relay chart deploy/infrastructure-agent (templates/serviceaccount.yaml, rbac.yaml) rendered for this
+# installation with release name relay-infrastructure-agent, enrollment-only values
+# (policy.bootstrapSecrets false, persistentVolumeClaims false, no candidateRuntime, no
+# ordinaryNamespacePins). scripts/relay-researcher-bundle.py check --chart renders the pinned chart
+# with the operator's 30-agent-values.json and refuses any difference from these objects.
+#
+# What the agent can do, and nothing more:
+#   relay-infra-control  get/update ONLY the ConfigMap relay-installation-fence and the Lease
+#                        relay-infrastructure-agent; create ConfigMaps and Leases (create cannot be
+#                        name-restricted; the agent client creates only those two names).
+#   cluster              get ONLY the Namespace kube-system (the cluster UID pin).
+#   relay-researcher-1   get/create/delete Pods. No list/watch, exec, attach, port-forward, logs,
+#                        Secrets, PVCs, namespaces or RBAC.
+# The activation step adds Secret get/create/delete in the slot (bootstrapSecrets true, required by
+# every runtime mode) and Namespace get for both namespaces (ordinaryNamespacePins); both come from the
+# reviewed activation values, in their own PR.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: relay-infrastructure-agent
+  namespace: relay-infra-control
+  labels:
+    app.kubernetes.io/name: relay-infrastructure-agent
+    app.kubernetes.io/instance: relay-infrastructure-agent
+    app.kubernetes.io/component: infrastructure-agent
+# Only the short-lived projected token mounted by the Deployment is used.
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: relay-infrastructure-agent-control
+  namespace: relay-infra-control
+  labels:
+    app.kubernetes.io/name: relay-infrastructure-agent
+    app.kubernetes.io/instance: relay-infrastructure-agent
+    app.kubernetes.io/component: infrastructure-agent
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["relay-installation-fence"]
+  verbs: ["get", "update"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  resourceNames: ["relay-infrastructure-agent"]
+  verbs: ["get", "update"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: relay-infrastructure-agent-control
+  namespace: relay-infra-control
+  labels:
+    app.kubernetes.io/name: relay-infrastructure-agent
+    app.kubernetes.io/instance: relay-infrastructure-agent
+    app.kubernetes.io/component: infrastructure-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: relay-infrastructure-agent-control
+subjects:
+- kind: ServiceAccount
+  name: relay-infrastructure-agent
+  namespace: relay-infra-control
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: relay-infrastructure-agent-relay-infra-control-cluster-uid
+  labels:
+    app.kubernetes.io/name: relay-infrastructure-agent
+    app.kubernetes.io/instance: relay-infrastructure-agent
+    app.kubernetes.io/component: infrastructure-agent
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  resourceNames:
+  - kube-system
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: relay-infrastructure-agent-relay-infra-control-cluster-uid
+  labels:
+    app.kubernetes.io/name: relay-infrastructure-agent
+    app.kubernetes.io/instance: relay-infrastructure-agent
+    app.kubernetes.io/component: infrastructure-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: relay-infrastructure-agent-relay-infra-control-cluster-uid
+subjects:
+- kind: ServiceAccount
+  name: relay-infrastructure-agent
+  namespace: relay-infra-control
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: relay-infrastructure-agent-workloads
+  namespace: relay-researcher-1
+  labels:
+    app.kubernetes.io/name: relay-infrastructure-agent
+    app.kubernetes.io/instance: relay-infrastructure-agent
+    app.kubernetes.io/component: infrastructure-agent
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: relay-infrastructure-agent-workloads
+  namespace: relay-researcher-1
+  labels:
+    app.kubernetes.io/name: relay-infrastructure-agent
+    app.kubernetes.io/instance: relay-infrastructure-agent
+    app.kubernetes.io/component: infrastructure-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: relay-infrastructure-agent-workloads
+subjects:
+- kind: ServiceAccount
+  name: relay-infrastructure-agent
+  namespace: relay-infra-control

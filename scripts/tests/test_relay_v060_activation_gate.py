@@ -36,6 +36,17 @@ class ActivationGate(unittest.TestCase):
             "llm-router-relay-keys",
             "llm-router-relay-keys-trust",
             "relay-router-connection",
+            # The researcher hub upgrade (docs/runbooks/relay-researcher-hub-upgrade.md). Installation
+            # stays disabled until step H3, which removes the first four of these deliberately and
+            # together (RELAY_INFRASTRUCTURE_INSTALLATIONS without a fenced recovery generation does
+            # not start); H4 removes the profile registry pair, H6 the control-plane component.
+            "RELAY_INFRASTRUCTURE_INSTALLATIONS",
+            "RELAY_RECOVERY_GENERATION_FILE",
+            "relay-infrastructure-installations",
+            "relay-restore-fencing",
+            "RELAY_WORKER_PROFILES_FILE",
+            "relay-worker-profiles",
+            "relay-agent-control-plane",
         )
         for root in active_roots:
             for path in root.rglob("*"):

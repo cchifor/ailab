@@ -1,0 +1,56 @@
+# The execution slot's ONLY egress allowance: the reviewed external CNI artifact that Relay's
+# installation definition names in executionEgressArtifacts (namespace relay-researcher-1, name
+# relay-researcher-egress, sha256 = Relay's candidateMeasurementDigest of this object, recorded in
+# docs/relay-workers/researcher-installation-definition.json and recomputed by
+# scripts/tests/test_relay_researcher_installation.py). Relay's tool does not write this policy; ailab
+# owns it.
+#
+# Cilium runs enable-policy=default with no clusterwide policy, so a namespace without a policy is
+# wide open. This file ships in the same Flux Kustomization as the Namespace, so the namespace never
+# exists without relay-default-deny (containment.yaml) and this allow-list.
+#
+# Rule 0, DNS: the CoreDNS pods only (k8s-app=kube-dns), UDP and TCP 53. Socket LB is off
+# (kubernetes/infra/bootstrap/cilium-values.yaml), so a gVisor Pod's query to the kube-dns ClusterIP
+# is translated per packet before policy and matches these backends.
+# Rule 1, Relay hub AND Router, TCP 443: https://relay.chifor.me and https://router.chifor.me are both
+# Cloudflare-proxied and resolve to the SAME two anycast addresses (read 2026-11-14 through 1.1.1.1:
+# 104.21.86.245 and 172.67.138.98; the Pods' CoreDNS forwards to the public resolvers, so they see
+# the same answer). One rule therefore serves both origins; a hub-only cut by address is impossible
+# (runbook, "Egress: what this allows and what it cannot separate").
+#
+# Nothing else: no LAN (192.168.0.0/23), no node, no kube-apiserver, no cloud-power WoL listener, no
+# NAS 10.55.0.254, no metadata address, no other namespace. A Cloudflare address change breaks the
+# worker CLOSED (refused), never open; re-read both names before every rollout (runbook step I5).
+#
+# Kubernetes unions allowances: the qualification drivers refuse a slot with any NetworkPolicy beyond
+# relay-default-deny and this one. Add nothing else to relay-researcher-1.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-researcher-egress
+  namespace: relay-researcher-1
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - protocol: UDP
+      port: 53
+    - protocol: TCP
+      port: 53
+  - to:
+    - ipBlock:
+        cidr: 104.21.86.245/32
+    - ipBlock:
+        cidr: 172.67.138.98/32
+    ports:
+    - protocol: TCP
+      port: 443

@@ -1,0 +1,126 @@
+# Relay chart deploy/infrastructure-agent templates/deployment.yaml rendered for this installation
+# (release name relay-infrastructure-agent). Two deliberate differences from the chart, both
+# normalized by scripts/relay-researcher-bundle.py check --chart:
+#   * the config ConfigMap comes from kustomize's configMapGenerator, so its name carries a content
+#     hash and a new config.json rolls the Pod; the chart's relay.infrastructure/config-digest
+#     annotation, which does the same for Helm, is therefore omitted;
+#   * chifor.me/source-commit records the pinned Relay commit (from ../pins), as the hub's does.
+# The image is the ONLY other pinned value; it also comes from ../pins.
+#
+# Placement: the control agent stays OFF the worker pool. talos-agent-node-3 was the least-loaded
+# agent node in the operator's 2026-11-10 report; re-check headroom read-only before including this
+# (runbook step I6). Relay's preparation refuses the definition unless every worker placement has a
+# nodeSelector key that the control placement sets to a different value, so the researcher binding's
+# placement must carry kubernetes.io/hostname: relay-worker-1.
+#
+# Secrets, by NAME only (no value is in git): relay-infrastructure-agent-key (key installation.pem,
+# PKCS#8 Ed25519) and relay-infrastructure-agent-enrollment (key token, the one-use enrollment
+# token). The operator creates both (runbook steps I7, I8). After confirmed enrollment the enrollment
+# volume and mount are removed in a reviewed change, and fenceObjectUid is pinned in config.json.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay-infrastructure-agent
+  namespace: relay-infra-control
+  labels:
+    app.kubernetes.io/name: relay-infrastructure-agent
+    app.kubernetes.io/instance: relay-infrastructure-agent
+    app.kubernetes.io/component: infrastructure-agent
+spec:
+  replicas: 1
+  # Recreate: never two processes from a rollout. Leadership plus the hub epoch fence remain the
+  # safety mechanism either way.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: relay-infrastructure-agent
+      app.kubernetes.io/instance: relay-infrastructure-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: relay-infrastructure-agent
+        app.kubernetes.io/instance: relay-infrastructure-agent
+        app.kubernetes.io/component: infrastructure-agent
+      annotations:
+        chifor.me/source-commit: pinned-by-pins-component
+    spec:
+      serviceAccountName: relay-infrastructure-agent
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        ailab.io/agent-pool: "true"
+        kubernetes.io/hostname: talos-agent-node-3
+      tolerations:
+      - key: dedicated
+        operator: Equal
+        value: agent
+        effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: agent
+        image: pinned-by-pins-component
+        imagePullPolicy: IfNotPresent
+        args: ["/etc/relay-agent/config.json"]
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          privileged: false
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+            ephemeral-storage: 64Mi
+          limits:
+            cpu: 200m
+            memory: 256Mi
+            ephemeral-storage: 64Mi
+        volumeMounts:
+        - {name: config, mountPath: /etc/relay-agent, readOnly: true}
+        - {name: kubernetes, mountPath: /run/relay/kubernetes, readOnly: true}
+        - {name: installation-key, mountPath: /run/relay/installation, readOnly: true}
+        - {name: enrollment-token, mountPath: /run/relay/enrollment, readOnly: true}
+        - {name: hub-ca, mountPath: /run/relay/hub-ca, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+      volumes:
+      - name: config
+        configMap:
+          name: relay-infrastructure-agent-config
+      - name: kubernetes
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600
+          - configMap:
+              name: kube-root-ca.crt
+              items: [{key: ca.crt, path: ca.crt}]
+      - name: installation-key
+        secret:
+          secretName: relay-infrastructure-agent-key
+          defaultMode: 0400
+          items: [{key: installation.pem, path: installation.pem}]
+      - name: enrollment-token
+        secret:
+          secretName: relay-infrastructure-agent-enrollment
+          defaultMode: 0400
+          items: [{key: token, path: token}]
+      - name: hub-ca
+        configMap:
+          name: relay-hub-ca
+          items: [{key: ca.crt, path: ca.crt}]
+      - name: tmp
+        emptyDir:
+          sizeLimit: 16Mi

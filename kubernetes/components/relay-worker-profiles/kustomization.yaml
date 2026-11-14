@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Relay's pinned worker profile registry (Relay docs/worker-runtime-sessions.md, "Deployment
+# configuration"): RELAY_WORKER_PROFILES_FILE names a root-owned, regular, single-link JSON file and
+# RELAY_WORKER_PROFILES_SHA256 pins its exact bytes independently. Hub upgrade step H4
+# (docs/runbooks/relay-researcher-hub-upgrade.md), in the same PR as ../relay-worker-budget-client.
+#
+# profiles.json is a PLACEHOLDER that Relay's schema refuses. The operator replaces it with the
+# registry for the pinned release: version 1, one entry for tenant
+# 00000000-0000-4000-8000-000000000001 with the sealed researcher templateDigest, the runtime image's
+# runtimeDigest, the pool modelPolicy, the complete WorkerProfileTemplate (launcher-proxy-v1, UID
+# 1000, /workspace, the relay-researcher channel ae9b92bb-0b59-4987-b41f-376bd269db62, inference
+# {connectionId babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8, protocol codex-responses, selection {kind: model,
+# model: relay-researcher-luna}} with adaptedResponses), the current release approval and the
+# qualified tokenPolicyDigests. The same PR sets RELAY_WORKER_PROFILES_SHA256 in deployment.yaml to
+# sha256sum of that file. scripts/tests/test_relay_researcher_installation.py refuses inclusion while
+# either is a placeholder or they disagree.
+#
+# Mount: a read-only subPath file under /run (never /var/run, a symlink), mode 0444, root-owned
+# (Relay's reader refuses symlinked projections and group/other-writable files). A subPath file never
+# changes in place: a new registry reaches Relay only through a reviewed rollout, which Relay requires
+# ("Changing the mounted registry or its pin requires a hub restart").
+#
+# NOT INCLUDED by kubernetes/apps/apps/relay; scripts/tests/test_relay_v060_activation_gate.py refuses
+# RELAY_WORKER_PROFILES_FILE and this component's name there until step H4.
+configMapGenerator:
+- name: relay-worker-profiles
+  namespace: relay
+  files:
+  - profiles.json
+patches:
+- path: deployment.yaml

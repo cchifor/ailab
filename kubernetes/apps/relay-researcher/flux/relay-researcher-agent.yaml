@@ -1,0 +1,33 @@
+# STAGED, NOT APPLIED. Outside kubernetes/apps/clusters/ai, so Flux never reads it. Runbook step I8
+# (docs/runbooks/relay-researcher-installation.md) moves it to
+# kubernetes/apps/clusters/ai/relay-researcher-agent.yaml in the PR that commits the agent's generated
+# config.json and fills the agent image and source pins, only after the installation stage is applied
+# and its containment and denial have been read back (step I6).
+# scripts/tests/test_relay_researcher_installation.py refuses the move while config.json or a pin
+# still carries a placeholder, or while the installation stage is not included.
+#
+# What applying it creates in relay-infra-control: the agent's ServiceAccount, its Roles (control
+# namespace and the slot) and the kube-system read, its config and trust ConfigMaps, its egress
+# policies, the Deployment (one replica, Recreate) and the PrometheusRule. It needs the two
+# operator-created Secrets relay-infrastructure-agent-key and relay-infrastructure-agent-enrollment
+# first; without them the Pod waits in ContainerCreating and this Kustomization stays not Ready.
+#
+# prune: true is safe here: removing the tree stops the agent and removes its permissions. It never
+# touches the agent-owned fence ConfigMap relay-installation-fence, which no Flux inventory contains.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: relay-researcher-agent
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 2m
+  timeout: 5m
+  dependsOn:
+  - name: relay-researcher-installation
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/relay-researcher/agent
+  prune: true
+  wait: true

@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# RELAY_AGENT_CONTROL_PLANE=1 (Relay server/config.ts). Hub upgrade step H6
+# (docs/runbooks/relay-researcher-hub-upgrade.md), in the same PR as ../relay-router-connection.
+#
+# Why the researcher needs it: a worker's holder installs its Router credential through the holder
+# launch transport, and Relay passes that transport its credential manager only when the control plane
+# is on (server/main.ts launchTransportRoutes `manager: controlPlane ? credentials : undefined`;
+# server/agent-sessions/holder-router.ts refuses a routed launch with "Routed holder installation is
+# unavailable" without it). Verified on Relay main 2ce7cd7ab; re-check on the pinned release.
+#
+# What else it turns on (review before including): control health and metrics routes, session
+# control, elicitations, the router-credential administration routes (they need the connection file
+# of ../relay-router-connection), and the Router access manager for RELAY_LLM_URL's origin
+# (https://router.chifor.me), whose public access-request flow is Relay's production path.
+# RELAY_ENVIRONMENTS stays unset, so the Incus environment routes stay off.
+#
+# NOT INCLUDED by kubernetes/apps/apps/relay. scripts/tests/test_relay_v060_activation_gate.py already
+# refuses RELAY_AGENT_CONTROL_PLANE in the live overlay; step H6 amends it for this component only.
+patches:
+- path: deployment.yaml

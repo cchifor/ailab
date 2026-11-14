@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Turns on Relay's infrastructure installation and worker APIs (RELAY_INFRASTRUCTURE_INSTALLATIONS=1,
+# Relay server/config.ts). Hub upgrade step H3 (docs/runbooks/relay-researcher-hub-upgrade.md).
+#
+# Include it ONLY together with ../relay-restore-fencing, in the same PR: Relay refuses to start with
+# this flag and no RELAY_RECOVERY_GENERATION_FILE ("RELAY_INFRASTRUCTURE_INSTALLATIONS requires
+# RELAY_RECOVERY_GENERATION_FILE"), and it refuses to start with that file unless the database holds
+# the matching active fence row, which only the operator's recovery:fence run creates (step H3's
+# first half). scripts/tests/test_relay_researcher_installation.py refuses one without the other.
+#
+# What it enables: approval, enrollment and fence routes for installations and the worker routes. It
+# issues no offer, grant or workload; profiles, budgets, qualification and the router connection
+# remain separate admission requirements, each its own component and step.
+#
+# NOT INCLUDED by kubernetes/apps/apps/relay. scripts/tests/test_relay_v060_activation_gate.py refuses
+# RELAY_INFRASTRUCTURE_INSTALLATIONS and this component's name in the live overlay until step H3
+# amends it deliberately.
+patches:
+- path: deployment.yaml

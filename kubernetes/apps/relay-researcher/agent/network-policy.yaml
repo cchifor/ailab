@@ -1,0 +1,68 @@
+# The agent Pod's egress, additive to relay-default-deny in relay-infra-control.
+#
+# First object: Relay chart templates/networkpolicy.yaml rendered with this installation's
+# controlNetwork (docs/relay-workers/researcher-installation-definition.json): no ingress; egress to
+# the CoreDNS pods on 53, to the three control-plane endpoints of the kubernetes Service on 6443
+# (kubernetes.default.svc:443 is translated to 192.168.0.41-43:6443 before policy), and to the hub on
+# 443. relay.chifor.me is Cloudflare-proxied: 104.21.86.245 and 172.67.138.98 (read 2026-11-14; the
+# same two addresses serve router.chifor.me).
+#
+# Second object, ailab's addition, as for dsh and ci-rerun-watchdog: Cilium gives the control-plane
+# node addresses the kube-apiserver identity, and an ipBlock rule does not select that identity
+# (policy-cidr-match-mode is not `nodes` here), so the chart's API rule alone never admits the API
+# connection. toEntities kube-apiserver on 6443 does. It opens the API server and nothing else; what
+# the agent may do there is the RBAC in rbac.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-infrastructure-agent
+  namespace: relay-infra-control
+  labels:
+    app.kubernetes.io/name: relay-infrastructure-agent
+    app.kubernetes.io/instance: relay-infrastructure-agent
+    app.kubernetes.io/component: infrastructure-agent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: relay-infrastructure-agent
+      app.kubernetes.io/instance: relay-infrastructure-agent
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+    ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+  - to:
+    - ipBlock: {cidr: "192.168.0.41/32"}
+    - ipBlock: {cidr: "192.168.0.42/32"}
+    - ipBlock: {cidr: "192.168.0.43/32"}
+    ports:
+    - {protocol: TCP, port: 6443}
+  - to:
+    - ipBlock: {cidr: "104.21.86.245/32"}
+    - ipBlock: {cidr: "172.67.138.98/32"}
+    ports:
+    - {protocol: TCP, port: 443}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: relay-infrastructure-agent-api-egress
+  namespace: relay-infra-control
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: relay-infrastructure-agent
+      app.kubernetes.io/instance: relay-infrastructure-agent
+  egress:
+  - toEntities: [kube-apiserver]
+    toPorts:
+    - ports:
+      - {port: "6443", protocol: TCP}

@@ -1,0 +1,50 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Stage 2 of the first Relay researcher installation (docs/runbooks/relay-researcher-installation.md):
+# Relay's infrastructure agent in relay-infra-control, mirroring the pinned chart
+# deploy/infrastructure-agent rendered with the operator's 30-agent-values.json, plus three ailab
+# objects (the API-server Cilium rule, the pinned public trust bundle and the alert rules).
+#
+# INERT: no Flux Kustomization in kubernetes/apps/clusters/ai references this path. The reviewed one
+# waits in ../flux/relay-researcher-agent.yaml; it depends on the installation stage and is included
+# only after the operator has read back that stage's containment and denial (runbook step I6).
+#
+# config.json is the expected 31-agent-config.json with OPERATOR-FILLS leaves. The operator replaces
+# it, byte for byte, with the file Relay's scripts/prepare-pod-installation.ts writes for the approved
+# installation (scripts/relay-researcher-bundle.py import does that and nothing else).
+resources:
+- rbac.yaml
+- deployment.yaml
+- network-policy.yaml
+- relay-researcher-rules.yaml
+components:
+- ../pins
+configMapGenerator:
+# The agent's nonsecret configuration (paths only, never a secret value).
+- name: relay-infrastructure-agent-config
+  namespace: relay-infra-control
+  files:
+  - config.json
+  options:
+    labels:
+      app.kubernetes.io/name: relay-infrastructure-agent
+      app.kubernetes.io/instance: relay-infrastructure-agent
+      app.kubernetes.io/component: infrastructure-agent
+# The pinned public trust for https://relay.chifor.me: the complete Mozilla CA bundle as published at
+# https://curl.se/ca/cacert.pem, "Certificate data from Mozilla as of Thu Nov 5 04:12:01 2026 GMT",
+# sha256 427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285 (relay#277 comment 120903;
+# downloaded 2026-11-14 and verified against that pin; the test rehashes it). A set of roots, never a
+# leaf or intermediate: Pods see Google Trust Services through Cloudflare today, and Cloudflare can
+# change CA at renewal. Stored as .crt because the repo ignores *.pem. The agent reads it as
+# hub.caFile (/run/relay/hub-ca/ca.crt), which replaces Node's bundled roots for the hub connection
+# only. Immutable; a new bundle is a new hashed name.
+- name: relay-hub-ca
+  namespace: relay-infra-control
+  files:
+  - ca.crt=hub-ca/mozilla-ca-bundle.crt
+  options:
+    immutable: true
+    labels:
+      app.kubernetes.io/name: relay-infrastructure-agent
+      app.kubernetes.io/instance: relay-infrastructure-agent
+      app.kubernetes.io/component: infrastructure-agent

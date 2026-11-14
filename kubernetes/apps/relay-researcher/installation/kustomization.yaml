@@ -1,0 +1,19 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Stage 1 of the first Relay researcher installation (docs/runbooks/relay-researcher-installation.md):
+# the two dedicated namespaces with everything that contains them, and nothing that runs.
+#   namespaces.yaml        restricted PSA, retention annotations          (Relay 10-namespaces.json)
+#   containment.yaml       quotas (zero Pods in the slot), limits, deny   (Relay 20-containment.json)
+#   execution-egress.yaml  the slot's DNS + Relay/Router allow-list        (ailab-owned CNI artifact)
+#   admission-deny.yaml    the deny-all Pod gate                          (Relay 21-admission-deny.json)
+#
+# INERT: no Flux Kustomization in kubernetes/apps/clusters/ai references this path. The reviewed one
+# waits in ../flux/relay-researcher-installation.yaml until the installation is approved in Relay and
+# ../pins carries its ID.
+resources:
+- namespaces.yaml
+- containment.yaml
+- execution-egress.yaml
+- admission-deny.yaml
+components:
+- ../pins

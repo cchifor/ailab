@@ -1,0 +1,91 @@
+{
+  "_comment": "Reviewed TEMPLATE of the PodInstallationPreparation input to Relay's scripts/prepare-pod-installation.ts for the first researcher installation (docs/runbooks/relay-researcher-installation.md, step I4). Every value that is not an OPERATOR-FILLS string is decided by this review and must reach the tool unchanged; scripts/relay-researcher-bundle.py check compares the bundle's 00-definition.json with this file and refuses any difference outside the OPERATOR-FILLS leaves. Remove this _comment key from the operator's copy: the tool's schema is strict.",
+  "version": 1,
+  "kind": "relay-pod-installation-preparation",
+  "mode": "enrollment-only",
+  "sourceCommit": "OPERATOR-FILLS: the reviewer-merged 40-hex Relay commit (= kubernetes/apps/relay-researcher/pins sourceCommit)",
+  "agentImage": "OPERATOR-FILLS: publication.image of the agent's publish.py receipt (= pins agentImage)",
+  "kubernetesMinor": "1.35",
+  "identity": {
+    "tenantId": "00000000-0000-4000-8000-000000000001",
+    "installationId": "OPERATOR-FILLS: from the approval receipt (= pins installationId)",
+    "clusterUid": "faf3a521-bd08-4d6d-ba5c-9dc7da903819",
+    "controlNamespace": "relay-infra-control",
+    "installationPublicKey": "OPERATOR-FILLS: raw base64url Ed25519 public half of the installation key, as approved"
+  },
+  "executionSlots": [
+    "relay-researcher-1"
+  ],
+  "hub": {
+    "origin": "https://relay.chifor.me",
+    "caConfigMap": "relay-hub-ca"
+  },
+  "kubernetesOrigin": "https://kubernetes.default.svc:443",
+  "references": {
+    "installationKeySecret": "relay-infrastructure-agent-key",
+    "enrollmentTokenSecret": "relay-infrastructure-agent-enrollment"
+  },
+  "controlPlacement": {
+    "nodeSelector": {
+      "ailab.io/agent-pool": "true",
+      "kubernetes.io/hostname": "talos-agent-node-3"
+    },
+    "tolerations": [
+      {
+        "key": "dedicated",
+        "operator": "Equal",
+        "value": "agent",
+        "effect": "NoSchedule"
+      }
+    ]
+  },
+  "agentResources": {
+    "milliCpu": 200,
+    "memoryMiB": 256,
+    "ephemeralMiB": 64
+  },
+  "controlNetwork": {
+    "dnsNamespace": "kube-system",
+    "dnsPodLabels": {
+      "k8s-app": "kube-dns"
+    },
+    "apiServerCidrs": [
+      "192.168.0.41/32",
+      "192.168.0.42/32",
+      "192.168.0.43/32"
+    ],
+    "apiServerPorts": [
+      6443
+    ],
+    "hubCidrs": [
+      "104.21.86.245/32",
+      "172.67.138.98/32"
+    ]
+  },
+  "executionEgressArtifacts": [
+    {
+      "namespace": "relay-researcher-1",
+      "name": "relay-researcher-egress",
+      "sha256": "aa11c2299af12acc886696480b5800ac0b568a0b6e2813609d4ed2f7eea38405"
+    }
+  ],
+  "installationPolicy": {
+    "allowedRegistries": [
+      "registry.chifor.me"
+    ],
+    "allowedImageDigests": "OPERATOR-FILLS: [the worker runtime image digest from its publish.py receipt]",
+    "allowedHarnessAdapters": "OPERATOR-FILLS: [the researcher template's harness.adapter]",
+    "allowedEgressDestinations": "OPERATOR-FILLS: [the researcher template's network.egressDestinations slugs]",
+    "resourceCeiling": {
+      "milliCpu": 2000,
+      "memoryMiB": 4096,
+      "scratchMiB": 10240,
+      "retainedGiB": 0,
+      "cacheGiB": 0,
+      "maxProcesses": 512
+    },
+    "maxLifetimeSeconds": 86400,
+    "maxLeaseSeconds": 300
+  },
+  "binding": "OPERATOR-FILLS: the release's PodRuntimeBinding (runtime manifest + image, sealed researcher template, identities, placements). Its researcher placement must be {tier, binding, runtimeClassName: relay-gvisor, overhead {milliCpu 80, memoryMiB 24}, nodeSelector including kubernetes.io/hostname: relay-worker-1 and ailab.io/relay-worker-pool: \"true\", tolerations [dedicated=relay-worker:NoSchedule]}; its policyDigest must be Relay contentDigest(\"relay.infrastructure/v1/installation-policy\", installationPolicy) of THIS file's installationPolicy, so the ceilings above are part of the binding"
+}
