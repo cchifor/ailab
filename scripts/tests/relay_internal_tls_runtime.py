@@ -39,7 +39,8 @@ SUPPORT = pathlib.Path(__file__).resolve().parent / "relay_internal_tls_runtime"
 sys.path.insert(0, str(ROOT / "scripts/tests"))
 import edge_runtime as er  # noqa: E402  docker(), probe_image(), IMG_PY
 
-LABEL = "ailab.relay-internal-tls-runtime"
+LABEL = "ailab.relay-internal-tls-runtime"  # every resource: LABEL=<run id>, LABEL.started=<unix time>
+STALE_AFTER = 2 * 3600  # a run older than this died without cleanup (a cancelled job): removed
 RUN = secrets.token_hex(4)
 P = f"ritls-{RUN}"
 SENTINELS = ("SENTINEL-TOKEN-6b2e", "SENTINEL-QUERY-91f0")
@@ -57,7 +58,21 @@ DROPPED = ("forwarded", "true-client-ip", "cf-ray", "cf-ipcountry", "cdn-loop", 
 
 
 def labels():
-    return ["--label", f"{LABEL}={RUN}"]
+    return ["--label", f"{LABEL}={RUN}", "--label", f"{LABEL}.started={int(time.time())}"]
+
+
+def remove_stale_runs():
+    """Containers and networks of runs that died without cleanup, and only those: this fixture's label
+    and an age past STALE_AFTER (concurrent runs are younger and keep theirs)."""
+    now = int(time.time())
+    for kind, ls, rm in (("container", ["ps", "-a"], ["rm", "-f"]), ("network", ["network", "ls"], ["network", "rm"])):
+        r = er.docker(*ls, "--filter", f"label={LABEL}", "--format", "{{.ID}}", check=False)
+        for oid in r.stdout.split():
+            fmt = ("{{index .Config.Labels \"" + LABEL + ".started\"}}" if kind == "container"
+                   else "{{index .Labels \"" + LABEL + ".started\"}}")
+            started = er.docker("inspect", "--format", fmt, oid, check=False).stdout.strip()
+            if started.isdigit() and now - int(started) > STALE_AFTER:
+                er.docker(*rm, oid, check=False)
 
 
 def caddy_image() -> str:
@@ -77,6 +92,7 @@ class Fixture:
         self.ip: dict = {}
 
     def up(self):
+        remove_stale_runs()
         for _ in range(20):
             k, j = random.randrange(256), random.randrange(256)
             nets = {"client": f"198.19.{k}", "back": f"198.18.{j}"}
