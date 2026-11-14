@@ -95,6 +95,15 @@ spec:
   jobTemplate:
     spec:
       backoffLimit: 0
+      # failedJobsHistoryLimit keeps the newest 3 failed Jobs until a newer failure evicts them, so on a
+      # schedule that rarely fails KubeJobFailed stays up for days off one dead Job object. Seen
+      # 2026-11-09 07:10Z/07:15Z: ai-node1 and ai-node3 rebooted with every guest, two runs failed
+      # closed against an unreachable primary, every run since completed, and the alert was still
+      # firing on 11-14. Same trap and fix as renovate/cronjob.yaml and
+      # apps/gitea/actions-run-retention.yaml. 6h keeps a failed pod for inspection; a PERSISTENT
+      # failure makes a fresh failed Job every 5 minutes, so the alert still holds. Applies to Jobs
+      # created after this lands.
+      ttlSecondsAfterFinished: 21600
       activeDeadlineSeconds: 280
       template:
         metadata:
