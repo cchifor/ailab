@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Source gates for the first Relay researcher installation and its hub upgrade components.
+"""Source gates for the first Relay researcher installation.
 
-docs/runbooks/relay-researcher-installation.md and relay-researcher-hub-upgrade.md. Everything here
+docs/runbooks/relay-researcher-installation.md (the hub upgrade and its components are ailab #1767,
+with their own test_relay_researcher_hub_upgrade.py). Everything here
 is staged and inert until the operator's inclusion PRs; these tests pin what those PRs may include
 and refuse an inclusion that still carries a placeholder. The rendered shapes are proven by
 scripts/tests/test-relay-researcher-render.sh (docker, manifests.yaml).
@@ -25,8 +26,6 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 TREE = ROOT / "kubernetes/apps/relay-researcher"
 CLUSTER = ROOT / "kubernetes/apps/clusters/ai"
-COMPONENTS = ROOT / "kubernetes/components"
-RELAY_OVERLAY = ROOT / "kubernetes/apps/apps/relay/kustomization.yaml"
 TEMPLATE = ROOT / "docs/relay-workers/researcher-installation-definition.json"
 CONTROL, SLOT = "relay-infra-control", "relay-researcher-1"
 MOZILLA_SHA256 = "427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285"
@@ -77,10 +76,6 @@ def flux_kustomizations_for_tree() -> dict:
             if doc.get("kind") == "Kustomization" and "relay-researcher" in str(doc.get("spec", {}).get("path", "")):
                 found[doc["spec"]["path"]] = doc
     return found
-
-
-def relay_components() -> list[str]:
-    return yaml.safe_load(RELAY_OVERLAY.read_text(encoding="utf-8")).get("components", [])
 
 
 class InclusionGate(unittest.TestCase):
@@ -139,37 +134,6 @@ class InclusionGate(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             for value in pins().values():
                 self.assertNotIn(value, text, f"{path} holds a literal pin")
-
-    def test_hub_components_are_included_only_together(self):
-        comps = {c.rsplit("/", 1)[-1] for c in relay_components()}
-        if "relay-infrastructure-installations" in comps or "relay-restore-fencing" in comps:
-            self.assertTrue({"relay-infrastructure-installations", "relay-restore-fencing"} <= comps,
-                            "installations need the recovery generation and vice versa (step H3)")
-        if "relay-worker-profiles" in comps:
-            self.assertIn("relay-infrastructure-installations", comps)
-            self.assertIn("relay-worker-budget-client", comps)
-            body = (COMPONENTS / "relay-worker-profiles/profiles.json").read_bytes()
-            self.assertNotIn(b"OPERATOR-FILLS", body)
-            patch = docs(COMPONENTS / "relay-worker-profiles/deployment.yaml")[0]
-            env = {e["name"]: e["value"] for e in patch["spec"]["template"]["spec"]["containers"][0]["env"]}
-            self.assertEqual(env["RELAY_WORKER_PROFILES_SHA256"], hashlib.sha256(body).hexdigest())
-        if "relay-agent-control-plane" in comps:
-            self.assertTrue({"relay-router-connection", "relay-worker-profiles"} <= comps,
-                            "the control plane comes with the Router connection, last (step H6)")
-
-    def test_control_plane_never_brings_environments_gitea_or_notifications(self):
-        # Owner decision G2 (relay#277 comment 122379): RELAY_AGENT_CONTROL_PLANE with its full scope,
-        # but the environments, Gitea authority and notification components stay out.
-        comps = relay_components()
-        if not any(c.rsplit("/", 1)[-1] == "relay-agent-control-plane" for c in comps):
-            return
-        for c in comps:
-            self.assertNotIn("relay-gitea-authority", c)
-            self.assertNotIn("relay-notifications", c)
-        for path in (ROOT / "kubernetes/apps/apps/relay").rglob("*.yaml"):
-            self.assertNotIn("RELAY_ENVIRONMENTS", path.read_text(encoding="utf-8"), path)
-        patch = (COMPONENTS / "relay-agent-control-plane/deployment.yaml").read_text(encoding="utf-8")
-        self.assertNotIn("RELAY_ENVIRONMENTS", patch)
 
 
 class InstallationStage(unittest.TestCase):
@@ -595,9 +559,12 @@ class BundleCheck(unittest.TestCase):
             files["report.json"]["identity"]["policyDigest"] = "5" * 64
         def report_runtime(files):
             files["report.json"]["identity"]["runtimeDigest"] = "4" * 64
+        def empty_fill(files):
+            files["00-definition.json"]["installationPolicy"]["allowedHarnessAdapters"] = []
         for mutate in (quota, ceiling, unfilled, gate, egress, hub, secrets, label, config, config_ceiling,
                        config_registries, values_tiers, tiers_not_binding, templates_not_binding, two_runtimes,
-                       placement_off_node, placement_overhead, runtime_not_allowed, report_policy, report_runtime):
+                       placement_off_node, placement_overhead, runtime_not_allowed, report_policy, report_runtime,
+                       empty_fill):
             with self.subTest(mutate.__name__):
                 self.assertEqual(self.run_check(self.make_bundle(mutate)), 1)
 

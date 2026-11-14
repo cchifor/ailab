@@ -116,6 +116,10 @@ def compare_definition(expected, actual, path: str = "") -> None:
     if is_placeholder(expected):
         if actual is None or is_placeholder(actual) or (isinstance(actual, str) and PLACEHOLDER in actual):
             fail(f"definition {path or '/'} is still a placeholder")
+        # Every remaining OPERATOR-FILLS leaf needs content (allowedEgressDestinations, which may
+        # legitimately be empty, is a reviewed [] in the template, not a placeholder).
+        if actual in ("", [], {}):
+            fail(f"definition {path} is empty")
         return
     if isinstance(expected, dict):
         if not isinstance(actual, dict):
@@ -198,7 +202,7 @@ def check_values(values: dict, definition: dict, agent: dict) -> None:
         "kubernetes": (values["kubernetes"], {"origin": definition["kubernetesOrigin"]}),
         "identity.installationKeySecret": (values["identity"]["installationKeySecret"],
                                            volumes["installation-key"]["secret"]["secretName"]),
-        "identity.enrollmentTokenSecret": (values["identity"]["enrollmentTokenSecret"],
+        "identity.enrollmentTokenSecret": (values["identity"].get("enrollmentTokenSecret", ""),
                                            volumes.get("enrollment-token", {}).get("secret", {}).get("secretName", "")),
         "policy.bootstrapSecrets": (values["policy"]["bootstrapSecrets"], False),
         "policy.persistentVolumeClaims": (values["policy"]["persistentVolumeClaims"], False),

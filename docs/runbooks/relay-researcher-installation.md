@@ -4,7 +4,8 @@ Status: **source only. Nothing in this runbook is applied, and merging it change
 It is step 8 of the [researcher delivery plan](https://git.chifor.me/cchifor/relay/src/branch/docs/researcher-delivery-plan-20261114/docs/plans/2026-11-08-infrastructure-workers/delivery-plan-2026-11-14.md)
 ("Reviewed ailab install") and steps 3-4 of the gated order in
 [relay-worker-capacity.md](relay-worker-capacity.md#next-stage-first-researcher-runtime). The hub
-side, which must come first, is [relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md).
+side, which must come first, is [relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md),
+staged with its components in ailab #1767 (a separate PR; either can merge first).
 
 Every step that writes is an operator action with the owner's direct confirmation for the exact
 reviewed rollout (capacity runbook, "Before any privileged write"). A dev-worker prepares the PRs and
@@ -313,4 +314,8 @@ Enrollment is not worker readiness. Before the first worker Pod:
 
 ## What still blocks a web-UI-created researcher
 
-See [relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md#what-still-blocks-a-web-ui-created-researcher).
+See [relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md#what-still-blocks-a-web-ui-created-researcher)
+(ailab #1767). For this installation in short: the pinned release with the `recovery:initialize`
+command and the Relay part of G3, the qualification-stage egress series (pending), the binding's
+`relay-worker-1` placement, the Router model qualification and budget authority, then the nineteen
+scenarios, the canary and the activation outputs.
