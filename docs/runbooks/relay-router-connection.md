@@ -1,7 +1,7 @@
 # Relay Router connection for the first researcher worker (inactive)
 
 This is the fixed, reviewed record of the Relay → Router connection that the first repository-free
-researcher worker (`relay-researcher`, `gpt-6-luna`) will use, the Router's trust mapping for it, the
+researcher worker (`relay-researcher`, `gpt-6-luna` on the dedicated route `relay-researcher-luna`) will use, the Router's trust mapping for it, the
 OpenBao escrow writer, and the order in which the operator brings them up. Owner approval for creating
 the connection, binding and reader identity: [relay#277 comment 120817](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-120817)
 (caps in 120818 as corrected, amendments in 120903), 2026-11-14.
@@ -105,7 +105,7 @@ public keys:
 - issuer `relay.chifor.me`; key `relay-admin-2026-11` with roles `[admin]`, key
   `relay-reconciler-2026-11` with roles `[reconciler]`;
 - tenant `00000000-0000-4000-8000-000000000001`, Router namespace `default` (every live route and key);
-- `routes: ["gpt-6-luna"]`, `access: ["api"]`, `maxLifetimeSeconds: 86400`, `maxKeys: 4`;
+- `routes: ["relay-researcher-luna"]`, `access: ["api"]`, `maxLifetimeSeconds: 86400`, `maxKeys: 4`;
 - `workerBudgets: {maxTokens: 8 × (I + 8192), maxAuthoritySeconds: 120, maxRequests: 8}` (comment
   120818 D). `maxTokens` is the placeholder string `operator-sets-8x(I+8192)` until qualification
   proves I, the provider-enforced input bound. A string fails the Router's schema, so the trust file
@@ -115,41 +115,80 @@ public keys:
 a rotation overlap: review them against the researcher pool's lifetime before step 6. The pool
 inference policy's grant (`routes`, `access`, `lifetimeSeconds`) must be a subset of this ceiling.
 
-### Route precondition (stop until resolved)
+### Route precondition (stop until the route exists)
 
-The decided selection is `{kind: "model", model: "gpt-6-luna"}` with no route. With the current
-sources that means the Router route **named** `gpt-6-luna` in namespace `default` serves the worker,
-not `codex-api-1`:
+The owner chose a dedicated route ([relay#277 comment 121330](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-121330)):
+the shared `gpt-6-luna` route stays untouched. The selection is
+`{kind: "model", model: "relay-researcher-luna"}` with no route, and the profile pins
+`adaptedResponses: {catalogModel: "gpt-6-luna", maxOutputTokens: 8192, reasoningEffort: "none"}`.
+The effort is `none` by owner decision D
+([relay#277 comment 121597](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-121597)):
+OpenAI allows function calling on Chat Completions for `gpt-6-luna` only with
+`reasoning_effort: none`. Relay's contract admits no other value. Trial results are "pipeline
+qualified, reasoning off", not evidence of research quality.
+Relay's design note `docs/plans/2026-11-08-infrastructure-workers/researcher-budgeted-codex-route.md`
+(relay#487) holds the reasoning. Why the alias works:
 
 - Relay sends `requestedModel = selection.model` and the grant's `routes` to the Router's
   `worker-budget-preflight` (Relay `server/workers/pool-readiness.ts`,
   `server/workers/runtime-session/profiles.ts`), and the Router refuses unless `routes` includes
   `requestedModel` and every route exists in the namespace (llm-router
-  `packages/plugins/relay-keys/service.ts`). A grant of `["codex-api-1"]` is refused there.
-- At inference a Relay key is always route-scoped. A request for model `gpt-6-luna` without
-  `X-Router-Route` is route mode on the route of that name, and must be one of the key's routes
-  (`packages/modules/inference/index.ts` `authorize`; `packages/plugins/api-openai/index.ts`
-  `selectRoute`, `codexNativeRoute`: a route of that name wins over any mapping).
-- Model mode (`selection.route: codex-api-1`) is not available to a budgeted worker: the preflight
-  checks route aliases only ("Model selectors/default routes are not currently issued by this
-  bridge").
+  `packages/plugins/relay-keys/service.ts`). The alias resolves by route name.
+- At inference a Relay key is always route-scoped. A request for model `relay-researcher-luna` is
+  route mode on that route, and the budget compares each policy with the attempt's deployment (its
+  real model `gpt-6-luna`), never with the requested name.
+- Model mode (`selection.route`) is not available to a budgeted worker: the preflight checks route
+  aliases only ("Model selectors/default routes are not currently issued by this bridge").
 
-In the 2026-10-10 notes of `docs/runbooks/llm-router.md` the `gpt-6-luna` route is a shared route
-of the Codex **subscription** accounts, which the worker budget refuses. Before step 6, the operator reads
-the live route (`GET /admin/v1/config` or the console) and records its targets, access list and
-deployment IDs. Then, as an owner decision, one of:
+Before step 6 the operator creates the route. `GET /admin/v1/config` returns the whole Router
+configuration; its `policies` array holds the routes (each entry is one route, a `RoutePolicy`).
+Append this entry to `policies`, then `PUT /admin/v1/config` with the edited document and
+`If-Match: <revision>`:
 
-1. the route `gpt-6-luna` allows `api` access and its **API** targets are exactly the qualified
-   `openai-2` / `gpt-6-luna` deployment(s); the key's `access: ["api"]` keeps the worker off its
-   subscription targets at preflight and at inference. Any other API target on that route would be
-   reachable by the worker too, so it must be qualified or removed; or
-2. a dedicated route alias is chosen for the worker, and the profile selection, the pool grant routes
-   and this trust's `routes` change together (none of them is in the deployment digest).
+```json
+{
+  "alias": "relay-researcher-luna",
+  "namespace": "default",
+  "deployments": [
+    { "id": "relay-researcher-luna-openai-2", "accountId": "openai-2", "model": "gpt-6-luna", "enabled": true, "weight": 1 }
+  ],
+  "strategy": "priority",
+  "affinity": "none",
+  "access": ["api"],
+  "maxAttempts": 1,
+  "fallbackAliases": [],
+  "native": []
+}
+```
 
-Either way, the qualification evidence and every `QualifiedTokenPolicy` must name the **account and
-deployment ID of the target in the route the worker resolves to**: the Router matches
-`accountId`, `deploymentId` and `model` against that route's targets, so a policy that names a
-`codex-api-1` deployment ID does not qualify a target of route `gpt-6-luna`.
+- `native: []`: Codex's protocol is never passed through on this route. A Router release with
+  llm-router #189 then lists it with `adaptedResponses`, which Relay's holder requires. The same
+  release needs llm-router #190: without it the Router drops the Relay MCP tools (Codex sends them as
+  one `mcp__relay` namespace) and invents `cached_tokens: 0` in usage.
+- The same edit sets two settings on the shared account `openai-2`:
+  - `baseUrl: "https://api.openai.com/v1"`, explicitly. The budget authority compares
+    `account.baseUrl` with the policy's required `baseUrl`, so an account relying on the provider
+    default never qualifies. It changes no request: it is already the `openai` provider's default
+    (llm-router `provider-openai` and `adapters/providers/url.ts`), so `codex-api-1` and
+    `pool-codex-api` keep reaching the same endpoint. Readback: those routes still list their
+    `openai-2` target.
+  - `reasoningEffort: "none"`, the Router's enforcement layer for the effort; Relay's launcher and
+    proxy are the other. The Router sends it on every request in place of any client value. This
+    one does change shared traffic: every route on `openai-2`, `codex-api-1` and `pool-codex-api`
+    included, loses reasoning, which the owner accepted (decision D). The `QualifiedTokenPolicy`
+    does not bind the effort, so the setting is recorded with the policy digest, and any change to it
+    requires requalification. Readback: the journal's `request.parameters_adjusted` shows
+    `reasoning_effort:passed` or `reasoning_effort:overridden` on every attempt, and reported
+    reasoning tokens are 0.
+- `affinity` stays `none`: `strict` requires an `agent_id`, which Codex does not send.
+
+The qualification evidence and every `QualifiedTokenPolicy` name the account and deployment ID of
+this route's target: `accountId: openai-2`, `deploymentId: relay-researcher-luna-openai-2`,
+`model: gpt-6-luna`. The authority accepts a policy only when its deployment ID occurs exactly once
+across all routes, so that ID must be new. A policy that names a `codex-api-1` deployment ID does
+not qualify this route. Readback: `GET /v1/routes` with the worker's key lists
+`relay-researcher-luna` with `available: true`, `capabilities.tools: true`,
+`adaptedResponses: {protocol: "codex-responses"}` and targets `[{provider: openai, model: gpt-6-luna}]`.
 
 ## OpenBao documents the operator fills
 
@@ -255,7 +294,8 @@ Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authorit
 8. **Researcher release deployed.** The reviewed Relay release that reads these settings (worker budget
    client, installations, pinned profile registry, `relay-researcher` profile with
    `connectionId babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`, `protocol codex-responses`,
-   `selection {kind: model, model: gpt-6-luna}`, pool inference policy grant within the ceiling above),
+   `selection {kind: model, model: relay-researcher-luna}` with `adaptedResponses`, pool inference
+   policy grant within the ceiling above),
    through its own PRs and pre-migration backup. Readback per that release's runbook.
 9. **Escrow token** (section above). Readback, with the admin token:
    `bao token lookup -accessor <accessor>` shows `policies [relay-router-escrow]`, `orphan true`,

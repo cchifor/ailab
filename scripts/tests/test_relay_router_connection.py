@@ -273,8 +273,9 @@ class RouterTrust(unittest.TestCase):
         self.assertEqual(set(ceiling), {"tenant", "namespace", "routes", "access", "maxLifetimeSeconds",
                                         "maxKeys", "workerBudgets"})
         self.assertEqual(ceiling["namespace"], "default")
-        # Selection {kind: model, model: gpt-6-luna}, no route: the requested model IS the route alias.
-        self.assertEqual(ceiling["routes"], ["gpt-6-luna"])
+        # Selection {kind: model, model: relay-researcher-luna}, no route: the requested model IS the
+        # route alias, the dedicated adapted route (relay#277 comment 121330), never the shared one.
+        self.assertEqual(ceiling["routes"], ["relay-researcher-luna"])
         self.assertEqual(ceiling["access"], ["api"], "the worker budget refuses subscription transports")
         self.assertTrue(60 <= ceiling["maxLifetimeSeconds"] <= 366 * 86400)
         self.assertTrue(1 <= ceiling["maxKeys"] <= 1000)

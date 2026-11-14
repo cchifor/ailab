@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: a17f60dbd19a10f1de7b0d259a60126acf227e27
-        chifor.me/release: router-0.1.0-20261114-max-completion-tokens
+        chifor.me/source-commit: 5a5181b78350a6f740cc65fb7412e1c009732a32
+        chifor.me/release: router-0.1.0-20261114-adapted-codex
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,10 +121,10 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source a17f60dbd19a10f1de7b0d259a60126acf227e27: the live 3c0d78a2 plus llm-router #188 (OpenAI accounts
-          # get the output limit as max_completion_tokens; its current models refuse max_tokens).
-          # Relay run 132166; archive sha256:01ffa2ad239448dd9da8ca15d8001c5cd15d26c88d4118b06d0a2f55d735e5d6.
-          image: registry.chifor.me/llm-router/router@sha256:0064706f905dc35f3d63f775d04b62f22d904ec16f34e74021f7f139c9566f05
+          # Source 5a5181b78350a6f740cc65fb7412e1c009732a32: the live a17f60db plus llm-router #189 (adapted Codex
+          # routes listed in /v1/routes) and #190 (Codex MCP tools on chat routes; cached counts only when reported).
+          # Relay run 132490; archive sha256:3b5ffcee4bbdf66687809d66d2134abae12aa1e7c0b75c5e3de5f75f9523afeb.
+          image: registry.chifor.me/llm-router/router@sha256:54735b64a017d46c2828d1d421acf7696e036e0259eefae827785fcb8db0eb0b
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
