@@ -173,11 +173,13 @@ new output directory):
 node_modules/.bin/tsx scripts/prepare-pod-installation.ts /operator/researcher-definition.json \
   "$(sha256sum /operator/researcher-definition.json | cut -d' ' -f1)" /operator/researcher-bundle
 python3 scripts/relay-researcher-bundle.py check /operator/researcher-bundle --chart /path/to/relay
-python3 scripts/relay-researcher-bundle.py import /operator/researcher-bundle
+python3 scripts/relay-researcher-bundle.py import /operator/researcher-bundle --chart /path/to/relay
 ```
 
 `check` refuses any difference between the bundle and this review: definition, namespaces,
-containment, gate, egress digest, agent values and config, and (with `--chart`) the chart render
+containment, gate, egress digest, agent values and config, the generated agent policy against the
+definition and its binding (placements on `relay-worker-1` with the relay-gvisor overhead, one runtime
+digest, the binding's templates), and (with `--chart`, which `import` requires) the chart render
 against the committed agent objects. `report.json` must say `enrollment-only-worker-creation-disabled`
 with every readback `not-observed`. Keep the bundle, its `bundle-manifest.json` and the definition's
 SHA-256 in the operator evidence.
@@ -193,12 +195,28 @@ the namespaces and their containment in one Flux apply.
 kubectl --context admin@ai get ns relay-infra-control relay-researcher-1 -o custom-columns=NAME:.metadata.name,UID:.metadata.uid,LABELS:.metadata.labels
 kubectl --context admin@ai get validatingadmissionpolicy relay-enrollment-<id> -o jsonpath='{.status}'   # typeChecking without warnings
 kubectl --context admin@ai -n relay-researcher-1 get resourcequota,limitrange,networkpolicy
-kubectl --context admin@ai -n relay-researcher-1 run gate-probe --image=registry.k8s.io/pause:3.10 --restart=Never --dry-run=server   # DENIED by relay-enrollment-<id>
 kubectl --context admin@ai -n relay-researcher-1 get pods                         # No resources found
+kubectl --context admin@ai -n relay-researcher-1 create --dry-run=server -f - <<'POD'
+apiVersion: v1
+kind: Pod
+metadata: {name: gate-probe}
+spec:
+  automountServiceAccountToken: false
+  securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+  containers:
+  - name: probe
+    image: registry.k8s.io/pause:3.10
+    securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+    resources: {limits: {cpu: 10m, memory: 16Mi, ephemeral-storage: 16Mi}}
+POD
+# must fail with: ValidatingAdmissionPolicy 'relay-enrollment-<id>' ... denied request: Relay
+# enrollment-only installation: all worker Pod creation and updates are disabled.
 ```
 
 Record both namespace UIDs (the later `ordinaryNamespacePins`). Exactly two NetworkPolicies in the
-slot. The dry run must be refused by the gate; a quota or PSA refusal alone is not this proof.
+slot. The probe is restricted-compliant on purpose: Pod Security admission runs before the policy, so
+a non-compliant probe would be refused by PSA and prove nothing about the gate, and the quota is
+evaluated after the policy. Only the gate's own message is this proof.
 
 **I7. Agent stage PR.** Re-check `talos-agent-node-3` headroom. One PR:
 `git mv kubernetes/apps/relay-researcher/flux/relay-researcher-agent.yaml kubernetes/apps/clusters/ai/`.

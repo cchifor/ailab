@@ -9,6 +9,7 @@ scripts/tests/test-relay-researcher-render.sh (docker, manifests.yaml).
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import io
 import importlib.util
@@ -85,9 +86,17 @@ def relay_components() -> list[str]:
 class InclusionGate(unittest.TestCase):
     """Nothing is live on merge; an inclusion with a placeholder is refused."""
 
+    @staticmethod
+    def flux_manifest(name: str) -> Path:
+        """Steps I5 and I7 `git mv` each file from flux/ (staged) to clusters/ai (active): exactly one
+        copy exists at any time, and it keeps the reviewed shape in either place."""
+        copies = [p for p in (TREE / "flux" / name, CLUSTER / name) if p.is_file()]
+        assert len(copies) == 1, f"{name}: expected exactly one of flux/ or clusters/ai, found {copies}"
+        return copies[0]
+
     def test_staged_flux_kustomizations(self):
-        inst = docs(TREE / "flux/relay-researcher-installation.yaml")[0]
-        agent = docs(TREE / "flux/relay-researcher-agent.yaml")[0]
+        inst = docs(self.flux_manifest("relay-researcher-installation.yaml"))[0]
+        agent = docs(self.flux_manifest("relay-researcher-agent.yaml"))[0]
         for doc, path in ((inst, "./kubernetes/apps/relay-researcher/installation"),
                           (agent, "./kubernetes/apps/relay-researcher/agent")):
             self.assertEqual(doc["kind"], "Kustomization")
@@ -421,7 +430,18 @@ class BundleCheck(unittest.TestCase):
         d["installationPolicy"]["allowedImageDigests"] = ["c" * 64]
         d["installationPolicy"]["allowedHarnessAdapters"] = ["codex"]
         d["installationPolicy"]["allowedEgressDestinations"] = []
-        d["binding"] = {"synthetic": True}
+        runtime_image = "registry.chifor.me/relay/worker-runtime@sha256:" + "c" * 64
+        placement = {"tier": "sandboxed-pod", "binding": "researcher", "runtimeClassName": "relay-gvisor",
+                     "overhead": {"milliCpu": 80, "memoryMiB": 24},
+                     "nodeSelector": {"ailab.io/relay-worker-pool": "true", "kubernetes.io/hostname": "relay-worker-1"},
+                     "tolerations": [{"key": "dedicated", "operator": "Equal", "value": "relay-worker", "effect": "NoSchedule"}]}
+        d["binding"] = {"installationId": self.IID, "policyDigest": "f" * 64, "runtime": {"image": runtime_image},
+                        "placements": [placement],
+                        "templates": [{"definition": {"templateId": "researcher", "revision": 1}, "digest": "e" * 64}]}
+        policy = {"installation": d["installationPolicy"],
+                  "podTiers": [{"tier": "sandboxed-pod", "binding": "researcher", "runtimeClassName": "relay-gvisor"}],
+                  "allowedRuntimeDigests": ["d" * 64],
+                  "allowedTemplates": [{"templateId": "researcher", "revision": 1, "digest": "e" * 64}]}
         inst = TREE / "installation"
         lists = {
             "10-namespaces.json": b.with_installation_id(docs(inst / "namespaces.yaml"), self.IID),
@@ -440,8 +460,7 @@ class BundleCheck(unittest.TestCase):
                          "clusterUid": d["identity"]["clusterUid"], "installationPublicKey": "A" * 43, "fenceObjectUid": "",
                          "installationKeySecret": d["references"]["installationKeySecret"],
                          "enrollmentTokenSecret": d["references"]["enrollmentTokenSecret"]},
-            "policy": {"installation": d["installationPolicy"], "podTiers": [], "allowedRuntimeDigests": [],
-                       "allowedTemplates": [], "retainedStorageClass": None, "persistentVolumeClaims": False,
+            "policy": {**copy.deepcopy(policy), "retainedStorageClass": None, "persistentVolumeClaims": False,
                        "bootstrapSecrets": False},
             "podRuntime": {"configMap": "", "bindingSha256": "", "qualificationSha256": ""},
             "candidateRuntime": {"configMap": "", "bindingSha256": "", "trustSha256": "", "trustConfigMap": "",
@@ -457,14 +476,17 @@ class BundleCheck(unittest.TestCase):
         config = json.loads((TREE / "agent/config.json").read_text(encoding="utf-8"))
         config["identity"]["installationId"] = self.IID
         config["identity"]["installationPublicKey"] = "A" * 43
-        config["policy"].update({"allowedRuntimeDigests": ["d" * 64], "allowedTemplates": [],
-                                 "installation": d["installationPolicy"], "podTiers": []})
+        config["policy"].update(copy.deepcopy(policy))
         files = {
             "00-definition.json": d,
             **{k: {"apiVersion": "v1", "kind": "List", "items": v} for k, v in lists.items()},
             "30-agent-values.json": values, "31-agent-config.json": config,
             "40-planned-pod-envelope.json": {"status": "planned-not-compiled"},
-            "report.json": {"status": "enrollment-only-worker-creation-disabled", "workloadCreationEnabled": False},
+            "report.json": {"status": "enrollment-only-worker-creation-disabled", "workloadCreationEnabled": False,
+                            "identity": {"sourceCommit": d["sourceCommit"], "agentImage": d["agentImage"],
+                                         "runtimeImage": runtime_image, "runtimeDigest": "d" * 64,
+                                         "bindingDigest": "9" * 64, "installationId": self.IID,
+                                         "clusterUid": d["identity"]["clusterUid"], "policyDigest": "f" * 64}},
         }
         if mutate:
             mutate(files)
@@ -506,7 +528,37 @@ class BundleCheck(unittest.TestCase):
             files["10-namespaces.json"]["items"][1]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"] = "baseline"
         def config(files):
             files["31-agent-config.json"]["hub"]["origin"] = "https://elsewhere.example"
-        for mutate in (quota, ceiling, unfilled, gate, egress, hub, secrets, label, config):
+        # The generated agent policy, which the committed config cannot pin (reviewer-codex, #1766):
+        def config_ceiling(files):
+            files["31-agent-config.json"]["policy"]["installation"]["resourceCeiling"]["milliCpu"] = 4000
+            files["30-agent-values.json"]["policy"]["installation"]["resourceCeiling"]["milliCpu"] = 4000
+        def config_registries(files):
+            for f in ("31-agent-config.json", "30-agent-values.json"):
+                files[f]["policy"]["installation"]["allowedRegistries"] = ["registry.chifor.me", "ghcr.io"]
+        def values_tiers(files):
+            files["30-agent-values.json"]["policy"]["podTiers"] = []
+        def tiers_not_binding(files):
+            for f in ("31-agent-config.json", "30-agent-values.json"):
+                files[f]["policy"]["podTiers"][0]["runtimeClassName"] = None
+        def templates_not_binding(files):
+            for f in ("31-agent-config.json", "30-agent-values.json"):
+                files[f]["policy"]["allowedTemplates"][0]["digest"] = "7" * 64
+        def two_runtimes(files):
+            for f in ("31-agent-config.json", "30-agent-values.json"):
+                files[f]["policy"]["allowedRuntimeDigests"].append("8" * 64)
+        def placement_off_node(files):
+            files["00-definition.json"]["binding"]["placements"][0]["nodeSelector"]["kubernetes.io/hostname"] = "talos-agent-node-1"
+        def placement_overhead(files):
+            files["00-definition.json"]["binding"]["placements"][0]["overhead"]["milliCpu"] = 0
+        def runtime_not_allowed(files):
+            files["00-definition.json"]["binding"]["runtime"]["image"] = "registry.chifor.me/relay/worker-runtime@sha256:" + "6" * 64
+        def report_policy(files):
+            files["report.json"]["identity"]["policyDigest"] = "5" * 64
+        def report_runtime(files):
+            files["report.json"]["identity"]["runtimeDigest"] = "4" * 64
+        for mutate in (quota, ceiling, unfilled, gate, egress, hub, secrets, label, config, config_ceiling,
+                       config_registries, values_tiers, tiers_not_binding, templates_not_binding, two_runtimes,
+                       placement_off_node, placement_overhead, runtime_not_allowed, report_policy, report_runtime):
             with self.subTest(mutate.__name__):
                 self.assertEqual(self.run_check(self.make_bundle(mutate)), 1)
 

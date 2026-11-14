@@ -15,12 +15,14 @@ installation is exactly what was reviewed here, and then copies the only two thi
          tool's 10-namespaces, 20-containment and 21-admission-deny objects against
          kubernetes/apps/relay-researcher/installation with the bundle's installation ID; the
          execution egress artifact digest against the committed allow-list; 30-agent-values.json and
-         31-agent-config.json against the committed agent objects and config; pins already filled
-         against the definition. With --chart it also renders that checkout's
+         31-agent-config.json against the committed agent objects and config, and the generated
+         agent policy against the definition it came from (installationPolicy verbatim, podTiers and
+         allowedTemplates from the binding, the same policy in values and config, report.json's
+         identity); pins already filled against the definition. With --chart it also renders that checkout's
          deploy/infrastructure-agent with 30-agent-values.json (helm template, no cluster) and
          compares every rendered object with the committed mirror. Exit 1 on the first mismatch.
-  import <bundle-dir>
-         Runs check, then writes the bundle's installationId, agentImage and sourceCommit into
+  import <bundle-dir> --chart <relay-checkout>
+         Runs check WITH the chart render (required here), then writes the bundle's installationId, agentImage and sourceCommit into
          kubernetes/apps/relay-researcher/pins/pins.yaml and copies 31-agent-config.json byte for
          byte to kubernetes/apps/relay-researcher/agent/config.json. It writes nothing else, creates
          no Kubernetes object and contacts nothing. Review and commit the diff.
@@ -247,6 +249,64 @@ def check_config(config: dict, definition: dict) -> None:
     for field in ("installationId", "installationPublicKey", "tenantId", "clusterUid", "controlNamespace"):
         if identity[field] != definition["identity"][field]:
             fail(f"31-agent-config.json identity.{field} differs from the definition")
+    if identity.get("fenceObjectUid") != definition["identity"].get("fenceObjectUid"):
+        fail("31-agent-config.json identity.fenceObjectUid differs from the definition")
+
+
+def check_policy(config: dict, values: dict, definition: dict, report: dict) -> None:
+    """The release-derived agent policy is the one leaf the committed config cannot pin, so join it
+    to the definition it came from. The tool writes the same policy into 31-agent-config.json and
+    30-agent-values.json, takes `installation` verbatim from the definition, and maps podTiers and
+    allowedTemplates from the binding's placements and templates; report.json repeats the identity."""
+    policy, binding = config["policy"], definition["binding"]
+    if not isinstance(binding, dict):
+        fail("the definition's binding is not an object")
+    if policy["installation"] != definition["installationPolicy"]:
+        fail("31-agent-config.json policy.installation differs from the definition's installationPolicy")
+    for field in ("installation", "podTiers", "allowedRuntimeDigests", "allowedTemplates", "retainedStorageClass",
+                  "bootstrapSecrets"):
+        if values["policy"][field] != policy[field]:
+            fail(f"30-agent-values.json policy.{field} differs from 31-agent-config.json")
+    tiers = [{"tier": p.get("tier"), "binding": p.get("binding"), "runtimeClassName": p.get("runtimeClassName")}
+             for p in binding.get("placements", [])]
+    if not tiers or policy["podTiers"] != tiers:
+        fail("policy.podTiers is not the binding's placements")
+    if {t["runtimeClassName"] for t in tiers} != {"relay-gvisor"}:
+        fail("every researcher placement must use RuntimeClass relay-gvisor")
+    for p in binding["placements"]:
+        if p.get("overhead") != {"milliCpu": 80, "memoryMiB": 24}:
+            fail("a placement's overhead is not relay-gvisor's 80m / 24Mi (the slot quota assumes it)")
+        selector = p.get("nodeSelector", {})
+        if selector.get("kubernetes.io/hostname") != "relay-worker-1" or \
+                selector.get("ailab.io/relay-worker-pool") != "true":
+            fail("a placement does not pin kubernetes.io/hostname relay-worker-1 on the relay worker pool")
+    templates = [{"templateId": t.get("definition", {}).get("templateId"),
+                  "revision": t.get("definition", {}).get("revision"), "digest": t.get("digest")}
+                 for t in binding.get("templates", [])]
+    if not templates or policy["allowedTemplates"] != templates:
+        fail("policy.allowedTemplates is not the binding's templates")
+    digests = policy["allowedRuntimeDigests"]
+    if not (isinstance(digests, list) and len(digests) == 1 and re.match(r"^[0-9a-f]{64}$", str(digests[0]))):
+        fail("policy.allowedRuntimeDigests is not exactly one runtime digest")
+    if binding.get("installationId") != definition["identity"]["installationId"]:
+        fail("the binding names another installation")
+    image = binding.get("runtime", {}).get("image", "")
+    if not re.match(r"^registry\.chifor\.me/[a-z0-9/._-]+@sha256:[0-9a-f]{64}$", image) or \
+            image.rsplit(":", 1)[1] not in definition["installationPolicy"]["allowedImageDigests"]:
+        fail("the binding's runtime image is not a digest-pinned registry.chifor.me image allowed by the policy")
+    ident = report.get("identity", {})
+    expected = {"sourceCommit": definition["sourceCommit"], "agentImage": definition["agentImage"],
+                "installationId": definition["identity"]["installationId"],
+                "clusterUid": definition["identity"]["clusterUid"], "runtimeImage": image,
+                "runtimeDigest": digests[0], "policyDigest": binding.get("policyDigest")}
+    for field, want in expected.items():
+        if ident.get(field) != want:
+            fail(f"report.json identity.{field} differs from the definition")
+    for field in ("tenantId", "installationId", "clusterUid", "installationPublicKey"):
+        if values["identity"][field] != definition["identity"][field]:
+            fail(f"30-agent-values.json identity.{field} differs from the definition")
+    if values["identity"]["fenceObjectUid"] != definition["identity"].get("fenceObjectUid", ""):
+        fail("30-agent-values.json identity.fenceObjectUid differs from the definition")
 
 
 def chart_compare(chart_root: Path, bundle: Path, definition: dict, agent: dict) -> None:
@@ -321,8 +381,11 @@ def check(bundle: Path, chart: Path | None) -> dict:
         fail("executionEgressArtifacts does not name the committed allow-list and its digest")
 
     agent = committed_agent()
-    check_values(json.loads((bundle / "30-agent-values.json").read_text(encoding="utf-8")), definition, agent)
-    check_config(json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8")), definition)
+    values = json.loads((bundle / "30-agent-values.json").read_text(encoding="utf-8"))
+    config = json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8"))
+    check_values(values, definition, agent)
+    check_config(config, definition)
+    check_policy(config, values, definition, report)
     if chart is not None:
         chart_compare(chart, bundle, definition, agent)
     return definition
@@ -347,11 +410,12 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("check", "import"):
         sp = sub.add_parser(name)
         sp.add_argument("bundle", type=Path)
-        if name == "check":
-            sp.add_argument("--chart", type=Path, help="exact pinned Relay checkout to render the chart from")
+        # import never runs without the chart render: it is the only step that writes.
+        sp.add_argument("--chart", type=Path, required=name == "import",
+                        help="exact pinned Relay checkout to render the chart from")
     args = parser.parse_args(argv)
     try:
-        definition = check(args.bundle, getattr(args, "chart", None))
+        definition = check(args.bundle, args.chart)
         if args.command == "import":
             write_pins(definition)
             target = TREE / "agent/config.json"

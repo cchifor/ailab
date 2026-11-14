@@ -107,7 +107,7 @@ elicitations, the router-credential administration routes and the Router access 
 2. Take a fresh coordinated backup and verify that it restores:
 
    ```sh
-   kubectl --context admin@ai -n relay create job --from=cronjob/relay-postgres-dump relay-dump-pre-researcher-$(date -u +%Y%m%dT%H%M%SZ)
+   kubectl --context admin@ai -n relay create job --from=cronjob/relay-postgres-dump relay-dump-pre-researcher-$(date -u +%Y%m%d%H%M%S)
    kubectl --context admin@ai -n relay wait --for=condition=complete job/<that job> --timeout=35m
    ```
 
