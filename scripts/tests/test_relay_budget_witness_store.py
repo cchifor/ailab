@@ -51,12 +51,16 @@ def production_files():
 
 def glob_matches(glob, target):
     """OpenBao/Vault policy path semantics: `+` is one segment, a trailing `*` a prefix.
-    Shell-variable segments in templated policies (${host}, $TENANT) are treated as `+`."""
+    A template expansion in a rendered policy (shell ${host} or $TENANT, Jinja {{ item }}) can
+    hold anything, slashes included, so it matches anything: an over-match fails loudly, an
+    under-match would pass silently."""
     pattern = ""
     rest = glob[:-1] if glob.endswith("*") else glob
-    for token in re.split(r"(\+|\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*)", rest):
-        if token == "+" or token.startswith("$"):
+    for token in re.split(r"(\+|\$\{[^}]+\}|\$[A-Za-z_][A-Za-z0-9_]*|\{\{.*?\}\})", rest):
+        if token == "+":
             pattern += "[^/]+"
+        elif token.startswith("$") or token.startswith("{{"):
+            pattern += ".*"
         else:
             pattern += re.escape(token)
     pattern += ".*" if glob.endswith("*") else ""
@@ -73,6 +77,9 @@ class NoAutomationWritesTheWitness(unittest.TestCase):
         self.assertTrue(glob_matches("af/data/*", WITNESS_API[0]))
         self.assertTrue(glob_matches("af/+/relay-budget/+", WITNESS_API[1]))
         self.assertTrue(glob_matches("af/data/${host}/*", WITNESS_API[0]))
+        self.assertTrue(glob_matches("af/data/{{ item }}/*", WITNESS_API[0]))
+        self.assertTrue(glob_matches("af/{{ api }}/relay-budget/*", WITNESS_API[1]))
+        self.assertTrue(glob_matches("af/data/{{ prefix }}", WITNESS_API[0]))  # may span segments
         self.assertFalse(glob_matches("af/data/relay-budget/ca", WITNESS_API[0]))
         self.assertFalse(glob_matches("af/data/dev-workers/*", WITNESS_API[0]))
 
@@ -165,7 +172,8 @@ class TheProceduresStayDocumented(unittest.TestCase):
                        "### After an OpenBao restore", "### Drills before production `ready=true`",
                        "`af/relay-budget/witness`", "at least 20 seconds", "`refreshInterval: 1h`",
                        # A negative drill counts only with the gate proven open at the observation.
-                       "**Drill protocol.**", "**Prove the gate is open, immediately before observing.**"):
+                       "**Drill protocol.**", "**Prove the gate is open, immediately before observing.**",
+                       "**Drill injections are never issuance entries.**"):
             self.assertIn(anchor, runbook)
         recovery = RECOVERY.read_text()
         self.assertIn("### After any restore: the Relay budget witness", recovery)

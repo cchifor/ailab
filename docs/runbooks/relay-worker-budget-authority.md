@@ -420,8 +420,17 @@ gate, so a refusal seen at that point proves nothing about the witness. Every
 negative drill (A–C) therefore re-opens the gate for the drill alone and proves
 it is open, at the moment of the observation:
 
-1. **Install** the drill's witness state ("Changing the witness" steps 1–6). It
-   ends withdrawn, with both consumers rolled onto the drill's file.
+1. **Install** the drill's witness state using "Changing the witness" steps
+   1–2 and 4–6, **skipping step 3's record entry**. It ends withdrawn, with both
+   consumers rolled onto the drill's file.
+   - **Drill injections are never issuance entries.** That covers drill A's
+     restored A, B's empty witness, C's malformed one and D's rewrite of B. Log
+     each one in the drill captures only, never in the offline issuance record.
+   - **What does go in the record.** Only a witness the authority row is rotated
+     to (the initial A, drill A's rotation to B) is an issuance and gets a
+     record entry.
+   - **Why it matters.** The record's latest entry stays the real current
+     witness, which step 5 below and the restore procedure re-enter from.
 2. **Re-open for the drill only.** The owner sets `ready=true` and the operator
    enables the Router plugin. Allocation stays impossible: no Relay connection
    or binding exists.
@@ -442,7 +451,7 @@ it is open, at the moment of the observation:
 | A, stale | Issue A (step 6). Rotate to B: owner updates the row's `recovery_epoch` and `witness_digest`, operator records and writes B ("Changing the witness"). Then restore A in OpenBao (`bao kv rollback -mount=af -version=<A> relay-budget/witness`), force-sync and roll | Router log `Worker budget authority unavailable: …`, still unavailable after waiting ≥20 s. `worker_budget.current_epoch(<A ids>)` as `relay_budget_router` from an operator client Pod returns SQLSTATE 42501. Relay, once wired: `worker_budget_ledger_unavailable`, allocation refused |
 | B, missing | Write an empty `witness` (the only "missing" a running consumer can receive), force-sync and roll. Separately, soft-delete the document (`bao kv delete`) | Empty: Router unavailable, as in A; the positive control still succeeds. Soft-delete: the ExternalSecret goes not Ready while the Secret is retained (ESO Retain), and nothing changes until a deliberate roll |
 | C, malformed | Write JSON that fails the schema (for example `{"version":1}`, or an uppercase digest), force-sync and roll | Router unavailable, as in A |
-| D, older snapshot, unchanged witness | Write B again (a new KV version, same bytes). Roll back to the previous version, force-sync and roll; re-open as in protocol step 2 | Authorization may succeed (Router `available`). Allocations, `token_limit`, `original_deadline`, `recovery_epoch`, outbox sequences and receipts are identical before and after (`SELECT` captures) |
+| D, older snapshot, unchanged witness | Write B again (a new KV version, same bytes; not a record entry). Roll back to the previous version, force-sync and roll; re-open as in protocol step 2 | What the window can show: the Router is `available`; the authority row is identical before and after; both mounted witness digests equal B and the record's latest entry. No allocation exists in this window, so the history comparison (allocations, `token_limit`, `original_deadline`, `recovery_epoch`, outbox sequences, receipts) runs when D is repeated with the Relay-wired drills, and after any real OpenBao restore |
 
 - **Restoring B.** After A–C, restore B from the record and verify `available`
   before the next drill.
