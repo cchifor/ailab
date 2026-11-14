@@ -18,6 +18,7 @@ import ipaddress
 import json
 import re
 import tempfile
+from unittest import mock
 import unittest
 from pathlib import Path
 
@@ -619,17 +620,29 @@ class BundleCheck(unittest.TestCase):
             "status": "enrollment-only-worker-creation-disabled", "workloadCreationEnabled": False, "files": digests}))
         return out
 
-    def run_check(self, bundle, stage=None):
+    def run_check(self, bundle, stage=None, reason=None):
+        """Exit code of `check`; with `reason`, a refusal must name it (not an earlier, unrelated check)."""
         module = bundle_module()
-        if stage is not None:
-            # As after that stage's switch PR: the tree includes it and the template pins its digest.
-            module.egress_stage = lambda: (stage, EGRESS[stage])
-            (egress,) = docs(EGRESS[stage])
-            reviewed = module.template()
-            reviewed["executionEgressArtifacts"][0]["sha256"] = module.measurement_digest(egress)
-            module.template = lambda: copy.deepcopy(reviewed)
-        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
-            return module.main(["check", str(bundle)])
+        err = io.StringIO()
+        with contextlib.ExitStack() as patches:
+            if stage is not None:
+                # As after that stage's switch PR: the tree includes it and the template pins its digest.
+                (egress,) = docs(EGRESS[stage])
+                reviewed = module.template()
+                reviewed["executionEgressArtifacts"][0]["sha256"] = module.measurement_digest(egress)
+                patches.enter_context(mock.patch.object(module, "egress_stage", lambda: (stage, EGRESS[stage])))
+                patches.enter_context(mock.patch.object(module, "template", lambda: copy.deepcopy(reviewed)))
+            patches.enter_context(contextlib.redirect_stderr(err))
+            patches.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            code = module.main(["check", str(bundle)])
+        if reason is not None:
+            self.assertEqual(code, 1)
+            self.assertIn(reason, err.getvalue())
+        return code
+
+    def test_each_check_runs_on_its_own_module(self):
+        # run_check patches the module it loads; that is isolated only while each call loads afresh.
+        self.assertIsNot(bundle_module(), bundle_module())
 
     @staticmethod
     def g3(files, stage="enrollment"):
@@ -673,10 +686,11 @@ class BundleCheck(unittest.TestCase):
         for mutate in (no_aliases, null_aliases, no_g3_at_all):
             for stage in ("enrollment", "qualification"):
                 with self.subTest(mutate.__name__, stage=stage):
-                    self.assertEqual(self.run_check(self.make_bundle(lambda f, m=mutate, s=stage: m(f, s)), stage), 1)
+                    self.run_check(self.make_bundle(lambda f, m=mutate, s=stage: m(f, s)), stage,
+                                   reason="the binding has no hostAliases")
         # The enrollment pin with the qualification stage selected, and the reverse.
-        self.assertEqual(self.run_check(self.make_bundle(), "qualification"), 1)
-        self.assertEqual(self.run_check(self.make_bundle(lambda f: self.g3(f, "qualification"))), 1)
+        self.run_check(self.make_bundle(), "qualification", reason="/executionEgressArtifacts differs")
+        self.run_check(self.make_bundle(lambda f: self.g3(f, "qualification")), reason="/executionEgressArtifacts differs")
 
     def test_refuses_each_g3_difference(self):
         def m(files):
@@ -702,14 +716,19 @@ class BundleCheck(unittest.TestCase):
             m(files)["holderProfiles"]["workerTemplates"][0]["definition"]["holder"]["router"]["origin"] = "https://router.example"
         def no_templates(files):
             m(files)["holderProfiles"]["workerTemplates"] = []
-        for mutate in (aliases_swapped, alias_extra, no_journal_alias, hub_ca_mozilla, hub_origin, router_unpinned,
-                       router_ca_not_packaged, communication_other_ca, router_origin, no_templates):
+        # Each refusal must come from its own guard, so a reordered or weakened check is caught.
+        aliases, hub, router, communication = ("are not the pinned internal TLS and journal addresses",
+                                               "hub origin or hub CA", "holder.router is not", "holder.communication is not")
+        for mutate, reason in ((aliases_swapped, aliases), (alias_extra, aliases), (no_journal_alias, aliases),
+                               (hub_ca_mozilla, hub), (hub_origin, hub), (router_unpinned, router),
+                               (router_ca_not_packaged, router), (communication_other_ca, communication),
+                               (router_origin, router), (no_templates, "no worker templates")):
             for stage in ("enrollment", "qualification"):
                 with self.subTest(mutate.__name__, stage=stage):
                     def both(files, mutate=mutate, stage=stage):
                         self.g3(files, stage)
                         mutate(files)
-                    self.assertEqual(self.run_check(self.make_bundle(both), stage), 1)
+                    self.run_check(self.make_bundle(both), stage, reason=reason)
 
     def test_accepts_the_reviewed_shape(self):
         self.assertEqual(self.run_check(self.make_bundle()), 0)
