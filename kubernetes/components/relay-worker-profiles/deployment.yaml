@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: relay
+spec:
+  template:
+    spec:
+      containers:
+      - name: relay
+        env:
+        - name: RELAY_WORKER_PROFILES_FILE
+          value: /run/relay-worker-profiles/profiles.json
+        # sha256sum of profiles.json, lowercase hex, including any trailing newline. Pinned here
+        # independently of the file; the test recomputes it.
+        - name: RELAY_WORKER_PROFILES_SHA256
+          value: OPERATOR-FILLS-sha256-of-profiles-json
+        volumeMounts:
+        - name: worker-profiles
+          mountPath: /run/relay-worker-profiles/profiles.json
+          subPath: profiles.json
+          readOnly: true
+      volumes:
+      - name: worker-profiles
+        configMap:
+          name: relay-worker-profiles
+          defaultMode: 0444
