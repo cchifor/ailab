@@ -5960,23 +5960,24 @@ class OwnerApprovalCarryOverTest(unittest.TestCase):
             self.assertEqual([], self._merge_gate(head, [self._owner(self.approved)], base=None))
         run.assert_not_called()
 
-    def test_role_leaves_the_rule_off_by_default_and_renders_an_override(self):
-        # Off until the reviewer tokens carry read:issue (the carry-over reads the PR timeline):
-        # a deploy must not re-enable a rule the bots' tokens cannot serve.
+    def test_role_enables_the_rule_for_workbricks_only_and_renders_an_override(self):
+        # Opt-in per repo: workbricks only, since #1754 gave the reviewer tokens read:issue (the
+        # carry-over reads the PR timeline). The scope alone opts no repo in, so a deploy must not
+        # enable the rule for any other repo, and an override must still be able to turn it off.
         import jinja2
 
         role = ROOT / "ansible" / "roles" / "pr_reviewer"
         defaults = AllowlistDefaultsTest._strict_yaml(
             (role / "defaults" / "main.yml").read_text(encoding="utf-8"))
         key = "owner_approval_survives_main_merges_by_repo"
-        self.assertEqual({}, defaults["pr_reviewer_" + key])
+        self.assertEqual({"cchifor/workbricks": True}, defaults["pr_reviewer_" + key])
         source = (role / "templates" / "config.json.j2").read_text(encoding="utf-8")
         env = jinja2.Environment(undefined=jinja2.StrictUndefined)
         env.filters["to_json"] = json.dumps
         template = env.from_string(source)
-        self.assertEqual({}, json.loads(template.render(defaults))[key])
-        enabled = dict(defaults, **{"pr_reviewer_" + key: {"cchifor/workbricks": True}})
-        self.assertEqual({"cchifor/workbricks": True}, json.loads(template.render(enabled))[key])
+        self.assertEqual({"cchifor/workbricks": True}, json.loads(template.render(defaults))[key])
+        disabled = dict(defaults, **{"pr_reviewer_" + key: {}})
+        self.assertEqual({}, json.loads(template.render(disabled))[key])
         env = jinja2.Environment()
         env.filters["to_json"] = json.dumps
         template = env.from_string(source)
