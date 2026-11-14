@@ -1,0 +1,45 @@
+# Mount contract (router readBudgetWitness): regular file, single link, realpath equal to the
+# configured path, no group/world write, owned by root or the process uid -- hence subPath files under
+# /run. The Secret volume is root:1000 (fsGroup) mode 0440. A subPath file never updates in place: a
+# new password, CA or witness reaches the router only through a deliberate rollout.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-router
+  namespace: llm-router
+spec:
+  template:
+    spec:
+      containers:
+      - name: router
+        env:
+        - name: ROUTER_WORKER_BUDGET_DSN_FILE
+          value: /run/llm-router-worker-budget/dsn
+        - name: ROUTER_WORKER_BUDGET_CA_FILE
+          value: /run/llm-router-worker-budget/ca.crt
+        - name: ROUTER_WORKER_BUDGET_WITNESS_FILE
+          value: /run/llm-router-worker-budget/witness.json
+        # sha256 of the canonical Relay RouterDeployment identity {id, origin, issuer, baoOrigin,
+        # baoMount, baoPrefix} (Relay server/router-credentials/service.ts deploymentDigest), equal to
+        # readers.deployment_digest and clients.deployment_digest in the ledger. OPERATOR INPUT: the
+        # placeholder is not 64 hex, so the plugin refuses to start with it even if enabled.
+        - name: ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST
+          value: operator-sets-the-reviewed-relay-router-deployment-digest
+        volumeMounts:
+        - name: worker-budget
+          mountPath: /run/llm-router-worker-budget/dsn
+          subPath: dsn
+          readOnly: true
+        - name: worker-budget
+          mountPath: /run/llm-router-worker-budget/ca.crt
+          subPath: ca.crt
+          readOnly: true
+        - name: worker-budget
+          mountPath: /run/llm-router-worker-budget/witness.json
+          subPath: witness.json
+          readOnly: true
+      volumes:
+      - name: worker-budget
+        secret:
+          secretName: llm-router-worker-budget
+          defaultMode: 0440

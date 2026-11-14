@@ -1,0 +1,49 @@
+# The independent Relay worker budget ledger (docs/runbooks/relay-worker-budget-authority.md).
+# Owner approval for activation: cchifor/relay#277, 2026-11-14.
+#
+# WHAT MERGING THIS INSTALLS: the reviewed optional base at kubernetes/optional/relay-budget-authority
+# through the overlay at ./kubernetes/apps/relay-budget-authority/ledger. That is the namespace, the
+# retained qnap-iscsi PVC, the ailab-ca server Certificate, the Service, the NetworkPolicies, and the
+# StatefulSet at ZERO replicas. Nothing initializes the database: the one-time initialization Job
+# and its schema ConfigMap stay operator-only and outside every Flux inventory (runbook step 3). No
+# login password, authority row, witness, qualification or consumer is created here.
+#
+# EVERY dependsOn ENCODES A RUNBOOK PRECONDITION:
+#   qnap-storage         the StorageClass qnap-iscsi (reclaimPolicy Retain) exists before the PVC.
+#   cert-manager-config  the ClusterIssuer ailab-ca exists before the Certificate. wait:true below then
+#                        keeps this Kustomization not-Ready until the Certificate is actually issued.
+#   apps                 the reviewed egress baselines of relay/relay and llm-router/llm-router are
+#                        applied first, so the base's two additive ledger-egress policies never select
+#                        an otherwise unisolated pod (runbook step 1). Same revision, Ready.
+#   backup               both Velero schedules exclude namespace relay-budget-authority BEFORE the
+#                        ledger is installed (runbook step 1). Flux waits for `backup` to be Ready at
+#                        THIS source revision, so the velero HelmRelease upgrade lands first.
+# The cost is coupling: while `apps` or `backup` is not Ready, changes to THIS tree (for example the
+# operator's replica flip) wait. The running ledger is never stopped by that.
+#
+# wait:true: the PVC must be Bound and the Certificate Ready (runbook step 2, "wait for its retained
+# PVC and Certificate"); the StatefulSet at 0 replicas is trivially ready. After the operator's
+# reviewed flip to ONE replica, the pod's readiness becomes part of this health check.
+#
+# prune:true is safe for the data: the Namespace and the PVC carry kustomize.toolkit.fluxcd.io/prune:
+# disabled in the base, so removing this file stops the database but never deletes its claim.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: relay-budget-authority
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 2m
+  timeout: 10m # the startup probe allows 240 s once the operator runs one replica
+  dependsOn:
+    - name: qnap-storage
+    - name: cert-manager-config
+    - name: apps
+    - name: backup
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/relay-budget-authority/ledger
+  prune: true
+  wait: true

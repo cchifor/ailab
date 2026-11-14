@@ -1,0 +1,40 @@
+# Mount contract (Relay deploy/worker-budget-ledger/README.md and fileBudgetRecoveryWitness): regular
+# files, single link, no group/world write, owned by root or the process uid, canonical absolute
+# paths with no symlinked ancestor -- hence subPath files under /run, never /var/run (a symlink).
+# The Secret volume is root:1000 (fsGroup) mode 0440. A subPath file never updates in place: a new
+# password, CA or witness reaches Relay only through a deliberate rollout, which the runbook requires.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: relay
+spec:
+  template:
+    spec:
+      containers:
+      - name: relay
+        env:
+        - name: RELAY_WORKER_BUDGET_DSN_FILE
+          value: /run/relay-worker-budget/dsn
+        - name: RELAY_WORKER_BUDGET_CA_FILE
+          value: /run/relay-worker-budget/ca.crt
+        - name: RELAY_WORKER_BUDGET_WITNESS_FILE
+          value: /run/relay-worker-budget/witness.json
+        volumeMounts:
+        - name: worker-budget
+          mountPath: /run/relay-worker-budget/dsn
+          subPath: dsn
+          readOnly: true
+        - name: worker-budget
+          mountPath: /run/relay-worker-budget/ca.crt
+          subPath: ca.crt
+          readOnly: true
+        - name: worker-budget
+          mountPath: /run/relay-worker-budget/witness.json
+          subPath: witness.json
+          readOnly: true
+      volumes:
+      - name: worker-budget
+        secret:
+          secretName: relay-worker-budget
+          defaultMode: 0440

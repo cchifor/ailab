@@ -13,8 +13,13 @@
 #
 # The direction of dependency is deliberate and one-way: this layer depends on `infrastructure` (it
 # needs the vmware-tanzu HelmRepository from infrastructure/sources, and the storage classes), but
-# NOTHING depends on this layer. A backup failure is now visible and alertable without being able to
-# gate anything that serves.
+# nothing that serves depends on this layer. A backup failure is now visible and alertable without
+# being able to gate anything that serves.
+#
+# ONE deliberate exception: `relay-budget-authority` (clusters/ai/relay-budget-authority.yaml). Its
+# runbook requires the Velero schedules to exclude the ledger namespace BEFORE the ledger is
+# installed, and dependsOn is how that order is enforced. An unhealthy backup layer only delays
+# changes to the ledger's manifests; the running ledger keeps serving.
 #
 # `wait: true` is kept ON PURPOSE. It is not a gate any more, since nothing dependsOn `backup`, so it
 # costs nothing — and it preserves the signal: an unhealthy backup layer still shows up as
