@@ -96,8 +96,9 @@ Do not enable application consumers until every gate below is satisfied.
    `relay-budget-authority` from **both** Velero daily/weekly schedules before
    installing it. The activation PR does this; the ledger Kustomization depends on
    `backup` at the same revision, so the schedules change first. This directory
-   applies `velero.io/exclude-from-backup=true` to every resource/pod and to cert-manager's generated TLS Secret, and excludes the
-   database volume, but these are additional guards. The operator must also label
+   applies `velero.io/exclude-from-backup=true` to every resource/pod and to
+   cert-manager's generated TLS Secret, and excludes the database volume, but
+   these are additional guards. The operator must also label
    the dynamically provisioned backing PV with that exclusion and confirm no
    custom/cluster-wide backup selects it. Never add the ledger to the Relay
    logical dump, router restore, `infra-pg` dump, or generic app recovery job.
@@ -105,8 +106,8 @@ Do not enable application consumers until every gate below is satisfied.
    With the activation overlay, rendering and inspection happen before the merge
    (`kubectl kustomize kubernetes/apps/relay-budget-authority/ledger`) and the merge
    is the apply. Flux's health check waits for the PVC to bind and the Certificate
-   to be issued. Wait for its retained PVC and Certificate. Record PVC UID, PV name/UID,
-   QNAP LUN identity, Retain policy, image digest and issued certificate SANs.
+   to be issued. Wait for its retained PVC and Certificate. Record PVC UID, PV
+   name/UID, QNAP LUN identity, Retain policy, image digest and issued certificate SANs.
    The backing PV is not created by this repo, so its exclusion is an operator
    gate. Do not delete or replace an existing claim to make initialization pass.
 3. Export the four files from one **reviewer-merged full Relay commit SHA** using

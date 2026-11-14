@@ -83,13 +83,19 @@ class FluxInstallOrder(unittest.TestCase):
         deps = {d["name"] for d in ks["dependsOn"]}
         # StorageClass, ClusterIssuer, the app egress baselines, the Velero exclusion: all first.
         self.assertTrue({"qnap-storage", "cert-manager-config", "apps", "backup"} <= deps, deps)
+        # Every dependency must be a defined Flux Kustomization: a typo would wait forever on
+        # `dependency not found` while a name-only check still passed.
+        self.assertTrue(deps <= set(flux_kustomizations()), deps)
         self.assertNotIn("decryption", ks, "nothing in the ledger overlay is a secret")
 
     def test_credentials_kustomization_never_gates_a_layer(self):
         ks = flux_kustomizations()["relay-budget-credentials"]["spec"]
         self.assertEqual(ks["path"], "./kubernetes/apps/relay-budget-authority/credentials")
         self.assertIs(ks["wait"], False)
-        self.assertIn("external-secrets", {d["name"] for d in ks["dependsOn"]})
+        deps = {d["name"] for d in ks["dependsOn"]}
+        # ESO CRDs, and ClusterIssuer ailab-ca for the two OpenBao-CA Certificates.
+        self.assertTrue({"external-secrets", "cert-manager-config"} <= deps, deps)
+        self.assertTrue(deps <= set(flux_kustomizations()), deps)
         for name, k in flux_kustomizations().items():
             for dep in k["spec"].get("dependsOn", []):
                 self.assertNotEqual(dep["name"], "relay-budget-credentials", name)
@@ -275,11 +281,20 @@ class ConsumerComponents(unittest.TestCase):
         self.assertNotIn("ROUTER_PLUGIN_CONFIG", env)
 
     def test_router_component_is_not_live_with_a_placeholder_digest(self):
-        router = yaml.safe_load((K8S / "apps/apps/llm-router/kustomization.yaml").read_text())
+        # Any kustomization in the tree that pulls the component in, however the path is spelled
+        # (./, trailing slash, another overlay, another component), counts as an inclusion.
+        including = []
+        for path in K8S.rglob("kustomization.yaml"):
+            if path.parent == ROUTER_COMPONENT:
+                continue
+            k = yaml.safe_load(path.read_text()) or {}
+            for entry in k.get("components", []) + k.get("resources", []):
+                if (path.parent / entry).resolve() == ROUTER_COMPONENT.resolve():
+                    including.append(path)
         patch = yaml.safe_load((ROUTER_COMPONENT / "deployment.yaml").read_text())
         [c] = patch["spec"]["template"]["spec"]["containers"]
         digest = {e["name"]: e["value"] for e in c["env"]}["ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST"]
-        if "../../../components/llm-router-worker-budget-reader" in router.get("components", []):
+        if including:
             self.assertRegex(digest, r"^[a-f0-9]{64}$",
                              "set the reviewed Relay router deployment digest before including this")
         else:
