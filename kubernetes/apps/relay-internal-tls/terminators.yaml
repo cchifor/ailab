@@ -154,7 +154,7 @@ spec:
     matchLabels:
       app.kubernetes.io/name: relay-hub-tls
 ---
-# PUBLIC_relay-hub-tls resolves to this address in a worker Pod (Relay hostAliases). Pinned: changing it is a
+# relay.chifor.me resolves to this address in a worker Pod (Relay hostAliases). Pinned: changing it is a
 # new Relay binding and a re-qualification, not an edit.
 apiVersion: v1
 kind: Service
@@ -330,7 +330,7 @@ spec:
     matchLabels:
       app.kubernetes.io/name: relay-router-tls
 ---
-# PUBLIC_relay-router-tls resolves to this address in a worker Pod (Relay hostAliases). Pinned: changing it is a
+# router.chifor.me resolves to this address in a worker Pod (Relay hostAliases). Pinned: changing it is a
 # new Relay binding and a re-qualification, not an edit.
 apiVersion: v1
 kind: Service
