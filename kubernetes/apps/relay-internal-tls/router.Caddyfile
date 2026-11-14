@@ -9,6 +9,20 @@
 # hub cut (ts, status, request.remote_ip, request.host): Router traffic that kept flowing.
 {
 	admin localhost:2019
+	# Caddy's own logs (startup, and http.log.error: a failed upstream logs the request it was
+	# serving) get the same redaction as the access log below; they stay on stderr.
+	log default {
+		format filter {
+			wrap json
+			fields {
+				request>uri regexp `\?.*$` `?REDACTED`
+				request>headers>Authorization delete
+				request>headers>Proxy-Authorization delete
+				request>headers>Cookie delete
+				request>headers>X-Api-Key delete
+			}
+		}
+	}
 	auto_https off
 	grace_period 90s
 	servers :443 {

@@ -247,8 +247,12 @@ class Caddyfiles(unittest.TestCase):
             stripped = re.findall(r"^\t\trequest_header (\S+)$", text, re.M)
             self.assertEqual(stripped, STRIPPED)
             self.assertEqual(re.findall(r"^\t\t\theader_up (\S+) (\S+)$", text, re.M), HEADER_UP)
+            # Both the site's access log and Caddy's default logger (http.log.error carries the request
+            # of a failed upstream) drop credentials and query strings.
+            self.assertIn("\tlog default {\n", text)
             for header in ("Authorization", "Proxy-Authorization", "Cookie", "X-Api-Key"):
-                self.assertIn(f"request>headers>{header} delete", text)
+                self.assertEqual(text.count(f"request>headers>{header} delete"), 2, header)
+            self.assertEqual(text.count("request>uri regexp `\\?.*$` `?REDACTED`"), 2)
             self.assertIn("\t\toutput stdout\n", text)
             # The strip comes before the proxy in the same route.
             self.assertLess(text.index("request_header -Cf-*"), text.index("reverse_proxy"))

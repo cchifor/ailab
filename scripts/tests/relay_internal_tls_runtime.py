@@ -10,8 +10,9 @@ X-Real-IP, Forwarded, True-Client-IP, Cf-*, Cdn-Loop, Remote-*) never reach the 
 sees the TCP peer in CF-Connecting-IP / X-Forwarded-For / X-Real-IP; the worker's Authorization does
 reach it; the request goes to the right upstream; another Host answers 421; another SNI, no SNI and
 plain HTTP are never proxied; the JSON access log carries ts, status, request.remote_ip and
-request.host, and no credential or query string. Then the cert-reloader sidecar picks up a renewed
-certificate without a restart.
+request.host, and no credential or query string. With the upstream down, the error log (Caddy's
+separate http.log.error logger) carries neither either. Then the cert-reloader sidecar picks up a
+renewed certificate without a restart.
 
 Caddy runs as UID 1000 with every capability dropped but NET_BIND_SERVICE, no-new-privileges and a
 read-only root, as terminators.yaml sets it, so binding 443 is proven under the Pods' settings. The
@@ -253,6 +254,26 @@ def suite(fx: Fixture, name: str) -> list:
     return failures
 
 
+def upstream_down(fx: Fixture) -> list:
+    """A failed upstream makes Caddy log the request it was serving through http.log.error, a logger
+    separate from the site's access log: it must be redacted too (stdout and stderr both checked)."""
+    failures = []
+    for name in TERMINATORS:
+        er.docker("stop", f"{P}-echo-{name}")
+    for name, (public, _, _) in TERMINATORS.items():
+        (r,) = fx.request(name, [case("down", public, headers=[["Authorization", f"Bearer {SENTINELS[0]}"]],
+                                     target=f"/v1/models?key={SENTINELS[1]}")])
+        failures += check(f"{name}: an unavailable upstream answers 502", r.get("status") == 502, json.dumps(r)[:300])
+        time.sleep(1)
+        text = fx.logs(name)
+        failures += check(f"{name}: the error log was exercised", '"logger":"http.log.error' in text)
+        leaked = [s for s in SENTINELS if s in text]
+        failures += check(f"{name}: no credential or query string in the error log", not leaked, str(leaked))
+    for name in TERMINATORS:
+        er.docker("start", f"{P}-echo-{name}")
+    return failures
+
+
 def reloader(fx: Fixture) -> list:
     name = "hub"
     fx.start_reloader(name)
@@ -288,6 +309,8 @@ def main() -> int:
         for name in TERMINATORS:
             print(f"relay internal TLS runtime fixture: {name} ({TERMINATORS[name][0]})")
             failures += suite(fx, name)
+        print("relay internal TLS runtime fixture: unavailable upstream and the error log")
+        failures += upstream_down(fx)
         print("relay internal TLS runtime fixture: certificate renewal")
         failures += reloader(fx)
     finally:
