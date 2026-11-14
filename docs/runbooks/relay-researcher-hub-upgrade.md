@@ -91,8 +91,9 @@ Excluded at H6 and after: `RELAY_ENVIRONMENTS` stays unset, and the `relay-gitea
 `relay-notifications` components stay out of the overlay (the tests refuse either next to the control
 plane). A narrower routing-only flag is a Relay follow-up.
 
-**G3 and G4** concern the installation: the Cloudflare egress rule is for the enrollment stage only
-(qualification moves to internal TLS terminators, a pending PR series), and the template is Relay's
+**G3 and G4** concern the installation: the Cloudflare egress rule is for the enrollment stage only;
+qualification moves the slot to two in-cluster TLS terminators (ailab #1768, `relay-internal-tls`) and
+a DNS-less egress stage (the installation runbook's steps Q1-Q6, ailab #1769), and the template is Relay's
 researcher baseline inside the ceilings 2000m / 4096 MiB / 10240 MiB / 512 processes, lease 900 s,
 lifetime 8 h. See [relay-researcher-installation.md](relay-researcher-installation.md).
 
@@ -104,7 +105,15 @@ lifetime 8 h. See [relay-researcher-installation.md](relay-researcher-installati
 
 - The researcher release is reviewer-merged and published: hub receipt, agent and runtime publish
   receipts, all from one `sourceCommit`. It contains the `recovery:initialize` command (G1) and the
-  Relay part of G3. The Router side is rolled and read back (ailab #1764 for llm-router #189/#190,
+  Relay part of G3: `PodRuntimeBinding.hostAliases` rendered and measured, the Router and
+  communication CA pins, the candidate journal alias and the hub-partition driver with separate hub
+  and Router rules. The runtime is built with `hubCa` = the ailab root CA
+  (`docs/relay-workers/researcher-runtime-ca.crt`, sha256 `3d109e83…54ad4c3`), every worker template's
+  `holder.router` and `holder.communication` carry `caFile: /etc/relay/hub-ca.pem` with that
+  `caSha256`, and the binding carries `hostAliases {hub: 10.96.0.40, router: 10.96.0.41,
+  candidateJournal: 10.96.0.42}` (installation runbook, step Q1). The hub itself is unchanged by G3:
+  workers still call `https://relay.chifor.me`, which must stay equal to `RELAY_URL`'s origin. The
+  Router side is rolled and read back (ailab #1764 for llm-router #189/#190,
   the route `relay-researcher-luna` and ailab #1763's trust, both merged), per Relay's
   `researcher-budgeted-codex-route.md`.
 - The budget ledger is through its runbook's step 6 (logins, authority row `ready=false`, witness) so
@@ -309,7 +318,8 @@ Readback, as Router connection runbook step 10, plus:
 - `GET /api/router-credentials/connections` lists `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`.
 
 The installation itself can be approved any time after H3 (installation runbook I1-I10); a worker
-session on it needs H6.
+session on it needs H6 and the qualification stage (installation runbook Q1-Q6: the internal TLS
+terminators, then the slot's DNS-less egress stage).
 
 ### H7. Later hub settings, each its own reviewed component and PR
 
@@ -331,7 +341,8 @@ session on it needs H6.
 | H5 | escrow token | H4 | `relay-router-files` Ready |
 | H6 | `RELAY_ROUTER_CONNECTIONS_FILE` + `RELAY_AGENT_CONTROL_PLANE` + monitoring; no environments, Gitea or notifications | ledger `ready=true`, plugin on | `agentControlPlane: true`, `environments: false`, connectors and bus keys working, budget `started`, connection listed |
 | I1-I10 | the researcher installation (enrollment-stage egress) | H3; worker sessions need H6 | installation `ready`, fence UID pinned |
-| H7 | candidate, canary, qualification files | the evidence for each | per Relay's documents |
+| Q1-Q6 | internal TLS terminators (`relay-internal-tls`), then the slot's qualification egress stage | I10; the release's G3 binding and CA pins | both Certificates Ready and chaining to the pinned root, Services `10.96.0.40`/`.41`, live policy digest `f6d3187c…282f` |
+| H7 | candidate, canary, qualification files | Q6 for the scenarios, the evidence for each | per Relay's documents |
 
 ## Rollback: migrations are forward-only
 
@@ -371,9 +382,10 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
 3. **Model and Router:** paid qualification of `gpt-6-luna` on `openai-2` through
    `relay-researcher-luna` (owner), the rolled Router read back, and the budget authority `ready=true`
    with the `clients` row's `max_tokens` = 8 × (I + 8192) once I is proven.
-4. **Qualification egress (G3):** this PR's Cloudflare rule is enrollment-stage only. The qualification
-   stage's internal TLS terminators, `hostAliases`, `ailab-ca` trust and two-rule egress policy are a
-   pending ailab PR series; no scenario runs before it lands.
+4. **Qualification egress (G3):** the installation's Cloudflare rule is enrollment-stage only. The
+   internal TLS terminators (ailab #1768) and the qualification egress stage with its runbook steps
+   Q1-Q6 (ailab #1769) are staged; the Relay part (hostAliases, CA pins, journal alias, driver) must
+   be in the pinned release. No scenario runs before step Q5's readback.
 5. **Qualification 0/19, no canary:** the slot keeps zero Pods and the deny-all gate until the nineteen
    rows are accepted, the canary passes and the activation compiler's outputs (guards, gate
    replacement, one-Pod quota, `ordinaryNamespacePins`, `bootstrapSecrets: true`) are reviewed and
