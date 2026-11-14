@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# RELAY_AGENT_CONTROL_PLANE=1 (Relay server/config.ts) on the live hub. Hub upgrade step H6
+# (docs/runbooks/relay-researcher-hub-upgrade.md), in the same PR as ../relay-router-connection.
+# Owner decision relay#277 comment 122379 (G2): enabled at H6 with its full scope accepted; each
+# feature keeps its existing authorization checks. A narrower routing-only flag is a Relay follow-up.
+#
+# Why the researcher needs it: a worker's holder installs its Router credential through the holder
+# launch transport, and Relay passes that transport its credential manager only when the control plane
+# is on (server/main.ts launchTransportRoutes `manager: controlPlane ? credentials : undefined`;
+# server/agent-sessions/holder-router.ts refuses a routed launch with "Routed holder installation is
+# unavailable" without it).
+#
+# Everything else it turns on, on Relay main (re-check on the pinned release):
+#   * launch profiles (approval and launch admission routes);
+#   * session control, permission decisions and elicitations;
+#   * the Router access manager, IMPLICITLY: RELAY_LLM_URL is https://router.chifor.me/v1, so
+#     routerAccessOrigin defaults to https://router.chifor.me and its access-request flow and worker
+#     loop start (/api/settings then reports routerAccessRequests: true);
+#   * delegation (with the installations of step H3);
+#   * managed Assistant inference and the router-credential administration routes (with the
+#     connection file of ../relay-router-connection);
+#   * the connector control loops (the control-plane variants of the session, holder-event,
+#     messaging and conversation routes Relay already serves for agent communication);
+#   * control health and metrics routes (../relay-control-monitoring supplies the metrics file).
+#
+# Deliberately NOT turned on with it: RELAY_ENVIRONMENTS stays unset (the Incus environment routes stay
+# off, /api/settings reports environments: false), and the relay-gitea-authority and
+# relay-notifications components stay out. scripts/tests/test_relay_researcher_hub_upgrade.py refuses
+# this component next to either of them or next to RELAY_ENVIRONMENTS in the live overlay.
+#
+# NOT INCLUDED by kubernetes/apps/apps/relay. scripts/tests/test_relay_v060_activation_gate.py already
+# refuses RELAY_AGENT_CONTROL_PLANE in the live overlay; step H6 amends it for this component only.
+patches:
+- path: deployment.yaml
