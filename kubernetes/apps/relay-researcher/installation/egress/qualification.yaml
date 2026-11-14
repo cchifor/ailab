@@ -1,0 +1,68 @@
+# QUALIFICATION STAGE. Owner decision relay#277 comment 122379 (G3). The same object as
+# ./enrollment.yaml (relay-researcher-egress, the definition's executionEgressArtifacts entry), with
+# a different body; ../kustomization.yaml includes exactly one of the two. Selecting this one is the
+# runbook's "Qualification stage" PR, which also moves the definition pin to this file's digest:
+#   f6d3187c2fa3843ef54ed5d6026093c00a8fe487ab54263b7ce6db140d51282f (recomputed by the tests)
+#
+# Workers keep the public names https://relay.chifor.me and https://router.chifor.me. Their Pod's
+# measured hostAliases (Relay PodRuntimeBinding.hostAliases, rendered and admission-checked by Relay)
+# map relay.chifor.me to 10.96.0.40, router.chifor.me to 10.96.0.41 and, for candidate runs,
+# relay-candidate-journal.relay-candidate-journal.svc to 10.96.0.42: the Services of the two internal
+# TLS terminators (kubernetes/apps/relay-internal-tls) and of the candidate journal
+# (kubernetes/optional/relay-candidate-journal). Nothing else is resolvable, so there is no DNS rule.
+# Socket LB is off (kubernetes/infra/bootstrap/cilium-values.yaml): a gVisor Pod's connection to a
+# ClusterIP is translated per packet before policy, so each rule names the backend Pods, on their
+# container port.
+#
+# Rule 0, the hub: the relay-hub-tls Pods, TCP 443 (Caddy -> Relay; ailab-ca certificate for
+#   relay.chifor.me, client address overwritten). Relay's hub-partition driver removes exactly this
+#   rule (hubRuleIndex 0) and checks that it admits the hub terminator and nothing else.
+# Rule 1, the Router: the relay-router-tls Pods, TCP 443 (Caddy -> llm-router-edge -> Router). The
+#   driver keeps it during the cut (routerRuleIndex 1) and checks Router reachability through it.
+# Rule 2, the candidate journal: the relay-candidate-journal Pods, TCP 8443. The candidate supervisor
+#   consumes its one-use session permit there; ordinary (post-qualification) workers never dial it.
+#
+# Nothing else: no DNS, no Cloudflare address, no LAN, node, API server or metadata address, no other
+# namespace. A rule is one namespace AND one Pod label set (one peer), so it can never widen to the
+# whole namespace. Kubernetes unions allowances: the qualification drivers refuse a slot with any
+# NetworkPolicy beyond relay-default-deny and this one. Add nothing else to relay-researcher-1.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-researcher-egress
+  namespace: relay-researcher-1
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: relay-internal-tls
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: relay-hub-tls
+    ports:
+    - protocol: TCP
+      port: 443
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: relay-internal-tls
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: relay-router-tls
+    ports:
+    - protocol: TCP
+      port: 443
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: relay-candidate-journal
+      podSelector:
+        matchLabels:
+          app: relay-candidate-journal
+    ports:
+    - protocol: TCP
+      port: 8443

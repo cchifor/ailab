@@ -18,13 +18,17 @@ the evidence; its read-only `platform` credential cannot do any of this.
 | `kubernetes/apps/relay-researcher/installation/` | none; staged as `flux/relay-researcher-installation.yaml` | Nothing |
 | `kubernetes/apps/relay-researcher/agent/` | none; staged as `flux/relay-researcher-agent.yaml` | Nothing |
 | `kubernetes/apps/relay-researcher/pins/pins.yaml` | read by both trees at build time | Nothing; three placeholders |
+| `kubernetes/apps/relay-researcher/installation/egress/qualification.yaml` | not included (the tree includes `egress/enrollment.yaml`) | Nothing; selected by step Q4 |
+| `kubernetes/apps/relay-internal-tls/` (ailab PR "stage two in-cluster TLS terminators", included here until it merges) | none; staged as `flux/relay-internal-tls.yaml` | Nothing |
+| `docs/relay-workers/researcher-runtime-ca.crt` | not a manifest | The pinned ailab root CA for the release build (step Q1) |
 | `docs/relay-workers/researcher-installation-definition.json` | not a manifest | The reviewed input template for Relay's tool |
 | `scripts/relay-researcher-bundle.py` | not a manifest | Operator's check and import of Relay's generated bundle |
 
-`scripts/tests/test_relay_researcher_installation.py` pins the shapes, the derived quotas, the
-egress digest, the RBAC and the trust pin, and refuses including either Flux Kustomization while a
-pin is a placeholder. `scripts/tests/test-relay-researcher-render.sh` builds both trees under
-manifest-lint's pinned kustomize and kubeconform.
+`scripts/tests/test_relay_researcher_installation.py` pins the shapes, the derived quotas, both
+egress stages and their digests (exactly one included, the definition pinning that one), the RBAC
+and the trust pins, and refuses including either Flux Kustomization while a pin is a placeholder.
+`scripts/tests/test-relay-researcher-render.sh` builds both trees, the installation once per egress
+stage, under manifest-lint's pinned kustomize and kubeconform.
 
 ### Names and placement
 
@@ -92,18 +96,58 @@ Why it cannot carry qualification:
    could open TLS to another zone through them.
 3. **DNS goes to the public resolvers through CoreDNS**, so queries themselves can carry data out.
 
-**Qualification stage (pending, a separate ailab PR series with its Relay part in the pinned
-release).** Workers keep the public names `https://relay.chifor.me` and `https://router.chifor.me`,
-resolved through measured `hostAliases` to two distinct in-cluster TLS terminators. Their
-certificates for the public names come from `ailab-ca`, which becomes the CA the runtime, the holder's
-Router client and the inference proxy trust; the terminators overwrite client-address headers. The
-slot's egress policy then has two separate 443 rules (hub, Router) and no DNS rule once `hostAliases`
-covers both names. It **replaces** `relay-researcher-egress` (the drivers refuse a third policy):
-a new measured digest, a new definition and a re-run of step I4's check, reviewed in that series.
-
 A Cloudflare address change breaks the enrollment-stage slot **closed**: re-read both names before
 each inclusion PR (step I5) and treat a change as a policy change (new digest, new definition,
 re-review).
+
+### Egress: the qualification stage
+
+`installation/egress/qualification.yaml`, selected by step Q4 (it **replaces** the enrollment body of
+the same object, `relay-researcher-egress`: the drivers refuse a third policy). Measured digest
+`f6d3187c2fa3843ef54ed5d6026093c00a8fe487ab54263b7ce6db140d51282f`.
+
+Workers keep the public names `https://relay.chifor.me` and `https://router.chifor.me`: the hub origin
+is baked into the measured runtime and must equal Relay's `RELAY_URL` origin, and the Router origin
+must equal the template's attested origin. The Pod's measured `hostAliases` (Relay
+`PodRuntimeBinding.hostAliases`, rendered into the Pod, admission-checked, and part of every
+measurement; `dnsPolicy` stays `ClusterFirst` and no other alias is accepted) map them to two
+distinct in-cluster TLS terminators, `kubernetes/apps/relay-internal-tls`, and, for candidate runs
+only, the candidate journal's name to its Service:
+
+| Name in the Pod | Address (pinned Service) | Rule | Peer (namespace AND Pods) | Port |
+| --- | --- | --- | --- | --- |
+| `relay.chifor.me` | `10.96.0.40` `relay-internal-tls/relay-hub-tls` | 0, hub | `relay-internal-tls`, `app.kubernetes.io/name: relay-hub-tls` | TCP 443 |
+| `router.chifor.me` | `10.96.0.41` `relay-internal-tls/relay-router-tls` | 1, Router | `relay-internal-tls`, `app.kubernetes.io/name: relay-router-tls` | TCP 443 |
+| `relay-candidate-journal.relay-candidate-journal.svc` (candidate runs) | `10.96.0.42` `relay-candidate-journal/relay-candidate-journal` | 2, journal | `relay-candidate-journal`, `app: relay-candidate-journal` | TCP 8443 |
+
+No DNS rule and no address block: nothing else resolves, and nothing else routes. Socket LB is off,
+so each ClusterIP connection is translated per packet before policy and the rules name the backend
+Pods on their container ports. The journal entry is an addition to the owner's two-name design: the
+candidate supervisor dials the journal from the worker Pod to consume its one-use session permit, so
+a DNS-less candidate slot needs the name too; ordinary workers never dial it, and Relay renders the
+third alias only for candidate runs.
+
+What this fixes, against the enrollment stage's three limits:
+
+1. **A hub-only cut is measurable.** Rule 0 admits only the hub terminator's Pods and rule 1 only the
+   Router terminator's. Relay's `researcher-hub-partition-observation` removes `hubRuleIndex` 0 and
+   keeps `routerRuleIndex` 1; it derives which rule admits which terminator from the live Services
+   (ClusterIP equal to the Pod's aliases), their ready Pods and namespace labels, instead of trusting
+   the declared indices, and counts the Router terminator's access-log lines from the worker Pod's
+   address after the cut (Router traffic that kept flowing).
+2. **No Cloudflare anycast:** the slot reaches three in-cluster Services and nothing else.
+3. **No DNS:** the slot sends no query at all.
+
+Trust: each terminator holds an `ailab-ca` certificate for exactly its public name (cert-manager,
+ECDSA P-256, 90 days, reloaded without a restart) and overwrites `CF-Connecting-IP`,
+`X-Forwarded-For` and `X-Real-IP` with the worker Pod's address, so Relay's and the Router's trust in
+`CF-Connecting-IP` holds (their NetworkPolicy comments name the terminators). The runtime trusts only
+the ailab root CA for these origins: the release's `hub-ca.pem` (supervisor and connector) and the
+worker templates' `holder.router` and `holder.communication` `caFile`/`caSha256` (the holder's Router
+catalog client, the native inference proxy and the agent-tools hub client) are
+`docs/relay-workers/researcher-runtime-ca.crt`, sha256
+`3d109e83f3e144daf1022cff5af22cbeda668db9bb1f4b25fc42f179254ad4c3` (CN `ailab-root-ca`, valid to
+2036-06-15; byte-identical to `ansible/roles/openbao_agent/files/ailab-root-ca.crt`, CI compares).
 
 ### Template and ceilings
 
@@ -272,6 +316,121 @@ relay-installation-fence -o jsonpath='{.metadata.uid}'` equals it; the Lease
 `agent/deployment.yaml` and lower the control `secrets` quota from 5 to 4 (Relay's budget for one
 credential object). The tests require all four to agree.
 
+## Qualification stage (owner decision G3)
+
+The enrollment stage ends here. These steps move the slot to the internal TLS endpoints before any
+qualification scenario runs; nothing in them creates a worker.
+
+**Q1. Preconditions.** Steps I1-I10 are done. The pinned release carries the Relay part of G3
+(`PodRuntimeBinding.hostAliases` rendered and measured, the Router and communication CA pins, the
+candidate journal alias, and the hub-partition driver with separate hub and Router rules) and was
+built with:
+
+- `hubCa` = `docs/relay-workers/researcher-runtime-ca.crt` (sha256 `3d109e83…54ad4c3`), so
+  `supervisorConfig.hubOrigin` is `https://relay.chifor.me`, `hubCaPath` `/etc/relay/hub-ca.pem` and
+  `hubCaSha256` that sha256;
+- every worker template's `holder.router` (origin `https://router.chifor.me`) and
+  `holder.communication` (origin `https://relay.chifor.me`) with `caFile: /etc/relay/hub-ca.pem` and
+  `caSha256` the same sha256;
+- the binding's `hostAliases` `{hub: 10.96.0.40, router: 10.96.0.41, candidateJournal: 10.96.0.42}`;
+- a runtime base image whose `/etc/nsswitch.conf` reads `/etc/hosts` before DNS (`hosts: files dns`).
+
+The binding is the same in both stages (qualification evidence binds the exact binding), so step
+I4's `check` already verified the first three; it refuses different values in either stage and, once
+Q4 selects the qualification stage, a binding without them. The candidate journal
+([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) renders its Service at the
+pinned `10.96.0.42`.
+
+**Q2. Read-only checks.** The three addresses are free (each line must print nothing, except the
+journal's own Service once it exists), the issuer is ready, and the pinned PEM is the root:
+
+```sh
+kubectl --context admin@ai get svc -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.spec.clusterIP}{"\n"}{end}' \
+  | grep -E ' 10\.96\.0\.4[0-2]$'
+kubectl --context admin@ai get clusterissuer ailab-ca -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'   # True
+openssl x509 -in docs/relay-workers/researcher-runtime-ca.crt -noout -subject -fingerprint -sha256
+# subject=CN = ailab-root-ca
+# sha256 Fingerprint=FD:AC:C8:10:43:93:BA:DD:5A:B6:49:FE:03:BB:3C:E1:30:F9:BF:D8:4A:A0:E6:55:57:9A:11:2D:8D:98:C2:21
+```
+
+A taken address stops here: changing one is a new binding, a new release input and a re-review.
+
+**Q3. Terminators PR.** One PR:
+`git mv kubernetes/apps/relay-internal-tls/flux/relay-internal-tls.yaml kubernetes/apps/clusters/ai/`.
+Merging creates namespace `relay-internal-tls`, the two Certificates, the two Caddy terminators
+(2 replicas each) behind `10.96.0.40` and `10.96.0.41`, their NetworkPolicies (ingress only from
+managed worker Pods of `relay-researcher-1` on 443) and one additive ingress policy each in `relay`
+and `llm-router`. No worker can reach them yet: the slot is still on the enrollment stage with a
+0-Pod quota. Readback:
+
+```sh
+kubectl --context admin@ai -n relay-internal-tls get certificate,deploy,svc,pdb,networkpolicy
+#   both Certificates READY True; both Deployments 2/2; Services 10.96.0.40 and 10.96.0.41 on 443
+kubectl --context admin@ai -n relay get networkpolicy relay-internal-tls-ingress
+kubectl --context admin@ai -n llm-router get networkpolicy llm-router-edge-internal-tls-ingress
+# The served certificate chains to the pinned root and names exactly the public name
+# (a port-forward reaches the Pod directly, past the NetworkPolicy):
+kubectl --context admin@ai -n relay-internal-tls port-forward svc/relay-hub-tls 18443:443 &
+openssl s_client -connect 127.0.0.1:18443 -servername relay.chifor.me -verify_hostname relay.chifor.me \
+  -CAfile docs/relay-workers/researcher-runtime-ca.crt -verify_return_error </dev/null 2>/dev/null \
+  | grep -E '^(subject|issuer)=|Verify return code'                     # issuer CN = ailab-root-ca, code 0 (ok)
+kill %1
+# the same for svc/relay-router-tls with router.chifor.me
+```
+
+**Q4. Egress stage PR.** One PR, outside any ceremony window (if `relay-researcher-installation` is
+suspended for a drill or the activation ceremony, finish it, confirm the restore and resume first;
+never switch stages inside a window) and while the slot holds no Pod
+(`kubectl -n relay-researcher-1 get pods` empty; the quota is still 0):
+
+- `installation/kustomization.yaml`: `- egress/enrollment.yaml` becomes `- egress/qualification.yaml`;
+- the template's `executionEgressArtifacts[0].sha256` becomes
+  `f6d3187c2fa3843ef54ed5d6026093c00a8fe487ab54263b7ce6db140d51282f`.
+
+The tests refuse one without the other. Re-run step I4 with the operator's definition updated the
+same way: `check --chart` must pass (it now requires the binding's G3 fields), and `import` changes
+nothing (the egress artifact is only in the definition and the report). Keep the new bundle and the
+definition's SHA-256 in the evidence. Merging is one Flux apply of one object, same name, new body:
+the slot is never without its allow-list.
+
+**Q5. Readback.**
+
+```sh
+kubectl --context admin@ai -n relay-researcher-1 get networkpolicy        # relay-default-deny, relay-researcher-egress only
+kubectl --context admin@ai -n relay-researcher-1 get networkpolicy relay-researcher-egress -o json \
+  | python3 -c 'import json, sys, importlib.util as u
+s = u.spec_from_file_location("b", "scripts/relay-researcher-bundle.py"); m = u.module_from_spec(s); s.loader.exec_module(m)
+print(m.measurement_digest(json.load(sys.stdin)))'                        # f6d3187c...282f
+```
+
+Record the policy's UID: the drivers pin it.
+
+**Q6. The hub-partition drill's configuration** (Relay
+`scripts/qualification/researcher-hub-partition-observation.ts` in the pinned release):
+
+```json
+"egressPolicy": {"name": "relay-researcher-egress", "uid": "<Q5 UID>", "hubRuleIndex": 0, "routerRuleIndex": 1},
+"endpoints": {"hub": {"namespace": "relay-internal-tls", "service": "relay-hub-tls"},
+              "router": {"namespace": "relay-internal-tls", "service": "relay-router-tls"}}
+```
+
+The operator's identity also needs `get` on Services, Pods and Namespaces and `pods/log` in
+`relay-internal-tls` (the Router terminator's access log, container `caddy`, is the evidence of
+Router traffic during the cut). Suspend `relay-researcher-installation` for the drill window, as for
+every in-place ceremony below.
+
+**Rollback.** Revert Q4 (only while the slot holds no Pod) to return to the enrollment stage; revert
+Q3 only after that, or once the slot is empty for good: a worker whose terminator is gone fails
+closed (connection refused), it never falls back to Cloudflare. The namespace
+`relay-internal-tls` is retained (`prune: disabled`) and deleted by hand once empty.
+
+**Not covered by these steps.** The Relay half is the release's (Q1). The candidate journal is still
+the optional bundle, and the agent's own journal egress and candidate runtime values are separate
+changes ("Beyond enrollment", item 3). Rule 2 (the journal) stays in the policy after qualification:
+an ordinary-stage policy without it is a later digest change, reviewed with the activation outputs.
+The control namespace is unchanged: the agent still reaches the hub through Cloudflare
+(`controlNetwork.hubCidrs`).
+
 ## Flux and the in-place ceremonies
 
 Flux re-applies these trees every 10 minutes and on every commit. The qualification drivers replace
@@ -286,8 +445,8 @@ silently undo a drill or a ceremony.
 
 Enrollment is not worker readiness. Before the first worker Pod:
 
-1. The qualification-stage egress and trust (G3, pending series): internal TLS terminators,
-   `hostAliases`, `ailab-ca` trust and the two-rule policy replacing `relay-researcher-egress`.
+1. The qualification stage (steps Q1-Q6): internal TLS terminators, `hostAliases`, `ailab-ca`
+   trust and the three-rule, DNS-less policy replacing `relay-researcher-egress`.
 2. Pool and template approval in Relay (exact pool revision, policy digest = the local one).
 3. The nineteen qualification scenarios on this slot with the merged drivers (delivery plan step 9):
    they need the signed candidate run (`candidateRuntime` values: candidate ConfigMaps,
@@ -316,6 +475,6 @@ Enrollment is not worker readiness. Before the first worker Pod:
 
 See [relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md#what-still-blocks-a-web-ui-created-researcher)
 (ailab #1767). For this installation in short: the pinned release with the `recovery:initialize`
-command and the Relay part of G3, the qualification-stage egress series (pending), the binding's
+command and the Relay part of G3, the qualification stage (steps Q1-Q6), the binding's
 `relay-worker-1` placement, the Router model qualification and budget authority, then the nineteen
 scenarios, the canary and the activation outputs.
