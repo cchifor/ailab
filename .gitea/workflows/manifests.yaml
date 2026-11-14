@@ -223,6 +223,18 @@ jobs:
           bash scripts/tests/test-relay-router-provision.sh
           bash scripts/tests/test-relay-router-connection-render.sh
 
+      # The first Relay researcher installation (docs/runbooks/relay-researcher-installation.md): both
+      # staged trees under kubernetes/apps/relay-researcher rendered under manifest-lint's pinned
+      # kustomize and validated by its kubeconform (pins substituted, hashed config and trust
+      # ConfigMaps followed by the Deployment, trust bytes equal to the pinned Mozilla bundle). The
+      # source-level gates (tool shapes, derived quotas, egress digest, RBAC, trust pin, inclusion and
+      # placeholders) are scripts/tests/test_relay_researcher_installation.py, run by script-tests.yaml.
+      - name: Relay researcher installation render
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-relay-researcher-render.sh
+
       # The Relay hub upgrade components of the first researcher worker
       # (docs/runbooks/relay-researcher-hub-upgrade.md): each of the three un-included components
       # rendered onto the live Relay Deployment under manifest-lint's pinned kustomize changes only the

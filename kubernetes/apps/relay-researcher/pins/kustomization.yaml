@@ -1,0 +1,63 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Copies the three operator pins of pins.yaml into the objects of ../installation and ../agent. Both
+# trees include this component, so a value is written once and every copy is derived from it. A
+# replacement whose targets are absent from a tree (the Deployment in ../installation, the gate in
+# ../agent) selects nothing and changes nothing.
+resources:
+- pins.yaml
+replacements:
+# relay.chifor.me/installation-id on both namespaces (Relay renders it from the definition's identity).
+- source:
+    kind: ConfigMap
+    name: relay-researcher-pins
+    fieldPath: data.installationId
+  targets:
+  - select:
+      kind: Namespace
+    fieldPaths:
+    - metadata.labels.[relay.chifor.me/installation-id]
+# The enrollment gate: relay-enrollment-<installationId> names the policy, its binding and the
+# binding's policyName (Relay: `relay-enrollment-${installationId.toLowerCase()}`).
+- source:
+    kind: ConfigMap
+    name: relay-researcher-pins
+    fieldPath: data.installationId
+  targets:
+  - select:
+      kind: ValidatingAdmissionPolicy
+    fieldPaths:
+    - metadata.name
+    options:
+      delimiter: relay-enrollment-
+      index: 1
+  - select:
+      kind: ValidatingAdmissionPolicyBinding
+    fieldPaths:
+    - metadata.name
+    - spec.policyName
+    options:
+      delimiter: relay-enrollment-
+      index: 1
+# The agent image, digest only.
+- source:
+    kind: ConfigMap
+    name: relay-researcher-pins
+    fieldPath: data.agentImage
+  targets:
+  - select:
+      kind: Deployment
+      name: relay-infrastructure-agent
+    fieldPaths:
+    - spec.template.spec.containers.[name=agent].image
+# The source commit, recorded on the agent Pod the way kubernetes/apps/apps/relay records the hub's.
+- source:
+    kind: ConfigMap
+    name: relay-researcher-pins
+    fieldPath: data.sourceCommit
+  targets:
+  - select:
+      kind: Deployment
+      name: relay-infrastructure-agent
+    fieldPaths:
+    - spec.template.metadata.annotations.[chifor.me/source-commit]

@@ -1,0 +1,70 @@
+# Kubernetes-side alerts for the first Relay researcher installation, from kube-state-metrics only
+# (default collectors). They watch the containment this tree and ../installation promise; the hub's
+# own worker alerts are kubernetes/components/relay-worker-monitoring (included with the hub's
+# control-plane step, docs/runbooks/relay-researcher-hub-upgrade.md). Applied with the agent stage, so
+# no rule exists before the namespaces do. Unit tests: relay-researcher-rules.test.yaml (rules-lint).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: relay-researcher-installation
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+  - name: relay-researcher-installation
+    interval: 30s
+    rules:
+    # A Recreate rollout is a short zero; ten minutes is not.
+    - alert: RelayInfrastructureAgentUnavailable
+      expr: kube_deployment_status_replicas_available{namespace="relay-infra-control",deployment="relay-infrastructure-agent"} < 1
+      for: 10m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: The Relay infrastructure agent has no available replica
+        description: Workers cannot be created, observed or cleaned up while it is down. Never replace its installation identity or fence to restart it.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-researcher-installation.md
+    # The relay-gvisor RuntimeClass and the dedicated taint should make this impossible. If it fires,
+    # a worker runs beside protected workloads: stop it through Relay at once.
+    - alert: RelayResearcherPodOffWorkerPool
+      expr: max by (namespace, pod, node) (kube_pod_info{namespace="relay-researcher-1",node!="",node!="relay-worker-1"}) > 0
+      for: 1m
+      labels:
+        severity: critical
+        service: relay
+      annotations:
+        summary: A Pod in the researcher slot runs outside relay-worker-1
+        description: Stop the worker through Relay and inspect placement before any further admission.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-researcher-installation.md
+    # The slot is designed for one active Pod at most; the reviewed activation raises 0 to 1 only.
+    - alert: RelayResearcherSlotPodQuotaAboveOne
+      expr: max by (namespace) (kube_resourcequota{namespace="relay-researcher-1",resource="pods",type="hard"}) > 1
+      for: 1m
+      labels:
+        severity: critical
+        service: relay
+      annotations:
+        summary: The researcher slot's Pod quota is above one
+        description: Only the reviewed activation bundle may change it, and only from 0 to 1. Restore the committed quota.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-researcher-installation.md
+    # With either policy gone the slot is no longer default-deny plus allow-list (Cilium allows by
+    # default in a namespace without policy).
+    - alert: RelayResearcherSlotPolicyMissing
+      expr: |
+        count(kube_namespace_created{namespace="relay-researcher-1"}) > 0
+        unless on ()
+        (
+          count(kube_networkpolicy_created{namespace="relay-researcher-1",networkpolicy="relay-default-deny"}) > 0
+          and on ()
+          count(kube_networkpolicy_created{namespace="relay-researcher-1",networkpolicy="relay-researcher-egress"}) > 0
+        )
+      for: 5m
+      labels:
+        severity: critical
+        service: relay
+      annotations:
+        summary: The researcher slot lost its default-deny or its egress allow-list
+        description: Stop admission and restore both NetworkPolicies from git before any worker runs.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-researcher-installation.md

@@ -1,0 +1,37 @@
+{
+  "hub": {
+    "caFile": "/run/relay/hub-ca/ca.crt",
+    "origin": "https://relay.chifor.me"
+  },
+  "identity": {
+    "clusterUid": "faf3a521-bd08-4d6d-ba5c-9dc7da903819",
+    "controlNamespace": "relay-infra-control",
+    "enrollmentTokenFile": "/run/relay/enrollment/token",
+    "installationId": "OPERATOR-FILLS: the approved installation ID (same value as ../pins installationId)",
+    "installationKeyFile": "/run/relay/installation/installation.pem",
+    "installationPublicKey": "OPERATOR-FILLS: raw base64url Ed25519 public half of relay-infrastructure-agent-key",
+    "tenantId": "00000000-0000-4000-8000-000000000001"
+  },
+  "kubernetes": {
+    "caFile": "/run/relay/kubernetes/ca.crt",
+    "origin": "https://kubernetes.default.svc:443",
+    "tokenFile": "/run/relay/kubernetes/token"
+  },
+  "leadership": {
+    "leaseDurationSeconds": 15,
+    "renewDeadlineSeconds": 10,
+    "retryPeriodSeconds": 2
+  },
+  "policy": {
+    "allowedRuntimeDigests": "OPERATOR-FILLS: from the pinned release's PodRuntimeBinding (prepare-pod-installation.ts output)",
+    "allowedTemplates": "OPERATOR-FILLS: the sealed researcher template {templateId, revision, digest}",
+    "bootstrapSecrets": false,
+    "executionSlots": [
+      "relay-researcher-1"
+    ],
+    "installation": "OPERATOR-FILLS: installationPolicy of the definition (ailab ceilings + release digests)",
+    "podTiers": "OPERATOR-FILLS: [{tier, binding, runtimeClassName: relay-gvisor}] from the binding's placements",
+    "retainedStorageClass": null
+  },
+  "version": 1
+}
