@@ -10,7 +10,11 @@
 #     OpenBao egress NetworkPolicy. Every other object, container and pre-existing env entry is the
 #     plain render, so ROUTER_PLUGIN_CONFIG and RELAY_AGENT_CONTROL_PLANE are untouched;
 #   * also builds together with the budget-ledger consumer component of the same app (the inclusion
-#     the runbook orders), with no volume or mount collision.
+#     the runbook orders) with no volume, mount or env collision: every env entry of the plain render,
+#     of the budget component and of this component is present exactly once with its own value (env
+#     is a strategic-merge list keyed by name, so a shared name would be silently overwritten);
+#   * (Relay) its egress NetworkPolicy selects the live Deployment's pods: its podSelector labels are
+#     a subset of the rendered pod template labels, or the in-cluster baoOrigin would be unreachable.
 # The components are NOT part of any Flux path, which is why manifest-lint.sh does not build them.
 # Requires docker. Exit non-zero on the first broken expectation.
 set -euo pipefail
@@ -25,22 +29,25 @@ for app in relay llm-router; do
     relay) component=relay-router-connection; budget=relay-worker-budget-client ;;
     llm-router) component=llm-router-relay-keys-trust; budget=llm-router-worker-budget-reader ;;
   esac
-  mkdir -p "$WORK/plain/$app" "$WORK/with/$app" "$WORK/both/$app"
+  mkdir -p "$WORK/plain/$app" "$WORK/with/$app" "$WORK/budget/$app" "$WORK/both/$app"
   printf 'resources: [../../repo/kubernetes/apps/apps/%s]\n' "$app" > "$WORK/plain/$app/kustomization.yaml"
   printf 'resources: [../../repo/kubernetes/apps/apps/%s]\ncomponents: [../../repo/kubernetes/components/%s]\n' \
     "$app" "$component" > "$WORK/with/$app/kustomization.yaml"
+  printf 'resources: [../../repo/kubernetes/apps/apps/%s]\ncomponents: [../../repo/kubernetes/components/%s]\n' \
+    "$app" "$budget" > "$WORK/budget/$app/kustomization.yaml"
   printf 'resources: [../../repo/kubernetes/apps/apps/%s]\ncomponents: [../../repo/kubernetes/components/%s, ../../repo/kubernetes/components/%s]\n' \
     "$app" "$budget" "$component" > "$WORK/both/$app/kustomization.yaml"
 done
 chmod -R a+rX "$WORK"
 
-render() { # <plain|with|both> <app>
+render() { # <plain|with|budget|both> <app>
   docker run --rm --network none -v "$REPO_ROOT:/repo:ro" -v "$WORK/$1:/$1:ro" -w "/$1" \
     "$KUSTOMIZE_IMAGE" build "$2" > "$WORK/$1-$2.yaml"
 }
 for app in relay llm-router; do
   render plain "$app"
   render with "$app"
+  render budget "$app"
   render both "$app"
 done
 
@@ -92,6 +99,27 @@ for app, (deployment, container, env_names, volumes, added) in CASES.items():
         env = {e["name"]: e["value"] for e in added_env}
         assert env["RELAY_ROUTER_CONNECTIONS_FILE"] == "/run/relay-router/connections.json"
         assert "RELAY_AGENT_CONTROL_PLANE" not in {e["name"] for e in c["env"]}
+    if app == "relay":
+        [np_key] = [k for k in extra if k[0] == "NetworkPolicy"]
+        selector = with_[np_key]["spec"]["podSelector"]["matchLabels"]
+        pod_labels = with_[key]["spec"]["template"]["metadata"]["labels"]
+        assert selector.items() <= pod_labels.items(), f"egress policy {selector} selects no Relay pod {pod_labels}"
+    # Together with the budget component: no volume/mount collision, and no env name shared (a shared
+    # name would be silently replaced by the strategic merge): the combined env is exactly the plain
+    # env plus each component's own additions, each with its own value.
+    def container_of(render):
+        return [x for x in load(f"{work}/{render}-{app}.yaml")[key]["spec"]["template"]["spec"]["containers"]
+                if x["name"] == container][0]
+    def env_of(render):
+        return [(e["name"], e.get("value", e.get("valueFrom"))) for e in container_of(render).get("env", [])]
+    plain_env, with_env, budget_env, both_env = (env_of(r) for r in ("plain", "with", "budget", "both"))
+    own = [e for e in with_env if e not in plain_env]
+    budgets = [e for e in budget_env if e not in plain_env]
+    assert own and budgets, f"{app}: a component added no env"
+    assert not {n for n, _ in own} & {n for n, _ in budgets}, f"{app}: env name shared with the budget component"
+    names = [n for n, _ in both_env]
+    assert len(names) == len(set(names)), f"{app}: duplicate env {names}"
+    assert sorted(both_env, key=str) == sorted(plain_env + own + budgets, key=str), f"{app}: combined env {both_env}"
     both = load(f"{work}/both-{app}.yaml")[key]["spec"]["template"]["spec"]
     names = [v["name"] for v in both["volumes"]]
     assert len(names) == len(set(names)), f"{app}: volume collision {names}"
@@ -99,6 +127,7 @@ for app, (deployment, container, env_names, volumes, added) in CASES.items():
     paths = [m["mountPath"] for m in bc["volumeMounts"]]
     assert len(paths) == len(set(paths)), f"{app}: mount collision {paths}"
     print(f"{app}: {len(added_env)} env, {len(mounts)} read-only mounts, {len(vols)} volumes, "
-          f"{len(extra)} added objects; nothing else changed; builds with the budget component")
+          f"{len(extra)} added objects; nothing else changed; combines with the budget component "
+          f"({len(own)} + {len(budgets)} env, no collision)")
 PY
 echo "test-relay-router-connection-render: OK"

@@ -279,8 +279,17 @@ Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authorit
 ## Rollback
 
 - Before step 10, reverting an inclusion PR is enough; a Router trust without the Relay keys in use
-  issues nothing. To abandon, delete the documents (`bao kv metadata delete -mount=af relay-router/...`)
-  and revoke every minted escrow token by accessor.
+  issues nothing.
+- To abandon the connection, deleting the OpenBao documents is not enough: ESO keeps the last
+  rendered Secrets (`deletionPolicy: Retain`), so `relay/relay-router-files` would keep the private
+  keys. In order: revert both inclusions; revoke every minted escrow token by accessor
+  (`bao token revoke -accessor <accessor>`); remove `clusters/ai/relay-router-credentials.yaml` in a
+  reviewed PR, so Flux prunes the two ExternalSecrets and Kubernetes garbage-collects the Secrets
+  they own (`creationPolicy: Owner`); confirm with
+  `kubectl --context admin@ai -n relay get secret relay-router-files` and
+  `-n llm-router get secret llm-router-relay-trust` (both NotFound; delete them explicitly if not);
+  then delete the documents (`bao kv metadata delete -mount=af relay-router/relay/admin-signer`, and
+  `reconciler-signer`, `escrow-token`, `relay-router/router/trust`).
 - After any issuance, revoke the credentials through Relay first and confirm the Router rejects them:
   removing the components does not revoke issued keys, and Relay needs the connection files to finish
   revocation and escrow cleanup. Keep them until no pending job remains.

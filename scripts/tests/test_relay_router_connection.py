@@ -244,6 +244,11 @@ class RelayComponent(unittest.TestCase):
         self.assertEqual(peer["podSelector"],
                          {"matchLabels": {"app.kubernetes.io/name": "openbao", "component": "server"}})
         self.assertEqual(int(record()["baoOrigin"].rsplit(":", 1)[1]), 8200)
+        # It must select the live Relay pods, or the in-cluster baoOrigin stays unreachable.
+        relay = one(K8S / "apps/apps/relay/relay.yaml", "Deployment", "relay")
+        pod_labels = relay["spec"]["template"]["metadata"]["labels"]
+        selector = policy["spec"]["podSelector"]["matchLabels"]
+        self.assertLessEqual(selector.items(), pod_labels.items(), pod_labels)
 
 
 class RouterTrust(unittest.TestCase):
