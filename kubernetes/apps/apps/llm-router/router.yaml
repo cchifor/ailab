@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 3c0d78a279cb3994be7e1d86b9f2411ea3ca4e97
-        chifor.me/release: router-0.1.0-20261112-model-cooldown
+        chifor.me/source-commit: a17f60dbd19a10f1de7b0d259a60126acf227e27
+        chifor.me/release: router-0.1.0-20261114-max-completion-tokens
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,10 +121,10 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source 3c0d78a279cb3994be7e1d86b9f2411ea3ca4e97: the live 737d447b plus llm-router #179 (a Claude 429
-          # that limited only one model pauses only that model; ROUTER_CLAUDE_MODEL_SCOPED_LIMITS below).
-          # Relay run 129389; archive sha256:1eb78102b44f989a051ebf1d861742480185869498e7ab502df0f3f549c53de9.
-          image: registry.chifor.me/llm-router/router@sha256:05b2d8401e3369ed254baa8572c8099ff8e9249f145cfba22c3985e18290e414
+          # Source a17f60dbd19a10f1de7b0d259a60126acf227e27: the live 3c0d78a2 plus llm-router #188 (OpenAI accounts
+          # get the output limit as max_completion_tokens; its current models refuse max_tokens).
+          # Relay run 132166; archive sha256:01ffa2ad239448dd9da8ca15d8001c5cd15d26c88d4118b06d0a2f55d735e5d6.
+          image: registry.chifor.me/llm-router/router@sha256:0064706f905dc35f3d63f775d04b62f22d904ec16f34e74021f7f139c9566f05
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]

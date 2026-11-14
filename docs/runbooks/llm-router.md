@@ -4555,3 +4555,58 @@ off without a rollback, remove the variable (or set it to `0`): the router resta
 - reviewer-1: no `deferred: subscription rate-limited` line since the roll. It completed 13 reviews between 12:09 and
   12:24Z, where it had managed about four an hour since 04:00Z.
 - Fable stays spent on `claude` and `claude-2` until their weekly resets, so reviewer-claude reviews on Opus until then.
+
+## `max_completion_tokens` release (2026-11-14, llm-router #188)
+
+Release `router-0.1.0-20261114-max-completion-tokens`: source `a17f60dbd19a10f1de7b0d259a60126acf227e27` (llm-router
+branch `release/router-20261114-max-completion-tokens`: the live `3c0d78a2` plus
+[#188](https://git.chifor.me/cchifor/llm-router/pulls/188) cherry-picked; `main` still carries unreleased provenance
+work), archive `router-0.1.0-20261114-max-completion-tokens.tar.gz`, SHA-256
+`01ffa2ad239448dd9da8ca15d8001c5cd15d26c88d4118b06d0a2f55d735e5d6`, Relay branch
+`release/router-20261114-max-completion-tokens`, [Relay run 132166](https://git.chifor.me/cchifor/relay/actions/runs/132166),
+packaging commit `30bcab8372cb7dab06d5170616e21927eba6767c`, image
+`registry.chifor.me/llm-router/router@sha256:0064706f905dc35f3d63f775d04b62f22d904ec16f34e74021f7f139c9566f05`.
+An anonymous pull of the index, both manifests and all 12 blobs verified their digests, and the image's
+`org.opencontainers.image.revision` label is the source commit.
+
+**Why.** On 2026-11-14 the first Relay provider-qualification run (relay#277, comment 121330) stopped at its first call.
+A 163-byte chat request with `max_completion_tokens: 16` through route `codex-api-1` (`gpt-6-luna` on an `openai` API-key
+account) got `400 openai upstream error (HTTP 400, unsupported_parameter)`. The Chat Completions adapter sent every
+output limit upstream as `max_tokens`. OpenAI has deprecated that parameter in favor of `max_completion_tokens`, and its
+current models refuse it. A worker budget requires an output limit on every attempt, so every budgeted request to an
+OpenAI API account failed.
+
+**What it changes.**
+- Accounts of provider `openai` get the output limit as `max_completion_tokens`, whichever name the client used:
+  `max_tokens`, `max_completion_tokens`, Responses `max_output_tokens`, or a Codex request adapted to chat.
+- DeepSeek and local servers (cloud1-3, llama-swap) keep `max_tokens`, exactly as before.
+- The worker budget reserves and charges the same limit the upstream receives. Usage accounting is unchanged.
+- Nothing else changes. Against the live archive, only `dist/packages/adapters/providers/chatcompletions.*` differs,
+  apart from `SOURCE_COMMIT`, pnpm's own bookkeeping files and the `.bin` shims that name the staging directory. The
+  web bundle and every dependency file are byte-identical.
+
+**No storage change.** No schema, migration, KV, plugin-settings or configuration change between `3c0d78a2` and
+`a17f60db`, so no backup is taken and a rollback needs no restore. `ROUTER_CLAUDE_MODEL_SCOPED_LIMITS=1` stays: the
+release still contains #179.
+
+**Verified on the release tree.**
+- Node 24.22.0: `tsc --noEmit` clean, 2,649 tests passed (14 skipped): the 2,637 of the live release plus the 12 new
+  ones. On the PR head (`main` + #188), 3,183 passed. PR and `main` CI passed.
+- The archive was built from `git archive a17f60db` in the pinned Node 26.10.0 runtime. The production smoke passed
+  there with no network, uid 1000, a read-only root and all capabilities dropped. The publisher's smoke and backup
+  checks passed again in run 132166.
+- The archive has the live archive's 18,214 entries, the same paths, and owner 1000:1000. The live archive stored 2,644
+  duplicate dependency files as hard links. This one stores them as regular files, so it is 31.8 MB against 29.0 MB.
+- The image's seven runtime layers are the live image's. Only the `WORKDIR` and application layers differ.
+
+**Rollback.** Revert the image, the three-line comment above it and both annotations together, to image
+`registry.chifor.me/llm-router/router@sha256:05b2d8401e3369ed254baa8572c8099ff8e9249f145cfba22c3985e18290e414`,
+source `3c0d78a279cb3994be7e1d86b9f2411ea3ca4e97`, release `router-0.1.0-20261112-model-cooldown`.
+
+**At the roll.** One replica with `Recreate`: the router restarts, and streams in flight are cut, as at every release.
+
+**After the roll.**
+1. `validate-live`: 6/9 is the known baseline.
+2. Relay qualification resumes as run 2 (relay#277). Its first call, chat with `max_completion_tokens: 16` through
+   `codex-api-1`, returns 200 instead of `unsupported_parameter`.
+3. A request with an output limit to a local route (cloud3) still succeeds: llama.cpp still gets `max_tokens`.
