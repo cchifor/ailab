@@ -1,8 +1,8 @@
-# STAGED, NOT APPLIED. Outside kubernetes/apps/clusters/ai, so Flux never reads it. Runbook step I8
+# STAGED, NOT APPLIED. Outside kubernetes/apps/clusters/ai, so Flux never reads it. Runbook step I7
 # (docs/runbooks/relay-researcher-installation.md) moves it to
-# kubernetes/apps/clusters/ai/relay-researcher-agent.yaml in the PR that commits the agent's generated
-# config.json and fills the agent image and source pins, only after the installation stage is applied
-# and its containment and denial have been read back (step I6).
+# kubernetes/apps/clusters/ai/relay-researcher-agent.yaml in its own PR, after the installation stage
+# (whose step-I5 PR already committed the imported pins and generated config.json) is applied and its
+# containment and denial have been read back (step I6).
 # scripts/tests/test_relay_researcher_installation.py refuses the move while config.json or a pin
 # still carries a placeholder, or while the installation stage is not included.
 #

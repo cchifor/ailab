@@ -232,7 +232,7 @@ bao kv get -mount=af -field=installation_pem relay-infrastructure/installation-k
 curl -sS --fail -b "$COOKIES" -H 'Origin: https://relay.chifor.me' -H 'Content-Type: application/json' \
   -d '{"operationId":"<new UUID>","enrollmentTtlSeconds":900}' \
   https://relay.chifor.me/api/infrastructure/installations/<id>/enrollment-token \
-  | jq -r .enrollmentToken \
+  | jq -j .enrollmentToken \
   | kubectl --context admin@ai -n relay-infra-control create secret generic relay-infrastructure-agent-enrollment --from-file=token=/dev/stdin
 ```
 

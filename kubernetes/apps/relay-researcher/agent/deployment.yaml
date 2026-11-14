@@ -9,13 +9,13 @@
 #
 # Placement: the control agent stays OFF the worker pool. talos-agent-node-3 was the least-loaded
 # agent node in the operator's 2026-11-10 report; re-check headroom read-only before including this
-# (runbook step I6). Relay's preparation refuses the definition unless every worker placement has a
+# (runbook step I7). Relay's preparation refuses the definition unless every worker placement has a
 # nodeSelector key that the control placement sets to a different value, so the researcher binding's
 # placement must carry kubernetes.io/hostname: relay-worker-1.
 #
 # Secrets, by NAME only (no value is in git): relay-infrastructure-agent-key (key installation.pem,
 # PKCS#8 Ed25519) and relay-infrastructure-agent-enrollment (key token, the one-use enrollment
-# token). The operator creates both (runbook steps I7, I8). After confirmed enrollment the enrollment
+# token). The operator creates both (runbook step I8). After confirmed enrollment the enrollment
 # volume and mount are removed in a reviewed change, and fenceObjectUid is pinned in config.json.
 apiVersion: apps/v1
 kind: Deployment
