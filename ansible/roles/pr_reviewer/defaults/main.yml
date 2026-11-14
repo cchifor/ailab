@@ -316,14 +316,14 @@ pr_reviewer_owner_approval_paths_by_repo:
 # rule; one dismissed by a person does not. The check runs in a bare cache repo per repo under
 # /var/lib/reviewbot/git-cache (needs git >= 2.38) and FAILS CLOSED: any doubt or error holds the
 # PR for a fresh Approve, as before. Only a literal `true` enables it.
-# OFF everywhere by default (2026-11-10): telling Gitea's dismissal from a person's reads the PR
-# timeline, which Gitea serves under read:issue, and the reviewer bots' tokens carry
-# write:repository only. Shipped on, the bots 403'd on it every sweep (cchifor/workbricks#219). The
-# reviewbot now reads it only when the head lacks a direct owner Approve and treats a failed read as
-# no carry-over, but the rule cannot work without the scope. Re-enable it here
-# (`cchifor/workbricks: true`) once the reviewer tokens carry read:issue, an owner credential step.
+# Telling Gitea's dismissal from a person's reads the PR timeline, which Gitea serves under
+# read:issue. It shipped OFF everywhere (2026-11-10) because the reviewer bots' tokens carried
+# write:repository only, and shipped on, the bots 403'd on it every sweep (cchifor/workbricks#219).
+# The reviewbot reads it only when the head lacks a direct owner Approve and treats a failed read
+# as no carry-over. ON for cchifor/workbricks since 2026-11-14, after #1754 reissued both reviewer
+# tokens with read:issue (verified from each VM with the bot's own token). Any other repo stays off
+# until its owner asks for it; the scope is now there for all repos the bots review.
 pr_reviewer_owner_approval_survives_main_merges_by_repo:
-  # 2026-11-14: re-enabled for workbricks after #1754 reissued both reviewer tokens with read:issue.
   cchifor/workbricks: true
 # renovate-bot added 2026-09-09 (operator-directed): its PRs automerge on the SAME gate as
 # everyone else's — every persona clean at the current head, CI green, no `no-automerge`
