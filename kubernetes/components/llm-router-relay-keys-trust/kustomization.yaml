@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Router's trust mapping for Relay's signed management assertions (llm-router plugin `relay-keys`,
+# packages/plugins/relay-keys/contracts.ts `Trust`; docs/runbooks/relay-router-connection.md). Mounts
+# key trust.json of the ESO-rendered Secret llm-router/llm-router-relay-trust (kubernetes/apps/
+# relay-router-connection/credentials/llm-router.yaml) as one read-only subPath file and names it in
+# RELAY_KEYS_TRUST_FILE. Nothing else.
+#
+# The mapping (fixed in that ExternalSecret's template, only the two PUBLIC keys come from OpenBao):
+#   issuer relay.chifor.me; kid relay-admin-2026-11 (roles [admin]) and relay-reconciler-2026-11
+#   (roles [reconciler]); tenant 00000000-0000-4000-8000-000000000001 in Router namespace `default`,
+#   the same issuer, kids and tenant as kubernetes/components/relay-router-connection/connections.json.
+#
+# INCLUDING IT TURNS THE BRIDGE ON. `relay-keys` is not default-disabled: its apply() serves
+# POST /register/relay-keys as soon as RELAY_KEYS_TRUST_FILE is set. Only holders of the two private
+# keys can sign, and until the Relay component is included nothing holds them in a running process.
+# Trust changes need a router restart (subPath, and the plugin reads the file once).
+#
+# NOT INCLUDED by kubernetes/apps/apps/llm-router. Its name contains `llm-router-relay-keys`, which
+# scripts/tests/test_relay_v060_activation_gate.py refuses in the live Router overlay, and
+# scripts/tests/test_relay_router_connection.py refuses any inclusion while the ExternalSecret template
+# still carries the workerBudgets.maxTokens placeholder (8 x (I + 8192), where I is the
+# provider-enforced input bound that qualification proves; relay#277 comment 120818 D).
+patches:
+- path: deployment.yaml

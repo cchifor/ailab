@@ -72,7 +72,10 @@ when they exist; do not fill in or infer pins from the feasibility spike:
    already-created generation.
 4. Establish the reviewed router connection and worker identity for the repository-free researcher
    using `gpt-6-luna`. Keep the scoped egress policy and enrollment limited to Relay, the router and
-   DNS; validate the control agent remains outside the execution pool.
+   DNS; validate the control agent remains outside the execution pool. The connection record, its
+   deployment digest, the Router trust mapping, the OpenBao escrow writer and their order are in
+   `docs/runbooks/relay-router-connection.md` (inactive; its "Route precondition" must be resolved
+   before the Router trust is included).
 5. Run the finite, repository-free researcher qualification. Keep heavier `gpt-6-sol` work and
    ordinary worker activation as separate later decisions, each gated on its own prerequisites and
    qualification evidence.

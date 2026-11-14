@@ -1,0 +1,309 @@
+# Provisions the OpenBao side of the Relay Router connection (docs/runbooks/relay-router-connection.md;
+# kubernetes/apps/relay-router-connection/credentials/; owner approval cchifor/relay#277). Six vault
+# objects, owned declaratively the way relay-budget-provision-job.yaml owns its four:
+#   * policy `relay-router-escrow`       Relay's escrow WRITER (Relay credential-operations.md): create,
+#                                        read, update on KV data af/data/relay-router/escrow/<tenant>/+/+
+#                                        and update on the matching af/destroy/... endpoint, for the one
+#                                        approved tenant only. `+` is exactly one path segment, so the
+#                                        grant is exactly <prefix>/<tenant>/<host-or-assistant>/<credential-id>.
+#                                        No list, no metadata, no delete, no other path.
+#   * policy `af-app-relay-router`       read on af/data/relay-router/relay/{admin-signer,
+#                                        reconciler-signer,escrow-token}, nothing else (Relay's ESO).
+#   * policy `af-app-router-relay-keys`  read on af/data/relay-router/router/trust, nothing else (Router's
+#                                        ESO; public keys only).
+#   * k8s auth role `af-app-relay-router`       bound to ServiceAccount relay-router-eso in ns relay.
+#   * k8s auth role `af-app-router-relay-keys`  bound to ServiceAccount router-relay-keys-eso in ns llm-router.
+#   * token role `relay-router-escrow`   the ONLY way the operator mints the escrow token: an orphan
+#                                        service token carrying exactly policy relay-router-escrow (no
+#                                        `default`), not renewable, explicit max TTL 720h. Relay never
+#                                        renews it, so the operator rotates it (runbook).
+#
+# IT CREATES NO KV DOCUMENT AND NO TOKEN. The signer keys and public keys are generated in the
+# operator's session, the escrow token is minted from the token role by the operator, and the escrow
+# documents are written by Relay itself. An absent document keeps the ExternalSecret not-Ready, which
+# is the honest state until then.
+#
+# AUTH: the openbao-breakglass-token Secret, for the same reason the sibling provision Jobs need it --
+# the scoped provisioner token cannot write policies, auth roles or token roles. `optional: false`.
+#
+# THE OWNERSHIP CONTRACT (relay-budget-provision-job.yaml's, extended to the token role):
+#   * GIT OWNS THE POLICIES AND ALL THREE ROLES WHOLE. `bao policy write` replaces a policy; each role
+#     write spells out every field that decides who may log in or what a token may carry, empty ones
+#     included. A grant or binding changed by hand is reverted on the next run, and a policy that
+#     matches neither reviewed form is REFUSED before anything is written.
+#   * THE KV CONTENTS ARE THE OPERATOR'S AND RELAY'S. This Job never reads, writes or deletes them.
+#   * A WIPE LOSES THE VALUES, the escrow and every token minted from the role: openbao-recovery.md,
+#     the RELAY ROUTER CONNECTION row, has the order.
+#   * REMOVING THIS FILE FROM GIT DOES NOT UNDO ITS WRITES, and does not revoke a minted token.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-relay-router-provision-script
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-relay-router-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: relay-router-connection
+data:
+  provision.sh: |
+    #!/bin/sh
+    # Idempotent and fail-closed: `set -eu`, no blanket `|| true`. Handles no credential material.
+    # A POLICY is not a credential, so the previous policy IS printed before it is replaced -- that
+    # log line is the audit trail and the recovery source if this Job ever writes the wrong thing.
+    set -eu
+
+    bao token lookup >/dev/null || {
+      echo "openbao unreachable/sealed or the breakglass token was rejected; aborting" >&2
+      exit 1
+    }
+
+    # THE MAINTENANCE RULE (relay-budget-provision-job.yaml has the reasoning): on ANY policy change
+    # here, edit the heredoc, set *_DESIRED to the new normalised form, and set *_BASELINE to the
+    # OUTGOING *_DESIRED. No policy has a pre-ownership form: nothing created them before this Job.
+    normalise() {
+      sed -e 's/^[[:space:]]*#.*$//' | tr -d '[:space:]'
+    }
+    ESCROW_BASELINE='path"af/data/relay-router/escrow/00000000-0000-4000-8000-000000000001/+/+"{capabilities=["create","read","update"]}path"af/destroy/relay-router/escrow/00000000-0000-4000-8000-000000000001/+/+"{capabilities=["update"]}'
+    ESCROW_DESIRED='path"af/data/relay-router/escrow/00000000-0000-4000-8000-000000000001/+/+"{capabilities=["create","read","update"]}path"af/destroy/relay-router/escrow/00000000-0000-4000-8000-000000000001/+/+"{capabilities=["update"]}'
+    RELAY_BASELINE='path"af/data/relay-router/relay/admin-signer"{capabilities=["read"]}path"af/data/relay-router/relay/reconciler-signer"{capabilities=["read"]}path"af/data/relay-router/relay/escrow-token"{capabilities=["read"]}'
+    RELAY_DESIRED='path"af/data/relay-router/relay/admin-signer"{capabilities=["read"]}path"af/data/relay-router/relay/reconciler-signer"{capabilities=["read"]}path"af/data/relay-router/relay/escrow-token"{capabilities=["read"]}'
+    ROUTER_BASELINE='path"af/data/relay-router/router/trust"{capabilities=["read"]}'
+    ROUTER_DESIRED='path"af/data/relay-router/router/trust"{capabilities=["read"]}'
+
+    # ---- 1. Drift guard for ALL THREE policies, BEFORE replacing anything -----------------------
+    # Whole-document comparison after stripping full-line comments and every whitespace character.
+    # Absence is established from the policy LIST; once a policy is known to exist its read must
+    # succeed or the Job stops. All three are checked before any is written, so a refusal leaves
+    # every policy and every role exactly as it was.
+    POLICY_LIST="$(bao policy list -format=json)" || {
+      echo "cannot list policies; aborting rather than writing blind" >&2
+      exit 1
+    }
+    guard() { # <policy> <baseline> <desired>
+      if echo "$POLICY_LIST" | grep -q "\"$1\""; then
+        prev="$(bao policy read "$1")" || {
+          echo "policy $1 exists but could not be read; aborting rather than writing blind" >&2
+          exit 1
+        }
+        echo "--- existing policy $1 (replaced below; kept here as the audit trail) ---"
+        echo "$prev"
+        echo "--- end existing policy ---"
+        prev_norm="$(printf '%s\n' "$prev" | normalise)"
+        if [ "$prev_norm" != "$2" ] && [ "$prev_norm" != "$3" ]; then
+          echo "REFUSING: policy $1 does not match the reviewed baseline or the desired" >&2
+          echo "document. Something changed it outside git. Reconcile relay-router-provision-job.yaml" >&2
+          echo "with the policy printed above before letting this Job run again." >&2
+          exit 1
+        fi
+        echo "policy $1 matches a reviewed form; safe to replace"
+      else
+        echo "policy $1 absent (fresh vault, or first run); creating it"
+      fi
+    }
+    guard relay-router-escrow "$ESCROW_BASELINE" "$ESCROW_DESIRED"
+    guard af-app-relay-router "$RELAY_BASELINE" "$RELAY_DESIRED"
+    guard af-app-router-relay-keys "$ROUTER_BASELINE" "$ROUTER_DESIRED"
+
+    # ---- 2. The policies ------------------------------------------------------------------------
+    # The escrow writer: Relay's BaoEscrow POSTs a new version with cas=0 (create; update covers a
+    # retried write at the same path, which KV refuses by CAS rather than by policy), GETs data and
+    # ?version=N (read), and POSTs af/destroy/<path> with that version (update). Nothing else.
+    bao policy write relay-router-escrow - <<'EOF'
+    path "af/data/relay-router/escrow/00000000-0000-4000-8000-000000000001/+/+" { capabilities = ["create", "read", "update"] }
+    path "af/destroy/relay-router/escrow/00000000-0000-4000-8000-000000000001/+/+" { capabilities = ["update"] }
+    EOF
+    # The two ESO readers: `read` on the DATA endpoints only (ESO never enumerates or reads metadata).
+    # Relay's reader cannot read the Router's document or the escrow; the Router's reads public keys.
+    bao policy write af-app-relay-router - <<'EOF'
+    path "af/data/relay-router/relay/admin-signer" { capabilities = ["read"] }
+    path "af/data/relay-router/relay/reconciler-signer" { capabilities = ["read"] }
+    path "af/data/relay-router/relay/escrow-token" { capabilities = ["read"] }
+    EOF
+    bao policy write af-app-router-relay-keys - <<'EOF'
+    path "af/data/relay-router/router/trust" { capabilities = ["read"] }
+    EOF
+    [ "$(bao policy read relay-router-escrow | normalise)" = "$ESCROW_DESIRED" ] || {
+      echo "policy relay-router-escrow is not the desired document after writing; aborting" >&2
+      exit 1
+    }
+    [ "$(bao policy read af-app-relay-router | normalise)" = "$RELAY_DESIRED" ] || {
+      echo "policy af-app-relay-router is not the desired document after writing; aborting" >&2
+      exit 1
+    }
+    [ "$(bao policy read af-app-router-relay-keys | normalise)" = "$ROUTER_DESIRED" ] || {
+      echo "policy af-app-router-relay-keys is not the desired document after writing; aborting" >&2
+      exit 1
+    }
+    echo "policies relay-router-escrow, af-app-relay-router and af-app-router-relay-keys written and verified"
+
+    # ---- 3. The two k8s auth roles, WRITTEN and OWNED WHOLE -------------------------------------
+    # Exactly relay-budget-provision-job.yaml's write_role: the ServiceAccount's uid as the entity
+    # alias, a 1h token, the policy attached through token_policies, every login-deciding field written
+    # explicitly (empty ones included) and read back as an EXACT list element.
+    role_field_has() { # <role path> <field> <value>
+      bao read -field="$2" "$1" | tr -d '[]' | tr ' ' '\n' | grep -qx "$3"
+    }
+    write_role() { # <role name> <service account> <namespace>
+      role="auth/kubernetes/role/$1"
+      bao write "$role" \
+        bound_service_account_names="$2" \
+        bound_service_account_namespaces="$3" \
+        bound_service_account_namespace_selector="" \
+        audience="" \
+        token_bound_cidrs="" \
+        token_policies="$1" \
+        token_ttl=1h \
+        alias_name_source=serviceaccount_uid
+      role_field_has "$role" token_policies "$1" || {
+        echo "$role does not carry policy $1 after writing; aborting" >&2
+        exit 1
+      }
+      [ "$(bao read -field=token_policies "$role")" = "[$1]" ] || {
+        echo "$role carries a policy other than $1 after writing; aborting" >&2
+        exit 1
+      }
+      role_field_has "$role" bound_service_account_names "$2" || {
+        echo "$role is not bound to ServiceAccount $2 after writing; aborting" >&2
+        exit 1
+      }
+      role_field_has "$role" bound_service_account_namespaces "$3" || {
+        echo "$role is not bound to namespace $3 after writing; aborting" >&2
+        exit 1
+      }
+      sel="$(bao read -field=bound_service_account_namespace_selector "$role")" || {
+        echo "cannot read back $role's namespace selector; aborting" >&2
+        exit 1
+      }
+      [ -z "$sel" ] || {
+        echo "$role still carries a namespace selector after writing; aborting" >&2
+        exit 1
+      }
+      echo "$role written: $2@$3 carries $1"
+    }
+    write_role af-app-relay-router relay-router-eso relay
+    write_role af-app-router-relay-keys router-relay-keys-eso llm-router
+
+    # ---- 4. The token role for the escrow writer, WRITTEN and OWNED WHOLE -----------------------
+    # Every field that decides what a minted token carries or how long it lives is written, empty ones
+    # included, so a hand-widened role (another policy, a glob, a period, renewability, the default
+    # policy, a parent) is put back on the next run. Orphan: the token must not die with the
+    # operator's session token. Not renewable and no period: Relay never renews, so the lifetime is
+    # explicit and the runbook rotates it. No default policy: Relay needs nothing but the escrow.
+    trole="auth/token/roles/relay-router-escrow"
+    bao write "$trole" \
+      allowed_policies="relay-router-escrow" \
+      disallowed_policies="" \
+      allowed_policies_glob="" \
+      disallowed_policies_glob="" \
+      allowed_entity_aliases="" \
+      orphan=true \
+      renewable=false \
+      path_suffix="" \
+      token_bound_cidrs="" \
+      token_explicit_max_ttl=720h \
+      token_no_default_policy=true \
+      token_num_uses=0 \
+      token_period=0 \
+      token_type=service
+    # Read back as one whitespace-free JSON document. OpenBao omits token_num_uses and
+    # token_bound_cidrs while they are zero/empty, so those two are checked for ABSENCE of a value;
+    # the legacy `period` and `explicit_max_ttl` fields must stay zero too.
+    ROLE_JSON="$(bao read -format=json "$trole" | tr -d '[:space:]')" || {
+      echo "cannot read back $trole; aborting" >&2
+      exit 1
+    }
+    for want in '"allowed_policies":\["relay-router-escrow"\]' '"allowed_policies_glob":\[\]' \
+                '"disallowed_policies":\[\]' '"disallowed_policies_glob":\[\]' '"allowed_entity_aliases":\[\]' \
+                '"orphan":true' '"renewable":false' '"token_no_default_policy":true' \
+                '"token_explicit_max_ttl":2592000[,}]' '"token_period":0[,}]' '"period":0[,}]' \
+                '"explicit_max_ttl":0[,}]' '"token_type":"service"' '"path_suffix":""'; do
+      echo "$ROLE_JSON" | grep -q "$want" || {
+        echo "$trole does not read back $want after writing; aborting" >&2
+        exit 1
+      }
+    done
+    for unwanted in '"token_num_uses":[1-9]' '"token_bound_cidrs":\["'; do
+      if echo "$ROLE_JSON" | grep -q "$unwanted"; then
+        echo "$trole still carries $unwanted after writing; aborting" >&2
+        exit 1
+      fi
+    done
+    echo "$trole written: orphan, non-renewable, policy relay-router-escrow only, explicit max TTL 720h"
+
+    # ---- 5. No KV document, no token ------------------------------------------------------------
+    # Deliberately nothing here. af/relay-router/{relay,router}/* are written by the operator, the
+    # escrow token is minted by the operator from the role above, af/relay-router/escrow/* by Relay.
+    echo "no KV document and no token written: af/relay-router/* is operator- and Relay-owned"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-relay-router-provision
+  namespace: openbao
+  annotations:
+    # WEDGE GUARD -- same rationale as the other provision Jobs (2026-07-28 immutable-Job outage).
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+  labels:
+    app.kubernetes.io/name: openbao-relay-router-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: relay-router-connection
+spec:
+  backoffLimit: 6
+  # Reaped after a day, which is also how this re-runs: Flux re-applies the reaped Job, so a policy
+  # change in git converges within a day without anyone running `bao` by hand.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao-relay-router-provision
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: relay-router-connection
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      automountServiceAccountToken: false # talks only to the OpenBao API, never to kube-apiserver
+      securityContext:
+        # uid 100 / gid 1000 is the `openbao` user baked into the image, NUMERIC because a NAMED
+        # image user cannot satisfy runAsNonRoot.
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provision
+          # Official OpenBao image (bao CLI + busybox sh), the same pin as the sibling provision
+          # Jobs: the server's MINOR (renovate.json holds the CLI to 2.6.x).
+          image: quay.io/openbao/openbao:2.6.5
+          command: ["/bin/sh", "/scripts/provision.sh"]
+          env:
+            # The headless per-pod name, not the `openbao` Service: a pod that is up but sealed
+            # fails with a real error rather than a DNS miss.
+            - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: BAO_CACERT, value: "/tls/ca.crt" }
+            - name: BAO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openbao-breakglass-token
+                  key: root_token # the live Secret carries no `token` key
+                  optional: false
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: script, mountPath: /scripts, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
+        - name: script
+          configMap:
+            name: openbao-relay-router-provision-script
+            defaultMode: 0555

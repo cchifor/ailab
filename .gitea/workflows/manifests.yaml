@@ -209,6 +209,20 @@ jobs:
           bash scripts/tests/test-relay-budget-provision.sh
           bash scripts/tests/test-relay-budget-consumers-render.sh
 
+      # The Relay Router connection (docs/runbooks/relay-router-connection.md): its OpenBao provision
+      # script under the Job's image against a real `bao server -dev` (three policies, two k8s-auth
+      # roles, the escrow token role, NO KV document and NO token; the escrow writer does exactly what
+      # Relay's BaoEscrow needs on its one tenant and nothing else; role, token-role and policy drift),
+      # then the two un-included components rendered onto the live Relay/Router Deployments under
+      # manifest-lint's pinned kustomize. The source-level gates (record, digest, trust mapping, mounts,
+      # policies, inclusion) are scripts/tests/test_relay_router_connection.py, run by script-tests.yaml.
+      - name: Relay Router connection OpenBao provision + component render
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-relay-router-provision.sh
+          bash scripts/tests/test-relay-router-connection-render.sh
+
       # The Workbricks cell c1's OpenBao provision script (transit engine, three non-exportable
       # ecdsa-p256 keys, four policies, four k8s-auth roles, the signing-role retirement) under its Job image against a real
       # `bao server -dev`: create, keep, role drift, least privilege (no export/backup/rotate, KV read

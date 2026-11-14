@@ -1,0 +1,26 @@
+# A subPath file under /run (never /var/run): it never updates in place, which matches the plugin
+# (it reads the trust once at startup; "Restart to change trust"). Secret volume root:1000 (fsGroup)
+# mode 0440; the router runs as 1000:1000.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-router
+  namespace: llm-router
+spec:
+  template:
+    spec:
+      containers:
+      - name: router
+        env:
+        - name: RELAY_KEYS_TRUST_FILE
+          value: /run/llm-router-relay-keys/trust.json
+        volumeMounts:
+        - name: relay-keys-trust
+          mountPath: /run/llm-router-relay-keys/trust.json
+          subPath: trust.json
+          readOnly: true
+      volumes:
+      - name: relay-keys-trust
+        secret:
+          secretName: llm-router-relay-trust
+          defaultMode: 0440

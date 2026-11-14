@@ -32,7 +32,7 @@ relay_router_bindings:
     executionIdentity: c4
     connectionId: CONNECTION_UUID
     bindingId: BINDING_UUID
-    origin: https://llm-router.chifor.me
+    origin: https://router.chifor.me # the connection's origin; llm-router.chifor.me does not resolve
     credentialFile: /home/c4/.local/state/relay/router-managed/BINDING_UUID/credential.json
     protocol: codex-responses
     selection: {kind: model, model: QUALIFIED_REAL_MODEL}
@@ -71,6 +71,13 @@ path "secret/data/relay/router/TENANT_UUID/HOST_UUID/*" {
   capabilities = ["read"]
 }
 ```
+
+The estate's connection (`docs/runbooks/relay-router-connection.md`, connection
+`babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`) escrows under mount `af` and prefix `relay-router/escrow`.
+The role defaults (`secret`, `relay/router`) do not match it, and this estate has no `secret` mount:
+a host binding on that connection sets `relay_router_bao_mount: af` and
+`relay_router_bao_prefix: relay-router/escrow`, so its reader policy is
+`af/data/relay-router/escrow/TENANT_UUID/HOST_UUID/*`.
 
 Create one dedicated AppRole per tenant/host/execution identity with only this policy plus the
 normal default self-token lifecycle policy. Use a renewable periodic token, bounded SecretID

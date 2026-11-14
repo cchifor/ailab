@@ -88,6 +88,10 @@ EXPECTED_LOCAL_PATHS = frozenset(
         # (docs/runbooks/relay-worker-budget-authority.md). Added deliberately.
         "./kubernetes/apps/relay-budget-authority/ledger",
         "./kubernetes/apps/relay-budget-authority/credentials",
+        # 2026-11-14 — the Relay Router connection's ESO delivery (signer keys + escrow token for
+        # Relay, trust mapping for the Router; docs/runbooks/relay-router-connection.md). Added
+        # deliberately; the two consuming components stay outside every Flux path.
+        "./kubernetes/apps/relay-router-connection/credentials",
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
         "./kubernetes/apps/cloudlab-bootstrap",

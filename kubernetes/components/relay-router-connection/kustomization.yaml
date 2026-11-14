@@ -1,0 +1,43 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Relay's Router connection record for the first researcher worker (docs/runbooks/relay-router-connection.md;
+# owner approval cchifor/relay#277 comments 120817, 120818, 120903). Relay reads it from
+# RELAY_ROUTER_CONNECTIONS_FILE (Relay server/router-credentials/transport.ts RouterDeployment).
+#
+#   connection id       babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8 (generated once, 2026-11-14)
+#   deployment digest   547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad
+#                       = Relay deploymentDigest(): sha256 of the canonical JSON of {id, origin, issuer,
+#                       baoOrigin, baoMount, baoPrefix} of connections.json. The ledger's readers and
+#                       clients rows and ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST must carry exactly this
+#                       value; scripts/tests/test_relay_router_connection.py recomputes it.
+#
+# CHANGING ANY OF THOSE SIX FIELDS IS A NEW CONNECTION, not an edit: Relay persists the digest with the
+# first credential it issues and refuses a changed identity (409 "reconcile its configuration"), and
+# the ledger rows and qualification rows are keyed on it. Name, kids and file paths may change.
+#
+# What the component adds to Deployment relay/relay, and nothing else:
+#   * connections.json (non-secret, generated ConfigMap) as a read-only subPath file;
+#   * the two Ed25519 signer PEMs from Secret relay/relay-router-files (ESO, rendered from OpenBao by
+#     kubernetes/apps/relay-router-connection/credentials/) as read-only subPath files;
+#   * the OpenBao escrow token from the same Secret as a DIRECTORY mount, so a rotated token reaches
+#     Relay without a restart (Relay reads baoTokenFile on every escrow call);
+#   * NODE_EXTRA_CA_CERTS = the ailab-ca root, because baoOrigin is the in-cluster OpenBao Service
+#     whose certificate ailab-ca issues; public origins keep Node's bundled roots;
+#   * one additive egress NetworkPolicy to the OpenBao server pods on 8200.
+# It does NOT set RELAY_AGENT_CONTROL_PLANE: the credential APIs and worker admission stay with the
+# reviewed researcher release and its own flags.
+#
+# NOT INCLUDED by kubernetes/apps/apps/relay. scripts/tests/test_relay_v060_activation_gate.py refuses
+# both RELAY_ROUTER_CONNECTIONS_FILE and this component's name in the live Relay overlay, and
+# scripts/tests/test_relay_router_connection.py refuses any inclusion of this directory. The operator's
+# inclusion PR changes both deliberately, LAST in the runbook order: after the budget authority is
+# ready=true and the researcher release that reads these settings is deployed.
+configMapGenerator:
+- name: relay-router-connection
+  namespace: relay
+  files:
+  - connections.json
+resources:
+- network-policy.yaml
+patches:
+- path: deployment.yaml

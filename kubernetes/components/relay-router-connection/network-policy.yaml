@@ -1,0 +1,29 @@
+# Additive egress for the escrow: Relay -> OpenBao server pods, TCP 8200. The reviewed baseline
+# relay/relay (kubernetes/apps/apps/relay/network-policy.yaml) already isolates these pods for Egress
+# and excludes RFC1918 from its public 443 rule, so without this the in-cluster baoOrigin in
+# connections.json is unreachable. Policies are additive: this opens only that one destination.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-router-openbao-egress
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  podSelector:
+    matchLabels:
+      app: relay
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: openbao
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: openbao
+          component: server
+    ports:
+    - protocol: TCP
+      port: 8200
