@@ -19,7 +19,8 @@ metadata:
 spec:
   serviceName: relay-budget-postgres
   # Reviewable and inactive even if this optional directory is applied.
-  # Operator sets one replica only AFTER the one-time initialization Job succeeds.
+  # Operator sets one replica only AFTER the one-time initialization Job succeeds, in the
+  # activation overlay's replicas.yaml (kubernetes/apps/relay-budget-authority/ledger).
   replicas: 0
   updateStrategy:
     type: OnDelete

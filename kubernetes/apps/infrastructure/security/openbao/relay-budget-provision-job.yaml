@@ -1,0 +1,252 @@
+# Provisions the OpenBao side of the independent Relay worker budget ledger's credential delivery
+# (kubernetes/apps/relay-budget-authority/credentials/, docs/runbooks/relay-worker-budget-authority.md).
+# Two ESO SecretStores read three documents each; four vault objects make those reads possible, and
+# this Job owns them declaratively, the way strive-pg-harness-provision-job.yaml owns its pair:
+#   * policy `af-app-relay-budget`    read on af/data/relay-budget/{allocator,ca,witness}, nothing else.
+#   * policy `af-app-router-budget`   read on af/data/relay-budget/{router,ca,witness}, nothing else.
+#   * k8s auth role `af-app-relay-budget`    bound to ServiceAccount relay-budget-eso in ns relay.
+#   * k8s auth role `af-app-router-budget`   bound to ServiceAccount router-budget-eso in ns llm-router.
+#
+# IT CREATES NO KV DOCUMENT -- the narrowest of the provision Jobs. No seed, no placeholder, no
+# generated value: the two login passwords are chosen by the operator at the ledger's `\password`
+# prompt, the CA is the public ailab-ca PEM the operator verifies, and the witness is issued by the
+# independent recovery process (runbook steps 5-6). A placeholder would render an empty DSN or
+# witness into the consumers' Secrets; an absent document keeps the ExternalSecret not-Ready
+# instead, which is the honest state until the ceremony.
+#
+# AUTH: the openbao-breakglass-token Secret, for the same reason the sibling provision Jobs need it --
+# the scoped provisioner token cannot write policies or auth roles. `optional: false` so an absent
+# Secret turns this Job red rather than skipping silently.
+#
+# THE OWNERSHIP CONTRACT:
+#   * GIT OWNS THE POLICIES AND THE ROLES WHOLE. `bao policy write` replaces a policy; each role write
+#     spells out every login-deciding field, empty ones included (a role write is an update that
+#     keeps omitted fields). A grant or binding changed by hand is reverted on the next run, and a
+#     policy that matches neither reviewed form is REFUSED before anything is written. An emergency
+#     change must suspend this Job (or the `openbao` Kustomization) AND land in git first.
+#   * THE KV CONTENTS ARE THE OPERATOR'S. This Job never reads, writes, patches or deletes them.
+#   * A WIPE LOSES THE VALUES and this Job does not bring them back: docs/runbooks/openbao-recovery.md,
+#     the OPERATOR-OWNED (ceremony) row, has the order.
+#   * REMOVING THIS FILE FROM GIT DOES NOT UNDO ITS WRITES. Rollback has to address the OpenBao
+#     objects explicitly.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-relay-budget-provision-script
+  namespace: openbao
+  labels:
+    app.kubernetes.io/name: openbao-relay-budget-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: relay-budget-authority
+data:
+  provision.sh: |
+    #!/bin/sh
+    # Idempotent and fail-closed: `set -eu`, no blanket `|| true`. Handles no credential material.
+    # A POLICY is not a credential, so the previous policy IS printed before it is replaced -- that
+    # log line is the audit trail and the recovery source if this Job ever writes the wrong thing.
+    set -eu
+
+    bao token lookup >/dev/null || {
+      echo "openbao unreachable/sealed or the breakglass token was rejected; aborting" >&2
+      exit 1
+    }
+
+    # THE MAINTENANCE RULE, which no test can enforce because it spans git revisions: when a policy
+    # heredoc below changes, the live vault holds the OUTGOING desired form, so a Job that only
+    # updated its *_DESIRED refuses every run from then on. On ANY policy change here, do all three:
+    #   1. edit the heredoc;
+    #   2. set *_DESIRED to the new normalised form (the integration test pins each pair);
+    #   3. set *_BASELINE to the OUTGOING *_DESIRED.
+    # Neither policy has a pre-ownership form: nothing created them before this Job.
+    normalise() {
+      sed -e 's/^[[:space:]]*#.*$//' | tr -d '[:space:]'
+    }
+    RELAY_BASELINE='path"af/data/relay-budget/allocator"{capabilities=["read"]}path"af/data/relay-budget/ca"{capabilities=["read"]}path"af/data/relay-budget/witness"{capabilities=["read"]}'
+    RELAY_DESIRED='path"af/data/relay-budget/allocator"{capabilities=["read"]}path"af/data/relay-budget/ca"{capabilities=["read"]}path"af/data/relay-budget/witness"{capabilities=["read"]}'
+    ROUTER_BASELINE='path"af/data/relay-budget/router"{capabilities=["read"]}path"af/data/relay-budget/ca"{capabilities=["read"]}path"af/data/relay-budget/witness"{capabilities=["read"]}'
+    ROUTER_DESIRED='path"af/data/relay-budget/router"{capabilities=["read"]}path"af/data/relay-budget/ca"{capabilities=["read"]}path"af/data/relay-budget/witness"{capabilities=["read"]}'
+
+    # ---- 1. Drift guard for BOTH policies, BEFORE replacing anything ---------------------------
+    # Whole-document comparison after stripping full-line comments, then every whitespace character
+    # (chatgpt-provision-job.yaml has the reasoning). An unreadable policy must NOT look like an
+    # absent one: absence is established from the policy LIST, and once a policy is known to exist
+    # its read must succeed or the Job stops. Both are checked before either is written, so a
+    # refusal leaves both policies and both roles exactly as they were.
+    POLICY_LIST="$(bao policy list -format=json)" || {
+      echo "cannot list policies; aborting rather than writing blind" >&2
+      exit 1
+    }
+    guard() { # <policy> <baseline> <desired>
+      if echo "$POLICY_LIST" | grep -q "\"$1\""; then
+        prev="$(bao policy read "$1")" || {
+          echo "policy $1 exists but could not be read; aborting rather than writing blind" >&2
+          exit 1
+        }
+        echo "--- existing policy $1 (replaced below; kept here as the audit trail) ---"
+        echo "$prev"
+        echo "--- end existing policy ---"
+        prev_norm="$(printf '%s\n' "$prev" | normalise)"
+        if [ "$prev_norm" != "$2" ] && [ "$prev_norm" != "$3" ]; then
+          echo "REFUSING: policy $1 does not match the reviewed baseline or the desired" >&2
+          echo "document. Something changed it outside git. Reconcile relay-budget-provision-job.yaml" >&2
+          echo "with the policy printed above before letting this Job run again." >&2
+          exit 1
+        fi
+        echo "policy $1 matches a reviewed form; safe to replace"
+      else
+        echo "policy $1 absent (fresh vault, or first run); creating it"
+      fi
+    }
+    guard af-app-relay-budget "$RELAY_BASELINE" "$RELAY_DESIRED"
+    guard af-app-router-budget "$ROUTER_BASELINE" "$ROUTER_DESIRED"
+
+    # ---- 2. The policies ------------------------------------------------------------------------
+    # `read` on the DATA endpoints only: ESO's `data[].remoteRef` reads KV-v2 data and never
+    # enumerates or fetches metadata. Each consumer reads its OWN login's document plus the two
+    # shared public documents; neither can read the other's password.
+    bao policy write af-app-relay-budget - <<'EOF'
+    path "af/data/relay-budget/allocator" { capabilities = ["read"] }
+    path "af/data/relay-budget/ca" { capabilities = ["read"] }
+    path "af/data/relay-budget/witness" { capabilities = ["read"] }
+    EOF
+    bao policy write af-app-router-budget - <<'EOF'
+    path "af/data/relay-budget/router" { capabilities = ["read"] }
+    path "af/data/relay-budget/ca" { capabilities = ["read"] }
+    path "af/data/relay-budget/witness" { capabilities = ["read"] }
+    EOF
+    [ "$(bao policy read af-app-relay-budget | normalise)" = "$RELAY_DESIRED" ] || {
+      echo "policy af-app-relay-budget is not the desired document after writing; aborting" >&2
+      exit 1
+    }
+    [ "$(bao policy read af-app-router-budget | normalise)" = "$ROUTER_DESIRED" ] || {
+      echo "policy af-app-router-budget is not the desired document after writing; aborting" >&2
+      exit 1
+    }
+    echo "policies af-app-relay-budget and af-app-router-budget written and verified"
+
+    # ---- 3. The auth roles, WRITTEN and OWNED WHOLE ---------------------------------------------
+    # The shape af-app-strive-pg-harness has live: the ServiceAccount's uid as the entity alias, a 1h
+    # token, the policy attached through token_policies. Every field that decides WHO may log in is
+    # written explicitly, empty ones included -- above all bound_service_account_namespace_selector,
+    # which would otherwise let the same ServiceAccount NAME log in from any namespace a hand-added
+    # selector matches. Each is read back as an EXACT list element, not a substring.
+    role_field_has() { # <role path> <field> <value>
+      bao read -field="$2" "$1" | tr -d '[]' | tr ' ' '\n' | grep -qx "$3"
+    }
+    write_role() { # <role name> <service account> <namespace>
+      role="auth/kubernetes/role/$1"
+      bao write "$role" \
+        bound_service_account_names="$2" \
+        bound_service_account_namespaces="$3" \
+        bound_service_account_namespace_selector="" \
+        audience="" \
+        token_bound_cidrs="" \
+        token_policies="$1" \
+        token_ttl=1h \
+        alias_name_source=serviceaccount_uid
+      role_field_has "$role" token_policies "$1" || {
+        echo "$role does not carry policy $1 after writing; aborting" >&2
+        exit 1
+      }
+      [ "$(bao read -field=token_policies "$role")" = "[$1]" ] || {
+        echo "$role carries a policy other than $1 after writing; aborting" >&2
+        exit 1
+      }
+      role_field_has "$role" bound_service_account_names "$2" || {
+        echo "$role is not bound to ServiceAccount $2 after writing; aborting" >&2
+        exit 1
+      }
+      role_field_has "$role" bound_service_account_namespaces "$3" || {
+        echo "$role is not bound to namespace $3 after writing; aborting" >&2
+        exit 1
+      }
+      sel="$(bao read -field=bound_service_account_namespace_selector "$role")" || {
+        echo "cannot read back $role's namespace selector; aborting" >&2
+        exit 1
+      }
+      [ -z "$sel" ] || {
+        echo "$role still carries a namespace selector after writing; aborting" >&2
+        exit 1
+      }
+      echo "$role written: $2@$3 carries $1"
+    }
+    write_role af-app-relay-budget relay-budget-eso relay
+    write_role af-app-router-budget router-budget-eso llm-router
+
+    # ---- 4. No KV document ------------------------------------------------------------------------
+    # Deliberately nothing here. af/relay-budget/{allocator,router,ca,witness} are written only by
+    # the operator during the ceremony (docs/runbooks/relay-worker-budget-authority.md).
+    echo "no KV document written: af/relay-budget/* is operator-owned"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-relay-budget-provision
+  namespace: openbao
+  annotations:
+    # WEDGE GUARD -- same rationale as the other provision Jobs (2026-07-28 immutable-Job outage).
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+  labels:
+    app.kubernetes.io/name: openbao-relay-budget-provision
+    app.kubernetes.io/component: bootstrap
+    app.kubernetes.io/part-of: relay-budget-authority
+spec:
+  backoffLimit: 6
+  # Reaped after a day, which is also how this re-runs: Flux re-applies the reaped Job, so a policy
+  # change in git converges within a day without anyone running `bao` by hand.
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao-relay-budget-provision
+        app.kubernetes.io/component: bootstrap
+        app.kubernetes.io/part-of: relay-budget-authority
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      automountServiceAccountToken: false # talks only to the OpenBao API, never to kube-apiserver
+      securityContext:
+        # uid 100 / gid 1000 is the `openbao` user baked into the image, NUMERIC because a NAMED
+        # image user cannot satisfy runAsNonRoot.
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: provision
+          # Official OpenBao image (bao CLI + busybox sh), the same pin as the sibling provision
+          # Jobs: the server's MINOR (renovate.json holds the CLI to 2.6.x).
+          image: quay.io/openbao/openbao:2.6.5
+          command: ["/bin/sh", "/scripts/provision.sh"]
+          env:
+            # The headless per-pod name, not the `openbao` Service: a pod that is up but sealed
+            # fails with a real error rather than a DNS miss.
+            - { name: BAO_ADDR, value: "https://openbao-0.openbao-internal.openbao.svc.cluster.local:8200" }
+            - { name: BAO_CACERT, value: "/tls/ca.crt" }
+            - name: BAO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: openbao-breakglass-token
+                  key: root_token # the live Secret carries no `token` key
+                  optional: false
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: script, mountPath: /scripts, readOnly: true }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { cpu: 250m, memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+      volumes:
+        - name: tls
+          secret:
+            secretName: openbao-tls
+            items:
+              - { key: ca.crt, path: ca.crt }
+        - name: script
+          configMap:
+            name: openbao-relay-budget-provision-script
+            defaultMode: 0555

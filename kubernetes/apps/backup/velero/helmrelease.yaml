@@ -219,7 +219,10 @@ spec:
           snapshotVolumes: false
           resourcePolicy: { kind: configmap, name: velero-volume-policy } # skip emptyDirs — volume-policy.yaml
           includedNamespaces: ["*"]
-          excludedNamespaces: [kube-system, velero, trivy-system, testpool] # trivy DB cache is rebuildable — keep it out of the off-site chain. testpool: retired 2026-10-10 (ADR 0037); the entry is inert and stays until the next real velero change (editing it alone would upgrade the release for nothing)
+          # relay-budget-authority: the independent worker budget ledger must stay out of every app/cluster
+          # backup (docs/runbooks/relay-worker-budget-authority.md, activation step 1). Its Flux Kustomization
+          # dependsOn `backup`, so this exclusion is applied before the ledger is installed.
+          excludedNamespaces: [kube-system, velero, trivy-system, relay-budget-authority] # trivy DB cache is rebuildable — keep it out of the off-site chain. testpool (retired 2026-10-10, ADR 0037) dropped with this change, as its old note asked
       weekly:
         disabled: false
         schedule: "0 3 * * 0"
@@ -229,7 +232,10 @@ spec:
           snapshotVolumes: false
           resourcePolicy: { kind: configmap, name: velero-volume-policy } # skip emptyDirs — volume-policy.yaml
           includedNamespaces: ["*"]
-          excludedNamespaces: [kube-system, velero, trivy-system, testpool] # trivy DB cache is rebuildable — keep it out of the off-site chain. testpool: retired 2026-10-10 (ADR 0037); the entry is inert and stays until the next real velero change (editing it alone would upgrade the release for nothing)
+          # relay-budget-authority: the independent worker budget ledger must stay out of every app/cluster
+          # backup (docs/runbooks/relay-worker-budget-authority.md, activation step 1). Its Flux Kustomization
+          # dependsOn `backup`, so this exclusion is applied before the ledger is installed.
+          excludedNamespaces: [kube-system, velero, trivy-system, relay-budget-authority] # trivy DB cache is rebuildable — keep it out of the off-site chain. testpool (retired 2026-10-10, ADR 0037) dropped with this change, as its old note asked
     resources:
       # ephemeral-storage request (2026-09-27): all 13 lingering velero-594c8b58fd-* pods were evicted
       # from talos-cp1 under DiskPressure (09-09 "Container velero was using 361712Ki, request is 0";

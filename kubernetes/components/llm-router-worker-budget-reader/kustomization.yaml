@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Router's reader files for the independent worker budget ledger
+# (docs/runbooks/relay-worker-budget-authority.md, "Consumer wiring"). Mounts the three keys of the
+# ESO-rendered Secret llm-router/llm-router-worker-budget (kubernetes/apps/relay-budget-authority/
+# credentials/) as read-only subPath files and sets ROUTER_WORKER_BUDGET_{DSN,CA,WITNESS}_FILE plus
+# ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST. Nothing else.
+#
+# THE PLUGIN STAYS DISABLED. `worker-budget-authority` is defaultDisabled in the router (llm-router
+# #158; live image source 3c0d78a2) and these variables are read only by that plugin's apply(). This
+# component never touches ROUTER_PLUGIN_CONFIG or /data/plugins.yml. The operator enables the plugin
+# through the authenticated admin API (POST /admin/v1/plugins/worker-budget-authority
+# {"enabled":true}) only after the ceremony, qualification and authority ready=true (runbook step 9).
+#
+# NOT INCLUDED by kubernetes/apps/apps/llm-router yet. The operator's inclusion PR replaces the
+# deployment-digest placeholder in deployment.yaml with the 64-hex digest of the reviewed Relay router
+# deployment record (the same value as readers.deployment_digest); scripts/tests/
+# test_relay_budget_authority_activation.py refuses the inclusion while the placeholder is there.
+patches:
+- path: deployment.yaml

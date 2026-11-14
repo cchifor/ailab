@@ -83,6 +83,11 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/infrastructure/workbricks-c1-gateway",
         # 2026-10-22 — the read-only deploy key for the cell's own Flux unit (workbricks-c1-git-auth).
         "./kubernetes/apps/workbricks-c1-bootstrap",
+        # 2026-11-14 — the independent Relay worker budget ledger (activation overlay over
+        # kubernetes/optional/relay-budget-authority) and its ESO credential delivery
+        # (docs/runbooks/relay-worker-budget-authority.md). Added deliberately.
+        "./kubernetes/apps/relay-budget-authority/ledger",
+        "./kubernetes/apps/relay-budget-authority/credentials",
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
         "./kubernetes/apps/cloudlab-bootstrap",

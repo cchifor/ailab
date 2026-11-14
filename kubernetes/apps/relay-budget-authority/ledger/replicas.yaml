@@ -1,0 +1,11 @@
+# Runbook step 4: ZERO until the one-time initialization Job has succeeded, its Pod has terminated,
+# and the completed Job and its temporary schema/script ConfigMaps are deleted. Then the operator
+# sets ONE here in a reviewed PR. Never more than one: one primary, no replicas, no promotion.
+# scripts/tests/test_relay_budget_authority_activation.py refuses any other value.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: relay-budget-postgres
+  namespace: relay-budget-authority
+spec:
+  replicas: 0

@@ -6,10 +6,27 @@ from Relay PostgreSQL, router SQLite, `infra-pg`, OpenBao and their restore sets
 Its history must survive a simultaneous Relay/router restore. Lost or uncertain
 ledger history denies inference; cleanup remains available.
 
-`kubernetes/optional/relay-budget-authority/` is **not referenced by live Flux**.
-The StatefulSet starts at zero replicas. Its separate initialization Job is
-suspended and is not part of the default build. Merging this change installs
-nothing, creates no credentials or policy, and enables no worker.
+`kubernetes/optional/relay-budget-authority/` is the reviewed base. Live Flux
+references it only through the activation overlay
+`kubernetes/apps/relay-budget-authority/ledger/` (Flux Kustomization
+`relay-budget-authority`, owner approval
+[relay#277](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-120817)).
+The overlay adds nothing but the replica count, which stays **0** until step 4.
+The separate initialization Job is suspended, operator-created and outside every
+Flux inventory. Merging the activation installs the empty, stopped ledger
+(namespace, retained claim, certificate, policies), the OpenBao policies/roles and
+ESO objects for credential delivery, and nothing else: no database, no login
+password, authority row, witness, qualification, consumer or enabled plugin.
+
+| Source | Flux Kustomization | Merge effect |
+| --- | --- | --- |
+| `apps/backup/velero/helmrelease.yaml` | `backup` | Both schedules exclude `relay-budget-authority` |
+| `apps/relay-budget-authority/ledger/` | `relay-budget-authority` (wait, after `qnap-storage`, `cert-manager-config`, `apps`, `backup`) | Base applied, StatefulSet at 0 |
+| `apps/infrastructure/security/openbao/relay-budget-provision-job.yaml` | `openbao` | Policies + k8s-auth roles `af-app-relay-budget`, `af-app-router-budget`; no KV document |
+| `apps/relay-budget-authority/credentials/` | `relay-budget-credentials` (no wait) | SecretStore + ExternalSecret in `relay` and `llm-router`, not Ready until step 6 |
+| `components/relay-worker-budget-client`, `components/llm-router-worker-budget-reader` | none (not included) | Nothing until a later operator PR (see Consumer wiring) |
+
+`scripts/tests/test_relay_budget_authority_activation.py` pins these gates.
 
 ## Reviewed inputs and boundaries
 
@@ -71,18 +88,26 @@ Do not enable application consumers until every gate below is satisfied.
    before applying this optional directory; repeat after application. A missing,
    changed or nonselecting baseline is a **stop**, not permission to install an
    isolated ledger-only policy. The activation overlay must first preserve or
-   explicitly supply each application's full reviewed egress baseline.
+   explicitly supply each application's full reviewed egress baseline. It preserves
+   them: its Flux Kustomization depends on `apps`, which owns both baselines, and
+   the activation test fails if either baseline stops selecting its pods with
+   Egress, DNS and HTTPS rules. The live comparison is still this step.
    Inspect all Flux and backup selections. In a separate activation PR, exclude
    `relay-budget-authority` from **both** Velero daily/weekly schedules before
-   installing it. This directory applies `velero.io/exclude-from-backup=true` to
-   every resource/pod and to cert-manager's generated TLS Secret, and excludes the
-   database volume, but these are additional guards. The operator must also label
+   installing it. The activation PR does this; the ledger Kustomization depends on
+   `backup` at the same revision, so the schedules change first. This directory
+   applies `velero.io/exclude-from-backup=true` to every resource/pod and to
+   cert-manager's generated TLS Secret, and excludes the database volume, but
+   these are additional guards. The operator must also label
    the dynamically provisioned backing PV with that exclusion and confirm no
    custom/cluster-wide backup selects it. Never add the ledger to the Relay
    logical dump, router restore, `infra-pg` dump, or generic app recovery job.
 2. Render and inspect the optional base; apply it with StatefulSet replicas **0**.
-   Wait for its retained PVC and Certificate. Record PVC UID, PV name/UID,
-   QNAP LUN identity, Retain policy, image digest and issued certificate SANs.
+   With the activation overlay, rendering and inspection happen before the merge
+   (`kubectl kustomize kubernetes/apps/relay-budget-authority/ledger`) and the merge
+   is the apply. Flux's health check waits for the PVC to bind and the Certificate
+   to be issued. Wait for its retained PVC and Certificate. Record PVC UID, PV
+   name/UID, QNAP LUN identity, Retain policy, image digest and issued certificate SANs.
    The backing PV is not created by this repo, so its exclusion is an operator
    gate. Do not delete or replace an existing claim to make initialization pass.
 3. Export the four files from one **reviewer-merged full Relay commit SHA** using
@@ -113,7 +138,9 @@ Do not enable application consumers until every gate below is satisfied.
    Preserve the retained database and initialization marker.
 4. After Job success and its Pod termination, delete the completed Job and its
    temporary schema/script ConfigMaps. Scale the StatefulSet to **one** replica
-   in the operator's reviewed activation overlay. Never use more than one. No
+   in the operator's reviewed activation overlay: `replicas: 1` in
+   `kubernetes/apps/relay-budget-authority/ledger/replicas.yaml`, as its own PR.
+   `kubectl scale` would be reverted by Flux. Never use more than one. No
    production authority is ready yet: the authority table still has no row and
    both runtime passwords are NULL.
 5. Open an interactive, protected local administration session (disable shell
@@ -128,6 +155,10 @@ Do not enable application consumers until every gate below is satisfied.
    Use `\password relay_budget_allocator` and `\password relay_budget_router`
    with independently generated passwords through the approved secret workflow.
    PostgreSQL's password prompt avoids cleartext passwords in SQL/history/logs.
+   Generate each as 64 lowercase hex characters (`openssl rand -hex 32`), so the
+   ESO-built DSN needs no escaping, and write the same value from stdin to OpenBao
+   (`bao kv put -mount=af relay-budget/allocator password=-`, and
+   `relay-budget/router`). See Credential delivery below.
    Keep the administrator socket inaccessible to app pods. The role memberships
    created by initialization are:
 
@@ -146,9 +177,13 @@ Do not enable application consumers until every gate below is satisfied.
    `{version:1,instanceId,recoveryEpoch,witnessDigest}` in the independently owned
    witness store, outside this repository and **all** ledger/app backup selections.
    The database holds the expected IDs/digest for comparison, not the external
-   witness file. Generate the witness digest from fresh independent random bytes;
-   it is an identity fence, not a password and not the SHA of a self-referential
-   JSON file. Keep evidence of its deliberate issuance independently.
+   witness file. The consumers read the witness from OpenBao
+   (`af/relay-budget/witness`, field `witness`); whether OpenBao qualifies as the
+   independently owned witness store is an owner decision recorded before this
+   step (see Credential delivery). Generate the witness digest from fresh
+   independent random bytes; it is an identity fence, not a password and not the
+   SHA of a self-referential JSON file. Keep evidence of its deliberate issuance
+   independently.
 7. Insert a reviewed `clients` row for `relay_budget_allocator` with the actual
    Relay issuer, connection UUID, router deployment digest, allowed tenant UUIDs,
    maximum tokens and maximum authority duration (at most 300000 ms). Insert the
@@ -160,16 +195,58 @@ Do not enable application consumers until every gate below is satisfied.
    endpoint/model, input/output bounds including reasoning/cache tokens,
    retained evidence, and expiry covering the **whole original worker lifetime**.
    There is intentionally no example qualifying policy or automatic seed.
-8. Prove TLS hostname verification, TLS-only login, different role permissions,
+   The deployment digest comes from the Relay router deployment record (see
+   Consumer wiring), so that record must be fixed before the `readers` row. The
+   connection UUID exists only once the Relay connection is created; if the owner
+   orders that after activation, the `clients` row follows it and allocation stays
+   impossible until then.
+8. Include the router reader component (Consumer wiring) so the router's files
+   can be verified; the plugin stays disabled.
+   Prove TLS hostname verification, TLS-only login, different role permissions,
    current primary status, synchronous settings and checksum mode. Verify the
    current external witness, preserved allocation/outbox history, and independent
    durability/recovery evidence. Failure of any gate keeps `ready=false`.
    After independent review, set `worker_budget.authority.ready=true` explicitly.
    Authority readiness is an allocation gate; Kubernetes readiness only proves
    PostgreSQL is reachable and must never be treated as qualification.
+9. Only after step 8 and the qualification gates, enable the router plugin through
+   the authenticated admin API: `POST /admin/v1/plugins/worker-budget-authority`
+   with `{"enabled":true}`. Read back `GET /admin/v1/plugins` (state active) and the
+   router log line `Worker budget authority available`. No manifest enables it.
 
-Use a separate reviewed ESO/OpenBao delivery change for the two DSNs and public
-CA, with no secret material in git. DSN shape is
+### Credential delivery
+
+The DSNs, public CA and external witness reach the consumers through OpenBao and
+ESO, with no secret material in git. Every value is written by the operator during
+the ceremony; `relay-budget-provision-job.yaml` owns only the policies and roles
+and creates no document, so an ExternalSecret stays not Ready until its documents
+exist.
+
+| OpenBao (`af` KV v2) | Field | Written at | Read by |
+| --- | --- | --- | --- |
+| `relay-budget/allocator` | `password` | step 5 | `af-app-relay-budget` (SA `relay/relay-budget-eso`) |
+| `relay-budget/router` | `password` | step 5 | `af-app-router-budget` (SA `llm-router/router-budget-eso`) |
+| `relay-budget/ca` | `certificate` | after step 2 | both |
+| `relay-budget/witness` | `witness` | step 6 | both |
+
+`certificate` is the public PEM of the CA that issued the ledger's server
+certificate. Compare it with the `ca.crt` of Secret `relay-budget-postgres-tls`
+and with the committed `ansible/roles/openbao_agent/files/ailab-root-ca.crt`
+before writing it. `witness` is the exact JSON of step 6.
+
+ESO renders Secret `relay/relay-worker-budget` and
+`llm-router/llm-router-worker-budget`, each with exactly `dsn`, `ca.crt` and
+`witness.json`, labelled `velero.io/exclude-from-backup=true`. The templates fix
+the login, the full Service hostname, the port and the database; only the password
+comes from OpenBao. **Open question for the owner:** the witness must be outside
+every ledger/app backup selection. The rendered Secrets are excluded, but OpenBao
+itself is captured by its raft snapshots and by Velero (namespace `openbao`). An
+OpenBao restore could therefore bring back an older witness. Against the retained,
+backup-excluded ledger that fails closed (mismatch, authority denied); it is not a
+false match. Record whether OpenBao is accepted as the independently owned witness
+store, or name another store, before step 6.
+
+The DSN shape is
 `postgresql://<login>:<percent-encoded-password>@relay-budget-postgres.relay-budget-authority.svc.cluster.local:5432/relay_budget`
 without query options. Application TLS verification cannot be disabled. Relay's
 files are `RELAY_WORKER_BUDGET_DSN_FILE`, `_CA_FILE`, `_WITNESS_FILE`; router's
@@ -179,6 +256,35 @@ the readers' ownership/mode checks: regular files, no hardlinks, symlinks or
 group/world writes. Use read-only `subPath` files; changing the external witness
 requires a deliberate consumer rollout. Do not add the witness to app ConfigMaps,
 Secrets or other resources selected by app/ledger backup.
+
+### Consumer wiring
+
+Two components hold the wiring; neither is included by the live overlays yet. Each
+mounts its namespace's ESO Secret as three read-only `subPath` files under `/run/`
+(never `/var/run`, a symlink), mode 0440 root:1000, and sets the variables above.
+`scripts/tests/test-relay-budget-consumers-render.sh` proves each changes nothing
+else in its Deployment.
+
+- `kubernetes/components/llm-router-worker-budget-reader`: include it from
+  `kubernetes/apps/apps/llm-router/kustomization.yaml` after the router
+  ExternalSecret is Ready (steps 5-6). The same PR replaces the placeholder
+  `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` with the 64-hex digest of the reviewed
+  Relay router deployment record: SHA-256 of canonical JSON of `{id, origin,
+  issuer, baoOrigin, baoMount, baoPrefix}` (Relay `deploymentDigest`), the value of
+  `readers.deployment_digest`. The activation test refuses the inclusion while the
+  placeholder remains. Inclusion is a `Recreate` rollout of the router. The
+  plugin stays disabled until step 9.
+- `kubernetes/components/relay-worker-budget-client`: inert on the live Relay
+  (v0.9.1, `a53a3ee8`), which predates these variables (first in Relay `0badd1e3`,
+  not yet released). A Relay that has them starts the authority only with
+  `RELAY_INFRASTRUCTURE_INSTALLATIONS`, a router connection
+  (`RELAY_ROUTER_CONNECTIONS_FILE`, still refused by
+  `test_relay_v060_activation_gate.py`) and a pinned worker-profile registry.
+  Include it with that reviewed Relay release, not before.
+
+Including either before its Secret exists leaves the new Pod unable to mount the
+volume. Both use `Recreate`, so that is an outage: check `kubectl get
+externalsecret` Ready first.
 
 ## Offline upgrade of a retained version-1 database
 
@@ -296,7 +402,8 @@ projected files; after verifying new SANs/chain/modes, the operator runs
 For router-only or simultaneous Relay/router restore, close the independent gate
 and consumers first. Preserve allocations/outbox/tombstones forever; rotate the
 recovery epoch and external witness deliberately without rewriting old allocation
-epochs. Run Relay's offline `recovery:fence`, check exact release/qualification
+epochs. The new witness goes to `af/relay-budget/witness`; consumers read it only
+after a deliberate rollout (subPath). Run Relay's offline `recovery:fence`, check exact release/qualification
 bindings, and review before reopening. Old prepaid worker identities remain
 fenced. A Relay-only restore still runs `recovery:fence`; an intact independent
 ledger rejects conflicting restored identities and grant regressions.
@@ -314,7 +421,9 @@ witness is outside automatic recovery.
 
 Build both optional directories using the exact digest-pinned Kustomize image in
 `scripts/manifest-lint.sh`, then validate them with that script's pinned
-Kubeconform and default/CRD schema locations. Neither build is added to live Flux.
+Kubeconform and default/CRD schema locations. The base reaches live Flux only
+through the activation overlay, which `scripts/manifest-lint.sh` now builds with
+every other Flux path; the `initialize/` build is never added to live Flux.
 The focused script exercises the actual pinned PostgreSQL image using disposable
 local volumes and the approved schema supplied explicitly:
 

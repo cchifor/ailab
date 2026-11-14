@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Relay's client files for the independent worker budget ledger
+# (docs/runbooks/relay-worker-budget-authority.md, "Consumer wiring"). Mounts the three keys of the
+# ESO-rendered Secret relay/relay-worker-budget (kubernetes/apps/relay-budget-authority/credentials/)
+# as read-only subPath files and names them in RELAY_WORKER_BUDGET_{DSN,CA,WITNESS}_FILE. Nothing else.
+#
+# NOT INCLUDED by kubernetes/apps/apps/relay yet, and including it alone enables nothing:
+#   * the live Relay release (v0.9.1, a53a3ee8) predates these variables entirely; the first source
+#     that reads them is Relay 0badd1e3, in no release yet;
+#   * a release that has them starts the budget authority only with RELAY_INFRASTRUCTURE_INSTALLATIONS,
+#     a router connection (RELAY_ROUTER_CONNECTIONS_FILE, still refused by
+#     scripts/tests/test_relay_v060_activation_gate.py) and a pinned worker-profile registry, each its
+#     own reviewed change;
+#   * and even then every allocation is refused until the operator sets
+#     worker_budget.authority.ready=true in the ledger (runbook step 8).
+# A Recreate rollout of Relay (with its pre-migration backup) is the price of including it, so
+# include it together with the Relay release that consumes it.
+patches:
+- path: deployment.yaml

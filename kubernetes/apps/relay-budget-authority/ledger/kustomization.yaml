@@ -1,0 +1,19 @@
+# Activation overlay for the independent Relay worker budget ledger. Reconciled by the dedicated
+# clusters/ai/relay-budget-authority.yaml Flux Kustomization, whose dependsOn list encodes the
+# runbook's install-order preconditions (docs/runbooks/relay-worker-budget-authority.md).
+#
+# The base is used UNCHANGED: storage class, retention, CA, TLS, pg_hba, NetworkPolicies and
+# backup-exclusion labels stay exactly as reviewed there. This overlay adds one thing, the replica
+# count, so the operator's step-4 flip is a one-line reviewed change HERE and never an edit of the
+# reviewed base or a `kubectl scale` that Flux would revert.
+#
+# NEVER add ../../../optional/relay-budget-authority/initialize (or its Job manifests) here: the
+# initialization and upgrade Jobs are operator-created standalone objects that must not enter any
+# Flux inventory or be recreated by a reconcile (runbook steps 3-4, "Offline upgrade").
+# scripts/tests/test_relay_budget_authority_activation.py fails if either rule is broken.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../../optional/relay-budget-authority
+patches:
+- path: replicas.yaml
