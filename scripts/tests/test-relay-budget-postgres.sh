@@ -17,9 +17,16 @@ test_dir=$(mktemp -d "$repo/.budget-postgres-test.XXXXXX")
 # the read-only ConfigMap mount. Keep fixture TLS private even inside this tree.
 chmod 755 "$test_dir"
 mkdir "$test_dir/schema"
-cp "$schema/"{source-commit,SHA256SUMS,001-authority.sql,002-preflight.sql,003-scoped-requests.sql,004-preflight-errors.sql} "$test_dir/schema/"
+cp "$schema/"{source-commit,SHA256SUMS,001-authority.sql,002-preflight.sql,003-scoped-requests.sql,004-preflight-errors.sql,005-provenance-purpose.sql} "$test_dir/schema/"
 chmod 644 "$test_dir/schema/"*
 schema="$test_dir/schema"
+# The Jobs read the reviewed source pin from relay-source.env beside their scripts.
+# The committed pin may still be unset; the harness pins the supplied bundle's own
+# commit over it, and separately proves that an unset or different pin refuses.
+pin_for() { printf '# harness fixture\nRELAY_BUDGET_SOURCE_COMMIT=%s\n' "$1"; }
+pin_for "$(cat "$schema/source-commit")" > "$test_dir/relay-source.env"
+pin_for "$(printf 'f%.0s' $(seq 40))" > "$test_dir/other-source.env"
+chmod 644 "$test_dir/relay-source.env" "$test_dir/other-source.env"
 test_name="relay-budget-test-$(date +%s)-$$"
 data_volume="$test_name-data"
 tls_volume="$test_name-tls"
@@ -44,7 +51,7 @@ docker run --rm --network none --user 0:0 --entrypoint /bin/sh \
   cp /fixture/tls.crt /fixture/tls.key /run/tls/
   chown 0:70 /run/tls/tls.crt /run/tls/tls.key
   chmod 0440 /run/tls/tls.crt /run/tls/tls.key'
-run_args=(--rm --network none --user 70:70 --read-only --cap-drop ALL
+base_args=(--rm --network none --user 70:70 --read-only --cap-drop ALL
   --security-opt no-new-privileges:true
   --tmpfs /var/run/postgresql:uid=70,gid=70,mode=0700
   --tmpfs /tmp:uid=70,gid=70,mode=0700
@@ -53,9 +60,10 @@ run_args=(--rm --network none --user 70:70 --read-only --cap-drop ALL
   -v "$source_dir:/etc/relay-budget:ro"
   -e PGDATA=/var/lib/postgresql/data/pgdata
   -e RELAY_BUDGET_SCHEMA_MANIFEST_SHA256="$schema_pin")
+run_args=("${base_args[@]}" -v "$test_dir/relay-source.env:/etc/relay-budget/initialize/relay-source.env:ro")
 
 # Exercise refusal before PostgreSQL or any entrypoint could initialize storage.
-for state in empty wrong-major recovery standby legacy-schema; do
+for state in empty wrong-major recovery standby legacy-schema retired-four; do
   set +e
   docker run --rm --network none --user 70:70 --read-only --cap-drop ALL \
     --tmpfs /tmp:uid=70,gid=70,mode=0700 -v "$source_dir:/etc/relay-budget:ro" \
@@ -63,9 +71,11 @@ for state in empty wrong-major recovery standby legacy-schema; do
     if [ "$PROBE_STATE" != empty ]; then
       mkdir "$PGDATA"
       printf "17\n" > "$PGDATA/PG_VERSION"
-      printf "4\n" > "$PGDATA/relay-budget-schema-version"
+      printf "5\n" > "$PGDATA/relay-budget-schema-version"
       case "$PROBE_STATE" in
         legacy-schema) printf "1\n" > "$PGDATA/relay-budget-schema-version" ;;
+        # The retired 001-004 initializer wrote 4; that database lacks 005.
+        retired-four) printf "4\n" > "$PGDATA/relay-budget-schema-version" ;;
         wrong-major) printf "16\n" > "$PGDATA/PG_VERSION" ;;
         recovery) touch "$PGDATA/recovery.signal" ;;
         standby) touch "$PGDATA/standby.signal" ;;
@@ -87,15 +97,33 @@ set -e
 [ "$result" -eq 78 ] || { cat "$test_dir/pin.log" >&2; exit 1; }
 docker run "${run_args[@]}" --entrypoint /bin/sh "$image" -ec '[ ! -e "$PGDATA" ] && [ ! -e /var/lib/postgresql/data/.initialization-started ]'
 
+# A correct manifest from a commit other than the reviewed source pin also refuses:
+# with the committed pin (unset until the operator's reviewed PR) and with a
+# different pin. Neither creates PGDATA or the attempt marker.
+for source_pin in committed other; do
+  pin_args=("${base_args[@]}")
+  [ "$source_pin" = other ] && pin_args+=(-v "$test_dir/other-source.env:/etc/relay-budget/initialize/relay-source.env:ro")
+  if [ "$source_pin" = committed ] && grep -Eq '^RELAY_BUDGET_SOURCE_COMMIT=[0-9a-f]{40}$' "$source_dir/initialize/relay-source.env"; then
+    [ "$(sed -n 's/^RELAY_BUDGET_SOURCE_COMMIT=//p' "$source_dir/initialize/relay-source.env")" = "$(cat "$schema/source-commit")" ] && continue
+  fi
+  set +e
+  docker run "${pin_args[@]}" -v "$schema:/schema:ro" \
+    --entrypoint /bin/sh "$image" /etc/relay-budget/initialize/initialize.sh > "$test_dir/source-pin.log" 2>&1
+  result=$?
+  set -e
+  [ "$result" -eq 78 ] || { cat "$test_dir/source-pin.log" >&2; exit 1; }
+  docker run "${run_args[@]}" --entrypoint /bin/sh "$image" -ec '[ ! -e "$PGDATA" ] && [ ! -e /var/lib/postgresql/data/.initialization-started ]'
+done
+
 # A valid manifest pin cannot excuse missing or altered SQL. An independently
 # pinned manifest with an extra path must also fail the fixed-inventory check.
 for corruption in altered missing extra; do
-  cp "$schema/004-preflight-errors.sql" "$test_dir/original.sql"
+  cp "$schema/005-provenance-purpose.sql" "$test_dir/original.sql"
   cp "$schema/SHA256SUMS" "$test_dir/original.sums"
   test_pin=$schema_pin
   case "$corruption" in
-    altered) printf '\n-- altered\n' >> "$schema/004-preflight-errors.sql" ;;
-    missing) mv "$schema/004-preflight-errors.sql" "$test_dir/missing.sql" ;;
+    altered) printf '\n-- altered\n' >> "$schema/005-provenance-purpose.sql" ;;
+    missing) mv "$schema/005-provenance-purpose.sql" "$test_dir/missing.sql" ;;
     extra)
       printf '%064d  ../not-allowed\n' 0 >> "$schema/SHA256SUMS"
       test_pin=$(sha256sum "$schema/SHA256SUMS" | cut -d ' ' -f1) ;;
@@ -107,7 +135,7 @@ for corruption in altered missing extra; do
   result=$?
   set -e
   [ "$result" -eq 78 ] || { cat "$test_dir/corrupt.log"; exit 1; }
-  cp "$test_dir/original.sql" "$schema/004-preflight-errors.sql"
+  cp "$test_dir/original.sql" "$schema/005-provenance-purpose.sql"
   cp "$test_dir/original.sums" "$schema/SHA256SUMS"
   docker run "${run_args[@]}" --entrypoint /bin/sh "$image" -ec '[ ! -e "$PGDATA" ] && [ ! -e /var/lib/postgresql/data/.initialization-started ]'
 done
@@ -142,7 +170,16 @@ settings=$(admin -c "SELECT current_setting('fsync'),current_setting('full_page_
 [ "$(admin -c 'SELECT count(*) FROM worker_budget.scope_runs')" = 0 ] || exit 1
 [ "$(admin -c 'SELECT count(*) FROM worker_budget.allocation_scopes')" = 0 ] || exit 1
 [ "$(admin -c "SELECT to_regprocedure('worker_budget.preflight(uuid,uuid,text,jsonb)') IS NOT NULL")" = t ] || exit 1
-[ "$(docker exec "$test_name" cat /var/lib/postgresql/data/pgdata/relay-budget-schema-version)" = 4 ] || exit 1
+[ "$(docker exec "$test_name" cat /var/lib/postgresql/data/pgdata/relay-budget-schema-version)" = 5 ] || exit 1
+cmp -s <(docker exec "$test_name" cat /var/lib/postgresql/data/pgdata/relay-budget-schema-SHA256SUMS) "$schema/SHA256SUMS" || exit 1
+# 005: the purpose column and the protected entry points exist; the client role (and
+# only it) may call them; the ordinary prepare stays the sole token-only entry point.
+[ "$(admin -c "SELECT count(*) FROM information_schema.columns WHERE table_schema='worker_budget' AND table_name='allocations' AND column_name='purpose'")" = 1 ] || exit 1
+for fn in 'provenance_capability(uuid,uuid,text,jsonb)' 'prepare_provenance(uuid,uuid,text,jsonb)'; do
+  [ "$(admin -c "SELECT has_function_privilege('relay_budget_allocator','worker_budget.$fn','EXECUTE'),has_function_privilege('relay_budget_router','worker_budget.$fn','EXECUTE')")" = 't|f' ] || exit 1
+done
+[ "$(admin -c "SELECT has_function_privilege('relay_budget_allocator','worker_budget.prepare(uuid,uuid,text,jsonb)','EXECUTE'),has_function_privilege('relay_budget_allocator','worker_budget.prepare_token_only(uuid,uuid,text,jsonb)','EXECUTE')")" = 't|f' ] || exit 1
+[ "$(admin -c "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='worker_budget' AND p.proname IN ('new_allocation_id','validate_provenance_input','assert_unscoped_provenance') AND (has_function_privilege('relay_budget_allocator',p.oid,'EXECUTE') OR has_function_privilege('relay_budget_router',p.oid,'EXECUTE'))")" = 0 ] || exit 1
 [ "$(admin -c "SELECT count(*) FROM pg_authid WHERE rolname IN ('relay_budget_allocator','relay_budget_router') AND rolpassword IS NULL")" = 2 ] || exit 1
 # Synthetic test-only password. No production credentials are used by this script.
 admin >/dev/null <<'SQL'
@@ -176,7 +213,7 @@ if client relay_budget_allocator verify-full -c "SELECT worker_budget.current_ep
 [ "$(docker inspect --format '{{.Config.StopSignal}}' "$test_name")" = SIGINT ] || exit 1
 docker stop --timeout 90 "$test_name" >/dev/null
 wait_removed
-echo 'PASS: empty/recovery refusal, one-time schema initialization, projected-key TLS, durability settings, narrow roles, unseeded gate'
+echo 'PASS: empty/recovery/retired-4 refusal, source-pin refusal, one-time 001-005 initialization, 005 grants, projected-key TLS, durability settings, narrow roles, unseeded gate'
 
 # A separate local fixture reproduces the retained version-1 format. It has no
 # connection to an operator database or any Kubernetes context.
@@ -238,9 +275,13 @@ done
 [ "$(admin -c 'SELECT count(*) FROM worker_budget.scope_runs')" = 0 ] || exit 1
 [ "$(admin -c "SELECT has_function_privilege('relay_budget_allocator','worker_budget.prepare_token_only(uuid,uuid,text,jsonb)','EXECUTE')")" = f ] || exit 1
 [ "$(admin -c "SELECT has_function_privilege('relay_budget_allocator','worker_budget.prepare(uuid,uuid,text,jsonb)','EXECUTE')")" = t ] || exit 1
+# 005 on retained history: the old allocation keeps a NULL purpose and is not relabelled.
+[ "$(admin -c 'SELECT allocation_id,purpose IS NULL FROM worker_budget.allocations')" = '00000000-0000-4000-8000-000000000003|t' ] || exit 1
+[ "$(admin -c "SELECT to_regprocedure('worker_budget.prepare_provenance(uuid,uuid,text,jsonb)') IS NOT NULL")" = t ] || exit 1
+[ "$(docker exec "$test_name" cat /var/lib/postgresql/data/pgdata/relay-budget-schema-version)" = 5 ] || exit 1
 docker stop --timeout 90 "$test_name" >/dev/null
 wait_removed
-echo 'PASS: retained version-1 upgrade, unchanged debit/deadline/outbox/receipt, withdrawn authority, mediated prepare entry point, repeated upgrade refusal'
+echo 'PASS: retained version-1 upgrade to 5, unchanged debit/deadline/outbox/receipt, NULL purpose, withdrawn authority, mediated prepare entry point, repeated upgrade refusal'
 
 # A live authority is a hard refusal before a migration attempt starts. Retrying
 # the unchanged preflight must still refuse, without leaving an attempt marker.
@@ -284,7 +325,7 @@ docker run --rm --network none --user 0:0 --entrypoint /bin/sh \
 docker run "${run_args[@]}" -v "$schema:/schema:ro" -v "$test_dir/legacy.sh:/legacy.sh:ro" \
   --entrypoint /bin/sh "$image" /legacy.sh > "$test_dir/partial-legacy.log" 2>&1 || { cat "$test_dir/partial-legacy.log"; exit 1; }
 printf 'BEGIN; SELECT 1/0; COMMIT;\n' > "$schema/003-scoped-requests.sql"
-(cd "$schema" && sha256sum source-commit 001-authority.sql 002-preflight.sql 003-scoped-requests.sql 004-preflight-errors.sql) > "$schema/SHA256SUMS"
+(cd "$schema" && sha256sum source-commit 001-authority.sql 002-preflight.sql 003-scoped-requests.sql 004-preflight-errors.sql 005-provenance-purpose.sql) > "$schema/SHA256SUMS"
 partial_pin=$(sha256sum "$schema/SHA256SUMS" | cut -d ' ' -f1)
 set +e
 docker run "${run_args[@]}" -v "$schema:/schema:ro" \

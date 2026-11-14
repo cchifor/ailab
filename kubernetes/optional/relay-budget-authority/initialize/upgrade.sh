@@ -1,5 +1,5 @@
 #!/bin/sh
-# One offline, operator-owned upgrade of a retained version-1 ledger to version 4.
+# One offline, operator-owned upgrade of a retained version-1 ledger to version 5 (002-005).
 set -eu
 umask 077
 [ "$PGDATA" = /var/lib/postgresql/data/pgdata ] || exit 78
@@ -28,14 +28,16 @@ DO $$ BEGIN
     RAISE EXCEPTION 'Withdraw authority before the offline schema upgrade';
   END IF;
   IF to_regprocedure('worker_budget.preflight(uuid,uuid,text,jsonb)') IS NOT NULL
-     OR to_regclass('worker_budget.scope_runs') IS NOT NULL THEN
+     OR to_regclass('worker_budget.scope_runs') IS NOT NULL
+     OR to_regprocedure('worker_budget.prepare_provenance(uuid,uuid,text,jsonb)') IS NOT NULL THEN
     RAISE EXCEPTION 'Retained schema is not the expected version 1; inspect migration history';
   END IF;
 END $$;
 SQL
 mkdir "$PGDATA/relay-budget-upgrade-started" || exit 78
 sync
-for schema in 002-preflight.sql 003-scoped-requests.sql 004-preflight-errors.sql; do
+for schema in 002-preflight.sql 003-scoped-requests.sql 004-preflight-errors.sql \
+  005-provenance-purpose.sql; do
   psql -X -h /var/run/postgresql -U postgres -d relay_budget -v ON_ERROR_STOP=1 -f "/schema/$schema"
 done
 stop
