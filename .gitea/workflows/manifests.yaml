@@ -247,6 +247,21 @@ jobs:
           set -euo pipefail
           bash scripts/tests/test-relay-researcher-hub-render.sh
 
+      # The Relay researcher internal TLS terminators (kubernetes/apps/relay-internal-tls, owner decision
+      # G3): the staged tree rendered under manifest-lint's pinned kustomize and validated by its
+      # kubeconform, then both committed Caddyfiles run under the pinned Caddy with the Pods' security
+      # settings (UID 1000, only NET_BIND_SERVICE, no-new-privileges, read-only root): forged
+      # client-address headers never reach the upstream, which sees the TCP peer; another Host, another
+      # SNI, no SNI and plain HTTP are never proxied; the access log carries no credential; the reloader
+      # serves a renewed certificate without a restart. The source-level gates are
+      # scripts/tests/test_relay_internal_tls.py, run by script-tests.yaml.
+      - name: Relay internal TLS terminators render + runtime fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-relay-internal-tls-render.sh
+          python3 scripts/tests/relay_internal_tls_runtime.py
+
       # The Workbricks cell c1's OpenBao provision script (transit engine, three non-exportable
       # ecdsa-p256 keys, four policies, four k8s-auth roles, the signing-role retirement) under its Job image against a real
       # `bao server -dev`: create, keep, role drift, least privilege (no export/backup/rotate, KV read

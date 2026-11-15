@@ -229,6 +229,25 @@ a new signed run and reviewed re-render of the journal inputs.
 The renderer outputs an immutable ConfigMap containing only these public files,
 a ClusterIP Service, network policy and a Deployment with zero replicas.
 
+The protocol Service's ClusterIP is pinned to `10.96.0.42` (`render.py`
+`CLUSTER_IP`; reserved in `docs/network-plan.md`). Relay's candidate supervisor
+dials the journal origin from the worker Pod, and a DNS-less researcher slot
+(owner decision G3) resolves that host only through the Pod's measured
+`hostAliases` entry (`PodRuntimeBinding.hostAliases.candidateJournal`), so the
+address must exist before the Service does. Confirm it is free with the
+read-only check in the network plan before creating the Service; the apiserver
+refuses a colliding address and leaves the Service uncreated.
+
+`spec.clusterIP` is immutable. The pin applies when the Service is created: if
+`kubectl -n relay-candidate-journal get svc relay-candidate-journal` already
+shows another address (a Service created from an earlier render), applying the
+new render is rejected rather than moving it. Then, with the journal Deployment
+at zero replicas and no run in flight, delete that Service and create it again
+from the new render, and read back `10.96.0.42`. No Relay binding can have used
+the old address: the alias is only ever `10.96.0.42`, so a binding naming
+anything else is refused by the researcher installation's bundle check
+(ailab #1769) before it reaches a worker.
+
 ```sh
 python3 -B kubernetes/optional/relay-candidate-journal/render.py \
   service /operator/service-render.json <config-sha256> > /operator/service-rendered.json

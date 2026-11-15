@@ -221,6 +221,9 @@ spec:
   ingress:
     # Only the Cloudflare tunnel and the edge proxy (ADR 0040) in the "edge" namespace, on 8080. Both
     # overwrite cf-connecting-ip, which the router trusts (router.yaml); never admit a client that does not.
+    # The researcher workers' internal TLS terminator relay-router-tls also overwrites it and is admitted
+    # by the separate, staged policy llm-router-edge-internal-tls-ingress
+    # (kubernetes/apps/relay-internal-tls/upstream-ingress.yaml).
     - from:
         - namespaceSelector:
             matchLabels:

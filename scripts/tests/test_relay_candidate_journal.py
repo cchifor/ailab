@@ -84,6 +84,20 @@ class JournalBundle(unittest.TestCase):
         self.assertTrue(cm['immutable'])
         self.assertEqual(cm['data']['config.json'], Path(config['config']['path']).read_text())
 
+    def test_service_address_is_pinned_for_dns_less_worker_slots(self):
+        # Relay's candidate supervisor dials ORIGIN from the worker Pod, which resolves its host through
+        # the Pod's measured hostAliases (candidateJournal) to this fixed address: no DNS in the slot.
+        config, _, _ = self.fixture()
+        svc = next(o for o in render.service(config) if o['kind'] == 'Service' and o['metadata']['name'] == render.NAME)
+        self.assertEqual(render.CLUSTER_IP, '10.96.0.42')
+        self.assertEqual(svc['spec']['clusterIP'], render.CLUSTER_IP)
+        self.assertEqual(svc['spec']['clusterIPs'], [render.CLUSTER_IP])
+        self.assertEqual((svc['spec']['ipFamilyPolicy'], svc['spec']['ipFamilies']), ('SingleStack', ['IPv4']))
+        self.assertEqual(svc['spec']['ports'], [{'name': 'https', 'port': 8443, 'targetPort': 'https'}])
+        self.assertEqual(render.ORIGIN, 'https://relay-candidate-journal.relay-candidate-journal.svc:8443')
+        plan = (Path(__file__).resolve().parents[2] / 'docs/network-plan.md').read_text(encoding='utf-8')
+        self.assertIn('`' + render.CLUSTER_IP + '`', plan)
+
     def test_service_refuses_unpinned_image_source_and_mismatched_fixed_paths(self):
         for mutation in ['image', 'source', 'config-path', 'run-image', 'witness', 'namespace', 'extra']:
             with self.subTest(mutation=mutation):

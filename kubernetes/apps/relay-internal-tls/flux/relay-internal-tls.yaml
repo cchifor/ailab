@@ -1,0 +1,32 @@
+# STAGED, NOT APPLIED. This file sits outside kubernetes/apps/clusters/ai, so Flux never reads it.
+# The qualification-stage step of docs/runbooks/relay-researcher-installation.md moves it, unchanged,
+# to kubernetes/apps/clusters/ai/relay-internal-tls.yaml after the operator's read-only check that
+# 10.96.0.40 and 10.96.0.41 are free. scripts/tests/test_relay_internal_tls.py keeps exactly one copy.
+#
+# What applying it creates: namespace relay-internal-tls with the two ailab-ca Certificates, the two
+# Caddy terminators and their pinned Services, their NetworkPolicies, and one additive ingress policy
+# each in relay and llm-router. No credential, no change to Relay, the Router or the public edge.
+#
+# prune: true. Removing this file removes the terminators and the two additive upstream policies (the
+# rollback); the Namespace itself carries prune: disabled and is deleted by hand once empty. Do that
+# only after every worker Pod that aliases these addresses is gone: a worker whose terminator vanished
+# fails closed (connection refused), it never falls back to Cloudflare.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: relay-internal-tls
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 2m
+  timeout: 5m
+  # The ClusterIssuer ailab-ca. The relay and llm-router namespaces already exist (apps); on a rebuild
+  # the two additive upstream policies are retried until apps has created them.
+  dependsOn:
+  - name: cert-manager-config
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/relay-internal-tls
+  prune: true
+  wait: true
