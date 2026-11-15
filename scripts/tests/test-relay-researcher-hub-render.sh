@@ -10,6 +10,10 @@
 #   * the whole H3-H6 set together (those five plus relay-router-connection, relay-control-monitoring
 #     and relay-worker-monitoring) builds with no env, volume or mount collision, and still sets no
 #     RELAY_ENVIRONMENTS, Gitea issuer or notification file (owner decision G2).
+#   * the live overlay, which includes some of these components from H3 on, renders exactly as the
+#     overlay WITHOUT them plus the ones it includes, in its order. Every case above is layered on that
+#     overlay without them (its kustomization minus those lines, mounted over the real one), so each
+#     still proves exactly what its own components change.
 # Requires docker. Exit non-zero on the first broken expectation.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -19,9 +23,22 @@ KUBECONFORM_IMAGE="$(sed -n 's/^KUBECONFORM_IMAGE="\(.*\)"$/\1/p' "$REPO_ROOT/sc
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# name -> components layered on the live relay overlay
+OVERLAY=kubernetes/apps/apps/relay
+HUB_COMPONENTS="relay-restore-fencing relay-infrastructure-installations relay-worker-budget-client relay-worker-profiles relay-router-connection relay-agent-control-plane relay-control-monitoring relay-worker-monitoring"
+LIVE_HUB=()
+: > "$WORK/pre-kustomization.yaml"
+while IFS= read -r line || [ -n "$line" ]; do
+  for c in $HUB_COMPONENTS; do
+    if [ "$line" = "- ../../../components/$c" ]; then LIVE_HUB+=("$c"); continue 2; fi
+  done
+  printf '%s\n' "$line" >> "$WORK/pre-kustomization.yaml"
+done < "$REPO_ROOT/$OVERLAY/kustomization.yaml"
+echo "live overlay includes: ${LIVE_HUB[*]:-(no hub component)}"
+
+# name -> components layered on the relay overlay without its hub components
 declare -A CASES=(
   [plain]=""
+  [live-expected]="${LIVE_HUB[*]:-}"
   [installations]="relay-restore-fencing relay-infrastructure-installations"
   [profiles]="relay-worker-budget-client relay-worker-profiles"
   [controlplane]="relay-agent-control-plane"
@@ -39,14 +56,16 @@ for case in "${!CASES[@]}"; do
 done
 chmod -R a+rX "$WORK"
 
-build() { # <dir-in-container> <output>
-  docker run --rm --network none -v "$REPO_ROOT:/repo:ro" -v "$WORK:/work:ro" -w / \
-    "$KUSTOMIZE_IMAGE" build "$1" > "$2"
+build() { # <dir-in-container> <output> [docker args]
+  local dir="$1" output="$2"; shift 2
+  docker run --rm --network none -v "$REPO_ROOT:/repo:ro" -v "$WORK:/work:ro" "$@" -w / \
+    "$KUSTOMIZE_IMAGE" build "$dir" > "$output"
 }
 mkdir -p "$WORK/out"
 for case in "${!CASES[@]}"; do
-  build "/work/$case" "$WORK/out/relay-$case.yaml"
+  build "/work/$case" "$WORK/out/relay-$case.yaml" -v "$WORK/pre-kustomization.yaml:/repo/$OVERLAY/kustomization.yaml:ro"
 done
+build "/repo/$OVERLAY" "$WORK/out/relay-live.yaml"
 chmod -R a+rX "$WORK/out"
 
 docker run --rm -v "$WORK/out:/out:ro" "$KUBECONFORM_IMAGE" \
@@ -66,7 +85,12 @@ def load(name):
             for d in yaml.safe_load_all(open(f"{out}/{name}", encoding="utf-8")) if d}
 
 
-# --- hub components on the live Relay Deployment
+# --- the live overlay is the overlay without its hub components plus exactly the ones it includes
+live, expected = load("relay-live.yaml"), load("relay-live-expected.yaml")
+assert live == expected, "the live overlay differs from its hub components layered on the overlay without them"
+print("live: equals the overlay without its hub components plus the ones it includes")
+
+# --- hub components on the Relay Deployment without them
 CASES = {  # case -> (env names, volume names, added (kind, name prefix))
     "installations": ({"RELAY_INFRASTRUCTURE_INSTALLATIONS", "RELAY_RECOVERY_GENERATION_FILE"},
                       {"restore-generation"}, set()),

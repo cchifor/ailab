@@ -34,7 +34,8 @@ registry without the installations and budget client or with a placeholder or wr
 plane without the Router connection or next to `RELAY_ENVIRONMENTS`, `relay-gitea-authority` or
 `relay-notifications`, and an H3 that runs the fence script. `test-relay-researcher-hub-render.sh`
 proves each component changes only the relay container's env, mounts and volumes, and that the whole
-H3-H6 set combines without collision.
+H3-H6 set combines without collision. It layers every case on the overlay without the hub components,
+and proves that the live overlay renders as exactly that plus the ones it already includes (H3 on).
 
 ## Operator-filled values
 
