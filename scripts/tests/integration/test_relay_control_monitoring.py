@@ -160,18 +160,23 @@ class Monitoring(unittest.TestCase):
             (self.root / 'policy' / filename).write_text(value)
         self.run_setup(False, recovery='2')
 
-    def test_restore_generation_is_external_canonical_readonly_and_opt_in(self):
-        spec = named(self.recovery_docs, 'Deployment', 'relay')['spec']['template']['spec']
-        application = next(c for c in spec['containers'] if c['name'] == 'relay')
-        self.assertIn({'name': 'RELAY_RECOVERY_GENERATION_FILE', 'value': '/run/relay-restore/generation.json'}, application['env'])
-        self.assertIn({'name': 'restore-generation', 'mountPath': '/run/relay-restore/generation.json',
-                       'subPath': 'generation.json', 'readOnly': True}, application['volumeMounts'])
-        self.assertIn({'name': 'restore-generation', 'configMap': {'name': 'relay-recovery-generation',
-                       'defaultMode': 292, 'items': [{'key': 'generation.json', 'path': 'generation.json'}]}}, spec['volumes'])
-        self.assertFalse(any(d['kind'] == 'ConfigMap' and d['metadata']['name'] == 'relay-recovery-generation' for d in self.recovery_docs))
-        for init in spec.get('initContainers', []):
-            self.assertNotIn('restore-generation', {m['name'] for m in init.get('volumeMounts', [])})
-        self.assertNotIn('relay-restore-fencing', (ROOT / 'kubernetes/apps/apps/relay/kustomization.yaml').read_text())
+    def test_restore_generation_is_external_canonical_readonly_and_live_since_h3(self):
+        # Researcher hub upgrade H3 (relay-researcher-hub-upgrade.md) included relay-restore-fencing in the
+        # live overlay; it stays there from then on (the H3 rollback and a restore keep it), so both the
+        # live render and the recovery render must carry the external generation file the same way.
+        overlay = yaml.safe_load((ROOT / 'kubernetes/apps/apps/relay/kustomization.yaml').read_text())
+        self.assertIn('relay-restore-fencing', {Path(c).name for c in overlay.get('components', [])})
+        for docs in (self.base_docs, self.recovery_docs):
+            spec = named(docs, 'Deployment', 'relay')['spec']['template']['spec']
+            application = next(c for c in spec['containers'] if c['name'] == 'relay')
+            self.assertIn({'name': 'RELAY_RECOVERY_GENERATION_FILE', 'value': '/run/relay-restore/generation.json'}, application['env'])
+            self.assertIn({'name': 'restore-generation', 'mountPath': '/run/relay-restore/generation.json',
+                           'subPath': 'generation.json', 'readOnly': True}, application['volumeMounts'])
+            self.assertIn({'name': 'restore-generation', 'configMap': {'name': 'relay-recovery-generation',
+                           'defaultMode': 292, 'items': [{'key': 'generation.json', 'path': 'generation.json'}]}}, spec['volumes'])
+            self.assertFalse(any(d['kind'] == 'ConfigMap' and d['metadata']['name'] == 'relay-recovery-generation' for d in docs))
+            for init in spec.get('initContainers', []):
+                self.assertNotIn('restore-generation', {m['name'] for m in init.get('volumeMounts', [])})
         self.assertNotIn('relay-recovery-monitoring-schema43', (ROOT / 'kubernetes/apps/apps/relay/kustomization.yaml').read_text())
         baseline = yaml.safe_load((ROOT / 'kubernetes/components/relay-recovery-monitoring/kustomization.yaml').read_text())
         self.assertIn('schema-version=42', baseline['configMapGenerator'][0]['literals'])
