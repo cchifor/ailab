@@ -1,0 +1,54 @@
+# 21-admission-deny.json of Relay's scripts/prepare-pod-installation.ts for this installation: the
+# fail-closed deny-all gate for Pod CREATE/UPDATE and ephemeral containers in the execution slot. The
+# names become relay-enrollment-<installationId> through ../pins; the operator's ceremonies address
+# the gate by that name.
+#
+# DELETE stays available; clearing a finalizer is an UPDATE and is denied. There is no operator bypass
+# and no mutable workload-label selector: the binding selects the immutable
+# kubernetes.io/metadata.name label, so even a compile or evaluation failure stays inside the slot.
+#
+# Never delete this gate or edit its `false` expression to open the slot. The only replacement is the
+# reviewed activation bundle's in-place replacement, committed here in its own PR. The installation
+# Flux Kustomization has prune: false, so removing this file from git does not delete the live gate.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: relay-enrollment-pinned-by-pins-component
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups:
+      - ""
+      apiVersions:
+      - v1
+      operations:
+      - CREATE
+      - UPDATE
+      resources:
+      - pods
+      - pods/ephemeralcontainers
+      scope: Namespaced
+  matchConditions:
+  - name: dedicated-execution-slots
+    expression: request.namespace in ["relay-researcher-1"]
+  validations:
+  - expression: "false"
+    reason: Forbidden
+    message: 'Relay enrollment-only installation: all worker Pod creation and updates are disabled.'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: relay-enrollment-pinned-by-pins-component
+spec:
+  policyName: relay-enrollment-pinned-by-pins-component
+  validationActions:
+  - Deny
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+      - key: kubernetes.io/metadata.name
+        operator: In
+        values:
+        - relay-researcher-1
