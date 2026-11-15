@@ -8,4 +8,4 @@ metadata:
   name: relay-budget-postgres
   namespace: relay-budget-authority
 spec:
-  replicas: 0
+  replicas: 1
