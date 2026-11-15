@@ -84,15 +84,19 @@ def order_violations(comps: set[str]) -> list[str]:
 
     One way only: installations need the recovery generation, but the generation may stand alone,
     because every restore (relay-recovery-verification.md) and the H3 rollback (revert installations,
-    keep the generation) include relay-restore-fencing without installations."""
+    keep the generation) include relay-restore-fencing without installations.
+
+    The control plane does not need the profile registry: H6 comes long before H4b, whose entries
+    carry the genuine release approval issued only after qualification. That approval is not visible
+    here; Relay's own registry schema refuses an entry without one."""
     out = []
     if "relay-infrastructure-installations" in comps and "relay-restore-fencing" not in comps:
         out.append("installations without the recovery generation (step H3)")
     if "relay-worker-profiles" in comps and not {"relay-infrastructure-installations",
                                                  "relay-worker-budget-client"} <= comps:
-        out.append("profiles without installations and the budget client (step H4)")
-    if "relay-agent-control-plane" in comps and not {"relay-router-connection", "relay-worker-profiles"} <= comps:
-        out.append("control plane without the Router connection and profiles (step H6)")
+        out.append("profiles without installations and the budget client (steps H3, H4a before H4b)")
+    if "relay-agent-control-plane" in comps and "relay-router-connection" not in comps:
+        out.append("control plane without the Router connection (step H6)")
     if "relay-agent-control-plane" in comps and comps & {"relay-gitea-authority", "relay-notifications"}:
         out.append("control plane with Gitea authority or notifications (owner decision G2)")
     return out
@@ -133,15 +137,22 @@ class InclusionGate(unittest.TestCase):
         self.assertEqual(order_violations(names), [])
 
     def test_order_states(self):
+        h3 = {"relay-restore-fencing", "relay-infrastructure-installations"}
+        h4a = h3 | {"relay-worker-budget-client"}                       # the budget client, no profiles
+        h6 = h4a | {"relay-router-connection", "relay-agent-control-plane",
+                    "relay-control-monitoring", "relay-worker-monitoring"}  # still no profiles
+        # H7's candidate configuration: its own component, not staged yet (a stand-in name). The
+        # predicate places no rule on it; the point is that it needs no profile registry.
+        h7 = h6 | {"relay-worker-candidate"}
         ok = [
             set(),
             {"relay-restore-fencing"},                                  # a restore, or the H3 rollback
-            {"relay-restore-fencing", "relay-infrastructure-installations"},
-            {"relay-restore-fencing", "relay-infrastructure-installations", "relay-worker-budget-client",
-             "relay-worker-profiles"},
-            {"relay-restore-fencing", "relay-infrastructure-installations", "relay-worker-budget-client",
-             "relay-worker-profiles", "relay-router-connection", "relay-agent-control-plane",
-             "relay-control-monitoring", "relay-worker-monitoring"},
+            h3,
+            h4a,
+            h6,
+            h7,
+            h7 | {"relay-worker-profiles"},                             # H4b, after the release approval
+            h6 | {"relay-worker-profiles"},                             # H4b once the candidate files are gone
         ]
         for comps in ok:
             self.assertEqual(order_violations(comps), [], comps)
@@ -150,6 +161,8 @@ class InclusionGate(unittest.TestCase):
             {"relay-restore-fencing", "relay-worker-profiles", "relay-worker-budget-client"},
             {"relay-restore-fencing", "relay-infrastructure-installations", "relay-worker-profiles"},
             {"relay-restore-fencing", "relay-infrastructure-installations", "relay-agent-control-plane"},
+            h6 - {"relay-router-connection"},
+            (h6 - {"relay-worker-budget-client"}) | {"relay-worker-profiles"},
             ok[-1] | {"relay-gitea-authority"},
             ok[-1] | {"relay-notifications"},
         ]

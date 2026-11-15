@@ -3,13 +3,14 @@
 # live Relay overlay under the SAME digest-pinned kustomize image as scripts/manifest-lint.sh, and
 # validates the combined render with its kubeconform. None of the components is included by a Flux
 # path, which is why manifest-lint.sh does not build them. Proves:
-#   * each hub component (relay-infrastructure-installations with relay-restore-fencing,
-#     relay-worker-profiles with relay-worker-budget-client, relay-agent-control-plane) applies to the
-#     current Relay Deployment and changes nothing but the relay container's env, mounts and added
-#     volumes plus its own generated ConfigMap;
-#   * the whole H3-H6 set together (those five plus relay-router-connection, relay-control-monitoring
-#     and relay-worker-monitoring) builds with no env, volume or mount collision, and still sets no
-#     RELAY_ENVIRONMENTS, Gitea issuer or notification file (owner decision G2).
+#   * each hub step's components (H3: relay-infrastructure-installations with relay-restore-fencing;
+#     H4a: relay-worker-budget-client alone; H4b: relay-worker-profiles alone, after the release
+#     approval; H6: relay-agent-control-plane) apply to the current Relay Deployment and change nothing
+#     but the relay container's env, mounts and added volumes plus their own generated ConfigMap;
+#   * the whole set together (H3, H4a, H6 and H4b: those five plus relay-router-connection,
+#     relay-control-monitoring and relay-worker-monitoring) builds with no env, volume or mount
+#     collision, and still sets no RELAY_ENVIRONMENTS, Gitea issuer or notification file (owner
+#     decision G2).
 #   * the live overlay, which includes some of these components from H3 on, renders exactly as the
 #     overlay WITHOUT them plus the ones it includes, in its order. Every case above is layered on that
 #     overlay without them (its kustomization minus those lines, mounted over the real one), so each
@@ -40,7 +41,8 @@ declare -A CASES=(
   [plain]=""
   [live-expected]="${LIVE_HUB[*]:-}"
   [installations]="relay-restore-fencing relay-infrastructure-installations"
-  [profiles]="relay-worker-budget-client relay-worker-profiles"
+  [budget]="relay-worker-budget-client"
+  [profiles]="relay-worker-profiles"
   [controlplane]="relay-agent-control-plane"
   [all]="relay-restore-fencing relay-infrastructure-installations relay-worker-budget-client relay-worker-profiles relay-router-connection relay-agent-control-plane relay-control-monitoring relay-worker-monitoring"
 )
@@ -94,9 +96,10 @@ print("live: equals the overlay without its hub components plus the ones it incl
 CASES = {  # case -> (env names, volume names, added (kind, name prefix))
     "installations": ({"RELAY_INFRASTRUCTURE_INSTALLATIONS", "RELAY_RECOVERY_GENERATION_FILE"},
                       {"restore-generation"}, set()),
-    "profiles": ({"RELAY_WORKER_PROFILES_FILE", "RELAY_WORKER_PROFILES_SHA256", "RELAY_WORKER_BUDGET_DSN_FILE",
-                  "RELAY_WORKER_BUDGET_CA_FILE", "RELAY_WORKER_BUDGET_WITNESS_FILE"},
-                 {"worker-profiles", "worker-budget"}, {("ConfigMap", "relay-worker-profiles-")}),
+    "budget": ({"RELAY_WORKER_BUDGET_DSN_FILE", "RELAY_WORKER_BUDGET_CA_FILE", "RELAY_WORKER_BUDGET_WITNESS_FILE"},
+               {"worker-budget"}, set()),
+    "profiles": ({"RELAY_WORKER_PROFILES_FILE", "RELAY_WORKER_PROFILES_SHA256"},
+                 {"worker-profiles"}, {("ConfigMap", "relay-worker-profiles-")}),
     "controlplane": ({"RELAY_AGENT_CONTROL_PLANE"}, set(), set()),
 }
 key = ("Deployment", "relay", "relay")

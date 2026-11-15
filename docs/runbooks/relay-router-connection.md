@@ -299,11 +299,14 @@ Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authorit
    review, then the router plugin enabled through the admin API. Readback as in that runbook
    (`GET /admin/v1/plugins` active, `Worker budget authority available`).
 8. **Researcher release deployed.** The reviewed Relay release that reads these settings (worker budget
-   client, installations, pinned profile registry, `relay-researcher` profile with
-   `connectionId babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`, `protocol codex-responses`,
-   `selection {kind: model, model: relay-researcher-luna}` with `adaptedResponses`, pool inference
-   policy grant within the ceiling above),
-   through its own PRs and pre-migration backup. Readback per that release's runbook.
+   client, installations), through its own PRs and pre-migration backup. Readback per that release's
+   runbook ([relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md), H2-H5). The pinned
+   profile registry is **not** a prerequisite of the connection: its entries need the genuine release
+   approval that follows qualification, so it comes after step 10 (hub upgrade H4b). Until then the
+   `relay-researcher` profile (`connectionId babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`,
+   `protocol codex-responses`, `selection {kind: model, model: relay-researcher-luna}` with
+   `adaptedResponses`) reaches Relay through the signed candidate runs and then the canary permit
+   (hub upgrade H7). The pool inference policy grant stays within the ceiling above.
 9. **Escrow token** (section above). Readback, with the admin token:
    `bao token lookup -accessor <accessor>` shows `policies [relay-router-escrow]`, `orphan true`,
    `renewable false` and its `expire_time`;

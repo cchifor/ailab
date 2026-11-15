@@ -30,21 +30,25 @@ class ActivationGate(unittest.TestCase):
             ROOT / "kubernetes/apps/apps/llm-router",
         ]
         forbidden = (
-            "RELAY_AGENT_CONTROL_PLANE",
-            "RELAY_ROUTER_CONNECTIONS_FILE",
+            # The retired trust bridge, for good.
             "relay-router-control-plane",
             "llm-router-relay-keys",
             "llm-router-relay-keys-trust",
+            # The researcher hub upgrade (docs/runbooks/relay-researcher-hub-upgrade.md), split per
+            # step: each step's PR removes exactly its own group. Installation stays disabled until
+            # step H3, which removed the installation pair deliberately (H3 done); H4a (the budget
+            # client) has no entry. The recovery generation (relay-restore-fencing,
+            # RELAY_RECOVERY_GENERATION_FILE) is NOT refused here: a restore of the current hub needs
+            # it on its own (relay-recovery-verification.md), and test_relay_researcher_hub_upgrade.py
+            # requires it whenever installations are on.
+            # H6: the Router connection and the control plane.
+            "RELAY_ROUTER_CONNECTIONS_FILE",
             "relay-router-connection",
-            # The researcher hub upgrade (docs/runbooks/relay-researcher-hub-upgrade.md). Installation
-            # stays disabled until step H3, which removed the installation pair deliberately (H3 done); H4
-            # removes the profile registry pair, H6 the control-plane component. The recovery
-            # generation (relay-restore-fencing, RELAY_RECOVERY_GENERATION_FILE) is NOT refused here:
-            # a restore of the current hub needs it on its own (relay-recovery-verification.md), and
-            # test_relay_researcher_hub_upgrade.py requires it whenever installations are on.
+            "RELAY_AGENT_CONTROL_PLANE",
+            "relay-agent-control-plane",
+            # H4b: the profile registry, after the genuine release approval and so long after H6.
             "RELAY_WORKER_PROFILES_FILE",
             "relay-worker-profiles",
-            "relay-agent-control-plane",
         )
         for root in active_roots:
             for path in root.rglob("*"):

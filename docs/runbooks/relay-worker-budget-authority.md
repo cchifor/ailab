@@ -308,8 +308,12 @@ else in its Deployment.
   `RELAY_INFRASTRUCTURE_INSTALLATIONS`, a router connection
   (`RELAY_ROUTER_CONNECTIONS_FILE`, still refused by
   `test_relay_v060_activation_gate.py`; the reviewed record is the un-included
-  `kubernetes/components/relay-router-connection`, included last) and a pinned
-  worker-profile registry. Include it with that reviewed Relay release, not before.
+  `kubernetes/components/relay-router-connection`, included last) and a profile
+  source: the candidate or ordinary-canary file, or the pinned worker-profile
+  registry, which needs the genuine release approval and so comes last
+  (`docs/runbooks/relay-researcher-hub-upgrade.md`, H7 and H4b). Include it with that
+  reviewed Relay release, not before. Included alone (hub upgrade H4a) it leaves
+  budget startup `start_failed` until H7's candidate file.
 
 Including either before its Secret exists leaves the new Pod unable to mount the
 volume. Both use `Recreate`, so that is an outage: check `kubectl get
