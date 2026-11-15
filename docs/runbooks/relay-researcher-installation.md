@@ -243,7 +243,7 @@ template or to these inputs regenerates the draft in the same PR (delete the dir
 | template `templateId` | `4da6f919-d660-472c-b503-4d8849fa60df` | A new random UUID: the hub has no template yet (step I1) | The pool's template, every intent, the H4 profile registry entry (by template digest) |
 | template `revision` / `name` | `1` / `researcher` | First revision of a new ID; the name of the image's worker profile template (Relay `deploy/worker-images/researcher/inputs.json`) | Template digest; Relay refuses duplicate names |
 | template `skills` / `toolsets` | `[]` / `[]` | Nothing consumes them at this release (only the preparation and baseline code read them), so a pin would be an unenforced claim | Template digest |
-| template `harness.modelPolicy` | `relay-researcher` | A slug naming the pool's inference policy; the execution identity's name, model-agnostic, so the open model choice (delivery plan step 4) does not rename it | The pool's `inferencePolicies[].name`, the H4 profile registry's `modelPolicy`, template digest |
+| template `harness.modelPolicy` | `relay-researcher` | A slug naming the pool's inference policy, after the execution identity. Model-agnostic as a name only: the released image's holder template already selects `relay-researcher-luna` (catalog model `gpt-6-luna`), so a switch to astra (delivery plan step 4) is a rebuilt image, a new runtime digest and a regenerated binding whatever this slug says | The pool's `inferencePolicies[].name`, the H4 profile registry's `modelPolicy`, template digest |
 | `releaseApproval` | absent | Forced by Relay: the candidate runtime and candidate policy preparation refuse a binding that carries one (`candidate-runtime.ts`, `candidate-policy-preparation.ts` `ordinary-approval`, `pod-renderer.ts`), and ordinary activation compares the binding without it (`pod-policy-activation.ts`) | The binding stays identical through enrollment and qualification; ordinary activation ("Beyond enrollment", item 4) adds the approval, a new binding digest reviewed then |
 
 Derived, not decided, but easy to miss: the placement's `nodeSelector` also carries
@@ -420,8 +420,10 @@ relay-installation-fence -o jsonpath='{.metadata.uid}'` equals it; the Lease
 **I10. Drop first-enrollment access.** Delete the enrollment Secret. Regenerate the bundle with
 `identity.fenceObjectUid` set and `references.enrollmentTokenSecret` removed (template too; the
 generator takes `--fence-object-uid <uid>` and reads the updated template), run `check --chart` and
-`import`, and in the same PR remove the `enrollment-token` volume and mount from
-`agent/deployment.yaml` and lower the control `secrets` quota from 5 to 4 (Relay's budget for one
+`import`, regenerate `docs/relay-workers/researcher-i4-draft/` with `--draft` (its `binding.json`
+comes out byte-identical; the draft never carries the fence UID, the generator refuses
+`--fence-object-uid` with `--draft`), and in the same PR remove the `enrollment-token` volume and
+mount from `agent/deployment.yaml` and lower the control `secrets` quota from 5 to 4 (Relay's budget for one
 credential object). The tests require all four to agree.
 
 ## Qualification stage (owner decision G3)
