@@ -188,7 +188,8 @@ def check_internal_tls(definition: dict, stage: str) -> None:
     if aliases != internal_tls_addresses():
         fail(f"binding hostAliases {aliases!r} are not the pinned internal TLS and journal addresses")
     ca_sha = hashlib.sha256(RUNTIME_CA.read_bytes()).hexdigest()
-    manifest = binding.get("runtime", {}).get("manifest")
+    runtime = binding.get("runtime")
+    manifest = runtime.get("manifest") if isinstance(runtime, dict) else None
     if not isinstance(manifest, dict):
         fail("the binding has hostAliases but no runtime manifest")
     supervisor = manifest.get("supervisorConfig", {})

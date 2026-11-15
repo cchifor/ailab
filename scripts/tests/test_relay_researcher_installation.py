@@ -726,13 +726,17 @@ class BundleCheck(unittest.TestCase):
             m(files)["holderProfiles"]["workerTemplates"][0]["definition"]["holder"]["router"]["origin"] = "https://router.example"
         def no_templates(files):
             m(files)["holderProfiles"]["workerTemplates"] = []
+        def null_runtime(files):
+            # A clean refusal, not an AttributeError (reviewer-claude, #1769).
+            files["00-definition.json"]["binding"]["runtime"] = None
         # Each refusal must come from its own guard, so a reordered or weakened check is caught.
         aliases, hub, router, communication = ("are not the pinned internal TLS and journal addresses",
                                                "hub origin or hub CA", "holder.router is not", "holder.communication is not")
         for mutate, reason in ((aliases_swapped, aliases), (alias_extra, aliases), (no_journal_alias, aliases),
                                (hub_ca_mozilla, hub), (hub_origin, hub), (router_unpinned, router),
                                (router_ca_not_packaged, router), (communication_other_ca, communication),
-                               (router_origin, router), (no_templates, "no worker templates")):
+                               (router_origin, router), (no_templates, "no worker templates"),
+                               (null_runtime, "hostAliases but no runtime manifest")):
             for stage in ("enrollment", "qualification"):
                 with self.subTest(mutate.__name__, stage=stage):
                     def both(files, mutate=mutate, stage=stage):
