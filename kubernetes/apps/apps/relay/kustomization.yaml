@@ -14,5 +14,9 @@ resources:
 - backup.yaml
 components:
 - ../../../components/relay-default-communication
+# Researcher hub upgrade H3 (docs/runbooks/relay-researcher-hub-upgrade.md): the recovery generation
+# (initialized once by recovery:initialize) and worker installations, enabled together.
+- ../../../components/relay-restore-fencing
+- ../../../components/relay-infrastructure-installations
 # The separate managed router component remains opt-in. This
 # communication component contains no router/OpenBao Secret or trust bridge.
