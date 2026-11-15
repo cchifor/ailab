@@ -19,7 +19,7 @@ the evidence; its read-only `platform` credential cannot do any of this.
 | `kubernetes/apps/relay-researcher/agent/` | none; staged as `flux/relay-researcher-agent.yaml` | Nothing |
 | `kubernetes/apps/relay-researcher/pins/pins.yaml` | read by both trees at build time | Nothing; three placeholders |
 | `kubernetes/apps/relay-researcher/installation/qualification-egress.yaml` | not included (the tree includes `execution-egress.yaml`) | Nothing; selected by step Q4 |
-| `kubernetes/apps/relay-internal-tls/` (ailab PR "stage two in-cluster TLS terminators", included here until it merges) | none; staged as `flux/relay-internal-tls.yaml` | Nothing |
+| `kubernetes/apps/relay-internal-tls/` (ailab #1768) | none; staged as `flux/relay-internal-tls.yaml` | Nothing |
 | `docs/relay-workers/researcher-runtime-ca.crt` | not a manifest | The pinned ailab root CA for the release build (step Q1) |
 | `docs/relay-workers/researcher-installation-definition.json` | not a manifest | The reviewed input template for Relay's tool |
 | `scripts/relay-researcher-bundle.py` | not a manifest | Operator's check and import of Relay's generated bundle |
@@ -126,7 +126,37 @@ so each ClusterIP connection is translated per packet before policy and the rule
 Pods on their container ports. The journal entry is an addition to the owner's two-name design: the
 candidate supervisor dials the journal from the worker Pod to consume its one-use session permit, so
 a DNS-less candidate slot needs the name too; ordinary workers never dial it, and Relay renders the
-third alias only for candidate runs.
+third alias only for candidate runs. The owner approved this extension on 2026-11-15, word for word
+(relay#277: decision record comment 123028, approval comment 123063): "candidate-only alias
+`relay-candidate-journal.relay-candidate-journal.svc -> 10.96.0.42`, TCP 8443, plus the documented
+ClusterIP-pinning exception for 10.96.0.40-42". The exception and its removal triggers are in
+`docs/network-plan.md`.
+
+**Rule 2 applies to every Pod in the slot: accepted, not narrowed** (condition 1 of comment 123028).
+The condition was to narrow the journal rule to candidate Pods by label, or to record why not. No
+label can do it. Relay's executor gives every worker Pod, candidate and ordinary alike, exactly one
+label, `relay.infrastructure/managed: "true"` (`packages/infrastructure-agent/executor.ts`,
+`MANAGED_LABEL`), and the per-Pod admission policies require the label set to equal that rendered set
+(`candidate-policy-preparation.ts`, `pod-policy-preparation.ts`, `ordinary-canary-pod-gate.ts`), so no
+Pod in the slot can carry a candidate-only label. A candidate Pod is marked only by the annotations
+`relay.infrastructure/candidate-run-sha256` and `relay.infrastructure/candidate-trust-sha256`, and a
+NetworkPolicy cannot select on annotations. Even with such a label, a `podSelector` belongs to the
+whole policy, not to one rule: narrowing rule 2 alone would take a second policy in the slot, which
+the drivers refuse. So the policy keeps `podSelector: {}`, and its digest is unchanged. What bounds
+the exposure:
+
+1. An ordinary Pod cannot name the journal: it has no resolver, and Relay's ordinary contract admits
+   exactly the two aliases (hub and Router), so it carries no journal alias.
+2. Reaching the journal is not authority: the journal verifies every request against the signed
+   run's agent or holder key, and the client verifies the journal's name and certificate against its
+   pinned CA (`checkCandidateJournalPins`). The alias changes name resolution only.
+3. The journal's own ingress admits only the managed worker Pods of `relay-researcher-1` and the
+   infrastructure agent in `relay-infra-control`, on TCP 8443, and its renderer refuses a run that
+   names any other namespace (`kubernetes/optional/relay-candidate-journal/render.py`,
+   `CLIENT_NAMESPACES`). The agent stays because it is a journal client itself: it inspects and admits
+   each candidate Pod with the run's agent key before creating it (Relay
+   `CandidateAdmissionController`).
+4. The rule is temporary: step Q7 removes it at ordinary activation.
 
 What this fixes, against the enrollment stage's three limits:
 
@@ -359,6 +389,27 @@ A taken address stops here: changing one is a new binding, a new release input a
 `clusterIP` is immutable, so a reserved Service that already exists on another address keeps it until
 it is deleted and created again (network plan; the journal runbook has the procedure).
 
+**Re-check at apply time, failing closed** (condition 5 of relay#277 comment 123028). An address can be
+taken between this check and the merge that creates its Service. Run the `grep` above again just
+before merging Q3 (for `.40` and `.41`) and just before the journal's Service is created (for `.42`):
+the addresses being created must still print nothing. Then, once each of those Services has been
+applied (Flux for Q3), read it back, and stop on anything other than the pinned address:
+
+```sh
+pinned() {  # pinned <namespace>/<service> <address>: fails unless that Service exists on exactly that address
+  got=$(kubectl --context admin@ai -n "${1%/*}" get svc "${1#*/}" -o jsonpath='{.spec.clusterIP}') \
+    && [ "$got" = "$2" ] || { echo "STOP: $1 is on '${got:-missing}', pinned $2" >&2; return 1; }
+}
+pinned relay-internal-tls/relay-hub-tls 10.96.0.40 && pinned relay-internal-tls/relay-router-tls 10.96.0.41   # after Q3
+pinned relay-candidate-journal/relay-candidate-journal 10.96.0.42   # after the journal's Service, before any candidate run
+```
+
+A `STOP`, or a Flux apply that failed with `provided IP is already allocated`, fails closed: Q4 is not
+merged (the slot keeps the enrollment policy and its 0-Pod quota) and no candidate run starts, because
+a worker's alias would point at the wrong Service or at nothing. Never fix it by changing an alias (that
+is a new binding and a re-review): free the address, then delete the Service and let Flux create it
+again from the pinned manifest, and run `pinned` again.
+
 **Q3. Terminators PR.** One PR:
 `git mv kubernetes/apps/relay-internal-tls/flux/relay-internal-tls.yaml kubernetes/apps/clusters/ai/`.
 Merging creates namespace `relay-internal-tls`, the two Certificates, the two Caddy terminators
@@ -382,10 +433,10 @@ kill %1
 # the same for svc/relay-router-tls with router.chifor.me
 ```
 
-**Q4. Egress stage PR.** One PR, outside any ceremony window (if `relay-researcher-installation` is
-suspended for a drill or the activation ceremony, finish it, confirm the restore and resume first;
-never switch stages inside a window) and while the slot holds no Pod
-(`kubectl -n relay-researcher-1 get pods` empty; the quota is still 0):
+**Q4. Egress stage PR.** One PR, after Q2's apply-time readback passed for `.40` and `.41`, outside
+any ceremony window (if `relay-researcher-installation` is suspended for a drill or the activation
+ceremony, finish it, confirm the restore and resume first; never switch stages inside a window) and
+while the slot holds no Pod (`kubectl -n relay-researcher-1 get pods` empty; the quota is still 0):
 
 - `installation/kustomization.yaml`: `- execution-egress.yaml` becomes `- qualification-egress.yaml`;
 - the template's `executionEgressArtifacts[0].sha256` becomes
@@ -423,6 +474,26 @@ The operator's identity also needs `get` on Services, Pods and Namespaces and `p
 Router traffic during the cut). Suspend `relay-researcher-installation` for the drill window, as for
 every in-place ceremony below.
 
+**Q7. Exit at ordinary activation: the two-rule policy** (condition 1 of relay#277 comment 123028).
+Rule 2 and the slot-wide `podSelector: {}` it rides on (accepted above) exist for candidate runs
+only. The activation PR that raises the slot to its one-Pod quota for ordinary workers ("Beyond
+enrollment", item 4) also swaps the egress stage, in that same PR, never in a separate one:
+
+- add `installation/ordinary-egress.yaml`: the same object, `relay-researcher-egress`, with rules 0
+  and 1 of `qualification-egress.yaml` unchanged (hub rule 0, Router rule 1) and no rule 2;
+- `installation/kustomization.yaml`: `- qualification-egress.yaml` becomes `- ordinary-egress.yaml`,
+  and the new file joins `EGRESS_STAGES` in `scripts/relay-researcher-bundle.py` and the tests'
+  `EGRESS`, with its digest pinned in the tests;
+- the egress digest pin moves with it: the template's `executionEgressArtifacts[0].sha256` becomes
+  the new file's measured digest (the operator's definition the same way, re-checked with step I4's
+  `check --chart`).
+
+The tests refuse a pin that is not the included stage's, so the swap and the pin cannot land apart.
+Not earlier: the hub-partition drill and every candidate scenario need rule 2. Not later: no ordinary
+worker may run under an activated policy that still admits the journal. Readback as in Q5, against
+the new digest. A later candidate run needs the qualification stage back (Q4 again, with this
+runbook's checks).
+
 **Rollback.** Revert Q4 (only while the slot holds no Pod) to return to the enrollment stage; revert
 Q3 only after that, or once the slot is empty for good: a worker whose terminator is gone fails
 closed (connection refused), it never falls back to Cloudflare. The namespace
@@ -430,8 +501,8 @@ closed (connection refused), it never falls back to Cloudflare. The namespace
 
 **Not covered by these steps.** The Relay half is the release's (Q1). The candidate journal is still
 the optional bundle, and the agent's own journal egress and candidate runtime values are separate
-changes ("Beyond enrollment", item 3). Rule 2 (the journal) stays in the policy after qualification:
-an ordinary-stage policy without it is a later digest change, reviewed with the activation outputs.
+changes ("Beyond enrollment", item 3). Rule 2 (the journal) stays in the policy through
+qualification and the ordinary canary, and leaves it at ordinary activation (Q7).
 The control namespace is unchanged: the agent still reaches the hub through Cloudflare
 (`controlNetwork.hubCidrs`).
 
@@ -459,7 +530,8 @@ Enrollment is not worker readiness. Before the first worker Pod:
 4. The finite ordinary canary (step 10) and then `scripts/activate-ordinary-pod-policy.ts`'s outputs:
    staged guards, Secret quota, the in-place gate replacement and the **one-Pod quota**, plus agent
    values with `ordinaryNamespacePins` (the UIDs of step I6) and `bootstrapSecrets: true`, committed
-   here, each through its own reviewed PR with the I6-style readbacks.
+   here, each through its own reviewed PR with the I6-style readbacks. The PR with the one-Pod quota
+   also swaps to the two-rule egress policy and moves its digest pin (step Q7).
 
 ## Rollback and retirement
 

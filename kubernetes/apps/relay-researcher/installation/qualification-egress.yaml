@@ -22,6 +22,12 @@
 #   driver keeps it during the cut (routerRuleIndex 1) and checks Router reachability through it.
 # Rule 2, the candidate journal: the relay-candidate-journal Pods, TCP 8443. The candidate supervisor
 #   consumes its one-use session permit there; ordinary (post-qualification) workers never dial it.
+#   Owner-approved extension (relay#277 comments 123028 and 123063, 2026-11-15). It applies to every
+#   Pod in the slot (podSelector {}): Relay labels candidate and ordinary Pods identically and marks a
+#   candidate only by annotation, and a podSelector covers the whole policy, so it cannot be narrowed
+#   to candidate Pods. That acceptance and its bounds are in the runbook ("Egress: the qualification
+#   stage"); step Q7 removes this rule at ordinary activation (a two-rule ordinary-egress.yaml and a
+#   new digest pin, in one PR).
 #
 # Nothing else: no DNS, no Cloudflare address, no LAN, node, API server or metadata address, no other
 # namespace. A rule is one namespace AND one Pod label set (one peer), so it can never widen to the

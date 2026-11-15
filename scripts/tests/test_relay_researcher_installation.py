@@ -349,6 +349,8 @@ class QualificationStage(unittest.TestCase):
 
     def test_three_rules_in_order_no_dns_no_cidr(self):
         spec = self.policy["spec"]
+        # Every Pod in the slot: Relay gives candidate Pods no label of their own, so rule 2 cannot be
+        # narrowed to them (accepted, relay#277 comment 123028 condition 1; runbook steps Q2 and Q7).
         self.assertEqual(spec["podSelector"], {})
         self.assertEqual(spec["policyTypes"], ["Egress"])
         expected = []
@@ -386,7 +388,15 @@ class QualificationStage(unittest.TestCase):
         self.assertIn("hostAliases {hub: 10.96.0.40, router: 10.96.0.41, candidateJournal: 10.96.0.42}", binding)
         self.assertIn(RUNTIME_CA_SHA256, binding)
         self.assertEqual(self.journal.ORIGIN, "https://relay-candidate-journal.relay-candidate-journal.svc:8443")
-        # The journal admits the slot's managed worker Pods (the renderer's execution-namespace peer).
+
+    def test_journal_admits_only_this_slot_and_its_control_namespace(self):
+        # relay#277 comment 123028 condition 2: the journal's client ingress is this installation's
+        # execution slot (managed worker Pods) and its control namespace (the agent, itself a journal
+        # client), nothing else; render.py refuses a run naming other namespaces.
+        roles = {d["metadata"]["labels"]["relay.chifor.me/namespace-role"]: d["metadata"]["name"]
+                 for d in docs(TREE / "installation/namespaces.yaml")}
+        self.assertEqual(roles, {"control": CONTROL, "execution": SLOT})
+        self.assertEqual(self.journal.CLIENT_NAMESPACES, roles)
         self.assertIn("{'relay.infrastructure/managed': 'true'}", JOURNAL_RENDER.read_text(encoding="utf-8"))
 
     def test_runtime_ca_is_the_ailab_root(self):

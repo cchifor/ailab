@@ -27,6 +27,14 @@ ORIGIN = 'https://relay-candidate-journal.relay-candidate-journal.svc:8443'
 # PodRuntimeBinding.hostAliases.candidateJournal) to this address. Static band of the Service CIDR,
 # recorded in docs/network-plan.md with the internal TLS terminators' 10.96.0.40 and .41.
 CLUSTER_IP = '10.96.0.42'
+# The journal's only clients, by purpose (owner approval relay#277 comment 123063 of the decision in
+# comment 123028, condition 2): the researcher slot's managed worker Pods (the candidate supervisor, the
+# run's holder key) and the infrastructure agent in its control namespace, which is a journal client
+# itself (Relay CandidateAdmissionController inspects and admits each candidate Pod with the run's agent
+# key before creating it). The client ingress policy admits exactly these two peers on 8443, so a run
+# that names any other namespace is refused. Installation namespaces:
+# kubernetes/apps/relay-researcher/installation/namespaces.yaml.
+CLIENT_NAMESPACES = {'control': 'relay-infra-control', 'execution': 'relay-researcher-1'}
 LABELS = {'app.kubernetes.io/part-of': NAME, 'velero.io/exclude-from-backup': 'true'}
 AFFINITY = {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {
     'nodeSelectorTerms': [{'matchExpressions': [
@@ -330,6 +338,9 @@ def service(config):
         port, collection = metrics_objects(config['metrics'], c['metrics'], p['ledger'])
         deployment['spec']['template']['spec']['containers'][0]['ports'].append({'name': 'metrics', 'containerPort': port})
         objects += collection
+    # Last, so each generic refusal above keeps its own code: the reviewed client namespaces only.
+    if {n['purpose']: n['name'] for n in namespaces} != CLIENT_NAMESPACES:
+        refuse('client-namespaces-not-reviewed')
     return objects
 
 

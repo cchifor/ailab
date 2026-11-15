@@ -40,12 +40,19 @@ filesystem remains read-only. Both namespaces' workloads explicitly exclude
 Each namespace starts with default-deny ingress and egress. The service renderer
 admits only the signed control namespace's infrastructure-agent selector and the
 signed execution namespace's managed-worker selector, combined as namespace AND
-Pod matches. Signed journal requests still authenticate every caller; labels are
-network reachability, not authority. The journal reaches only its database and
-cluster DNS. Database clients are the journal and an explicitly labeled operator
-client in the database namespace. Caller-side journal egress must be included in
-the separately reviewed agent/candidate policies and the run's policy digest;
-this bundle does not silently alter those policies.
+Pod matches, on TCP 8443. Those two namespaces are pinned (`render.py`
+`CLIENT_NAMESPACES`; relay#277 comment 123028 condition 2, approved in comment
+123063): the researcher slot `relay-researcher-1` and its control namespace
+`relay-infra-control`. The agent's namespace stays because the infrastructure
+agent is a journal client itself (it inspects and admits each candidate Pod
+with the run's agent key). The renderer refuses a run that names any other
+namespace (`client-namespaces-not-reviewed`). Signed journal requests still
+authenticate every caller; labels are network reachability, not authority. The
+journal reaches only its database and cluster DNS. Database clients are the
+journal and an explicitly labeled operator client in the database namespace.
+Caller-side journal egress must be included in the separately reviewed
+agent/candidate policies and the run's policy digest; this bundle does not
+silently alter those policies.
 
 ## Reviewed inputs and initialization
 
@@ -235,8 +242,11 @@ dials the journal origin from the worker Pod, and a DNS-less researcher slot
 (owner decision G3) resolves that host only through the Pod's measured
 `hostAliases` entry (`PodRuntimeBinding.hostAliases.candidateJournal`), so the
 address must exist before the Service does. Confirm it is free with the
-read-only check in the network plan before creating the Service; the apiserver
-refuses a colliding address and leaves the Service uncreated.
+read-only check in the network plan just before creating the Service; the apiserver
+refuses a colliding address and leaves the Service uncreated. Then read back that
+the Service is on exactly `10.96.0.42` before any candidate run (the `pinned`
+check in step Q2 of [relay-researcher-installation.md](relay-researcher-installation.md));
+any other address fails closed.
 
 `spec.clusterIP` is immutable. The pin applies when the Service is created: if
 `kubectl -n relay-candidate-journal get svc relay-candidate-journal` already
