@@ -11,17 +11,20 @@
  *     --relay <relay> --assets <dir> \
  *     --installation-id <uuid> --installation-public-key <base64url> --out <new dir>
  *
+ *   --installation-id / --installation-public-key   the identity Relay approved at step I3. They must
+ *             equal the reviewed record (researcher-binding-inputs.json `installation`), whose
+ *             fingerprint Relay's publicKeyFingerprint must reproduce; a typo is refused, not built.
  *   --fence-object-uid <uuid>   step I10 only: adds identity.fenceObjectUid (the live fence ConfigMap UID)
- *   --draft   the placeholder identity of docs/relay-workers/researcher-binding-inputs.json
- *             (`draft`) instead of the two identity arguments; --installation-public-key may still
- *             override the placeholder key (to validate with a throwaway key). Outside --draft the
- *             placeholders are refused.
+ *
+ * The committed docs/relay-workers/researcher-i4/ is this command's output for the recorded identity:
+ * the operator's run must reproduce it byte for byte.
  *
  * Refuses: a Relay checkout whose HEAD is not the pinned sourceCommit, or that has local changes;
  * a tsx that is not that checkout's; Node older than 22.21; any release asset whose sha256 is not
  * the pinned one; receipts that do not join the manifest; a runtime manifest without the G3 fields
  * the template requires (a BLOCKER: only a rebuilt image can fix it); a template with OPERATOR-FILLS
- * leaves other than the seven this fills; any definition Relay's preparePodInstallation refuses.
+ * leaves other than the seven this fills; an identity other than the I3 record, or a key Relay's
+ * Ed25519 check refuses; any definition Relay's preparePodInstallation refuses.
  *
  * Writes a NEW directory (never overwrites) with canonical JSON (Relay canonicalJson + "\n"):
  *   binding.json                     the PodRuntimeBinding
@@ -63,29 +66,22 @@ const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest(
 const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 
 function parseArgs(argv: string[]) {
-  const out: Record<string, string | boolean> = {};
-  const flags = new Set(["--draft"]);
+  const out: Record<string, string> = {};
   const values = new Set(["--relay", "--assets", "--installation-id", "--installation-public-key", "--out",
     "--fence-object-uid"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (flags.has(a)) out[a] = true;
-    else if (values.has(a) && i + 1 < argv.length && !(a in out)) out[a] = argv[++i]!;
+    if (values.has(a) && i + 1 < argv.length && !(a in out)) out[a] = argv[++i]!;
     else refuse(`unknown, repeated or incomplete argument ${JSON.stringify(a)}`);
   }
-  for (const required of ["--relay", "--assets", "--out"])
+  for (const required of ["--relay", "--assets", "--installation-id", "--installation-public-key", "--out"])
     if (typeof out[required] !== "string") refuse(`${required} is required`);
-  if (!out["--draft"] && (typeof out["--installation-id"] !== "string" || typeof out["--installation-public-key"] !== "string"))
-    refuse("--installation-id and --installation-public-key are required (or --draft)");
-  if (out["--draft"] && typeof out["--installation-id"] === "string")
-    refuse("--draft uses the placeholder installation ID; drop --installation-id");
   return out as {
     "--relay": string;
     "--assets": string;
     "--out": string;
-    "--draft"?: true;
-    "--installation-id"?: string;
-    "--installation-public-key"?: string;
+    "--installation-id": string;
+    "--installation-public-key": string;
     "--fence-object-uid"?: string;
   };
 }
@@ -146,11 +142,11 @@ function placeholderPaths(value: unknown, path = ""): string[] {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const inputs = readJson(INPUTS);
-  const { release, derived, decisions, draft } = inputs;
+  const { release, derived, decisions, installation: approved } = inputs;
   const { relay, head } = verifyCheckout(args["--relay"], release.sourceCommit);
   const relayModule = (path: string) => import(pathToFileURL(join(relay, path)).href);
-  const [bindingTs, manifestTs, digestTs, configTs, primitivesTs, templateTs, rolesTs, preparationTs] =
-    await Promise.all([
+  const [bindingTs, manifestTs, digestTs, configTs, primitivesTs, templateTs, rolesTs, preparationTs,
+    installationAuthTs] = await Promise.all([
       relayModule("packages/worker-runtime/binding.ts"),
       relayModule("packages/worker-runtime/manifest.ts"),
       relayModule("packages/infrastructure-protocol/digest.ts"),
@@ -159,6 +155,7 @@ async function main() {
       relayModule("packages/infrastructure-protocol/template.ts"),
       relayModule("packages/worker-roles/preparation.ts"),
       relayModule("packages/infrastructure-agent/installation-preparation.ts"),
+      relayModule("packages/infrastructure-protocol/installation-auth.ts"),
     ]);
   const { PodRuntimeBinding, bindingDigest, POD_RUNTIME_IDENTITIES, runtimeOriginHosts } = bindingTs;
   const { WorkerRuntimeManifest, workerRuntimeDigest, artifact, harnessExecutable } = manifestTs;
@@ -166,11 +163,22 @@ async function main() {
   const { InstallationTemplatePolicy } = templateTs;
   const canonical = (value: unknown) => canonicalJson(value) + "\n";
 
-  // Identity: the operator's after step I3, or the reviewed placeholders for the draft.
-  const installationId = args["--draft"] ? draft.installationId : args["--installation-id"]!;
-  const installationPublicKey = args["--installation-public-key"] ?? draft.installationPublicKey;
-  if (!args["--draft"] && (installationId === draft.installationId || installationPublicKey === draft.installationPublicKey))
-    refuse("the draft placeholder identity is accepted only with --draft");
+  // Identity: exactly the one Relay approved at step I3, as reviewed. The key must pass Relay's own
+  // canonical, non-weak Ed25519 check (the hub's at approval), and reproduce the approval receipt's
+  // fingerprint as Relay's installation view computes it (server/workers/installations/management.ts,
+  // module-private there: sha256 over the base64url key text, first 16 hex).
+  const installationId = args["--installation-id"];
+  const installationPublicKey = args["--installation-public-key"];
+  if (installationId !== approved.installationId || installationPublicKey !== approved.installationPublicKey)
+    refuse("the installation ID or public key is not the one recorded at step I3 (researcher-binding-inputs.json)");
+  try {
+    installationAuthTs.ed25519PublicKey(installationPublicKey);
+  } catch {
+    refuse("the installation public key is not a canonical Ed25519 public key");
+  }
+  const publicKeyFingerprint = createHash("sha256").update(installationPublicKey).digest("hex").slice(0, 16);
+  if (publicKeyFingerprint !== approved.publicKeyFingerprint)
+    refuse(`the public key's fingerprint is ${publicKeyFingerprint}, the approval recorded ${approved.publicKeyFingerprint}`);
 
   // Release assets: exact bytes, then the joins between them.
   const assets = verifyAssets(resolve(args["--assets"]), release.assets);
@@ -292,7 +300,6 @@ async function main() {
   definition.identity.installationId = installationId;
   definition.identity.installationPublicKey = installationPublicKey;
   if (args["--fence-object-uid"] !== undefined) {
-    if (args["--draft"]) refuse("--fence-object-uid belongs to step I10, not to the draft");
     definition.identity.fenceObjectUid = args["--fence-object-uid"];
   }
   definition.installationPolicy.allowedImageDigests = installationPolicy.allowedImageDigests;
@@ -321,9 +328,9 @@ async function main() {
   const summary = {
     kind: "ailab.relay-researcher-binding-summary",
     version: 1,
-    draft: Boolean(args["--draft"]),
     release: { tag: release.tag, sourceCommit: release.sourceCommit, relayCheckoutHead: head, assets: release.assets },
     installationId,
+    publicKeyFingerprint,
     runtimeImage,
     runtimeDigest,
     agentImage,

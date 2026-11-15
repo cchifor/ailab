@@ -24,14 +24,14 @@ the evidence; its read-only `platform` credential cannot do any of this.
 | `docs/relay-workers/researcher-installation-definition.json` | not a manifest | The reviewed input template for Relay's tool |
 | `scripts/relay-researcher-bundle.py` | not a manifest | Operator's check and import of Relay's generated bundle |
 | `scripts/relay-researcher-binding.mts`, `docs/relay-workers/researcher-binding-inputs.json` | not a manifest | Step I4's generator of the binding and the definition, run with the pinned Relay checkout's code, and its pinned inputs |
-| `docs/relay-workers/researcher-i4-draft/` | not a manifest | The generator's output with a placeholder installation ID and key, for review |
+| `docs/relay-workers/researcher-i4/` | not a manifest | The generator's output for the identity approved at step I3; the operator's I4 run must reproduce it byte for byte |
 
 `scripts/tests/test_relay_researcher_installation.py` pins the shapes, the derived quotas, both
 egress stages and their digests (exactly one included, the definition pinning that one), the RBAC
 and the trust pins, and refuses including either Flux Kustomization while a pin is a placeholder.
 `scripts/tests/test-relay-researcher-render.sh` builds both trees, the installation once per egress
 stage, under manifest-lint's pinned kustomize and kubeconform.
-`scripts/tests/test_relay_researcher_binding.py` pins the committed draft to the template, the
+`scripts/tests/test_relay_researcher_binding.py` pins the committed output to the template, the
 RuntimeClass, the internal TLS and journal manifests, the release pins and the decisions.
 
 ### Names and placement
@@ -221,23 +221,25 @@ Every source and image pin is a single value, written once:
 `scripts/relay-researcher-bundle.py import` writes the three pins and the generated `config.json`;
 nothing else is edited by hand except the step I10 removal of the enrollment mount.
 
-### Binding inputs that are decisions (owner rules)
+### Binding inputs that are decisions (owner decided 2026-11-15)
 
 `scripts/relay-researcher-binding.mts` derives the binding from the release assets (runtime
 manifest, image receipts), the reviewed template, the manifests here (RuntimeClass, internal TLS
 and journal Services) and Relay constants (identities 1000/2000, the researcher baseline, the
-instructions digest, the harness pins). The values below are not derived. Their proposed values are
-`decisions` in `docs/relay-workers/researcher-binding-inputs.json`, and the committed draft
-(`docs/relay-workers/researcher-i4-draft/`) was built with them. Each one is part of the binding
-digest (the template pins also of the template digest), which qualification evidence binds: change
-one in a reviewed PR with a regenerated draft before I4, never after qualification without a new one.
-The installation ID and public key are arguments (step I3), not decisions. Any change to the
-template or to these inputs regenerates the draft in the same PR (delete the directory, rerun with
-`--draft`): `scripts/tests/test_relay_researcher_binding.py` refuses a stale one.
+instructions digest, the harness pins). The values below are not derived; the owner decided them on
+2026-11-15 (relayed by the operator). They are `decisions` in
+`docs/relay-workers/researcher-binding-inputs.json`, and the committed output
+(`docs/relay-workers/researcher-i4/`) was built with them. Each one is part of the binding digest (the
+template pins also of the template digest), which qualification evidence binds: change one in a
+reviewed PR with a regenerated output before I4, never after qualification without a new one. The
+installation ID and public key are not decisions: they are the identity Relay approved at step I3,
+recorded as `installation` in the same file. Any change to the template or to these inputs
+regenerates the committed output in the same PR (delete the directory, rerun the I4 command):
+`scripts/tests/test_relay_researcher_binding.py` refuses a stale one.
 
-| Decision | Proposed | Source | What it constrains |
+| Decision | Decided | Source | What it constrains |
 | --- | --- | --- | --- |
-| `supervisor` (milliCpu / memoryMiB / ephemeralMiB) | `100 / 128 / 64` | Relay's reference binding (`tests/fixtures/worker-runtime.ts` at the pinned commit), the allocation every renderer, admission-policy and ordinary-canary test exercises. No live measurement exists: the supervisor container runs the Node supervisor and the Rust connector, so memory is the value to watch in the qualification and canary evidence | Carved out of every intent (the harness gets the rest); never added to the quota. Relay floors: memory at least 80 (16 MiB tmpfs + 64 MiB process), ephemeral at least 2 (lease + control volumes), harness at least 250m / 256 MiB, workspace at least 256 MiB |
+| `supervisor` (milliCpu / memoryMiB / ephemeralMiB) | `250 / 256 / 64` | The owner's decision. The proposal was Relay's reference binding, `100 / 128 / 64` (`tests/fixtures/worker-runtime.ts` at the pinned commit); the owner raised CPU and memory for headroom. No live measurement exists: the supervisor container runs the Node supervisor and the Rust connector, so memory is the value to watch in the qualification and canary evidence | Carved out of every intent (the harness gets the rest); never added to the quota. Relay floors: memory at least 80 (16 MiB tmpfs + 64 MiB process), ephemeral at least 2 (lease + control volumes), harness at least 250m / 256 MiB, workspace at least 256 MiB |
 | placement `tier` | `sandboxed-pod` | Relay `TIER_CAPABILITY_CEILING`: the pod tier of `user-space-kernel-sandbox`, which gVisor is; the researcher baseline admits both pod tiers | Every intent's `runtime.tier`, the pool's `tierBindings`, the agent policy's `podTiers` |
 | placement `binding` | `relay-gvisor` | Relay `KubernetesTierBinding.binding`: "operator binding name (RuntimeClass or VM profile)", so the RuntimeClass name | Every intent's `runtime.binding`, the pool's `tierBindings`, `podTiers` |
 | template `templateId` | `4da6f919-d660-472c-b503-4d8849fa60df` | A new random UUID: the hub has no template yet (step I1) | The pool's template, every intent, the H4 profile registry entry (by template digest) |
@@ -249,14 +251,14 @@ template or to these inputs regenerates the draft in the same PR (delete the dir
 Derived, not decided, but easy to miss: the placement's `nodeSelector` also carries
 `ailab.io/runtime-gvisor: "true"` (section "Names and placement").
 
-Fit, at the proposed supervisor allocation (Relay carves the supervisor out of the intent; the
+Fit, at the decided supervisor allocation (Relay carves the supervisor out of the intent; the
 quota and the scheduler see the intent plus the RuntimeClass overhead; the 50m / 32 MiB / 1 MiB
 `workspace-init` container runs before the others and adds nothing):
 
 | | Researcher template (baseline) | G4 ceiling |
 | --- | --- | --- |
 | Intent CPU / memory / scratch | 1000m / 2048 MiB / 4096 MiB | 2000m / 4096 MiB / 10240 MiB |
-| Harness = intent - supervisor (100m / 128 / 64) | 900m / 1920 MiB / 4032 MiB | 1900m / 3968 MiB / 10176 MiB |
+| Harness = intent - supervisor (250m / 256 / 64) | 750m / 1792 MiB / 4032 MiB | 1750m / 3840 MiB / 10176 MiB |
 | Workspace = scratch - 64 - 128 holder state - 32 log reserve | 3872 MiB (floor 256) | 10016 MiB |
 | Quota view = intent + 80m / 24 MiB overhead | 1080m / 2072 MiB / 4096 MiB | 2080m / 4120 MiB / 10240 MiB |
 | Slot quota 2080m / 4120 MiB / 10240 MiB | fits, about half | equal, by construction |
@@ -317,15 +319,22 @@ it, binding included, with the pinned Relay checkout's own code. Prepare that ch
 (`git rev-parse HEAD` = the release's `sourceCommit`, no local changes, `npm ci`, Node 22.21+) and
 download the release assets that `docs/relay-workers/researcher-binding-inputs.json` pins (`release.assets`:
 `SHA256SUMS`, `manifest.json` and the three `*-133788.json` worker files of Gitea release 2142) into a
-new empty directory. Then, from this checkout, with the step I3 installation ID and public key:
+new empty directory. Then, from this checkout, with the identity approved at step I3:
 
 ```sh
 /path/to/relay/node_modules/.bin/tsx scripts/relay-researcher-binding.mts --relay /path/to/relay \
-  --assets /operator/release-assets --installation-id <I3 id> \
-  --installation-public-key "$(cat "$d/public")" --out /operator/researcher-i4
-diff <(jq -S 'del(.installationId)' /operator/researcher-i4/binding.json) \
-     <(jq -S 'del(.installationId)' docs/relay-workers/researcher-i4-draft/binding.json)   # nothing
+  --assets /operator/release-assets \
+  --installation-id b380ff7f-0716-478d-8b01-3d39f30e750b \
+  --installation-public-key 6D2Cma_Oa4KiaDtOnpmiiztuBhEKObNtEqFNJl-FBas \
+  --out /operator/researcher-i4
+diff -r /operator/researcher-i4 docs/relay-workers/researcher-i4    # nothing: byte-identical
+sha256sum /operator/researcher-i4/binding.json                       # = summary.json files.binding.json
 ```
+
+The identity must equal the reviewed record (`installation` in the inputs file): the generator
+refuses any other, checks the key with Relay's own Ed25519 validation, and requires Relay's
+`publicKeyFingerprint` (first 16 hex of sha256 over the base64url key text) to equal the approval's,
+`25070c63dada58d3`.
 
 The generator refuses another commit, a checkout with local changes, another checkout's `tsx`, any
 asset whose sha256 is not pinned, receipts that do not name the runtime manifest, a runtime manifest
@@ -335,8 +344,8 @@ definition Relay's `preparePodInstallation` refuses. It writes, as canonical JSO
 `binding.json`, `template-preparation-input.json` (Relay `scripts/prepare-worker-templates.ts` input
 that seals the same researcher template) and `summary.json` (the pins, template, policy and binding
 digests). Every binding value that is not derived is in the inputs file's `decisions`, reviewed with
-the draft ("Binding inputs that are decisions" above). The `diff` proves the binding is the reviewed draft's but for the
-installation ID. Then, from the Relay checkout, following its
+the committed output ("Binding inputs that are decisions" above). The `diff` proves the operator's
+definition and binding are exactly the reviewed ones. Then, from the Relay checkout, following its
 `docs/infrastructure-installation-preparation.md` (operator-owned input, not group/other writable,
 new output directory):
 
@@ -420,9 +429,9 @@ relay-installation-fence -o jsonpath='{.metadata.uid}'` equals it; the Lease
 **I10. Drop first-enrollment access.** Delete the enrollment Secret. Regenerate the bundle with
 `identity.fenceObjectUid` set and `references.enrollmentTokenSecret` removed (template too; the
 generator takes `--fence-object-uid <uid>` and reads the updated template), run `check --chart` and
-`import`, regenerate `docs/relay-workers/researcher-i4-draft/` with `--draft` (its `binding.json`
-comes out byte-identical; the draft never carries the fence UID, the generator refuses
-`--fence-object-uid` with `--draft`), and in the same PR remove the `enrollment-token` volume and
+`import`, regenerate `docs/relay-workers/researcher-i4/` with the I4 command plus
+`--fence-object-uid <uid>` (its `binding.json` comes out byte-identical; its `definition.json` gains
+the fence UID and loses the enrollment Secret reference), and in the same PR remove the `enrollment-token` volume and
 mount from `agent/deployment.yaml` and lower the control `secrets` quota from 5 to 4 (Relay's budget for one
 credential object). The tests require all four to agree.
 
@@ -520,8 +529,9 @@ while the slot holds no Pod (`kubectl -n relay-researcher-1 get pods` empty; the
 - `installation/kustomization.yaml`: `- execution-egress.yaml` becomes `- qualification-egress.yaml`;
 - the template's `executionEgressArtifacts[0].sha256` becomes
   `f6d3187c2fa3843ef54ed5d6026093c00a8fe487ab54263b7ce6db140d51282f`;
-- `docs/relay-workers/researcher-i4-draft/` regenerated with `--draft` (its `definition.json` pins
-  the egress digest; its `binding.json` must come out byte-identical).
+- `docs/relay-workers/researcher-i4/` regenerated with the command of its last regeneration (step
+  I10's, with `--fence-object-uid`): its `definition.json` pins the egress digest; its `binding.json`
+  must come out byte-identical.
 
 The tests refuse one without the others. Re-run step I4 (the generator reads the updated template,
 so the new `definition.json` carries the new digest and `binding.json` is byte-identical):

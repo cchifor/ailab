@@ -1,5 +1,5 @@
 {
-  "_comment": "Inputs of scripts/relay-researcher-binding.mts, which rebuilds the researcher installation's PodRuntimeBinding and the complete operator definition for runbook step I4 (docs/runbooks/relay-researcher-installation.md) with the pinned Relay checkout's own code. `release` pins the Relay v0.10.3 release (Gitea release 2142) and the sha256 of each asset the generator reads: it refuses any other bytes and any checkout whose HEAD is not sourceCommit. `derived` holds the values the reviewed template's binding leaf requires (researcher-installation-definition.json), plus the relay-gvisor RuntimeClass's scheduling.nodeSelector key ailab.io/runtime-gvisor (RuntimeClass admission merges it into every Pod, and Relay pins the placement selector exactly); scripts/tests/test_relay_researcher_binding.py compares them with the template, relay-workers.tf and the internal TLS and journal manifests. `decisions` holds every binding value that is NOT derived from the release, the template or a Relay constant: the owner rules on each (runbook, 'Binding inputs that are decisions'). `draft` is the placeholder identity of the committed draft output (researcher-i4-draft/); the generator refuses it outside --draft.",
+  "_comment": "Inputs of scripts/relay-researcher-binding.mts, which rebuilds the researcher installation's PodRuntimeBinding and the complete operator definition for runbook step I4 (docs/runbooks/relay-researcher-installation.md) with the pinned Relay checkout's own code. `release` pins the Relay v0.10.3 release (Gitea release 2142) and the sha256 of each asset the generator reads: it refuses any other bytes and any checkout whose HEAD is not sourceCommit. `derived` holds the values the reviewed template's binding leaf requires (researcher-installation-definition.json), plus the relay-gvisor RuntimeClass's scheduling.nodeSelector key ailab.io/runtime-gvisor (RuntimeClass admission merges it into every Pod, and Relay pins the placement selector exactly); scripts/tests/test_relay_researcher_binding.py compares them with the template, relay-workers.tf and the internal TLS and journal manifests. `decisions` holds every binding value that is NOT derived from the release, the template or a Relay constant, as the owner decided them on 2026-11-15 (runbook, 'Binding inputs that are decisions'). `installation` is the identity Relay approved at step I3 (public values; fingerprint = Relay's publicKeyFingerprint, the first 16 hex of sha256 over the base64url key text): the generator refuses any other installation ID or public key, and researcher-i4/ is its committed output for exactly this identity.",
   "schema": "ailab.relay-researcher-binding-inputs/v1",
   "release": {
     "tag": "v0.10.3",
@@ -32,7 +32,7 @@
     "templateEgressDestinations": []
   },
   "decisions": {
-    "supervisor": {"milliCpu": 100, "memoryMiB": 128, "ephemeralMiB": 64},
+    "supervisor": {"milliCpu": 250, "memoryMiB": 256, "ephemeralMiB": 64},
     "placement": {"tier": "sandboxed-pod", "binding": "relay-gvisor"},
     "template": {
       "templateId": "4da6f919-d660-472c-b503-4d8849fa60df",
@@ -44,8 +44,9 @@
     },
     "releaseApproval": "absent"
   },
-  "draft": {
-    "installationId": "ffffffff-ffff-4fff-bfff-ffffffffffff",
-    "installationPublicKey": "PLACEHOLDER-installation-public-key-from-I3"
+  "installation": {
+    "installationId": "b380ff7f-0716-478d-8b01-3d39f30e750b",
+    "installationPublicKey": "6D2Cma_Oa4KiaDtOnpmiiztuBhEKObNtEqFNJl-FBas",
+    "publicKeyFingerprint": "25070c63dada58d3"
   }
 }
