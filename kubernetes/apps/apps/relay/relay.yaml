@@ -132,6 +132,11 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
+      # FORWARD-ONLY: this image's migrate step applies 057-079, so reverting this file is NOT a
+      # rollback (v0.9.1 must never run against schema 79). Rollback = restore the earliest
+      # pre-migration generation of the rollout (else the H1 generation
+      # 20261115T154415Z-54b75ce7-418b-45cf-a5f3-77688d98c768), then a reviewed PR re-pins v0.9.1:
+      # docs/runbooks/relay-researcher-hub-upgrade.md, "Rollback: migrations are forward-only".
       # Relay v0.10.2, source 5400eebc55a9eddce50bfe366a798db780d56eed
       # release v0.10.2 / run 133590.
       - image: registry.chifor.me/relay/control-plane@sha256:994ecee12237cc70fc0e942644ca71331ec4b6d52b9953d7959a7caf9e5cbe5e
