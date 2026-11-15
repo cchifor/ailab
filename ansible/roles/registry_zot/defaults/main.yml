@@ -97,6 +97,7 @@ registry_zot_sync_dockerhub_prefixes:
   - "curlimages/**"
   - "docker/**"
   - "dpage/**"
+  - "edoburu/**"
   - "gitea/**"
   - "grafana/**"
   - "hashicorp/**"
