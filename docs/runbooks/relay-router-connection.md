@@ -107,9 +107,12 @@ public keys:
 - tenant `00000000-0000-4000-8000-000000000001`, Router namespace `default` (every live route and key);
 - `routes: ["relay-researcher-luna"]`, `access: ["api"]`, `maxLifetimeSeconds: 86400`, `maxKeys: 4`;
 - `workerBudgets: {maxTokens: 8 × (I + 8192), maxAuthoritySeconds: 120, maxRequests: 8}` (comment
-  120818 D). `maxTokens` is the placeholder string `operator-sets-8x(I+8192)` until qualification
-  proves I, the provider-enforced input bound. A string fails the Router's schema, so the trust file
-  is refused outright, and the activation test refuses including the component with it.
+  120818 D), set to `maxTokens: 7441536`: I = 922,000, the gpt-6-luna input bound the owner accepted
+  (comment 122095), so 8 × (922,000 + 8,192). It is per allocation; the Router schema allows up to
+  1e9. The Router counts requests against `maxRequests` only when an authorization carries a
+  `requestLimit`: candidate runs do; the ordinary canary does from Relay v0.10.3 (owner decision U10,
+  comment 124122). The activation test still refuses including the component with the old
+  placeholder string.
 
 `maxLifetimeSeconds` 86400 and `maxKeys` 4 are conservative ceilings for one worker at a time with
 a rotation overlap: review them against the researcher pool's lifetime before step 6. The pool

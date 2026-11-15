@@ -49,6 +49,7 @@ RECORD = {
     "baoPrefix": "relay-router/escrow",
 }
 PLACEHOLDER = "operator-sets-8x(I+8192)"
+INPUT_BOUND = 922_000  # relay#277 comment 122095
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 ROUTER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,127}$")  # relay-keys `id`, Relay `issuer`
 
@@ -284,11 +285,11 @@ class RouterTrust(unittest.TestCase):
         self.assertEqual(budgets["maxAuthoritySeconds"], 120)  # relay#277 comment 120818 D
         self.assertEqual(budgets["maxRequests"], 8)
         tokens = budgets["maxTokens"]
-        if tokens != PLACEHOLDER:
-            self.assertIsInstance(tokens, int)
-            # 8 x (I + 8192), with I the provider-enforced input bound, at most the 1,000,000 cap.
-            self.assertEqual(tokens % 8, 0)
-            self.assertTrue(8 * (1 + 8192) <= tokens <= 1_000_000, tokens)
+        self.assertNotEqual(tokens, PLACEHOLDER)
+        self.assertIsInstance(tokens, int)
+        # 8 x (I + 8192) per allocation (comment 120818 D), with I = 922,000, the gpt-6-luna input
+        # bound the owner accepted (relay#277 comment 122095). The Router schema allows up to 1e9.
+        self.assertEqual(tokens, 8 * (INPUT_BOUND + 8192))
 
     def test_component_shape(self):
         k = yaml.safe_load((ROUTER_COMPONENT / "kustomization.yaml").read_text(encoding="utf-8"))
