@@ -283,8 +283,14 @@ Readback: the Pod started; the budget files' SHA-256 inside the Pod equal the Se
 no `worker_budget_authority_unavailable`. The budget authority does **not** start here, and is not
 expected to until H7: it needs a profile source (H7's candidate or canary file, later H4b's
 registry) as well as H6's Router connection. With no profile configuration at all Relay skips the
-startup without any warning (Relay `deploy/worker-budget-ledger/README.md`: "absence of a warning is
-not evidence that the authority is enabled"); its state becomes visible with H6's metrics.
+startup without any warning. The warning comes only from a failing profile load (`profiles-unavailable`)
+or a failing `startWorkerBudgetAuthority`, which validates the ledger settings (`ledger-config-invalid`).
+With no profile file and no candidate or canary authority the load returns nothing without failing
+(Relay `server/workers/runtime-session/profiles.ts:430-433`), and the ledger start runs only
+`if (workerProfiles)` (`server/main.ts:337`), so neither happens
+(`deploy/worker-budget-ledger/README.md:118-121`: "An entirely absent worker-profile configuration
+disables budget startup without that warning, even when ledger settings are present"). Its state
+becomes visible with H6's metrics.
 
 ### H5. Escrow token
 
@@ -415,7 +421,7 @@ failed to load or validate); budget startup is still `started`.
 | Q1-Q6 | internal TLS terminators (`relay-internal-tls`), then the slot's qualification egress stage (Q6 is the drill configuration) | I10; the release's G3 binding and CA pins | Q5: both Certificates Ready and chaining to the pinned root, Services `10.96.0.40`/`.41`, live policy digest `f6d3187c…282f`. The third alias, the candidate journal's Service at `10.96.0.42`, is not created here: it comes with the journal itself ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) before H7's candidate files |
 | journal | the independent candidate journal ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) | per that runbook | its Service on exactly `10.96.0.42` (Q2's `pinned` check) |
 | File B | budget ledger step 7's `qualifications` row (ailab #1753 comment 124071) | the final Router rollout read back | the stored policy re-verified, its `tokenPolicyDigest` recorded for the signed runs |
-| H7 | candidate files (the canary file follows the approval; the qualification file is general activation, step 11) | Q5's readback, the journal at `10.96.0.42`, File B | budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
+| H7 | candidate files (the canary file follows the approval; the qualification file is general activation, step 11) | H6, Q5's readback, the journal at `10.96.0.42`, File B | budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
 | scenarios | the nineteen qualification scenarios | H7's candidate files | the nineteen reports, independently accepted |
 | approval | a genuine `ReleaseApproval` | the nineteen reports and the other release gates accepted | its `workerTemplates` subject asserts the nine passed gates |
 | canary | H7's canary file | the approval (its permit carries it) | the canary's reviewed report |

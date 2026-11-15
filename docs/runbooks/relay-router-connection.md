@@ -300,7 +300,7 @@ Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authorit
    (`GET /admin/v1/plugins` active, `Worker budget authority available`).
 8. **Researcher release deployed.** The reviewed Relay release that reads these settings (worker budget
    client, installations), through its own PRs and pre-migration backup. Readback per that release's
-   runbook ([relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md), H2-H5). The pinned
+   runbook ([relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md), H2-H4a). The pinned
    profile registry is **not** a prerequisite of the connection: its entries need the genuine release
    approval that follows qualification, so it comes after step 10 (hub upgrade H4b). Until then the
    `relay-researcher` profile (`connectionId babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`,

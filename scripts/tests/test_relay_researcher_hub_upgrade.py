@@ -88,15 +88,19 @@ def order_violations(comps: set[str]) -> list[str]:
 
     The control plane does not need the profile registry: H6 comes long before H4b, whose entries
     carry the genuine release approval issued only after qualification. That approval is not visible
-    here; Relay's own registry schema refuses an entry without one."""
+    here; Relay's own registry schema refuses an entry without one. H6 still follows H3 and H4a, so
+    the control plane requires the installations (and through them the recovery generation) and the
+    budget client explicitly, no longer through the registry."""
     out = []
     if "relay-infrastructure-installations" in comps and "relay-restore-fencing" not in comps:
         out.append("installations without the recovery generation (step H3)")
     if "relay-worker-profiles" in comps and not {"relay-infrastructure-installations",
                                                  "relay-worker-budget-client"} <= comps:
         out.append("profiles without installations and the budget client (steps H3, H4a before H4b)")
-    if "relay-agent-control-plane" in comps and "relay-router-connection" not in comps:
-        out.append("control plane without the Router connection (step H6)")
+    if "relay-agent-control-plane" in comps and not {"relay-router-connection", "relay-infrastructure-installations",
+                                                     "relay-worker-budget-client"} <= comps:
+        out.append("control plane without the Router connection, installations and the budget client "
+                   "(step H6 follows H3 and H4a)")
     if "relay-agent-control-plane" in comps and comps & {"relay-gitea-authority", "relay-notifications"}:
         out.append("control plane with Gitea authority or notifications (owner decision G2)")
     return out
@@ -141,18 +145,16 @@ class InclusionGate(unittest.TestCase):
         h4a = h3 | {"relay-worker-budget-client"}                       # the budget client, no profiles
         h6 = h4a | {"relay-router-connection", "relay-agent-control-plane",
                     "relay-control-monitoring", "relay-worker-monitoring"}  # still no profiles
-        # H7's candidate configuration: its own component, not staged yet (a stand-in name). The
-        # predicate places no rule on it; the point is that it needs no profile registry.
-        h7 = h6 | {"relay-worker-candidate"}
+        # H7's candidate, canary and qualification files are their own components, none staged yet,
+        # so the H6 state holds through H7 here; H4b adds the registry after the release approval.
+        h4b = h6 | {"relay-worker-profiles"}
         ok = [
             set(),
             {"relay-restore-fencing"},                                  # a restore, or the H3 rollback
             h3,
             h4a,
             h6,
-            h7,
-            h7 | {"relay-worker-profiles"},                             # H4b, after the release approval
-            h6 | {"relay-worker-profiles"},                             # H4b once the candidate files are gone
+            h4b,
         ]
         for comps in ok:
             self.assertEqual(order_violations(comps), [], comps)
@@ -161,10 +163,12 @@ class InclusionGate(unittest.TestCase):
             {"relay-restore-fencing", "relay-worker-profiles", "relay-worker-budget-client"},
             {"relay-restore-fencing", "relay-infrastructure-installations", "relay-worker-profiles"},
             {"relay-restore-fencing", "relay-infrastructure-installations", "relay-agent-control-plane"},
-            h6 - {"relay-router-connection"},
-            (h6 - {"relay-worker-budget-client"}) | {"relay-worker-profiles"},
-            ok[-1] | {"relay-gitea-authority"},
-            ok[-1] | {"relay-notifications"},
+            {"relay-agent-control-plane", "relay-router-connection"},   # H6 with nothing before it
+            *(h6 - {missing} for missing in ("relay-restore-fencing", "relay-infrastructure-installations",
+                                             "relay-worker-budget-client", "relay-router-connection")),
+            h4b - {"relay-worker-budget-client"},
+            h4b | {"relay-gitea-authority"},
+            h4b | {"relay-notifications"},
         ]
         for comps in bad:
             self.assertTrue(order_violations(comps), comps)
