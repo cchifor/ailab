@@ -107,9 +107,12 @@ public keys:
 - tenant `00000000-0000-4000-8000-000000000001`, Router namespace `default` (every live route and key);
 - `routes: ["relay-researcher-luna"]`, `access: ["api"]`, `maxLifetimeSeconds: 86400`, `maxKeys: 4`;
 - `workerBudgets: {maxTokens: 8 × (I + 8192), maxAuthoritySeconds: 120, maxRequests: 8}` (comment
-  120818 D). `maxTokens` is the placeholder string `operator-sets-8x(I+8192)` until qualification
-  proves I, the provider-enforced input bound. A string fails the Router's schema, so the trust file
-  is refused outright, and the activation test refuses including the component with it.
+  120818 D), set to `maxTokens: 7441536`: I = 922,000, the gpt-6-luna input bound the owner accepted
+  (comment 122095), so 8 × (922,000 + 8,192). It is per allocation; the Router schema allows up to
+  1e9. The Router counts requests against `maxRequests` only when an authorization carries a
+  `requestLimit`: candidate runs do; the ordinary canary does from Relay v0.10.3 (owner decision U10,
+  comment 124122). The activation test still refuses including the component with the old
+  placeholder string.
 
 `maxLifetimeSeconds` 86400 and `maxKeys` 4 are conservative ceilings for one worker at a time with
 a rotation overlap: review them against the researcher pool's lifetime before step 6. The pool
@@ -280,9 +283,13 @@ Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authorit
    qualification proves I (comment 120818 A/B): the `qualifications` rows (keyed on this digest) and
    the `clients` row for `relay_budget_allocator` (issuer `relay.chifor.me`, connection
    `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`, this digest, tenant `00000000-0000-4000-8000-000000000001`,
-   `max_tokens` 8 × (I + 8192), `max_requests` 8, `max_authority_ms` 120000). Then one PR sets
-   `maxTokens` to the same 8 × (I + 8192), includes `components/llm-router-relay-keys-trust` and
-   amends `test_relay_v060_activation_gate.py` for that component only. Readback:
+   `max_tokens` 8 × (I + 8192), `max_requests` 8, `max_authority_ms` 120000). The ledger's
+   `max_requests` applies only to scoped allocations (candidate runs); the canary's unscoped
+   allocation is capped at 8 requests by the Router from the `requestLimit` Relay v0.10.3 sends
+   (owner decision U10, relay#277 comment 124122). The trust `maxTokens` is already
+   8 × (922,000 + 8,192) = 7441536 (ailab #1778), so the step-6 PR only includes
+   `components/llm-router-relay-keys-trust` and amends `test_relay_v060_activation_gate.py` for that
+   component only. Readback:
    `SELECT login, issuer, connection_id, deployment_digest, tenant_ids, max_tokens, max_requests, max_authority_ms FROM worker_budget.clients;`;
    after the rollout an unsigned `POST https://router.chifor.me/register/relay-keys` is refused with
    403 `RELAY_DELEGATION_DENIED` (before inclusion the plugin does not serve that path),
