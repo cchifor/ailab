@@ -359,7 +359,7 @@ Readback of the candidate files, the budget-started readback that H6 cannot give
 shows budget startup `started`; `RelayWorkerBudgetStartupFailed` has cleared; the log has neither
 `worker_budget_authority_unavailable` nor `worker_candidate_unavailable`. The candidate authority is
 the first profile source: `loadWorkerRuntimeProfiles` builds the runtime profiles from it alone, on an
-empty registry (Relay `server/workers/runtime-session/profiles.ts:431`), and Relay then starts the
+empty registry (Relay `server/workers/runtime-session/profiles.ts:430-433`, the candidate or canary branch), and Relay then starts the
 budget authority with H6's Router connection.
 
 Then, in this order:
@@ -387,7 +387,7 @@ trial. The canary does not need it. Why it cannot come earlier (Relay v0.10.3, `
   token-policy digests from the signed run (`profiles.ts:149`), the canary from its permit
   (`server/workers/ordinary-canary/authority.ts:283`).
 - **The budget authority needs a profile source, but not this one.** With no registry and no candidate
-  or canary file, `loadWorkerRuntimeProfiles` returns nothing (`profiles.ts:423`) and Relay never
+  or canary file, `loadWorkerRuntimeProfiles` returns nothing (`profiles.ts:430-433`) and Relay never
   starts the budget authority (`server/main.ts:337`), so the startup metric reads `start_failed`
   (`server/main.ts:420`, `deploy/worker-budget-ledger/README.md`). H7's candidate file starts it on an
   empty registry.
