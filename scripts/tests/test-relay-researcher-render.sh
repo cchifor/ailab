@@ -6,6 +6,9 @@
 #   * installation/ builds: exactly the two namespaces (restricted PSA, retention), their quotas,
 #     limits and default-deny, the slot's one allow-list and the deny gate, with the pins component's
 #     values substituted (placeholders today) and no pins ConfigMap in the output;
+#   * BOTH egress stages build (owner decision G3): the tree as committed, and a copy of it with the
+#     other stage selected, each rendering exactly that stage's relay-researcher-egress and nothing
+#     else different;
 #   * agent/ builds: the agent objects, the hashed config ConfigMap equal byte for byte to
 #     agent/config.json, the immutable hashed trust ConfigMap equal byte for byte to the pinned Mozilla
 #     bundle (sha256 427c0642...), the Deployment's volumes following both hashed names, and the image
@@ -25,6 +28,18 @@ build() { # <dir-in-container> <output>
 }
 build /repo/kubernetes/apps/relay-researcher/installation "$WORK/out/installation.yaml"
 build /repo/kubernetes/apps/relay-researcher/agent "$WORK/out/agent.yaml"
+# The other egress stage: a copy of the tree with the one stage line switched.
+ALT="$WORK/alt/relay-researcher"
+mkdir -p "$WORK/alt"
+cp -r "$REPO_ROOT/kubernetes/apps/relay-researcher" "$ALT"
+if grep -qx -- '- execution-egress.yaml' "$ALT/installation/kustomization.yaml"; then
+  sed -i 's#^- execution-egress.yaml$#- qualification-egress.yaml#' "$ALT/installation/kustomization.yaml"
+else
+  sed -i 's#^- qualification-egress.yaml$#- execution-egress.yaml#' "$ALT/installation/kustomization.yaml"
+fi
+chmod -R a+rX "$WORK"
+docker run --rm --network none -v "$WORK/alt:/alt:ro" -w / "$KUSTOMIZE_IMAGE" build /alt/relay-researcher/installation \
+  > "$WORK/out/installation-other-stage.yaml"
 chmod -R a+rX "$WORK"
 
 docker run --rm -v "$WORK/out:/out:ro" "$KUBECONFORM_IMAGE" \
@@ -32,7 +47,7 @@ docker run --rm -v "$WORK/out:/out:ro" "$KUBECONFORM_IMAGE" \
   -schema-location default \
   -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
   -skip Secret \
-  /out/installation.yaml /out/agent.yaml
+  /out/installation.yaml /out/installation-other-stage.yaml /out/agent.yaml
 
 PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
 "$PY" - "$WORK/out" "$REPO_ROOT" <<'PY'
@@ -70,6 +85,22 @@ for ns in ("relay-infra-control", "relay-researcher-1"):
 assert inst[("ValidatingAdmissionPolicyBinding", None, gate)]["spec"]["policyName"] == gate
 assert inst[("ResourceQuota", "relay-researcher-1", "relay-enrollment-quota")]["spec"]["hard"]["pods"] == "0"
 print(f"installation: {len(inst)} objects, gate {gate}, slot Pod quota 0")
+
+# --- the two egress stages: each build renders exactly its stage's policy, nothing else differs
+other = load("installation-other-stage.yaml")
+assert set(other) == set(inst), sorted(set(other) ^ set(inst))
+key = ("NetworkPolicy", "relay-researcher-1", "relay-researcher-egress")
+for k in inst:
+    if k != key:
+        assert inst[k] == other[k], f"switching the egress stage changed {k}"
+stages = {}
+for stage, name in (("enrollment", "execution-egress.yaml"), ("qualification", "qualification-egress.yaml")):
+    (doc,) = [d for d in yaml.safe_load_all(open(f"{tree}/installation/{name}", encoding="utf-8")) if d]
+    stages[stage] = doc
+rendered = sorted([inst[key], other[key]], key=lambda d: json.dumps(d, sort_keys=True))
+assert rendered == sorted(stages.values(), key=lambda d: json.dumps(d, sort_keys=True)), "a stage rendered differently"
+assert "ipBlock" not in json.dumps(stages["qualification"]) and "kube-dns" not in json.dumps(stages["qualification"])
+print("egress stages: enrollment and qualification both render, and only relay-researcher-egress differs")
 
 # --- agent stage
 agent = load("agent.yaml")

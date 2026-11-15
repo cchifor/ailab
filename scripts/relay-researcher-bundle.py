@@ -14,7 +14,11 @@ installation is exactly what was reviewed here, and then copies the only two thi
          not an OPERATOR-FILLS leaf must be identical, every OPERATOR-FILLS leaf must be filled; the
          tool's 10-namespaces, 20-containment and 21-admission-deny objects against
          kubernetes/apps/relay-researcher/installation with the bundle's installation ID; the
-         execution egress artifact digest against the committed allow-list; 30-agent-values.json and
+         execution egress artifact digest against the egress stage the installation tree includes
+         (execution-egress.yaml or qualification-egress.yaml, exactly one); the binding's G3 fields
+         (hostAliases equal to the pinned internal TLS and journal Service addresses, the hub CA and the
+         templates' Router/communication CA pins equal to docs/relay-workers/researcher-runtime-ca.crt),
+         required in both stages because the binding never changes between them; 30-agent-values.json and
          31-agent-config.json against the committed agent objects and config, and the generated
          agent policy against the definition it came from (installationPolicy verbatim, podTiers and
          allowedTemplates from the binding, the same policy in values and config, report.json's
@@ -47,6 +51,14 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 TREE = ROOT / "kubernetes/apps/relay-researcher"
 TEMPLATE = ROOT / "docs/relay-workers/researcher-installation-definition.json"
+EGRESS_STAGES = {"execution-egress.yaml": "enrollment", "qualification-egress.yaml": "qualification"}
+# Owner decision G3 (relay#277 comment 122379): the qualification stage's workers reach these three
+# pinned Services through measured hostAliases, and trust only the ailab root CA for them.
+INTERNAL_TLS_TERMINATORS = ROOT / "kubernetes/apps/relay-internal-tls/terminators.yaml"
+JOURNAL_RENDER = ROOT / "kubernetes/optional/relay-candidate-journal/render.py"
+RUNTIME_CA = ROOT / "docs/relay-workers/researcher-runtime-ca.crt"
+HUB_CA_PATH = "/etc/relay/hub-ca.pem"
+ROUTER_ORIGIN = "https://router.chifor.me"
 PLACEHOLDER = "OPERATOR-FILLS"
 BUNDLE_FILES = (
     "00-definition.json",
@@ -138,6 +150,66 @@ def compare_definition(expected, actual, path: str = "") -> None:
         return
     if expected != actual:
         fail(f"definition {path} differs from the reviewed template: {actual!r} != {expected!r}")
+
+
+def egress_stage() -> tuple[str, Path]:
+    """The one egress stage kubernetes/apps/relay-researcher/installation includes."""
+    resources = yaml.safe_load((TREE / "installation/kustomization.yaml").read_text(encoding="utf-8"))["resources"]
+    stages = [r for r in resources if r in EGRESS_STAGES]
+    if len(stages) != 1:
+        fail(f"the installation tree must include exactly one egress stage, found {stages}")
+    return EGRESS_STAGES[stages[0]], TREE / "installation" / stages[0]
+
+
+def internal_tls_addresses() -> dict:
+    """The pinned ClusterIPs, read from the manifests that create them (never a second copy here)."""
+    services = {d["metadata"]["name"]: d["spec"].get("clusterIP")
+                for d in load_yaml_docs(INTERNAL_TLS_TERMINATORS) if d["kind"] == "Service"}
+    journal = re.findall(r"^CLUSTER_IP = '([0-9.]+)'$", JOURNAL_RENDER.read_text(encoding="utf-8"), re.M)
+    if len(journal) != 1:
+        fail("kubernetes/optional/relay-candidate-journal/render.py has no single CLUSTER_IP")
+    return {"hub": services.get("relay-hub-tls"), "router": services.get("relay-router-tls"),
+            "candidateJournal": journal[0]}
+
+
+def check_internal_tls(definition: dict, stage: str) -> None:
+    """G3 in the release's binding: exactly the pinned addresses, the hub origin and CA of the runtime,
+    and every worker template's Router and communication clients pinned to the same CA. Required in
+    BOTH stages: the binding is never changed between them (qualification receipts bind the exact
+    binding), so an enrollment-stage bundle without these fields could never reach the qualification
+    stage; it is refused at step I4, not discovered at Q4."""
+    binding = definition["binding"]
+    if not isinstance(binding, dict):
+        fail("the definition's binding is not an object")
+    aliases = binding.get("hostAliases")
+    if aliases is None:
+        fail(f"the binding has no hostAliases: the {stage}-stage binding must already carry G3 "
+             "(the qualification stage reuses it unchanged and its slot has no DNS)")
+    if aliases != internal_tls_addresses():
+        fail(f"binding hostAliases {aliases!r} are not the pinned internal TLS and journal addresses")
+    ca_sha = hashlib.sha256(RUNTIME_CA.read_bytes()).hexdigest()
+    runtime = binding.get("runtime")
+    manifest = runtime.get("manifest") if isinstance(runtime, dict) else None
+    if not isinstance(manifest, dict):
+        fail("the binding has hostAliases but no runtime manifest")
+    supervisor = manifest.get("supervisorConfig", {})
+    artifacts = manifest.get("artifacts", [])
+    hub_ca = [a for a in artifacts if a.get("role") == "hub-ca"]
+    if (supervisor.get("hubOrigin") != definition["hub"]["origin"] or supervisor.get("hubCaPath") != HUB_CA_PATH
+            or supervisor.get("hubCaSha256") != ca_sha or len(hub_ca) != 1 or hub_ca[0].get("sha256") != ca_sha
+            or hub_ca[0].get("installPath") != HUB_CA_PATH):
+        fail("the runtime's hub origin or hub CA is not relay.chifor.me with the ailab root CA "
+             "(docs/relay-workers/researcher-runtime-ca.crt)")
+    pinned = {a.get("installPath") for a in artifacts if a.get("sha256") == ca_sha}
+    templates = manifest.get("holderProfiles", {}).get("workerTemplates") or []
+    if not templates:
+        fail("the runtime has hostAliases but no worker templates")
+    for t in templates:
+        holder = t.get("definition", {}).get("holder", {})
+        for client, origin in (("router", ROUTER_ORIGIN), ("communication", definition["hub"]["origin"])):
+            policy = holder.get(client) or {}
+            if policy.get("origin") != origin or policy.get("caSha256") != ca_sha or policy.get("caFile") not in pinned:
+                fail(f"a worker template's holder.{client} is not {origin} pinned to a packaged copy of the ailab root CA")
 
 
 def with_installation_id(docs: list[dict], installation_id: str) -> list[dict]:
@@ -378,11 +450,13 @@ def check(bundle: Path, chart: Path | None) -> dict:
                     load_yaml_docs(installation / "containment.yaml"))
     compare_objects("21-admission-deny.json", tool_list(bundle, "21-admission-deny.json"),
                     with_installation_id(load_yaml_docs(installation / "admission-deny.yaml"), installation_id))
-    (egress,) = load_yaml_docs(installation / "execution-egress.yaml")
+    stage, egress_path = egress_stage()
+    (egress,) = load_yaml_docs(egress_path)
     artifacts = [{"namespace": egress["metadata"]["namespace"], "name": egress["metadata"]["name"],
                   "sha256": measurement_digest(egress)}]
     if definition["executionEgressArtifacts"] != artifacts:
-        fail("executionEgressArtifacts does not name the committed allow-list and its digest")
+        fail(f"executionEgressArtifacts does not name the included {stage}-stage allow-list and its digest")
+    check_internal_tls(definition, stage)
 
     agent = committed_agent()
     values = json.loads((bundle / "30-agent-values.json").read_text(encoding="utf-8"))

@@ -18,6 +18,7 @@ import ipaddress
 import json
 import re
 import tempfile
+from unittest import mock
 import unittest
 from pathlib import Path
 
@@ -29,6 +30,17 @@ CLUSTER = ROOT / "kubernetes/apps/clusters/ai"
 TEMPLATE = ROOT / "docs/relay-workers/researcher-installation-definition.json"
 CONTROL, SLOT = "relay-infra-control", "relay-researcher-1"
 MOZILLA_SHA256 = "427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285"
+# The slot's two egress stages (owner decision G3): exactly one is included; the definition pins its digest.
+# One file per stage, side by side; the enrollment file is never edited in place.
+EGRESS = {"enrollment": TREE / "installation/execution-egress.yaml",
+          "qualification": TREE / "installation/qualification-egress.yaml"}
+ENROLLMENT_EGRESS_SHA256 = "aa11c2299af12acc886696480b5800ac0b568a0b6e2813609d4ed2f7eea38405"
+QUALIFICATION_EGRESS_SHA256 = "f6d3187c2fa3843ef54ed5d6026093c00a8fe487ab54263b7ce6db140d51282f"
+# The ailab root CA the qualification-stage runtime pins (hub-ca.pem, Router and communication caFile).
+RUNTIME_CA = ROOT / "docs/relay-workers/researcher-runtime-ca.crt"
+RUNTIME_CA_SHA256 = "3d109e83f3e144daf1022cff5af22cbeda668db9bb1f4b25fc42f179254ad4c3"
+INTERNAL_TLS = ROOT / "kubernetes/apps/relay-internal-tls"
+JOURNAL_RENDER = ROOT / "kubernetes/optional/relay-candidate-journal/render.py"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 LABELS = {
     "app.kubernetes.io/name": "relay-infrastructure-agent",
@@ -76,6 +88,16 @@ def flux_kustomizations_for_tree() -> dict:
             if doc.get("kind") == "Kustomization" and "relay-researcher" in str(doc.get("spec", {}).get("path", "")):
                 found[doc["spec"]["path"]] = doc
     return found
+
+
+def installation_resources() -> list[str]:
+    return yaml.safe_load((TREE / "installation/kustomization.yaml").read_text(encoding="utf-8"))["resources"]
+
+
+def selected_egress() -> Path:
+    stages = [r for r in installation_resources() if r in {p.name for p in EGRESS.values()}]
+    assert len(stages) == 1, f"exactly one egress stage must be included, found {stages}"
+    return TREE / "installation" / stages[0]
 
 
 class InclusionGate(unittest.TestCase):
@@ -130,7 +152,7 @@ class InclusionGate(unittest.TestCase):
 
     def test_no_literal_copy_of_a_pin(self):
         # Every copy is derived by ../pins: the objects carry the marker, never a value.
-        for path in sorted((TREE / "installation").glob("*.yaml")) + sorted((TREE / "agent").glob("*.yaml")):
+        for path in sorted((TREE / "installation").rglob("*.yaml")) + sorted((TREE / "agent").glob("*.yaml")):
             text = path.read_text(encoding="utf-8")
             for value in pins().values():
                 self.assertNotIn(value, text, f"{path} holds a literal pin")
@@ -141,8 +163,8 @@ class InstallationStage(unittest.TestCase):
 
     def setUp(self):
         self.d = template()
-        self.objects = by_key([o for f in sorted((TREE / "installation").glob("*.yaml"))
-                               if f.name != "kustomization.yaml" for o in docs(f)])
+        # What the tree renders: its resources, so exactly the INCLUDED egress stage.
+        self.objects = by_key([o for f in installation_resources() for o in docs(TREE / "installation" / f)])
 
     def test_namespaces(self):
         nss = {k[2]: v for k, v in self.objects.items() if k[0] == "Namespace"}
@@ -217,8 +239,8 @@ class InstallationStage(unittest.TestCase):
                 if "NetworkPolicy" in str(doc.get("kind")):
                     self.assertNotEqual(doc["metadata"].get("namespace"), SLOT, path)
 
-    def test_allow_list_is_dns_plus_the_two_public_edge_addresses(self):
-        egress = self.objects[("NetworkPolicy", SLOT, "relay-researcher-egress")]
+    def test_enrollment_allow_list_is_dns_plus_the_two_public_edge_addresses(self):
+        (egress,) = docs(EGRESS["enrollment"])
         spec = egress["spec"]
         self.assertEqual(spec["podSelector"], {})
         self.assertEqual(spec["policyTypes"], ["Egress"])
@@ -238,7 +260,7 @@ class InstallationStage(unittest.TestCase):
 
     def test_cloudflare_allow_list_is_marked_enrollment_stage_only(self):
         # Owner decision G3: qualification moves to internal TLS terminators (pending series).
-        text = (TREE / "installation/execution-egress.yaml").read_text(encoding="utf-8")
+        text = EGRESS["enrollment"].read_text(encoding="utf-8")
         self.assertTrue(text.startswith("# ENROLLMENT-STAGE ONLY."), "the header must say so first")
 
     def test_ceilings_admit_relay_researcher_baseline(self):
@@ -262,9 +284,8 @@ class InstallationStage(unittest.TestCase):
         self.assertLessEqual(set(baseline["egressDestinations"]), set(policy["allowedEgressDestinations"]))
 
     def test_egress_artifact_digest(self):
-        egress = self.objects[("NetworkPolicy", SLOT, "relay-researcher-egress")]
-        # The measurement normalizes empty collections and defaulted protocols away; the committed
-        # object has neither, so Relay's digest equals the plain canonical hash.
+        # The measurement normalizes empty collections and defaulted protocols away; neither stage has
+        # either, so Relay's digest equals the plain canonical hash.
         def walk(value):
             if isinstance(value, dict):
                 for k, v in value.items():
@@ -275,14 +296,116 @@ class InstallationStage(unittest.TestCase):
                 self.assertTrue(value)
                 for v in value:
                     walk(v)
-        walk(egress["spec"]["egress"])
-        for rule in egress["spec"]["egress"]:
-            for port in rule["ports"]:
-                self.assertIn("protocol", port)
-        digest = bundle_module().measurement_digest(egress)
+        measure = bundle_module().measurement_digest
+        for name, want in (("enrollment", ENROLLMENT_EGRESS_SHA256),
+                           ("qualification", QUALIFICATION_EGRESS_SHA256)):
+            (egress,) = docs(EGRESS[name])
+            self.assertEqual((egress["metadata"]["name"], egress["metadata"]["namespace"]),
+                             ("relay-researcher-egress", SLOT), name)
+            walk(egress["spec"]["egress"])
+            for rule in egress["spec"]["egress"]:
+                for port in rule["ports"]:
+                    self.assertIn("protocol", port)
+            self.assertEqual(measure(egress), want, name)
+        self.assertIn(QUALIFICATION_EGRESS_SHA256, EGRESS["qualification"].read_text(encoding="utf-8"))
+        # The definition pins the INCLUDED stage, and the tree renders that one object.
+        egress = self.objects[("NetworkPolicy", SLOT, "relay-researcher-egress")]
+        (selected,) = docs(selected_egress())
+        self.assertEqual(egress, selected)
         self.assertEqual(self.d["executionEgressArtifacts"],
-                         [{"namespace": SLOT, "name": "relay-researcher-egress", "sha256": digest}])
-        self.assertEqual(digest, "aa11c2299af12acc886696480b5800ac0b568a0b6e2813609d4ed2f7eea38405")
+                         [{"namespace": SLOT, "name": "relay-researcher-egress", "sha256": measure(selected)}])
+
+
+def journal_render():
+    spec = importlib.util.spec_from_file_location("relay_candidate_journal_render", JOURNAL_RENDER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class QualificationStage(unittest.TestCase):
+    """Owner decision G3: the qualification-stage slot reaches the hub, the Router and the candidate
+    journal through three distinct pinned endpoints, one rule each, and nothing else (no DNS)."""
+
+    def setUp(self):
+        (self.policy,) = docs(EGRESS["qualification"])
+        tls = {(d["kind"], d["metadata"]["name"]): d for f in ("terminators.yaml", "network-policy.yaml")
+               for d in docs(INTERNAL_TLS / f)}
+        journal = journal_render()
+        # endpoint -> (namespace, Pod labels, container port, Service ClusterIP)
+        self.endpoints = {}
+        for name in ("relay-hub-tls", "relay-router-tls"):
+            dep, svc = tls[("Deployment", name)], tls[("Service", name)]
+            (caddy,) = [c for c in dep["spec"]["template"]["spec"]["containers"] if c["name"] == "caddy"]
+            self.endpoints[name] = (dep["metadata"]["namespace"], dep["spec"]["template"]["metadata"]["labels"],
+                                    caddy["ports"][0]["containerPort"], svc["spec"]["clusterIP"])
+            self.assertEqual(svc["spec"]["ports"], [{"name": "https", "protocol": "TCP", "port": 443,
+                                                     "targetPort": caddy["ports"][0]["containerPort"]}])
+            ingress = tls[("NetworkPolicy", name)]["spec"]["ingress"]
+            self.assertEqual(ingress[0]["from"], [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": SLOT}},
+                                                   "podSelector": {"matchLabels": {"relay.infrastructure/managed": "true"}}}])
+        self.endpoints["relay-candidate-journal"] = (journal.SERVICE_NS, {"app": journal.NAME}, 8443, journal.CLUSTER_IP)
+        self.journal = journal
+
+    def test_three_rules_in_order_no_dns_no_cidr(self):
+        spec = self.policy["spec"]
+        # Every Pod in the slot: Relay gives candidate Pods no label of their own, so rule 2 cannot be
+        # narrowed to them (accepted, relay#277 comment 123028 condition 1; runbook steps Q2 and Q7).
+        self.assertEqual(spec["podSelector"], {})
+        self.assertEqual(spec["policyTypes"], ["Egress"])
+        expected = []
+        for name in ("relay-hub-tls", "relay-router-tls", "relay-candidate-journal"):
+            ns, labels, port, _ = self.endpoints[name]
+            selector = {"app.kubernetes.io/name": name} if name != "relay-candidate-journal" else {"app": name}
+            self.assertTrue(all(labels.get(k) == v for k, v in selector.items()), name)
+            expected.append({"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": ns}},
+                                     "podSelector": {"matchLabels": selector}}],
+                             "ports": [{"protocol": "TCP", "port": port}]})
+        self.assertEqual(spec["egress"], expected)
+        text = json.dumps(spec)
+        for forbidden in ("ipBlock", "kube-dns", "kube-system", '"port": 53'):
+            self.assertNotIn(forbidden, text)
+
+    def test_each_rule_admits_exactly_its_own_endpoint(self):
+        # The hub-partition driver removes rule 0 and keeps rule 1: separable only if no rule's peer
+        # matches another endpoint's Pods (Relay derives this from the live objects; here from source).
+        def admits(rule, endpoint):
+            ns, labels, port, _ = self.endpoints[endpoint]
+            return any(p["namespaceSelector"]["matchLabels"] == {"kubernetes.io/metadata.name": ns}
+                       and all(labels.get(k) == v for k, v in p["podSelector"]["matchLabels"].items())
+                       for p in rule["to"]) and any(q["port"] == port for q in rule["ports"])
+        names = list(self.endpoints)
+        for i, rule in enumerate(self.policy["spec"]["egress"]):
+            self.assertEqual([n for n in names if admits(rule, n)], [names[i]], f"rule {i}")
+
+    def test_addresses_are_the_pinned_services_and_distinct(self):
+        ips = {n: e[3] for n, e in self.endpoints.items()}
+        self.assertEqual(ips, {"relay-hub-tls": "10.96.0.40", "relay-router-tls": "10.96.0.41",
+                               "relay-candidate-journal": "10.96.0.42"})
+        self.assertEqual(bundle_module().internal_tls_addresses(),
+                         {"hub": "10.96.0.40", "router": "10.96.0.41", "candidateJournal": "10.96.0.42"})
+        binding = template()["binding"]
+        self.assertIn("hostAliases {hub: 10.96.0.40, router: 10.96.0.41, candidateJournal: 10.96.0.42}", binding)
+        self.assertIn(RUNTIME_CA_SHA256, binding)
+        self.assertEqual(self.journal.ORIGIN, "https://relay-candidate-journal.relay-candidate-journal.svc:8443")
+
+    def test_journal_admits_only_this_slot_and_its_control_namespace(self):
+        # relay#277 comment 123028 condition 2: the journal's client ingress is this installation's
+        # execution slot (managed worker Pods) and its control namespace (the agent, itself a journal
+        # client), nothing else; render.py refuses a run naming other namespaces.
+        roles = {d["metadata"]["labels"]["relay.chifor.me/namespace-role"]: d["metadata"]["name"]
+                 for d in docs(TREE / "installation/namespaces.yaml")}
+        self.assertEqual(roles, {"control": CONTROL, "execution": SLOT})
+        self.assertEqual(self.journal.CLIENT_NAMESPACES, roles)
+        self.assertIn("{'relay.infrastructure/managed': 'true'}", JOURNAL_RENDER.read_text(encoding="utf-8"))
+
+    def test_runtime_ca_is_the_ailab_root(self):
+        body = RUNTIME_CA.read_bytes()
+        self.assertEqual(body, (ROOT / "ansible/roles/openbao_agent/files/ailab-root-ca.crt").read_bytes())
+        self.assertEqual(hashlib.sha256(body).hexdigest(), RUNTIME_CA_SHA256)
+        # Relay's packager grammar for an operator-supplied CA: PEM certificates only.
+        self.assertRegex(body.decode("ascii"), r"^-----BEGIN CERTIFICATE-----\n[A-Za-z0-9+/=\n]+-----END CERTIFICATE-----\n$")
+        self.assertIn("researcher-runtime-ca.crt", (ROOT / ".gitea/workflows/manifests.yaml").read_text(encoding="utf-8"))
 
 
 class AgentStage(unittest.TestCase):
@@ -491,6 +614,8 @@ class BundleCheck(unittest.TestCase):
                                          "bindingDigest": "9" * 64, "installationId": self.IID,
                                          "clusterUid": d["identity"]["clusterUid"], "policyDigest": "f" * 64}},
         }
+        # The reviewed shape carries G3 in both stages (the binding never changes between them).
+        self.g3(files)
         if mutate:
             mutate(files)
         out = Path(tempfile.mkdtemp())
@@ -505,9 +630,119 @@ class BundleCheck(unittest.TestCase):
             "status": "enrollment-only-worker-creation-disabled", "workloadCreationEnabled": False, "files": digests}))
         return out
 
-    def run_check(self, bundle):
-        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
-            return bundle_module().main(["check", str(bundle)])
+    def run_check(self, bundle, stage=None, reason=None):
+        """Exit code of `check`; with `reason`, a refusal must name it (not an earlier, unrelated check)."""
+        module = bundle_module()
+        err = io.StringIO()
+        with contextlib.ExitStack() as patches:
+            if stage is not None:
+                # As after that stage's switch PR: the tree includes it and the template pins its digest.
+                (egress,) = docs(EGRESS[stage])
+                reviewed = module.template()
+                reviewed["executionEgressArtifacts"][0]["sha256"] = module.measurement_digest(egress)
+                patches.enter_context(mock.patch.object(module, "egress_stage", lambda: (stage, EGRESS[stage])))
+                patches.enter_context(mock.patch.object(module, "template", lambda: copy.deepcopy(reviewed)))
+            patches.enter_context(contextlib.redirect_stderr(err))
+            patches.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            code = module.main(["check", str(bundle)])
+        if reason is not None:
+            self.assertEqual(code, 1)
+            self.assertIn(reason, err.getvalue())
+        return code
+
+    def test_each_check_runs_on_its_own_module(self):
+        # run_check patches the module it loads; that is isolated only while each call loads afresh.
+        self.assertIsNot(bundle_module(), bundle_module())
+
+    @staticmethod
+    def g3(files, stage="enrollment"):
+        """The release binding's G3 fields, as the qualification stage needs them."""
+        d = files["00-definition.json"]
+        pem = {"installPath": "/etc/relay/hub-ca.pem", "sha256": RUNTIME_CA_SHA256}
+        d["binding"]["hostAliases"] = {"hub": "10.96.0.40", "router": "10.96.0.41", "candidateJournal": "10.96.0.42"}
+        holder = {"router": {"origin": "https://router.chifor.me", "caFile": pem["installPath"], "caSha256": pem["sha256"]},
+                  "communication": {"origin": "https://relay.chifor.me", "caFile": pem["installPath"],
+                                    "caSha256": pem["sha256"]}}
+        d["binding"]["runtime"]["manifest"] = {
+            "supervisorConfig": {"hubOrigin": "https://relay.chifor.me", "hubCaPath": pem["installPath"],
+                                 "hubCaSha256": pem["sha256"]},
+            "artifacts": [{"role": "hub-ca", **pem}, {"role": "holder", "installPath": "/opt/relay/relay-holder",
+                                                      "sha256": "1" * 64}],
+            "holderProfiles": {"workerTemplates": [{"definition": {"holder": holder}}]}}
+        BundleCheck.g3_pin(files, stage)
+
+    @staticmethod
+    def g3_pin(files, stage):
+        (egress,) = docs(EGRESS[stage])
+        files["00-definition.json"]["executionEgressArtifacts"][0]["sha256"] = bundle_module().measurement_digest(egress)
+
+    def test_accepts_the_g3_binding_in_both_stages(self):
+        self.assertEqual(self.run_check(self.make_bundle()), 0)
+        self.assertEqual(self.run_check(self.make_bundle(lambda f: self.g3(f, "qualification")), "qualification"), 0)
+
+    def test_both_stages_require_the_g3_binding_and_their_own_pin(self):
+        # The binding never changes between the stages: a binding without G3 is refused at enrollment
+        # (step I4), not first discovered at the qualification switch (reviewer-codex, #1769).
+        def no_aliases(files, stage):
+            self.g3(files, stage)
+            del files["00-definition.json"]["binding"]["hostAliases"]
+        def null_aliases(files, stage):
+            self.g3(files, stage)
+            files["00-definition.json"]["binding"]["hostAliases"] = None
+        def no_g3_at_all(files, stage):
+            files["00-definition.json"]["binding"].pop("hostAliases")
+            files["00-definition.json"]["binding"]["runtime"].pop("manifest")
+            self.g3_pin(files, stage)
+        for mutate in (no_aliases, null_aliases, no_g3_at_all):
+            for stage in ("enrollment", "qualification"):
+                with self.subTest(mutate.__name__, stage=stage):
+                    self.run_check(self.make_bundle(lambda f, m=mutate, s=stage: m(f, s)), stage,
+                                   reason="the binding has no hostAliases")
+        # The enrollment pin with the qualification stage selected, and the reverse.
+        self.run_check(self.make_bundle(), "qualification", reason="/executionEgressArtifacts differs")
+        self.run_check(self.make_bundle(lambda f: self.g3(f, "qualification")), reason="/executionEgressArtifacts differs")
+
+    def test_refuses_each_g3_difference(self):
+        def m(files):
+            return files["00-definition.json"]["binding"]["runtime"]["manifest"]
+        def aliases_swapped(files):
+            files["00-definition.json"]["binding"]["hostAliases"].update(hub="10.96.0.41", router="10.96.0.40")
+        def alias_extra(files):
+            files["00-definition.json"]["binding"]["hostAliases"]["git"] = "10.96.0.43"
+        def no_journal_alias(files):
+            del files["00-definition.json"]["binding"]["hostAliases"]["candidateJournal"]
+        def hub_ca_mozilla(files):
+            m(files)["supervisorConfig"]["hubCaSha256"] = MOZILLA_SHA256
+            m(files)["artifacts"][0]["sha256"] = MOZILLA_SHA256
+        def hub_origin(files):
+            m(files)["supervisorConfig"]["hubOrigin"] = "https://relay.example"
+        def router_unpinned(files):
+            del m(files)["holderProfiles"]["workerTemplates"][0]["definition"]["holder"]["router"]["caSha256"]
+        def router_ca_not_packaged(files):
+            m(files)["holderProfiles"]["workerTemplates"][0]["definition"]["holder"]["router"]["caFile"] = "/tmp/ca.pem"
+        def communication_other_ca(files):
+            m(files)["holderProfiles"]["workerTemplates"][0]["definition"]["holder"]["communication"]["caSha256"] = "2" * 64
+        def router_origin(files):
+            m(files)["holderProfiles"]["workerTemplates"][0]["definition"]["holder"]["router"]["origin"] = "https://router.example"
+        def no_templates(files):
+            m(files)["holderProfiles"]["workerTemplates"] = []
+        def null_runtime(files):
+            # A clean refusal, not an AttributeError (reviewer-claude, #1769).
+            files["00-definition.json"]["binding"]["runtime"] = None
+        # Each refusal must come from its own guard, so a reordered or weakened check is caught.
+        aliases, hub, router, communication = ("are not the pinned internal TLS and journal addresses",
+                                               "hub origin or hub CA", "holder.router is not", "holder.communication is not")
+        for mutate, reason in ((aliases_swapped, aliases), (alias_extra, aliases), (no_journal_alias, aliases),
+                               (hub_ca_mozilla, hub), (hub_origin, hub), (router_unpinned, router),
+                               (router_ca_not_packaged, router), (communication_other_ca, communication),
+                               (router_origin, router), (no_templates, "no worker templates"),
+                               (null_runtime, "hostAliases but no runtime manifest")):
+            for stage in ("enrollment", "qualification"):
+                with self.subTest(mutate.__name__, stage=stage):
+                    def both(files, mutate=mutate, stage=stage):
+                        self.g3(files, stage)
+                        mutate(files)
+                    self.run_check(self.make_bundle(both), stage, reason=reason)
 
     def test_accepts_the_reviewed_shape(self):
         self.assertEqual(self.run_check(self.make_bundle()), 0)

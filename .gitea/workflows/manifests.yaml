@@ -291,13 +291,16 @@ jobs:
           bash scripts/tests/test-check-slot-enumerations.sh
 
       # The pg-sync's OpenBao CA ConfigMap is generated from a copy of the public ailab root CA; the
-      # workers pin the same PEM from the ansible role. Two copies, one truth.
+      # workers pin the same PEM from the ansible role. The Relay researcher runtime's pinned CA (its
+      # hub-ca.pem and the template's router/communication caFile, owner decision G3) is a third copy.
+      # Three copies, one truth.
       - name: ailab root CA copies are identical
         shell: bash
         run: |
           set -euo pipefail
           cmp ansible/roles/openbao_agent/files/ailab-root-ca.crt kubernetes/apps/infrastructure/platform-access/ailab-root-ca.crt
           cmp ansible/roles/openbao_agent/files/ailab-root-ca.crt kubernetes/apps/infrastructure/workbricks-c1-operator/ailab-root-ca.crt
+          cmp ansible/roles/openbao_agent/files/ailab-root-ca.crt docs/relay-workers/researcher-runtime-ca.crt
 
       # The two spans derived from litellm.yaml's model_list — Open WebUI's Local-group model_ids and
       # litellm.yaml's own checksum/config — must match what the generator renders (dsh stopped being

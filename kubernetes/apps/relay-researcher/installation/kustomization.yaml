@@ -13,6 +13,10 @@ kind: Kustomization
 resources:
 - namespaces.yaml
 - containment.yaml
+# EXACTLY ONE egress stage of relay-researcher-egress (the definition's executionEgressArtifacts pin is
+# its digest; the tests refuse zero, two, or a pin that is not the included stage's):
+#   execution-egress.yaml      DNS + the two Cloudflare addresses; enrollment only (removable)
+#   qualification-egress.yaml  the internal TLS terminators and the candidate journal; no DNS (G3)
 - execution-egress.yaml
 - admission-deny.yaml
 components:

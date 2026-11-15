@@ -37,8 +37,8 @@ class JournalBundle(unittest.TestCase):
         ledger = {'origin': render.ORIGIN, 'caSha256': 'b' * 64, 'replyPublicKey': 'c' * 43,
                   'databaseIdentity': 'database', 'gateId': 'gate', 'witnessSha256': 'd' * 64}
         run = {'kind': 'relay.candidate-run', 'payload': {'hub': {'image': image}, 'ledger': ledger,
-               'externalEpoch': 'epoch', 'namespaces': [{'name': 'candidate-control', 'purpose': 'control'},
-                                                      {'name': 'candidate-execution', 'purpose': 'execution'}]}}
+               'externalEpoch': 'epoch', 'namespaces': [{'name': 'relay-infra-control', 'purpose': 'control'},
+                                                      {'name': 'relay-researcher-1', 'purpose': 'execution'}]}}
         witness = {k: ledger[k] for k in ['databaseIdentity', 'gateId', 'witnessSha256']}
         witness['externalEpoch'] = 'epoch'
         config = {'version': 1, 'relaySourceCommit': 'e' * 40, 'relayImage': image,
@@ -256,6 +256,30 @@ class MetricsComposition(unittest.TestCase):
         if port is not None:
             config['metrics']['port'] = port
         config['config'] = self.pin('config.json', service)
+
+    def test_client_ingress_is_the_researcher_slot_and_its_agent_only(self):
+        # relay#277 comment 123028, condition 2 (approved in 123063): the journal admits the researcher
+        # slot's managed worker Pods and the infrastructure agent's control namespace, TCP 8443, nothing else.
+        config, _, run = self.fixture()
+        (policy,) = [o for o in render.service(config) if o['kind'] == 'NetworkPolicy']
+        self.assertEqual(policy['metadata']['name'], 'journal-clients-and-database')
+        self.assertEqual(policy['spec']['ingress'], [{'from': [
+            {'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': 'relay-infra-control'}},
+             'podSelector': {'matchLabels': {'app.kubernetes.io/name': 'relay-infrastructure-agent'}}},
+            {'namespaceSelector': {'matchLabels': {'kubernetes.io/metadata.name': 'relay-researcher-1'}},
+             'podSelector': {'matchLabels': {'relay.infrastructure/managed': 'true'}}}],
+            'ports': [{'protocol': 'TCP', 'port': 8443}]}])
+        for control, execution in [('relay-infra-control', 'relay-researcher-2'), ('candidate-control', 'relay-researcher-1'),
+                                   ('relay-researcher-1', 'relay-infra-control')]:
+            with self.subTest(control=control, execution=execution):
+                config, service, run = self.fixture()
+                run['payload']['namespaces'] = [{'name': control, 'purpose': 'control'},
+                                                {'name': execution, 'purpose': 'execution'}]
+                config['run'] = self.pin('run.json', run)
+                service['run']['sha256'] = config['run']['sha256']
+                config['config'] = self.pin('config.json', service)
+                with self.assertRaisesRegex(render.Refusal, '^client-namespaces-not-reviewed$'):
+                    render.service(config)
 
     def test_default_off_has_no_metrics_resources_or_port(self):
         config, _, _ = self.fixture()
