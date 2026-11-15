@@ -1,0 +1,29 @@
+# THE ONLY PLACE the operator writes the three scalar pins of the first researcher installation
+# (docs/runbooks/relay-researcher-installation.md, "Operator-filled values"). Kustomize copies each
+# value into every object that carries it (kustomization.yaml in this directory); no other file in
+# kubernetes/apps/relay-researcher holds a literal copy. local-config: kustomize never emits this
+# ConfigMap, so nothing named relay-researcher-pins ever reaches the cluster.
+#
+# While any value below is a placeholder the tree is inert by construction: no Flux Kustomization in
+# kubernetes/apps/clusters/ai points at it, and scripts/tests/test_relay_researcher_installation.py
+# refuses one that does until all three are real.
+#
+#   installationId  Relay assigns it when an administrator approves the installation
+#                   (POST /api/infrastructure/installations, runbook step I3). Lowercase UUID.
+#                   It names the enrollment gate (relay-enrollment-<id>) and labels both namespaces,
+#                   exactly as Relay's scripts/prepare-pod-installation.ts renders them.
+#   agentImage      registry.chifor.me/relay/infrastructure-agent@sha256:<64 hex>, copied from the
+#                   `publication.image` of the agent's deploy/worker-images/publish.py receipt for the
+#                   pinned source. Digest only; never a tag.
+#   sourceCommit    The reviewer-merged 40-hex Relay commit that the agent image, the worker runtime
+#                   image, the chart mirrored in ../agent and the hub release were all built from.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: relay-researcher-pins
+  annotations:
+    config.kubernetes.io/local-config: "true"
+data:
+  installationId: operator-fills-installation-id
+  agentImage: registry.chifor.me/relay/infrastructure-agent@sha256:operator-fills-from-publish-receipt
+  sourceCommit: operator-fills-reviewed-relay-commit

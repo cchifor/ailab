@@ -208,9 +208,11 @@ spec:
               value: Constantin Chifor
             # Per-client sign-in throttling and the break-glass loopback check read this header when it is present,
             # else the TCP peer. Only two paths reach :8787: the edge (NetworkPolicy below: llm-router-edge pods only,
-            # which take traffic only from cloudflared and the edge proxy (ADR 0040); both overwrite cf-connecting-ip
-            # on every request - Cloudflare's edge, and the proxy from the TCP peer or Cloudflare's own header - so a
-            # client cannot forge it), and a kubectl port-forward. A port-forward bypasses NetworkPolicy, but
+            # which take traffic only from cloudflared, the edge proxy (ADR 0040) and, once staged, the researcher
+            # workers' internal TLS terminator relay-router-tls (kubernetes/apps/relay-internal-tls); all three
+            # overwrite cf-connecting-ip on every request - Cloudflare's edge, the proxy from the TCP peer or
+            # Cloudflare's own header, the terminator from the TCP peer - so a client cannot forge it), and a
+            # kubectl port-forward. A port-forward bypasses NetworkPolicy, but
             # opening one needs cluster-admin, which can read the break-glass token anyway. No other in-cluster client
             # can reach the pod to send its own header.
             - name: ROUTER_AUTH_CLIENT_ADDRESS_HEADER
@@ -234,7 +236,8 @@ spec:
             # using cf-connecting-ip. That header is trustworthy here: ingress admits only the llm-router-edge
             # proxy (NetworkPolicy below); NetworkPolicy llm-router-edge in edge.yaml admits only the cloudflared
             # pods of namespace edge (on 8080), and Cloudflare's edge sets/overwrites CF-Connecting-IP on every
-            # request, so a client cannot supply its own value through the tunnel. api-keys uses it the same way for the
+            # request, so a client cannot supply its own value through the tunnel. The edge proxy and the staged
+            # researcher-worker terminator relay-router-tls (its own additive policy) overwrite it the same way. api-keys uses it the same way for the
             # public agent access requests (/agent/v1/*: per-address limits), and publicUrl for the public skill
             # (/agent/skill.md) and approved keys' replies: never the request's Host header.
             # api-openai imageProxy: an image generation (POST /v1/images/generations) sends nothing until the image

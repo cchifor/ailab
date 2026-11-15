@@ -223,6 +223,18 @@ jobs:
           bash scripts/tests/test-relay-router-provision.sh
           bash scripts/tests/test-relay-router-connection-render.sh
 
+      # The first Relay researcher installation (docs/runbooks/relay-researcher-installation.md): both
+      # staged trees under kubernetes/apps/relay-researcher rendered under manifest-lint's pinned
+      # kustomize and validated by its kubeconform (pins substituted, hashed config and trust
+      # ConfigMaps followed by the Deployment, trust bytes equal to the pinned Mozilla bundle). The
+      # source-level gates (tool shapes, derived quotas, egress digest, RBAC, trust pin, inclusion and
+      # placeholders) are scripts/tests/test_relay_researcher_installation.py, run by script-tests.yaml.
+      - name: Relay researcher installation render
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-relay-researcher-render.sh
+
       # The Relay hub upgrade components of the first researcher worker
       # (docs/runbooks/relay-researcher-hub-upgrade.md): each of the three un-included components
       # rendered onto the live Relay Deployment under manifest-lint's pinned kustomize changes only the
@@ -234,6 +246,21 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/tests/test-relay-researcher-hub-render.sh
+
+      # The Relay researcher internal TLS terminators (kubernetes/apps/relay-internal-tls, owner decision
+      # G3): the staged tree rendered under manifest-lint's pinned kustomize and validated by its
+      # kubeconform, then both committed Caddyfiles run under the pinned Caddy with the Pods' security
+      # settings (UID 1000, only NET_BIND_SERVICE, no-new-privileges, read-only root): forged
+      # client-address headers never reach the upstream, which sees the TCP peer; another Host, another
+      # SNI, no SNI and plain HTTP are never proxied; the access log carries no credential; the reloader
+      # serves a renewed certificate without a restart. The source-level gates are
+      # scripts/tests/test_relay_internal_tls.py, run by script-tests.yaml.
+      - name: Relay internal TLS terminators render + runtime fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-relay-internal-tls-render.sh
+          python3 scripts/tests/relay_internal_tls_runtime.py
 
       # The Workbricks cell c1's OpenBao provision script (transit engine, three non-exportable
       # ecdsa-p256 keys, four policies, four k8s-auth roles, the signing-role retirement) under its Job image against a real

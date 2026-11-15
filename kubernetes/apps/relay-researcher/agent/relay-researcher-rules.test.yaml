@@ -1,0 +1,108 @@
+rule_files:
+  - relay-researcher-rules.yaml
+evaluation_interval: 1m
+tests:
+- name: RelayInfrastructureAgentUnavailable waits out a rollout, then fires, then clears
+  interval: 1m
+  input_series:
+  - series: kube_deployment_status_replicas_available{namespace="relay-infra-control",deployment="relay-infrastructure-agent"}
+    values: 1 0+0x12 1+0x3
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: RelayInfrastructureAgentUnavailable
+    exp_alerts: []
+  - eval_time: 12m
+    alertname: RelayInfrastructureAgentUnavailable
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        namespace: relay-infra-control
+        deployment: relay-infrastructure-agent
+      exp_annotations:
+        summary: The Relay infrastructure agent has no available replica
+        description: Workers cannot be created, observed or cleaned up while it is down. Never replace its installation identity or fence to restart it.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-researcher-installation.md
+  - eval_time: 15m
+    alertname: RelayInfrastructureAgentUnavailable
+    exp_alerts: []
+- name: RelayResearcherPodOffWorkerPool ignores pending and on-pool Pods
+  interval: 1m
+  input_series:
+  - series: kube_pod_info{namespace="relay-researcher-1",pod="w-on",node="relay-worker-1"}
+    values: 1+0x5
+  - series: kube_pod_info{namespace="relay-researcher-1",pod="w-pending",node=""}
+    values: 1+0x5
+  - series: kube_pod_info{namespace="relay-researcher-1",pod="w-off",node="talos-agent-node-1"}
+    values: _ _ 1+0x3
+  alert_rule_test:
+  - eval_time: 1m
+    alertname: RelayResearcherPodOffWorkerPool
+    exp_alerts: []
+  - eval_time: 4m
+    alertname: RelayResearcherPodOffWorkerPool
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: relay
+        namespace: relay-researcher-1
+        pod: w-off
+        node: talos-agent-node-1
+      exp_annotations:
+        summary: A Pod in the researcher slot runs outside relay-worker-1
+        description: Stop the worker through Relay and inspect placement before any further admission.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-researcher-installation.md
+- name: RelayResearcherSlotPodQuotaAboveOne allows 0 and 1, fires on 2
+  interval: 1m
+  input_series:
+  - series: kube_resourcequota{namespace="relay-researcher-1",resourcequota="relay-enrollment-quota",resource="pods",type="hard"}
+    values: 0 0 1 1 1 2 2 2 2
+  - series: kube_resourcequota{namespace="relay-researcher-1",resourcequota="relay-enrollment-quota",resource="pods",type="used"}
+    values: 0 0 0 1 1 5 5 5 5
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: RelayResearcherSlotPodQuotaAboveOne
+    exp_alerts: []
+  - eval_time: 7m
+    alertname: RelayResearcherSlotPodQuotaAboveOne
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: relay
+        namespace: relay-researcher-1
+      exp_annotations:
+        summary: The researcher slot's Pod quota is above one
+        description: Only the reviewed activation bundle may change it, and only from 0 to 1. Restore the committed quota.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-researcher-installation.md
+- name: RelayResearcherSlotPolicyMissing needs the namespace and fires on either policy's loss
+  interval: 1m
+  input_series:
+  # Minutes 0-2: no namespace yet, no policy: quiet. Minutes 3-9: both policies. The egress allow-list's
+  # last sample is at 9m; it stays visible for the 5m lookback, so the loss is seen from 15m and the
+  # alert fires 5m later.
+  - series: kube_namespace_created{namespace="relay-researcher-1"}
+    values: _ _ _ 1+0x20
+  - series: kube_networkpolicy_created{namespace="relay-researcher-1",networkpolicy="relay-default-deny"}
+    values: _ _ _ 1+0x20
+  - series: kube_networkpolicy_created{namespace="relay-researcher-1",networkpolicy="relay-researcher-egress"}
+    values: _ _ _ 1+0x6
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: RelayResearcherSlotPolicyMissing
+    exp_alerts: []
+  - eval_time: 9m
+    alertname: RelayResearcherSlotPolicyMissing
+    exp_alerts: []
+  - eval_time: 18m
+    alertname: RelayResearcherSlotPolicyMissing
+    exp_alerts: []
+  - eval_time: 21m
+    alertname: RelayResearcherSlotPolicyMissing
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        service: relay
+      exp_annotations:
+        summary: The researcher slot lost its default-deny or its egress allow-list
+        description: Stop admission and restore both NetworkPolicies from git before any worker runs.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-researcher-installation.md

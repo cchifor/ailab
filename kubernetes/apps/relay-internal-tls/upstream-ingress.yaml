@@ -1,0 +1,60 @@
+# ADDITIVE ingress on the two upstreams. Kubernetes unions the policies that select a Pod, so these
+# separate objects widen the existing relay and llm-router-edge ingress by exactly one source each, and
+# only while this tree is applied (removing its Flux Kustomization prunes them).
+#
+# Both upstreams trust CF-Connecting-IP as the client address (relay: RELAY_CLIENT_ADDRESS_HEADER;
+# Router: ROUTER_AUTH_CLIENT_ADDRESS_HEADER through llm-router-edge). That is sound only for sources
+# that overwrite the header on every request: Cloudflare's tunnel, the edge proxy, and these
+# terminators (hub.Caddyfile / router.Caddyfile strip every client-address header and set it to the
+# TCP peer). The comments next to those settings name this file.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-internal-tls-ingress
+  namespace: relay
+  labels:
+    app.kubernetes.io/name: relay-hub-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  podSelector:
+    matchLabels:
+      app: relay
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: relay-internal-tls
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: relay-hub-tls
+    ports:
+    - protocol: TCP
+      port: 8788
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: llm-router-edge-internal-tls-ingress
+  namespace: llm-router
+  labels:
+    app.kubernetes.io/name: relay-router-tls
+    app.kubernetes.io/part-of: relay
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: llm-router-edge
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: relay-internal-tls
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: relay-router-tls
+    ports:
+    - protocol: TCP
+      port: 8080

@@ -22,6 +22,11 @@ PROMETHEUS_LABELS = {'app.kubernetes.io/name': 'prometheus',
 PG_IMAGE = 'docker.io/library/postgres:17.11-alpine@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac'
 PUBLIC = '/run/relay-journal/'
 ORIGIN = 'https://relay-candidate-journal.relay-candidate-journal.svc:8443'
+# Pinned so a DNS-less worker slot can reach the journal: Relay's candidate supervisor dials ORIGIN from
+# the worker Pod, which resolves its host through the Pod's measured hostAliases (Relay
+# PodRuntimeBinding.hostAliases.candidateJournal) to this address. Static band of the Service CIDR,
+# recorded in docs/network-plan.md with the internal TLS terminators' 10.96.0.40 and .41.
+CLUSTER_IP = '10.96.0.42'
 LABELS = {'app.kubernetes.io/part-of': NAME, 'velero.io/exclude-from-backup': 'true'}
 AFFINITY = {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {
     'nodeSelectorTerms': [{'matchExpressions': [
@@ -315,7 +320,9 @@ def service(config):
                                 'podSelector': {'matchLabels': {'k8s-app': 'kube-dns'}}}],
                         'ports': [{'protocol': 'UDP', 'port': 53}, {'protocol': 'TCP', 'port': 53}]}]}}
     svc = {'apiVersion': 'v1', 'kind': 'Service', 'metadata': metadata(NAME, SERVICE_NS),
-           'spec': {'selector': {'app': NAME}, 'ports': [{'name': 'https', 'port': 8443, 'targetPort': 'https'}]}}
+           'spec': {'type': 'ClusterIP', 'clusterIP': CLUSTER_IP, 'clusterIPs': [CLUSTER_IP],
+                    'ipFamilyPolicy': 'SingleStack', 'ipFamilies': ['IPv4'],
+                    'selector': {'app': NAME}, 'ports': [{'name': 'https', 'port': 8443, 'targetPort': 'https'}]}}
     objects = [configmap(cm_name, SERVICE_NS, raw, annotations), svc, deployment, policy]
     if 'metrics' in config:
         if any(n['name'] == MONITORING_NS for n in namespaces):
