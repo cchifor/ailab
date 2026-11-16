@@ -189,9 +189,10 @@ def yaml_docs(path):
 
 
 def flux_kustomizations():
-    """Every Flux Kustomization under kubernetes/, by (file, name): .yaml and .yml, inside Lists too."""
+    """Every Flux Kustomization under kubernetes/, by (file, name): .yaml, .yml and .json, inside Lists too."""
     found = {}
-    for path in [*(ROOT / 'kubernetes').rglob('*.yaml'), *(ROOT / 'kubernetes').rglob('*.yml')]:
+    for path in [*(ROOT / 'kubernetes').rglob('*.yaml'), *(ROOT / 'kubernetes').rglob('*.yml'),
+                 *(ROOT / 'kubernetes').rglob('*.json')]:
         try:
             documents = yaml_docs(path)
         except yaml.YAMLError:
@@ -274,15 +275,19 @@ class Activation(unittest.TestCase):
         # the overlay's Service: no Job, Deployment, Secret or workload beyond the StatefulSet at 0/1.
         base = yaml.safe_load((BUNDLE / 'kustomization.yaml').read_text())
         self.assertEqual(set(base), {'apiVersion', 'kind', 'resources', 'configMapGenerator', 'labels'})
-        self.assertTrue(all((BUNDLE / entry).is_file() for entry in base['resources']), base['resources'])
+        self.assertEqual(base['resources'], ['namespace.yaml', 'storage.yaml', 'certificate.yaml',
+                                             'journal-certificate.yaml', 'postgres.yaml', 'network-policy.yaml'])
         self.assertEqual(base['configMapGenerator'], [{'name': render.NAME + '-postgres', 'namespace': render.DB_NS,
                                                        'files': ['start.sh', 'pg_hba.conf']}])
         self.assertEqual(base['labels'], [{'pairs': {'app.kubernetes.io/part-of': render.NAME, 'velero.io/exclude-from-backup': 'true'},
                                            'includeSelectors': False, 'includeTemplates': True}])
-        # Retained state: removing the Flux file must never delete the namespaces or the claim.
-        for entry in ('namespace.yaml', 'storage.yaml'):
-            for d in yaml_docs(BUNDLE / entry):
-                self.assertEqual(d['metadata']['annotations']['kustomize.toolkit.fluxcd.io/prune'], 'disabled', d['metadata']['name'])
+        # Retained state: removing the Flux file must never delete the namespaces or the claim. Checked on
+        # the objects the base actually includes.
+        retained = [d for entry in base['resources'] for d in yaml_docs(BUNDLE / entry)
+                    if d['kind'] in ('Namespace', 'PersistentVolumeClaim')]
+        self.assertEqual(len(retained), 3)
+        for d in retained:
+            self.assertEqual(d['metadata']['annotations']['kustomize.toolkit.fluxcd.io/prune'], 'disabled', d['metadata']['name'])
         inventory = sorted((d['kind'], d['metadata'].get('namespace', ''), d['metadata']['name'])
                            for entry in base['resources'] for d in yaml_docs(BUNDLE / entry))
         inventory += [(d['kind'], d['metadata']['namespace'], d['metadata']['name']) for d in yaml_docs(OVERLAY / 'service.yaml')]
