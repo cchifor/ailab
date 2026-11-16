@@ -164,7 +164,7 @@ def cleanup(subject: str, uid: str, rc: int) -> int:
     print(f"relay-operator: revoked ({after})", file=sys.stderr)
     if after != REVOKED:
         print("relay-operator: REVOKE NOT CONFIRMED - run `revoke` again NOW", file=sys.stderr)
-        rc = rc or 3
+        rc = 3  # always wins: a possibly standing admin outranks any other failure
     try:
         end_sso(uid)
         print("relay-operator: Keycloak SSO sessions ended", file=sys.stderr)
@@ -191,6 +191,9 @@ def call(op_args: list[str]) -> int:
         sys.stdout.buffer.write(p.stdout)
         sys.stdout.flush()
         rc = p.returncode
+    except SystemExit as e:  # grant/count/docker failed: report it, but let cleanup's verdict decide the rc
+        print(f"relay-operator: {e}", file=sys.stderr)
+        rc = 1
     finally:
         rc = cleanup(subject, uid, rc)
     return rc
