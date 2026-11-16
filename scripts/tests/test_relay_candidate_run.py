@@ -538,8 +538,10 @@ class Generator(unittest.TestCase):
         result, diff = gen.check_against_base(self.root, "r1", second["runDigest"], now_ms=self.now)
         self.assertEqual(diff, [])
         self.assertEqual((result["firstRun"], result["hubReadbackDeadlinePassed"]), (False, False))
-        self.assertIs(gen.check_against_base(self.root, "r1", now_ms=self.now + 3_600_001)[0]
-                      ["hubReadbackDeadlinePassed"], True)
+        # Past t_s + 60 min the gate fails: O6 says abort before the grant, never merge.
+        late, late_diff = gen.check_against_base(self.root, "r1", now_ms=self.now + 3_600_001)
+        self.assertIs(late["hubReadbackDeadlinePassed"], True)
+        self.assertEqual(late_diff, [gen.DEADLINE_PASSED])
         # An expired run never passes the gate; plain check stays time-free (CI after expiry).
         with self.assertRaises(gen.Refusal) as caught:
             gen.check_against_base(self.root, "r1", now_ms=self.now + 7_200_000)

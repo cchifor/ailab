@@ -49,7 +49,7 @@ refuses (`agent-...`): no candidate run can launch without those values.
       placeholder) is H7's inclusion PR: its generated values are checked for self-consistency and
       every other changed path is listed under reviewByHand. The gate refuses a branch that does
       not contain the base (base-not-in-branch: merge origin/main into it first) and an expired run
-      (run-expired), and reports hubReadbackDeadlinePassed past t_s + 60 min.
+      (run-expired), and fails (exit 1) past t_s + 60 min (hubReadbackDeadlinePassed: abort the run).
 
 Deterministic: the same inputs give the same bytes. Offline: no cluster, hub, Router or journal
 access, and it never reads a private key. The run's issuer signature is verified by Relay's composer
@@ -702,6 +702,7 @@ def check(repo: Path, expected_digest: str | None = None) -> tuple[dict, list]:
 
 
 GENERATOR_INPUTS = (COMPONENT, AGENT, INSTALLATION, BINDING, RELAY_MANIFEST)
+DEADLINE_PASSED = "the hub readback deadline t_s + 60 min has passed: abort the run before the grant (owner decision O6)"
 
 
 def git(repo: Path, *args: str) -> bytes:
@@ -767,9 +768,10 @@ def check_against_base(repo: Path, base: str, expected_digest: str | None = None
             result, diff = check(head_tree, expected_digest)
             if now >= iso_ms(result["expiresAt"]):
                 refuse("run-expired")
+            late = now > iso_ms(result["issuedAt"]) + HUB_READBACK_DEADLINE_MS
             result.update(base=base, firstRun=True, reviewByHand=sorted(changed - run_files),
-                          hubReadbackDeadlinePassed=now > iso_ms(result["issuedAt"]) + HUB_READBACK_DEADLINE_MS)
-            return result, diff
+                          hubReadbackDeadlinePassed=late)
+            return result, diff + ([DEADLINE_PASSED] if late else [])
         document = blob(repo, "HEAD", str(RUN_DIR / "document.json"))
         run_text = strict_json(utf8(document, "document-json"), "document-json").get("run")
         if not isinstance(run_text, str):
@@ -783,9 +785,12 @@ def check_against_base(repo: Path, base: str, expected_digest: str | None = None
     diff += sorted(f"not generated: {p}" for p in changed - {str(path) for path in expected})
     if expected_digest and expected_digest != v["runDigest"]:
         diff.append(f"run digest {v['runDigest']} is not the expected {expected_digest}")
+    late = now > v["payload"]["issuedAt"] + HUB_READBACK_DEADLINE_MS
+    if late:
+        diff.append(DEADLINE_PASSED)
     result = summary(v, expected)
     result.update(kind="ailab.relay-candidate-run-check", base=base, firstRun=False,
-                  hubReadbackDeadlinePassed=now > v["payload"]["issuedAt"] + HUB_READBACK_DEADLINE_MS)
+                  hubReadbackDeadlinePassed=late)
     return result, diff
 
 

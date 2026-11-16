@@ -141,8 +141,8 @@ It reads both revisions from git's tree objects (uncommitted changes never count
 `base-not-in-branch` when main has moved on since the branch was cut (merge it and re-run; the run's
 values are checked against the new base, so a hub image bump there is caught), and with `run-expired`
 for a run past its `expiresAt` (merging it would only roll the hub to log
-`worker_candidate_unavailable`). `hubReadbackDeadlinePassed: true` means `t_s + 60 min` is gone:
-abort the run before the grant instead of merging.
+`worker_candidate_unavailable`). Past `t_s + 60 min` it fails (exit 1, `hubReadbackDeadlinePassed:
+true`): abort the run before the grant instead of merging.
 
 R1's PR is H7's inclusion PR: its base still has the placeholder `run/`, so the check reports
 `"firstRun": true`, checks the generated values for self-consistency and lists every other changed
