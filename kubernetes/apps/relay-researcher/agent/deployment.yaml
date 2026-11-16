@@ -15,9 +15,10 @@
 #
 # Secrets, by NAME only (no value is in git): relay-infrastructure-agent-key (key installation.pem,
 # PKCS#8 Ed25519), created by the operator at runbook step I8. The one-use enrollment token
-# (relay-infrastructure-agent-enrollment, also step I8) was consumed at enrollment on 2026-11-16;
-# step I10 deleted that Secret, removed its volume and mount here, and pinned the live fence
-# ConfigMap's UID as identity.fenceObjectUid in config.json.
+# (relay-infrastructure-agent-enrollment, also step I8) was consumed at enrollment on 2026-11-16.
+# Step I10 removed its volume and mount here, and pinned the live fence ConfigMap's UID as
+# identity.fenceObjectUid in config.json. The operator deletes that consumed Secret only after this
+# change has rolled out.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -9,7 +9,8 @@
 # policies, the Deployment (one replica, Recreate) and the PrometheusRule. It needs the
 # operator-created Secret relay-infrastructure-agent-key (step I8); without it the Pod waits in
 # ContainerCreating and this Kustomization stays not Ready. The one-use enrollment Secret was needed
-# only until enrollment; step I10 deleted it and removed its mount.
+# only until enrollment: step I10 removes its mount, and the operator deletes the consumed Secret
+# after that change has rolled out.
 #
 # prune: true is safe here: removing the tree stops the agent and removes its permissions. It never
 # touches the agent-owned fence ConfigMap relay-installation-fence, which no Flux inventory contains.

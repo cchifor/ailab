@@ -7,7 +7,7 @@
 #               4 = 1 credential object (relay-infrastructure-agent-key) + 2 retained and 1 in-flight
 #               Helm release record (Relay's fixed budget, even though ailab applies the chart render
 #               through Flux); 2 Leases. It was 5 until step I10 dropped the one-use enrollment Secret
-#               (relay-infrastructure-agent-enrollment) after confirmed enrollment.
+#               (relay-infrastructure-agent-enrollment) from the definition after confirmed enrollment.
 #   execution = installationPolicy.resourceCeiling {milliCpu 2000, memoryMiB 4096, scratchMiB 10240}
 #               plus the relay-gvisor RuntimeClass overhead {80m, 24Mi}: 2080m / 4120Mi / 10240Mi.
 #               pods 0, secrets 0, no PVC, Service or Lease.
