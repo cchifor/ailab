@@ -17,6 +17,11 @@ written for 1.26.1 → 1.27.3 (chart 12.6.0 → 12.7.0, 2026-11-08); the plan an
   `gitea config edit-ini --apply-env` onto the existing `/data/gitea/conf/app.ini` on the data volume. It adds and
   changes keys but never deletes one, so a key removed from the HelmRelease values stays in the file and keeps taking
   effect. Removing one is a file edit while Gitea is down (step 5).
+- **A dropped section also stays in the chart's Secret.** The values reach `init-app-ini` through the
+  `gitea-inline-config` Secret, one key per `app.ini` section, which the chart renders with `stringData`. When the values
+  drop a whole section, Helm's upgrade patch deletes it from `stringData`, which the live object never holds, so the
+  section stays in the Secret's `data`. `init-app-ini` then writes it back into `app.ini` at every start (2026-11-16:
+  `[webhook]`). A key dropped from a section that stays is not affected: that section's whole value is replaced.
 - **Views on Gitea's tables.** The gitea database holds the `credential_inventory` views
   (`kubernetes/apps/databases/gitea-credential-inventory.sql`), which read `"user"`, `access_token` and `oauth2_grant`.
   A migration that drops or rebuilds one of those tables fails while the views exist. The rehearsal catches this,
@@ -57,9 +62,17 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
    - Merge the PR. Check the merge SHA on the GitHub mirror and on `GitRepository` `flux-system`.
    - Check that the live HelmRelease still names the OLD chart and image, and that `spec.suspend` is still `true`.
 5. **Write freeze and backups.**
-   - **Running CI jobs fail.** Stopping Gitea fails every Actions job that is running at the time. The runners
-     keep going, but Gitea marks those jobs failed as it comes back (2026-11-08: 18 jobs, 10 s after the start).
-     Note them first, on the primary, database `gitea` (job status 6 is running, 5 waiting):
+   - **Running CI jobs fail.** Gitea's `stop_zombie_tasks` check runs at startup and every 5 minutes. It fails every
+     running task with no update from its runner for `ZOMBIE_TASK_TIMEOUT` (10 minutes), so how many jobs the stop costs
+     depends on the outage:
+     - longer than 10 minutes: every job that was running fails as Gitea starts (2026-11-08: 14 minutes, 18 jobs,
+       10 s after the start);
+     - shorter: a job that is still running reports again and finishes normally. A job that ends on its runner while
+       Gitea is down cannot report its result, and Gitea fails it 10 minutes after its last update (2026-11-16:
+       4 min 42 s; of 23 running jobs, 8 reported again and 13 short ones failed; newer pushes cancelled the other 2).
+
+     Keeping the outage under 10 minutes therefore saves the long jobs. Note the running jobs first, on the primary,
+     database `gitea` (job status 6 is running, 5 waiting):
 
      ```sql
      select p.owner_name || '/' || p.name as repo, r.ref, r.index, r.id as run_id
@@ -67,9 +80,11 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
      where j.status = 6 order by repo, r.ref, r.index;
      ```
 
-     After step 7, re-run the newest run of each ref:
-     `scripts/gitea-api.sh POST /repos/<repo>/actions/runs/<run_id>/rerun` (1.27). A run that a newer run of the
-     same ref superseded needs no re-run.
+     After step 7, once the failed jobs show up, re-run the newest run of each ref:
+     `scripts/gitea-api.sh POST /repos/<repo>/actions/runs/<run_id>/rerun` (1.27). On 28.x, use
+     `.../runs/<run_id>/rerun-failed-jobs` once the run has finished, so the jobs that passed are not run again. A run
+     that a newer run of the same ref superseded needs no re-run. `ci-rerun-watchdog` does not re-run them: it skips
+     jobs that did not run on a cloud runner (`job_not_cloud`).
    - Run `kubectl -n gitea scale deploy/gitea --replicas=0`, then wait for `kubectl -n gitea get pods -l
      app.kubernetes.io/name=gitea` to list nothing. Gitea is the only writer to its database and volumes.
    - **Database.** Dump to the workstation and require both exit statuses to be 0:
@@ -81,8 +96,15 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
      `ttl: 720h`. Wait for `Completed`, and for both `PodVolumeBackup`s (`-l velero.io/backup-name=gitea-pre-<version>`)
      to be `Completed`. Then remove any keys the change deletes from the values (next bullet), and delete the holder
      pod and wait until it is gone.
-   - **Keys removed from the values** (see "`app.ini` is merged"). In the holder pod, after the backup, with `<data>`
-     the holder's mount of `gitea-shared-storage`, run it in three steps:
+   - **Keys removed from the values** (see "`app.ini` is merged"). If the change drops a whole section, delete it from
+     the Secret first, or `init-app-ini` writes it back at step 6. The step-6 upgrade does not restore it:
+
+     ```bash
+     kubectl -n gitea patch secret gitea-inline-config --type=json -p '[{"op":"remove","path":"/data/<section>"}]'
+     ```
+
+     For 28.x the section is `webhook`. Then, in the holder pod, after the backup, with `<data>` the holder's mount of
+     `gitea-shared-storage`, edit `app.ini` in three steps:
      1. Back the file up and check the copy.
      2. Build a candidate without the keys, and check it removes exactly `$n` lines.
      3. Only then copy the candidate over the file through a redirection. That keeps the file's inode, owner
