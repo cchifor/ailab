@@ -621,6 +621,7 @@ Enrollment is not worker readiness. Before the first worker Pod:
    they need the signed candidate run (`candidateRuntime` values: candidate ConfigMaps,
    `bootstrapSecrets: true`, journal egress) and the independent candidate journal, each its own
    reviewed change.
+   The per-run ceremony is [relay-researcher-qualification-campaign.md](relay-researcher-qualification-campaign.md).
 4. The finite ordinary canary (step 10) and then `scripts/activate-ordinary-pod-policy.ts`'s outputs:
    staged guards, Secret quota, the in-place gate replacement and the **one-Pod quota**, plus agent
    values with `ordinaryNamespacePins` (the UIDs of step I6) and `bootstrapSecrets: true`, committed
