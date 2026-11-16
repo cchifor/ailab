@@ -72,7 +72,9 @@ unchanged and adds two files:
 `dependsOn` encodes the install order: `qnap-storage` (the retained StorageClass)
 and `cert-manager-config` (the `ailab-ca` ClusterIssuer). `wait: true` keeps the
 Kustomization not-Ready until the PVC is Bound and both Certificates are Ready, and,
-after the flip to one replica, until the database Pod is Ready. `prune: true` is safe
+after the flip to one replica, until the database Pod is Ready. The claim binds at
+zero replicas because `qnap-iscsi` binds Immediately (it sets no
+`volumeBindingMode`; the test refuses `WaitForFirstConsumer`). `prune: true` is safe
 for the data: both Namespaces and the PVC carry `prune: disabled`, so removing the
 Flux file stops the database and releases `10.96.0.42` but keeps the claim.
 
