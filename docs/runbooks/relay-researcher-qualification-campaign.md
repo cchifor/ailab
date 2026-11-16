@@ -54,7 +54,7 @@ Each is read back; a missing one stops the campaign before any signing.
 | Agent one-time candidate values: candidate volume, `policy.bootstrapSecrets: true`, journal egress | installation runbook, "Beyond enrollment" item 3 | not staged |
 | E2 window + storage converters (#523), E3 lease → two rows (#527), E4 replay disruption (#524), defaultCommunication observer (#519) | Relay `main` | merged |
 | E1 delayed start: pre-session observer, converter branch, hold procedure | Relay PR (pending) | **pending** (§8 G6) |
-| **Hub v0.10.4: the `c0fe50f0` candidate loader refuses every real binding** | §8 G0; fixed by #525, released as v0.10.4 (S3 approved 2026-11-16) | **pending: the ailab hub pin and its rollout**, before H7's readback and before `subject.json` is frozen |
+| Hub v0.10.4: the `c0fe50f0` candidate loader refuses every real binding | §8 G0; fixed by #525, released as v0.10.4, pinned by ailab #1789 | **live** since 2026-11-16 10:08Z (`…@sha256:d1482bc1…57a7`, schema 79; ailab #1789 comment 125493) |
 | Ceremony tools and driver fixes (G1-G5): signer, `commandSha256`, `subject.json`, `submittedPod`, the matrix's installed-bundle check, fraction-safe parsing | §8; Relay #523, #528, #529, #530 | merged; `submittedPod` by reconstruction needs O7 |
 | `deployment.json` and `subject.json` composed and frozen (§3.0 step 7) | this runbook | after the v0.10.4 rollout |
 | E6 rehearsal passed (§4) | this runbook | not run |
@@ -703,7 +703,7 @@ before the bundle (§3.5), settled in the E6 rehearsal.
 
 **Gaps found in code while writing this runbook, and how each is closed:**
 
-- **G0, the hub cannot load a candidate document.** Released; the rollout is still pending.
+- **G0, the hub cannot load a candidate document.** Closed: released and rolled out.
   - **The bug.** `c0fe50f0`'s loader parses the whole `CandidateHubDocument` with the integer-only
     candidate parser (`rel:server/workers/candidate/load.ts:38`; `rel:packages/worker-runtime/candidate-signatures.ts:107`).
     The document's `binding` carries `supervisorConfig.renewAfterFraction`, a fraction by schema
@@ -713,8 +713,9 @@ before the bundle (§3.5), settled in the E6 rehearsal.
     unsigned document; signed run and session documents stay integer-only.
   - **The release.** Released as v0.10.4 (`rel4:`), hub-only: the worker images, the binding and the I4
     pins stay v0.10.3.
-  - **Still to do.** The ailab hub pin and its rollout, before H7 and before `subject.json` is frozen:
-    the hub image is in `deployment.json`.
+  - **Rolled out.** ailab #1789 (`bda5b3fd`) has run it since 2026-11-16 10:08Z: image
+    `registry.chifor.me/relay/control-plane@sha256:d1482bc101ecf13667a75bfc1892f78b37bed7cf2fed8f9ce42f8c4513d057a7`,
+    schema 79. This is `deployment.json`'s `hub.image`, frozen from R1 to the canary.
 - **G1, #15 matrix.** Closed by Relay #529. The driver now regenerates the installed bundle at its own
   `generatedAt`, requires the pinned bytes, and takes `installedReport`. The per-launch policy pins the
   seconds left when the bundle was generated (`rel:packages/infrastructure-agent/pod-renderer.ts:248-255`).
