@@ -372,6 +372,7 @@ def check_values(values: dict, definition: dict, agent: dict) -> None:
 
 
 _GENERATOR = []
+_CAMPAIGN = []  # the validated committed run (or None), once per process
 
 
 def candidate_generator():
@@ -389,6 +390,8 @@ def campaign_run() -> dict | None:
     overlay is accepted only while the generator's own check passes on the committed tree (the run
     against the repository and the agent tree, and every generated file equal to its output), so the
     two never disagree."""
+    if _CAMPAIGN:
+        return _CAMPAIGN[0]
     gen = candidate_generator()
     try:
         run = gen.committed_run(ROOT)
@@ -397,9 +400,10 @@ def campaign_run() -> dict | None:
             if differences:
                 fail(f"the committed candidate run is not the generator's output (relay-candidate-run.py check): "
                      f"{differences}")
-        return run
     except gen.Refusal as refusal:
         fail(f"the committed candidate run does not validate (relay-candidate-run.py: {refusal.code})")
+    _CAMPAIGN.append(run)
+    return run
 
 
 def committed_config(config: dict) -> dict:
@@ -519,9 +523,13 @@ def candidate_values(values: dict, v: dict, agent: dict, ns: str) -> dict:
         **{k: runtime[k] for k in ("bindingSha256", "trustSha256", "trustConfigMap", "pinConfigMap", "holderSecret")},
         "networkPolicyName": policy["metadata"]["name"]}
     rules = agent[("NetworkPolicy", ns, "relay-infrastructure-agent")]["spec"]["egress"][3:]
-    if len(rules) == 1 and len(rules[0].get("ports", [])) == 1:
-        values["networkPolicy"]["candidateJournalCidrs"] = [peer.get("ipBlock", {}).get("cidr") for peer in rules[0]["to"]]
-        values["networkPolicy"]["candidateJournalPort"] = rules[0]["ports"][0]["port"]
+    if (len(rules) != 1 or set(rules[0]) != {"to", "ports"} or len(rules[0]["ports"]) != 1
+            or not rules[0]["to"] or any(set(peer) != {"ipBlock"} or set(peer["ipBlock"]) != {"cidr"}
+                                         for peer in rules[0]["to"])):
+        fail("during the campaign the agent NetworkPolicy's egress must be the three enrollment rules plus one "
+             "journal rule: ipBlock CIDRs only (no except) and one port, as the chart renders candidateJournalCidrs")
+    values["networkPolicy"]["candidateJournalCidrs"] = [peer["ipBlock"]["cidr"] for peer in rules[0]["to"]]
+    values["networkPolicy"]["candidateJournalPort"] = rules[0]["ports"][0]["port"]
     return values
 
 

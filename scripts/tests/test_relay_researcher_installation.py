@@ -18,6 +18,7 @@ import ipaddress
 import json
 import re
 import tempfile
+import urllib.parse
 from unittest import mock
 import unittest
 from pathlib import Path
@@ -528,13 +529,15 @@ class AgentStage(unittest.TestCase):
             # The chart's journal egress rule: ipBlocks only, private and off the LAN, on the journal's
             # port (its CIDRs are the one-time PR's, U9).
             (rule,) = journal
-            self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": int(journal_render().ORIGIN.rsplit(":", 1)[1])}])
+            origin = urllib.parse.urlsplit(journal_render().ORIGIN)
+            self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": origin.port or 443}])
             self.assertTrue(rule["to"])
+            rfc1918 = [ipaddress.ip_network(n) for n in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
             for peer in rule["to"]:
                 self.assertEqual(set(peer), {"ipBlock"})
                 self.assertEqual(set(peer["ipBlock"]), {"cidr"})
                 block = ipaddress.ip_network(peer["ipBlock"]["cidr"])
-                self.assertTrue(block.is_private, block)
+                self.assertTrue(any(block.subnet_of(n) for n in rfc1918), f"{block} is not RFC 1918")
                 self.assertFalse(block.overlaps(ipaddress.ip_network("192.168.0.0/23")), f"{block} reaches the LAN")
         else:
             self.assertEqual(journal, [])
