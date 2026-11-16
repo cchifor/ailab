@@ -765,3 +765,63 @@ anything.
 `/api/auth/callback`), not from request or proxy headers. In OIDC mode Relay refuses to start
 unless `RELAY_URL` is an exact HTTPS origin. Keycloak's `relay` client allows exactly that one
 redirect URI, so changing the public origin means changing both.
+
+## Operator automation identity (just-in-time admin, 2026-11-16)
+
+Relay's admin API (`authorize(req, "admin")`) accepts only a `relay_session` from the OIDC login
+(`RELAY_AUTH_MODE=oidc`; Bearer tokens are connector-only and `POST /api/auth/login` answers 404).
+Instead of a person handing the operator a browser cookie, the operator uses a dedicated Keycloak
+account with **no Relay membership at rest**:
+
+| What | Where |
+| --- | --- |
+| Keycloak user | `relay-operator@ailab.invalid`, id `72e99c0a-fce0-42f1-8e2a-af1363b5aa4f`, realm `relay` |
+| Relay subject | `https://id.chifor.me/realms/relay|72e99c0a-fce0-42f1-8e2a-af1363b5aa4f`, user `a2d7daaa-27e1-422b-9909-d8ba5ae9c9c8`, display name `relay-operator (automation)` |
+| Password | OpenBao `af/relay/operator-oidc` (`username`, `password`, `subject`, `keycloak_user_id`), read with the breakglass token over stdin |
+| Tools | `scripts/relay-operator.py` (host: kubectl + docker), `scripts/relay-admin-call.py` (runs in `python:3.13-bookworm@sha256:073ffebb…`, stdlib only) |
+
+`python scripts/relay-operator.py call OP [ARGS]` does, in order:
+
+1. `member.js --role admin` for that subject (cluster admin is the real gate, as for every operator
+   step);
+2. in the container: Relay `/api/auth/oidc` -> the Keycloak login form -> `/api/auth/callback`. Every
+   redirect is followed by hand and its `Location` checked (`auth_error=…` fails closed), with an
+   explicit User-Agent (Cloudflare refuses Python's default). The session cookie stays in memory;
+   `/api/auth/me` must say `relay-operator (automation)` and `admin`;
+3. ONE call from the allowlist: `me`, `list-installations`, `get-installation ID`,
+   `enrollment-token ID [--ttl S]`. There is no approve, no grant, no policy and no key reveal;
+4. `POST /api/auth/logout` with `Origin` (without it the 403 would leave the session alive for 8 h),
+   then `/api/auth/me` must answer 401;
+5. in a `finally`: delete the identity's memberships and sessions, and read back `0 memberships, 0 sessions`.
+
+**Never let it approve anything durable.** Relay re-checks the approver's CURRENT admin membership at
+every use of a worker grant, creation policy, management authority, delegation or repository grant
+(`workers/grants/authority.ts`, `management/authority.ts`, `delegation/service.ts`, …). Approved by this
+identity, they would fail `approver_invalid` the moment its membership is removed. Installation
+approval (I3) stays a human admin's step too.
+
+**Enrollment tokens.** The reissue route answers 200 (approve answers 201). The token is in the first
+response only. A replay of the same operationId returns the stored receipt with a null token, so the
+tool sends a new operationId every time and writes ONLY the raw token to stdout, for piping straight
+into the Secret (a redacted receipt goes to stderr):
+
+```bash
+python scripts/relay-operator.py call enrollment-token <installation-id> --ttl 900 \
+  | kubectl --context admin@ai -n relay-infra-control create secret generic relay-infrastructure-agent-enrollment --from-file=token=/dev/stdin
+```
+
+(On Windows, `kubectl.exe` has no `/dev/stdin`. Build the Secret JSON in memory and pipe it to
+`kubectl create -f -` instead.)
+
+**Audit.** Keycloak records `LOGIN`, `CODE_TO_TOKEN`, `LOGOUT` and errors for the account (realm events,
+90 days: `kc get events -r relay -q user=72e99c0a-fce0-42f1-8e2a-af1363b5aa4f`). Relay's own events name
+user `a2d7daaa-…` (for example `enrollment-reissued`).
+
+**Operations.**
+- `python scripts/relay-operator.py status`: Relay membership/session counts (expect 0/0) and the
+  Keycloak user state.
+- `revoke`: delete its membership and sessions again (idempotent). Use it after any interrupted `call`.
+- `provision --rotate`: a new random password, set in Keycloak and OpenBao, verified by a sha256 prefix.
+  Never retry a failed login: the realm has brute-force protection, so repeated failures lock the account.
+- **Retire it:** `revoke`, then `kc update users/72e99c0a-… -r relay -s enabled=false` (or delete it),
+  then `bao kv metadata delete -mount=af relay/operator-oidc`.
