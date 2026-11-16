@@ -1,0 +1,48 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# Relay's candidate hub files for the researcher qualification campaign (hub upgrade step H7,
+# docs/runbooks/relay-researcher-hub-upgrade.md; per run: docs/runbooks/relay-candidate-run-generator.md).
+# Relay v0.10.4 (e77bd09a) reads three settings (server/config.ts, server/workers/candidate/load.ts):
+#
+#   RELAY_WORKER_CANDIDATE_FILE              the CandidateHubDocument, read with readCandidateFile
+#                                            {sha256, trustedUid: 0}: root-owned, regular, one link,
+#                                            no group/other write, at most 65,536 bytes, no symlink
+#                                            anywhere on its path (O_NOFOLLOW and /proc/self/fd);
+#   RELAY_WORKER_CANDIDATE_SHA256            sha256 of those exact bytes;
+#   RELAY_WORKER_CANDIDATE_SESSION_KEY_FILE  the run's session-permit Ed25519 PKCS#8 PEM, read with
+#                                            readCandidateFile {secret: true}: owned by root or the
+#                                            process UID, NO group or other permission bits at all.
+#
+# What kubelet produces, and why the key is copied (deployment.yaml has the mount-by-mount detail):
+#   * The document comes from a ConfigMap volume as a subPath file. kubelet bind-mounts the resolved
+#     file, so the container sees a regular file (not the ..data symlink) with one link, owned by root
+#     (the atomic writer runs as root), group 1000 (the Pod's fsGroup) and mode 0444. Readable by
+#     Relay's UID 1000; the reader's root-owner and no-group/other-write checks pass.
+#   * The key cannot come straight from a Secret volume. kubelet creates every Secret file as root
+#     and only changes its group to the fsGroup, ORing 0440 into the mode (pkg/volume
+#     volume_linux.go, read-only volumes). Root:1000 0440 is refused by the secret check
+#     (mode & 0o077); without the group bits UID 1000 cannot read a root-owned 0400 file. No volume
+#     option sets a file owner. So the init container candidate-session-key, as UID 1000, copies the
+#     key with `install -m 0400` into a Memory emptyDir: owner 1000 (the process UID), mode 0400,
+#     one link, a plain directory mount under /run. Only that init container mounts the Secret.
+#   * Paths are under /run, never /var/run (a symlink), as for the other hub components.
+#
+# Layout. This directory is reviewed once (H7). run/ is GENERATED per signed run by
+# scripts/relay-candidate-run.py (S-A, owner decision O6): run/document.json (the document composed
+# by Relay scripts/compose-candidate-hub-document.ts), and run/kustomization.yaml + run/deployment.yaml
+# with the run-bound values only: the ConfigMap relay-worker-candidate-<runDigest[:16]>, the
+# RELAY_WORKER_CANDIDATE_SHA256 pin and the session-key Secret relay-worker-candidate-key-<runDigest[:16]>
+# (operator-created from the run's permit key, never in git). `scripts/relay-candidate-run.py check`
+# regenerates run/ from the committed document and compares, so a per-run diff is mechanical. The
+# committed run/ is a PLACEHOLDER until the first run; scripts/tests/test_relay_candidate_run.py
+# refuses inclusion while it is.
+#
+# NOT INCLUDED by kubernetes/apps/apps/relay. scripts/tests/test_relay_v060_activation_gate.py refuses
+# the three settings and this component's name there until H7's inclusion PR, which is the first
+# run's (R1) per-run PR; test_relay_researcher_hub_upgrade.py pins the patch below and refuses the
+# component without H6's Router connection and control plane. Relay design: the candidate authority is
+# removed again before the ordinary canary (relay-researcher-hub-upgrade.md, H7).
+components:
+- run
+patches:
+- path: deployment.yaml
