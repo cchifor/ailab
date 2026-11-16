@@ -3,14 +3,17 @@
 // jobparser.ValidateWorkflowStatic, ReadWorkflow and Parse. A file that fails one of them is dropped by that
 // Gitea version with only a log warning ("ignore invalid workflow"), so its CI silently stops.
 //
-// Usage: wfcheck <dir>, where <dir> holds <owner>/<repo>/<n>-<path> files written by gitea-workflow-check.sh.
+// Usage: wfcheck <dir> <expected>, where <dir> holds the <owner>/<repo>/<n>-<path> files written by
+// gitea-workflow-check.sh and <expected> is how many it wrote. Every regular file is checked: the exporter has
+// already applied Gitea's .yml/.yaml filter, and a count that differs from <expected> fails the run (exit 3),
+// so no exported file can go unchecked.
 package main
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"strconv"
 
 	"gitea.dev/modules/actions/jobparser"
 )
@@ -19,10 +22,19 @@ import (
 const contentLimit = 1024 * 1024
 
 func main() {
+	if len(os.Args) != 3 {
+		fmt.Println("usage: wfcheck <dir> <expected>")
+		os.Exit(2)
+	}
 	root := os.Args[1]
+	expected, err := strconv.Atoi(os.Args[2])
+	if err != nil {
+		fmt.Println("expected count:", err)
+		os.Exit(2)
+	}
 	bad, total := 0, 0
-	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !(strings.HasSuffix(p, ".yml") || strings.HasSuffix(p, ".yaml")) {
+	err = filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil || !info.Mode().IsRegular() {
 			return err
 		}
 		total++
@@ -58,6 +70,10 @@ func main() {
 	if err != nil {
 		fmt.Println("walk:", err)
 		os.Exit(2)
+	}
+	if total != expected {
+		fmt.Printf("MISMATCH: %d files checked, %d exported\n", total, expected)
+		os.Exit(3)
 	}
 	fmt.Printf("checked %d workflow files, %d invalid\n", total, bad)
 	if bad > 0 || total == 0 {

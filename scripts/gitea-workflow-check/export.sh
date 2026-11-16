@@ -12,15 +12,19 @@ for d in */*.git; do
   [ -d "$d" ] || continue
   repo=${d%.git}
   if ! git -C "$d" rev-parse -q --verify HEAD^{commit} >/dev/null; then
-    # An empty repository has no HEAD. Anything else that fails here is an error, not "empty".
-    [ -z "$(git -C "$d" for-each-ref --count=1)" ] || { echo "=====ERROR $repo: HEAD unreadable"; exit 1; }
+    # An empty repository has no HEAD and no refs. Anything else is an error, not "empty": a repository whose refs
+    # cannot be listed, or one with refs but no readable HEAD.
+    refs=$(git -C "$d" for-each-ref --count=1) || { echo "=====ERROR $repo: cannot list refs"; exit 1; }
+    [ -z "$refs" ] || { echo "=====ERROR $repo: HEAD unreadable"; exit 1; }
     echo "=====EMPTY $repo"
     continue
   fi
   # The workflow directories Gitea 28.x reads: WORKFLOW_DIRS (first existing one wins) and SCOPED_WORKFLOW_DIRS.
   # Every one is checked, including one Gitea ignores because .gitea/workflows exists.
   for dir in .gitea/workflows .github/workflows .gitea/scoped_workflows; do
-    list=$(git -C "$d" ls-tree -r HEAD -- "$dir/") || { echo "=====ERROR $repo: ls-tree $dir"; exit 1; }
+    # quotePath=false prints non-ASCII names as they are; git still quotes names with a quote, tab or newline.
+    list=$(git -C "$d" -c core.quotePath=false ls-tree -r HEAD -- "$dir/") ||
+      { echo "=====ERROR $repo: ls-tree $dir"; exit 1; }
     [ -n "$list" ] || continue
     printf '%s\n' "$list" | while read -r mode type sha path; do
       [ "$type" = blob ] || continue          # a submodule is not a workflow

@@ -14,7 +14,7 @@ set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 host_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi; }
 die() { echo "gitea-workflow-check: $*" >&2; exit 2; }
-work=""
+work="" exported=0
 
 # Reads export.sh's stream on stdin and writes each workflow as a regular file under $1/<owner>/<repo>/.
 # The file name is a counter plus the Git path with every unsafe character replaced, so a crafted path cannot
@@ -27,6 +27,8 @@ decode_stream() {
         rest=${line#=====FILE }; repo=${rest%% *}; rest=${rest#* }; mode=${rest%% *}; path=${rest#* }
         [[ $repo =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ && $repo != *..* ]] || die "unexpected repository name: $repo"
         IFS= read -r data || die "stream ended inside $repo $path"
+        # Drop git's quotes around an unusual name, so the .yml/.yaml suffix survives into the file name.
+        [[ $path == \"*\" ]] && path=${path:1:${#path}-2}
         n=$((n + 1)); safe=$(printf '%s' "$path" | tr -c 'A-Za-z0-9._-' '_')
         mkdir -p "$out/$repo"
         printf '%s' "$data" | base64 -d > "$out/$repo/$n-$safe" || die "cannot decode $repo $path"
@@ -37,6 +39,7 @@ decode_stream() {
     esac
   done
   [ "$complete" = 1 ] || die "the export did not finish (no =====END)"
+  exported=$n
   echo "exported $n workflow files"
 }
 
@@ -61,15 +64,16 @@ main() {
     die "the export failed: $(grep '^=====ERROR' "$work/export.txt" || echo 'kubectl exec')"
   decode_stream "$work/files" < "$work/export.txt"
 
-  # Exit 1 comes only from the checker's verdict. A build or run failure prints no "checked" line: exit 3.
+  # Exit 1 comes only from the checker's verdict. A build or run failure, or a checked count that differs from
+  # the exported one, prints no "checked" line: exit 3.
   MSYS_NO_PATHCONV=1 docker run --rm \
     -v "$(host_path "$src"):/src-ro:ro" -v "$(host_path "$work/files"):/files:ro" \
     -v "$(host_path "$here/gitea-workflow-check"):/tool:ro" -v gitea-workflow-check-gomod:/go/pkg/mod \
     "golang:$toolchain" sh -c 'mkdir -p /src/cmd/wfcheck && cp /src-ro/go.mod /src-ro/go.sum /src/ &&
       cp -r /src-ro/modules /src/ && cp /tool/main.go /src/cmd/wfcheck/ && cd /src &&
-      GOFLAGS=-mod=mod go run ./cmd/wfcheck /files > /tmp/out 2>&1; rc=$?
+      GOFLAGS=-mod=mod go run ./cmd/wfcheck /files "$1" > /tmp/out 2>&1; rc=$?
       grep -v "^go: downloading" /tmp/out
-      grep -q "^checked [0-9]* workflow files" /tmp/out || exit 3; exit "$rc"' || rc=$?
+      grep -q "^checked [0-9]* workflow files" /tmp/out || exit 3; exit "$rc"' sh "$exported" || rc=$?
   [ "$rc" -le 1 ] || die "the checker did not run to the end (exit $rc)"
   return "$rc"
 }

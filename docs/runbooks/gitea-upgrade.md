@@ -286,7 +286,8 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
     `gitea`, `needs`, `vars` or `inputs`, and drops the whole workflow with a warning. 1.27 accepted it.
     - platform `ci.yml` (job `python`, `needs.changes.outputs[matrix.name]`): no `ci.yml` run, and so no required
       CI status, on any platform pull request after the start. dev-worker-4 reported it (platform #2778). The
-      warning was in this window's startup log and was not acted on.
+      warning was in this window's startup log and was not acted on. Fixed by platform #2784, merged 14:18 UTC:
+      no `matrix` in the job-level `if:`, so per-entry gating is left to the job's `should_run` step.
     - ci `matrix-admission-canary.yml` (manual only): the canary that qualified platform's gate.
 
     `scripts/gitea-workflow-check.sh 28.4.0`, written after the report, found exactly these two among 111 workflows
