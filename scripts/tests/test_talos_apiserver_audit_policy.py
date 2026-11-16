@@ -52,11 +52,22 @@ RULE_KEYS = {"level", "users", "userGroups", "verbs", "resources", "namespaces",
 GROUP_RESOURCE_KEYS = {"group", "resources", "resourceNames"}
 
 
+class UniqueKeyLoader(yaml.SafeLoader):
+    """Refuses a duplicated mapping key, as Talos's YAML decoder does; PyYAML would keep the last one."""
+
+    def construct_mapping(self, node, deep=False):
+        keys = [self.construct_object(k, deep=deep) for k, _ in node.value]
+        duplicates = {k for k in keys if keys.count(k) > 1}
+        if duplicates:
+            raise yaml.constructor.ConstructorError(None, None, f"duplicate keys {sorted(duplicates)}", node.start_mark)
+        return super().construct_mapping(node, deep=deep)
+
+
 def template_docs() -> list[dict]:
     """The template's documents, directives dropped and every interpolation replaced (tofu fills them)."""
     text = TEMPLATE.read_text(encoding="utf-8")
     text = "\n".join(line for line in text.splitlines() if not re.match(r"^\s*%\{.*\}\s*$", line))
-    return [d for d in yaml.safe_load_all(re.sub(r"\$\{[a-z_]+\}", "x", text)) if d]
+    return [d for d in yaml.load_all(re.sub(r"\$\{[a-z_]+\}", "x", text), Loader=UniqueKeyLoader) if d]
 
 
 def rendered_patch() -> dict:
@@ -205,6 +216,13 @@ class AuditPolicyTest(unittest.TestCase):
                 for res in gr["resources"]:
                     self.assertNotIn("*", res, rule)
                     self.assertNotIn(res, sensitive, rule)
+
+    def test_one_api_server_block(self):
+        # A second `apiServer:` (or any duplicated key) would pass a last-wins YAML load while Talos
+        # refuses the config at apply time.
+        self.assertEqual(len(template_docs()), 3)
+        with self.assertRaises(yaml.constructor.ConstructorError):
+            yaml.load("cluster:\n  apiServer: {}\n  apiServer: {}\n", Loader=UniqueKeyLoader)
 
     def test_slot_is_the_execution_namespace(self):
         roles = {d["metadata"]["name"]: d["metadata"]["labels"].get("relay.chifor.me/namespace-role")

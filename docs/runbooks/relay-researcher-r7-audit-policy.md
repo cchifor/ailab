@@ -173,7 +173,7 @@ event's shape (O7)") lives in `relay-delayed-start-rehearsal`, which this policy
 E6 does two things:
 
 - It runs `probe` on every control plane.
-- It rehearses the extraction below on one probe. Set `POD` to the probe's name. In the jq filter,
+- It rehearses the extraction below on one probe. Set `CANDIDATE` to the probe's name. In the jq filter,
   replace `(.requestURI | test("[?&]dryRun=") | not)` with `(.requestURI | test("[?&]dryRun="))`.
   Expect exactly one line, `403`, from the probed control plane and none from the others.
 
@@ -184,15 +184,15 @@ least two minutes before `T`.
 ## Extract R7's event
 
 Do this in R7's step 4 ("capture the inputs before T"), as soon as the agent's create has returned.
-`POD` is the submitted Pod's name.
+`CANDIDATE` is the submitted Pod's name (`POD` above holds the API server pod names).
 
 ```bash
-POD=$(jq -r .metadata.name /operator/r7/submitted-pod.json | tr -d '\r'); NS=relay-researcher-1
+CANDIDATE=$(jq -r .metadata.name /operator/r7/submitted-pod.json | tr -d '\r'); NS=relay-researcher-1
 for c in $CPS; do
-  "$T" -n $c read /var/log/audit/kube/kube-apiserver.log | grep -F "\"name\":\"$POD\"" > "$W/r7-$c.jsonl"
+  "$T" -n $c read /var/log/audit/kube/kube-apiserver.log | grep -F "\"name\":\"$CANDIDATE\"" > "$W/r7-$c.jsonl"
 done
 for c in $CPS; do
-  jq -r --arg ns "$NS" --arg pod "$POD" 'select(.verb == "create" and .stage == "ResponseComplete"
+  jq -r --arg ns "$NS" --arg pod "$CANDIDATE" 'select(.verb == "create" and .stage == "ResponseComplete"
       and .objectRef.resource == "pods" and .objectRef.subresource == null and .objectRef.namespace == $ns
       and .objectRef.name == $pod and (.requestURI | test("[?&]dryRun=") | not))
     | "\(.auditID) \(.level) \(.responseStatus.code) \(.responseObject.metadata.uid // "-") \(.user.username) \(.impersonatedUser.username // "-")"' \
@@ -211,9 +211,13 @@ done | tee "$W/r7-hits.txt"
 - **Write the file.** Copy that one line unchanged, as the API server logged it:
 
 ```bash
-read -r CP ID _ < <(grep ' 201 ' "$W/r7-hits.txt")
-grep -F "\"auditID\":\"$ID\"" "$W/r7-$CP.jsonl" > /operator/r7/create-audit-event.json
-wc -l < /operator/r7/create-audit-event.json                # 1
+if [ "$(grep -c ' 201 ' "$W/r7-hits.txt")" = 1 ]; then
+  read -r CP ID _ < <(grep ' 201 ' "$W/r7-hits.txt")
+  grep -F "\"auditID\":\"$ID\"" "$W/r7-$CP.jsonl" > /operator/r7/create-audit-event.json
+  wc -l < /operator/r7/create-audit-event.json              # 1
+else
+  echo "STOP: not exactly one 201 create event"            # see the outcomes above
+fi
 ```
 
 **Check it with #532's own code**, from the pinned driver checkout. First the strict parser the
