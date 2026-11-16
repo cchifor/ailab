@@ -52,8 +52,8 @@ class CommittedState(unittest.TestCase):
         self.pins = self.bundle.pins()
         self.config_text = (TREE / "agent/config.json").read_text(encoding="utf-8")
         self.config = json.loads(self.config_text)
-        # Step I5 has landed unless every pin is still the reviewed placeholder.
-        self.imported = not all("operator-fills" in str(v) for v in self.pins.values())
+        # Step I5 has landed unless every pin is still the reviewed placeholder (the bundle script's predicate).
+        self.imported = not self.bundle.pins_are_placeholders(self.pins)
 
     def require_imported(self):
         if not self.imported:
@@ -222,10 +222,13 @@ class CommittedState(unittest.TestCase):
                     stated = [json.loads(v) for v in re.findall(r"`(\[[^`]*\])`", cells[1])]
                     self.assertEqual(stated, [listed], f"row {cells[0]!r} must state exactly {listed}")
         self.assertEqual(seen, set(expected), "the provenance record does not state every imported field")
-        # The release it names is the pinned one.
+        # The release it names is the pinned one: every "release <id>" and, where the tag follows it
+        # ("release <id> (<tag>, ..."), that tag. Other version mentions (tools) are not the release.
         release = self.inputs["release"]
-        self.assertEqual(set(re.findall(r"(?<![\w.])v\d+\.\d+\.\d+(?![\w.])", text)), {release["tag"]})
         self.assertEqual(set(re.findall(r"\brelease (\d+)\b", text)), {str(release["giteaReleaseId"])})
+        tagged = re.findall(r"\brelease (\d+)\s*\((v\d+\.\d+\.\d+)(?![\w.])", text)
+        self.assertTrue(tagged, "the record does not name the release with its tag")
+        self.assertEqual(set(tagged), {(str(release["giteaReleaseId"]), release["tag"])})
         # Anything else it quotes is a pinned or derived hash.
         self.assert_hashes(text, self.known_digests(), "record")
         self.assertTrue(self.states(self.inputs["installation"]["publicKeyFingerprint"], text),

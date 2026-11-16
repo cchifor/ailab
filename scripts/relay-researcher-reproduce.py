@@ -70,12 +70,18 @@ def run(argv: list[str], cwd: Path | None = None) -> str:
 
 
 def export(ref: str, destination: Path) -> str:
-    """The committed tree of `ref` (its commit id is returned), extracted without git metadata."""
+    """The committed tree of `ref` (its commit id is returned), extracted without git metadata. Every
+    tracked file must arrive: an `export-ignore` attribute that drops one is refused, not skipped."""
     commit = run(["git", "-C", str(ROOT), "rev-parse", "--verify", f"{ref}^{{commit}}"]).strip()
     archive = subprocess.run(["git", "-C", str(ROOT), "archive", "--format=tar", commit],
                              capture_output=True, check=True).stdout
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-        tar.extractall(destination, filter="data")
+        # The "data" filter where this Python has it (3.12, and the 3.8.17+/3.9.17+/3.10.12+/3.11.4 backports).
+        tar.extractall(destination, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+    tracked = set(run(["git", "-C", str(ROOT), "ls-tree", "-r", "--name-only", "-z", commit]).split("\0")) - {""}
+    exported = {str(p.relative_to(destination)) for p in destination.rglob("*") if p.is_file() or p.is_symlink()}
+    if tracked - exported:
+        raise Difference(f"git archive left out tracked files (export-ignore?): {sorted(tracked - exported)[:5]}")
     return commit
 
 
@@ -91,13 +97,20 @@ def compare_files(label: str, produced: Path, committed: Path, names) -> list[st
     return differences
 
 
-def pins_are_placeholders(tree: Path) -> bool:
-    """True only while EVERY pin is still the reviewed placeholder (before step I5). Anything else,
-    malformed pins included, is compared with a fresh import, never skipped."""
-    spec = importlib.util.spec_from_file_location("relay_researcher_bundle", tree / "scripts/relay-researcher-bundle.py")
+def bundle_module(root: Path):
+    spec = importlib.util.spec_from_file_location("relay_researcher_bundle", root / "scripts/relay-researcher-bundle.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return all("operator-fills" in str(value) for value in module.pins().values())
+    return module
+
+
+def pins_are_placeholders(tree: Path) -> bool:
+    """True only while EVERY pin is still the reviewed placeholder (before step I5). Anything else,
+    malformed pins included, is compared with a fresh import, never skipped. The predicate is the
+    bundle script's (this checkout's, for a ref older than it)."""
+    exported = bundle_module(tree)
+    predicate = getattr(exported, "pins_are_placeholders", None) or bundle_module(ROOT).pins_are_placeholders
+    return predicate(exported.pins())
 
 
 def reproduce(relay: Path, assets: Path, ref: str) -> list[str]:
@@ -127,8 +140,9 @@ def reproduce(relay: Path, assets: Path, ref: str) -> list[str]:
         differences = [] if produced == committed == sorted(I4_FILES) else [
             f"I4: file sets differ: produced {produced}, committed {committed}"]
         differences += compare_files("I4", regenerated, tree / I4_OUTPUT, I4_FILES)
-        summary = json.loads((regenerated / "summary.json").read_text(encoding="utf-8"))
-        print(f"I4: {I4_OUTPUT}/ regenerated, bindingDigest {summary['bindingDigest']}: "
+        summary_file = regenerated / "summary.json"
+        digest = json.loads(summary_file.read_text(encoding="utf-8"))["bindingDigest"] if summary_file.is_file() else "?"
+        print(f"I4: {I4_OUTPUT}/ regenerated, bindingDigest {digest}: "
               + ("byte-identical" if not differences else "DIFFERENT"))
 
         # Step I5: Relay's preparation, the reviewed check with the chart render, then the import.
