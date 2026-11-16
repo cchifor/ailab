@@ -14,9 +14,11 @@
 # placement must carry kubernetes.io/hostname: relay-worker-1.
 #
 # Secrets, by NAME only (no value is in git): relay-infrastructure-agent-key (key installation.pem,
-# PKCS#8 Ed25519) and relay-infrastructure-agent-enrollment (key token, the one-use enrollment
-# token). The operator creates both (runbook step I8). After confirmed enrollment the enrollment
-# volume and mount are removed in a reviewed change, and fenceObjectUid is pinned in config.json.
+# PKCS#8 Ed25519), created by the operator at runbook step I8. The one-use enrollment token
+# (relay-infrastructure-agent-enrollment, also step I8) was consumed at enrollment on 2026-11-16.
+# Step I10 removed its volume and mount here, and pinned the live fence ConfigMap's UID as
+# identity.fenceObjectUid in config.json. The operator deletes that consumed Secret only after this
+# change has rolled out.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -91,7 +93,6 @@ spec:
         - {name: config, mountPath: /etc/relay-agent, readOnly: true}
         - {name: kubernetes, mountPath: /run/relay/kubernetes, readOnly: true}
         - {name: installation-key, mountPath: /run/relay/installation, readOnly: true}
-        - {name: enrollment-token, mountPath: /run/relay/enrollment, readOnly: true}
         - {name: hub-ca, mountPath: /run/relay/hub-ca, readOnly: true}
         - {name: tmp, mountPath: /tmp}
       volumes:
@@ -112,11 +113,6 @@ spec:
           secretName: relay-infrastructure-agent-key
           defaultMode: 0400
           items: [{key: installation.pem, path: installation.pem}]
-      - name: enrollment-token
-        secret:
-          secretName: relay-infrastructure-agent-enrollment
-          defaultMode: 0400
-          items: [{key: token, path: token}]
       - name: hub-ca
         configMap:
           name: relay-hub-ca

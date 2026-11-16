@@ -4,9 +4,10 @@
 # docs/relay-workers/researcher-installation-definition.json:
 #
 #   control   = agentResources {milliCpu 200, memoryMiB 256, ephemeralMiB 64}; pods 1; secrets
-#               5 = 2 credential objects (relay-infrastructure-agent-key, -enrollment) + 2 retained and
-#               1 in-flight Helm release record (Relay's fixed budget, even though ailab applies the
-#               chart render through Flux); 2 Leases.
+#               4 = 1 credential object (relay-infrastructure-agent-key) + 2 retained and 1 in-flight
+#               Helm release record (Relay's fixed budget, even though ailab applies the chart render
+#               through Flux); 2 Leases. It was 5 until step I10 dropped the one-use enrollment Secret
+#               (relay-infrastructure-agent-enrollment) from the definition after confirmed enrollment.
 #   execution = installationPolicy.resourceCeiling {milliCpu 2000, memoryMiB 4096, scratchMiB 10240}
 #               plus the relay-gvisor RuntimeClass overhead {80m, 24Mi}: 2080m / 4120Mi / 10240Mi.
 #               pods 0, secrets 0, no PVC, Service or Lease.
@@ -33,7 +34,7 @@ spec:
     services: "0"
     services.loadbalancers: "0"
     services.nodeports: "0"
-    secrets: "5"
+    secrets: "4"
     configmaps: "8"
     count/leases.coordination.k8s.io: "2"
 ---
