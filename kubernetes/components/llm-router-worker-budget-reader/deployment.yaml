@@ -21,10 +21,12 @@ spec:
           value: /run/llm-router-worker-budget/witness.json
         # sha256 of the canonical Relay RouterDeployment identity {id, origin, issuer, baoOrigin,
         # baoMount, baoPrefix} (Relay server/router-credentials/service.ts deploymentDigest), equal to
-        # readers.deployment_digest and clients.deployment_digest in the ledger. OPERATOR INPUT: the
-        # placeholder is not 64 hex, so the plugin refuses to start with it even if enabled.
+        # readers.deployment_digest and clients.deployment_digest in the ledger. For the reviewed record
+        # kubernetes/components/relay-router-connection/connections.json (id babbf5ca-...) it is the
+        # value below, recomputed with Relay's own canonicalJson and with the runbook's independent check
+        # (docs/runbooks/relay-router-connection.md, "Deployment digest").
         - name: ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST
-          value: operator-sets-the-reviewed-relay-router-deployment-digest
+          value: 547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad
         volumeMounts:
         - name: worker-budget
           mountPath: /run/llm-router-worker-budget/dsn
