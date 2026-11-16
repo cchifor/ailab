@@ -44,6 +44,12 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
 2. **Audit.** Check workflows for the release's breaking changes (for 1.27: cross-instance reusable workflows, by URL;
    for 28.x: the plan's list) in every repository with Actions, and custom templates under `/data/gitea/templates`.
    Render the chart with the new values (`helm template`) and diff it against the old render.
+   - Run `scripts/gitea-workflow-check.sh <target>`. It runs the target version's own workflow parser over every
+     workflow on every repository's default branch (28.0 and later; older trees lack `modules/actions/jobparser`).
+     Every `INVALID` line is a workflow that stops running at the upgrade: Gitea drops it with only a log warning.
+     Get each one fixed in its repository before the window. Reading release notes is not enough:
+     2026-11-16 missed that 28.x rejects `matrix` in a job-level `if:`, and platform's `ci.yml` stopped
+     (platform #2778).
 3. **Stage recovery files on the workstation, before anything stops:**
    - `helm -n gitea get values gitea -a -o yaml > gitea-values-before.yaml`;
    - `helm -n gitea get manifest gitea > gitea-manifest-before.yaml`;
@@ -169,6 +175,9 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
    - **28.x additions:**
      - the startup log carries no config problem: `kubectl -n gitea logs deploy/gitea -c gitea | grep -E
        'Deprecation|ALLOWED_HOST_LIST|EGRESS|invalid entry'` prints nothing;
+     - no workflow is dropped: `kubectl -n gitea logs deploy/gitea -c gitea | grep 'ignore invalid workflow'`
+       prints nothing. Gitea parses a repository's workflows only when an event reaches it, so an empty grep right
+       after the start proves little; `scripts/gitea-workflow-check.sh <version>` covers every repository;
      - the org webhooks to the reviewer VMs deliver (the reviewer-bot review above), and their latest deliveries are
        green in the org's webhook settings;
      - a clone over SSH (`gitea-ssh`; 28.0 replaced the built-in SSH server's library);
@@ -240,3 +249,44 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
     - the owner's OIDC login through Authelia (the owner, 2026-11-09).
   - **Cost:** the restart failed 18 running jobs (relay, ailab, workbricks). The newest run of each branch or
     pull request was re-run through the API (17 runs).
+- **2026-11-16: 1.27.3 → 28.4.0** (chart 12.7.0 unchanged; PR #1794, merge `b8772752`; plan
+  `plans/2026-11-16-gitea-28-upgrade-plan.md`).
+  - **Before the stop:** the 28.4.0 image was pulled on the three control-plane nodes. The HelmRelease was frozen at
+    about 13:13 UTC, and the `WIP:` prefix came off at about 13:14. The reviewer bots' findings, all on the step-5 snippet, were
+    fixed in two pushes, and the reviewer system merged at 13:30.
+  - **Outage:** 13:31:17 → 13:35:59 UTC, 4 min 42 s.
+  - **Dump:** 941 MB in 1 min 50 s; `pg_restore -f /dev/null` exited 0. It is kept on the workstation as
+    `gitea-pre-28.4.0-20261116T133129Z.dump`, sha256
+    `15cfa0f486415f31d1682bd650b7249102a8b014ac9800b9e35fc6132ceeb2a5`.
+  - **Volumes:** Velero `gitea-pre-2840`, 154/154 items, completed in 27 s (`data` 14.2 GB, `actions-storage`
+    6.0 GB).
+  - **Migrations:** 343 → 358 in about 1 s, in the `configure-gitea` init container; 358 matches the rehearsal. The
+    HelmRelease is Ready at its generation 28 (Helm revision 21).
+  - **Key removal, done twice.** The step-5 rewrite removed `[webhook] ALLOWED_HOST_LIST` in the holder pod, but the
+    first start logged both deprecation errors again. The `gitea-inline-config` Secret still held a `webhook` key with
+    the old value (see "A dropped section also stays in the chart's Secret"), and `init-app-ini` had written it back.
+    At 13:39 the key was deleted from the Secret, and the step-5 block was run again on the running pod's `app.ini`
+    (`b_suffix=pre-28.4.0-secret`). Gitea reads `app.ini` only at startup, so that start keeps both lists. They allow
+    the same two private ranges, so webhook behaviour is unchanged; the two errors go away at the next start.
+  - **Verified:**
+    - `gitea-api.sh GET /version` (28.4.0) and `GET /user`; the HelmRelease Ready; `GitRepository` `flux-system` and
+      Kustomization `apps` at `b8772752`;
+    - the org webhooks: the 6 deliveries to the reviewer VMs after the start all succeeded, and none is pending;
+    - SSH: the five Flux `GitRepository`s that fetch over `gitea-ssh` fetched again at 13:40;
+    - `/-/ws` answers `101 Switching Protocols` through the edge and in-cluster;
+    - the `cnpg_gitea_*` credential metrics and Gitea's own scrape (`up` 1), with no Gitea alert firing;
+    - a branch push mirrored to GitHub within 6 s;
+    - `ci-rerun-watchdog` scans with `errors=[]`, and `cloud-power` logged no error.
+  - **Regression: two workflows stopped.** 28.x rejects a job-level `if:` that names a context other than `github`,
+    `gitea`, `needs`, `vars` or `inputs`, and drops the whole workflow with a warning. 1.27 accepted it.
+    - platform `ci.yml` (job `python`, `needs.changes.outputs[matrix.name]`): no `ci.yml` run, and so no required
+      CI status, on any platform pull request after the start. dev-worker-4 reported it (platform #2778). The
+      warning was in this window's startup log and was not acted on.
+    - ci `matrix-admission-canary.yml` (manual only): the canary that qualified platform's gate.
+
+    `scripts/gitea-workflow-check.sh 28.4.0`, written after the report, found exactly these two among 111 workflows
+    in 21 repositories. Step 2 now runs it before the window.
+  - **Cost:** 23 jobs were running at the stop. 8 reported again after the start and ran to their end, and newer
+    pushes cancelled 2. The other 13, short jobs that ended during the outage, were failed as zombies at about 13:45.
+    Their runs got `rerun-failed-jobs` once each had finished (ailab `main`: `rules-lint`, `script-tests`; platform
+    `main`: `e2e-preflight`, `ci`, `contract`). `ci-rerun-watchdog` skipped them (`job_not_cloud`).
