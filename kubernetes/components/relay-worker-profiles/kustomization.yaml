@@ -2,8 +2,12 @@ apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 # Relay's pinned worker profile registry (Relay docs/worker-runtime-sessions.md, "Deployment
 # configuration"): RELAY_WORKER_PROFILES_FILE names a root-owned, regular, single-link JSON file and
-# RELAY_WORKER_PROFILES_SHA256 pins its exact bytes independently. Hub upgrade step H4
-# (docs/runbooks/relay-researcher-hub-upgrade.md), in the same PR as ../relay-worker-budget-client.
+# RELAY_WORKER_PROFILES_SHA256 pins its exact bytes independently. Hub upgrade step H4b
+# (docs/runbooks/relay-researcher-hub-upgrade.md): after the genuine release approval, which Relay's
+# design issues only once the nineteen qualification reports and the other release gates are
+# accepted, and before the general lifecycle trial. Every entry carries that approval and the
+# registry cannot be empty, so it cannot come earlier; the candidate runs and the canary do not need
+# it. ../relay-worker-budget-client came long before, alone, at step H4a.
 #
 # profiles.json is a PLACEHOLDER that Relay's schema refuses. The operator replaces it with the
 # registry for the pinned release: version 1, one entry for tenant
@@ -11,7 +15,7 @@ kind: Component
 # runtimeDigest, the pool modelPolicy, the complete WorkerProfileTemplate (launcher-proxy-v1, UID
 # 1000, /workspace, the relay-researcher channel ae9b92bb-0b59-4987-b41f-376bd269db62, inference
 # {connectionId babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8, protocol codex-responses, selection {kind: model,
-# model: relay-researcher-luna}} with adaptedResponses), the current release approval and the
+# model: relay-researcher-luna}} with adaptedResponses), the genuine release approval and the
 # qualified tokenPolicyDigests. The same PR sets RELAY_WORKER_PROFILES_SHA256 in deployment.yaml to
 # sha256sum of that file. scripts/tests/test_relay_researcher_hub_upgrade.py refuses inclusion while
 # either is a placeholder or they disagree.
@@ -22,7 +26,7 @@ kind: Component
 # ("Changing the mounted registry or its pin requires a hub restart").
 #
 # NOT INCLUDED by kubernetes/apps/apps/relay; scripts/tests/test_relay_v060_activation_gate.py refuses
-# RELAY_WORKER_PROFILES_FILE and this component's name there until step H4.
+# RELAY_WORKER_PROFILES_FILE and this component's name there until step H4b.
 configMapGenerator:
 - name: relay-worker-profiles
   namespace: relay
