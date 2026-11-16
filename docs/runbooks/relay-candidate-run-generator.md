@@ -127,11 +127,20 @@ before the per-launch bundle's guards freeze them (§3.7). The holder Secret `re
 Commit the five files, open the PR right after signing with label `no-automerge` (campaign runbook
 §2), and paste the summary. CI's `script-tests` runs `scripts/tests/test_relay_candidate_run.py`,
 which regenerates every run-bound value from the committed `run/document.json` (it carries the signed
-run) and fails on any difference; the reviewer and the operator confirm the run:
+run) and fails on any difference in them. **The merge gate** is stricter, and the reviewer and the
+operator run it on the PR branch: it runs the generator on the base revision's files with the
+committed run and requires the branch to equal that output and to change nothing else:
 
 ```sh
-python3 scripts/relay-candidate-run.py check --run-digest <runDigest recorded at t_s>   # exit 0, "equal": true
+git fetch origin main
+python3 scripts/relay-candidate-run.py check --base origin/main --run-digest <runDigest recorded at t_s>
+# exit 0, "equal": true, "firstRun": false
 ```
+
+R1's PR is H7's inclusion PR: its base still has the placeholder `run/`, so the check reports
+`"firstRun": true`, checks the generated values for self-consistency and lists every other changed
+path under `reviewByHand` (the overlay line, the activation-gate edit and, if it lands there, the
+agent's one-time structure), which are reviewed like any H-step change.
 
 The operator merges once CI, the §3.2-§3.3 readbacks and that check pass. Flux then rolls the hub
 (Recreate: `backup-database` up to 1800 s, `backup-artifacts`, `migrate`).
@@ -151,8 +160,26 @@ docker run --rm -v "$PWD:/repo:ro" -w /repo <KUSTOMIZE_IMAGE of scripts/manifest
 kubectl apply --server-side --field-manager=kustomize-controller -f /operator/<run>/hub-apply.yaml
 ```
 
-The agent half is applied in place in either mode (§3.5: the agent stays at 0 replicas until the
-per-launch bundle is installed).
+### 4c. The agent half, in place in either mode (campaign runbook §3.5)
+
+The agent must not claim the create before the per-launch bundle is installed, so its values are
+applied in place at 0 replicas, from the same branch, before the grant:
+
+```sh
+flux suspend kustomization relay-researcher-agent -n flux-system
+kubectl -n relay-infra-control scale deploy/relay-infrastructure-agent --replicas=0
+docker run --rm -v "$PWD:/repo:ro" -w /repo <KUSTOMIZE_IMAGE of scripts/manifest-lint.sh> build kubernetes/apps/relay-researcher/agent \
+  | python3 -c 'import sys,yaml; d=[x for x in yaml.safe_load_all(sys.stdin) if x]; [x["spec"].update(replicas=0) for x in d if x["kind"] == "Deployment"]; print(yaml.safe_dump_all(d))' \
+  > /operator/<run>/agent-apply.yaml
+kubectl apply --server-side --field-manager=kustomize-controller -f /operator/<run>/agent-apply.yaml
+```
+
+Readback: the Deployment has `replicas: 0` and its `candidate` volume names
+`relay-candidate-control-<d16>`; the `config.json` of the ConfigMap its `config` volume names has the
+SHA-256 of the branch's `kubernetes/apps/relay-researcher/agent/config.json`; the three run
+ConfigMaps of step 3 exist. Scale the agent to 1 only after the per-launch bundle (§3.7-§3.8), and
+resume `relay-researcher-agent` only once the per-run PR has merged and git equals the live agent
+(§3.10 step 8).
 
 ### 5. Readback (H7's), by `t_s + 60 min`
 
@@ -209,8 +236,9 @@ from a Secret under `fsGroup` (`root:1000 0440`) → `signer-file-untrusted`; fr
   `binding.json`, `config.json`, `ca.pem`, `network-policy.json`, read-only) and the `candidate`
   volume, in block style with `name:` on the line after `configMap:`, `defaultMode: 0444`,
   `optional: false` and those four items; plus the journal egress and the agent's namespace and
-  NetworkPolicy reads. It lands with R1's PR at the latest; the generator then owns only the values
-  above.
+  NetworkPolicy reads. Without a run's control ConfigMap the structure cannot mount, so it lands
+  with R1's PR at the latest (listed under `reviewByHand` there), under the agent Kustomization's
+  suspension; the generator then owns only the values above.
 - **The qualification egress stage** (installation runbook Q4) selected in the installation tree.
 
 ## After the campaign

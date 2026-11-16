@@ -381,7 +381,8 @@ from the run and the document Relay's `scripts/compose-candidate-hub-document.ts
 `- ../../../components/relay-worker-candidate` in `kubernetes/apps/apps/relay/kustomization.yaml` and
 the H7 group removed from the activation gate. Every later run's PR changes only the generated files,
 and CI (`test_relay_candidate_run.py`) fails unless they equal the generator's output for the committed
-run; the operator also runs `scripts/relay-candidate-run.py check --run-digest <digest>`. Create the
+run; the merge gate is `scripts/relay-candidate-run.py check --base origin/main --run-digest <digest>`
+(the generator on the base revision's files, and nothing else changed). Create the
 run's session-key Secret before the merge: without it the Pod waits in `ContainerCreating`.
 
 Readback of the candidate files, the budget-started readback that H6 cannot give: the init container

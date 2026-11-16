@@ -89,12 +89,20 @@ def candidate_tree(root: Path) -> None:
         kust.write_text(text.replace("- execution-egress.yaml", "- qualification-egress.yaml"), encoding="utf-8")
     (root / gen.AGENT / "config.json").write_text(canonical(AGENT_CONFIG) + "\n", encoding="utf-8")
     deployment = root / gen.AGENT / "deployment.yaml"
+    [parsed] = [d for d in gen.load_yaml_docs(deployment) if d.get("kind") == "Deployment"]
+    if gen.agent_candidate(parsed) != ([], []):
+        return  # the one-time structure is committed already: keep it as it is
     text = deployment.read_text(encoding="utf-8")
     mount = "        - {name: config, mountPath: /etc/relay-agent, readOnly: true}\n"
     volume = "      - name: config\n        configMap:\n          name: relay-infrastructure-agent-config\n"
     assert text.count(mount) == 1 and text.count(volume) == 1
     deployment.write_text(text.replace(mount, mount + AGENT_MOUNT_LINES).replace(volume, AGENT_VOLUME + volume),
                           encoding="utf-8")
+
+
+def control_name(root: Path) -> str:
+    [parsed] = [d for d in gen.load_yaml_docs(root / gen.AGENT / "deployment.yaml") if d.get("kind") == "Deployment"]
+    return gen.agent_candidate(parsed)[1][0]["configMap"]["name"]
 
 
 def campaign(root: Path, now_ms: int, patch=None) -> dict:
@@ -234,6 +242,7 @@ class Generator(unittest.TestCase):
     def test_generates_exactly_the_run_bound_values_and_checks_them(self):
         c = campaign(self.root, self.now)
         before = self.snapshot()
+        previous_control = control_name(self.root)
         out = self.generate(c)
         digest = gen.run_digest(c["run"])
         d16 = digest[:16]
@@ -278,7 +287,7 @@ class Generator(unittest.TestCase):
         old = before[str(gen.AGENT / "deployment.yaml")].decode().splitlines()
         new = after[str(gen.AGENT / "deployment.yaml")].decode().splitlines()
         self.assertEqual([(a, b) for a, b in zip(old, new) if a != b],
-                         [("          name: relay-candidate-control-unset", f"          name: relay-candidate-control-{d16}")])
+                         [(f"          name: {previous_control}", f"          name: relay-candidate-control-{d16}")])
         result, diff = gen.check(self.root, digest)
         self.assertEqual(diff, [])
         self.assertEqual(result["runDigest"], digest)
@@ -463,6 +472,58 @@ class Generator(unittest.TestCase):
         self.assertEqual(self.refusal(c), "agent-deployment-yaml")
         deployment.write_text(text)
         self.generate(c)
+
+    def test_base_check_is_the_merge_gate(self):
+        """S-A: the PR's working tree must be exactly the generator's output on the PR's base."""
+        def run_git(*args):
+            subprocess.run(["git", "-C", str(self.root), "-c", "user.name=test", "-c", "user.email=test@example.invalid",
+                            "-c", "commit.gpgsign=false",
+                            *args], check=True, capture_output=True)
+        # The fixture tree as the repository: its run/ is the placeholder unless a run is committed.
+        if not gen.is_placeholder(self.root):
+            for path, data in gen.placeholder_files().items():
+                (self.root / path).write_bytes(data)
+        run_git("init", "-q", "-b", "main")
+        run_git("add", "-A")
+        run_git("commit", "-q", "-m", "base")
+        first = self.generate(campaign(self.root, self.now))
+        # The first run is H7's inclusion PR: generated values self-consistent, the rest by hand.
+        (self.root / "kubernetes/apps/apps").mkdir(parents=True, exist_ok=True)
+        (self.root / "kubernetes/apps/apps/relay-inclusion.txt").write_text("- ../../../components/relay-worker-candidate\n")
+        result, diff = gen.check_against_base(self.root, "main", first["runDigest"])
+        self.assertEqual(diff, [])
+        self.assertEqual((result["firstRun"], result["reviewByHand"]),
+                         (True, ["kubernetes/apps/apps/relay-inclusion.txt"]))
+        run_git("add", "-A")
+        run_git("commit", "-q", "-m", "R1")
+
+        def next_run(run, _document):
+            run["payload"]["runId"] = "3d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f6a"
+        second = self.generate(campaign(self.root, self.now, next_run), tag="s")
+        result, diff = gen.check_against_base(self.root, "main", second["runDigest"])
+        self.assertEqual(diff, [])
+        self.assertIs(result["firstRun"], False)
+        self.assertEqual(gen.check_against_base(self.root, "main", first["runDigest"])[1],
+                         [f"run digest {second['runDigest']} is not the expected {first['runDigest']}"])
+        # Anything beyond the generated values fails, even an edit the self-check cannot see.
+        deployment = self.root / gen.AGENT / "deployment.yaml"
+        original = deployment.read_text()
+        deployment.write_text(original.replace("talos-agent-node-3", "talos-agent-node-2"))
+        self.assertEqual(gen.check(self.root, second["runDigest"])[1], [])
+        self.assertEqual(gen.check_against_base(self.root, "main", second["runDigest"])[1],
+                         [f"not the generator output for the base: {gen.AGENT / 'deployment.yaml'}"])
+        deployment.write_text(original)
+        config = self.root / gen.AGENT / "config.json"
+        original_config = config.read_text()
+        config.write_text(original_config.replace("/run/relay/hub-ca/ca.crt", "/run/relay/hub-ca/other.crt"))
+        self.assertEqual(gen.check_against_base(self.root, "main", second["runDigest"])[1],
+                         [f"not the generator output for the base: {gen.AGENT / 'config.json'}"])
+        config.write_text(original_config)
+        (self.root / "kubernetes/apps/apps/relay-inclusion.txt").write_text("changed\n")
+        self.assertEqual(gen.check_against_base(self.root, "main", second["runDigest"])[1],
+                         ["not generated: kubernetes/apps/apps/relay-inclusion.txt"])
+        with self.assertRaises(gen.Refusal):
+            gen.check_against_base(self.root, "no-such-ref")
 
     def test_cli(self):
         c = campaign(self.root, self.now)
