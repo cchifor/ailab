@@ -289,9 +289,10 @@ mounts its namespace's ESO Secret as three read-only `subPath` files under `/run
 `scripts/tests/test-relay-budget-consumers-render.sh` proves each changes nothing
 else in its Deployment.
 
-- `kubernetes/components/llm-router-worker-budget-reader`: include it from
-  `kubernetes/apps/apps/llm-router/kustomization.yaml` after the router
-  ExternalSecret is Ready (steps 5-6). The same PR replaces the placeholder
+- `kubernetes/components/llm-router-worker-budget-reader`: included by
+  `kubernetes/apps/apps/llm-router/kustomization.yaml` since the first part of
+  step 8 (ailab #1807, rolled 2026-11-16 17:16Z), after the router
+  ExternalSecret was Ready (steps 5-6). The same PR replaced the placeholder
   `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` with the 64-hex digest of the reviewed
   Relay router deployment record: SHA-256 of canonical JSON of `{id, origin,
   issuer, baoOrigin, baoMount, baoPrefix}` (Relay `deploymentDigest`), the value of
@@ -301,9 +302,11 @@ else in its Deployment.
   (`docs/runbooks/relay-router-connection.md`, "Deployment digest"; recompute it
   before use). The activation test refuses the inclusion while the
   placeholder remains. Inclusion is a `Recreate` rollout of the router. The
-  plugin stays disabled until step 9.
+  plugin stays disabled until step 9: the reader files are mounted, and nothing
+  reads them until the plugin is enabled.
 - `kubernetes/components/relay-worker-budget-client`: included alone by hub upgrade
-  step H4a (`docs/runbooks/relay-researcher-hub-upgrade.md`). The live Relay
+  step H4a (`docs/runbooks/relay-researcher-hub-upgrade.md`; ailab #1805, rolled
+  2026-11-16 17:33Z). The live Relay
   (v0.10.4) reads these variables, but starts the authority only with
   `RELAY_INFRASTRUCTURE_INSTALLATIONS`, a router connection
   (`RELAY_ROUTER_CONNECTIONS_FILE`, from the reviewed
