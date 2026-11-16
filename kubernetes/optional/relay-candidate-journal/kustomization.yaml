@@ -1,4 +1,7 @@
-# Optional only: no live Flux inventory references this directory.
+# Reviewed base. Live Flux references it ONLY through the activation overlay
+# kubernetes/apps/relay-candidate-journal (clusters/ai/relay-candidate-journal.yaml), which adds the
+# database replica count and the protocol Service on 10.96.0.42 (render.py's own object). initialize/
+# and every render.py output stay outside every Flux inventory. See the runbook.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

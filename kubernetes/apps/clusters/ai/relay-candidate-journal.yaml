@@ -1,0 +1,46 @@
+# The independent Relay candidate journal (docs/runbooks/relay-worker-candidate-journal.md,
+# "Activation under Flux"). Prerequisite of the researcher qualification campaign: the journal row of
+# docs/runbooks/relay-researcher-hub-upgrade.md, "Enablement order at a glance".
+#
+# WHAT MERGING THIS INSTALLS: the reviewed optional base at kubernetes/optional/relay-candidate-journal
+# through the overlay at ./kubernetes/apps/relay-candidate-journal. That is the two namespaces, the
+# retained qnap-iscsi PVC, the two ailab-ca Certificates, the database Service and StatefulSet at ZERO
+# replicas, the default-deny and database NetworkPolicies, and the protocol Service
+# relay-candidate-journal/relay-candidate-journal pinned to 10.96.0.42 (docs/network-plan.md), equal to
+# the Service render.py emits. Nothing initializes or starts the database, and nothing runs the journal:
+# the one-time initialization Job and every per-run service render (its public ConfigMap, Deployment
+# and client NetworkPolicy) stay operator-created and outside every Flux inventory. No login password,
+# authority row, witness, signed run or worker access is created here.
+#
+# EVERY dependsOn ENCODES A RUNBOOK PRECONDITION:
+#   qnap-storage         the StorageClass qnap-iscsi (reclaimPolicy Retain) exists before the PVC.
+#   cert-manager-config  the ClusterIssuer ailab-ca exists before the two Certificates. wait:true below
+#                        then keeps this Kustomization not-Ready until both are actually issued.
+#
+# wait:true: the PVC must be Bound and both Certificates Ready; the StatefulSet at 0 replicas is
+# trivially ready and a ClusterIP Service is ready once created. The PVC binds with no consuming Pod:
+# qnap-iscsi sets no volumeBindingMode, so it is Immediate (kubernetes/apps/qnap-storage/storageclass.yaml;
+# the budget ledger's claim bound the same way at zero replicas). After the operator's reviewed flip to
+# ONE replica, the database Pod's readiness becomes part of this health check.
+#
+# prune:true is safe for the data: both Namespaces and the PVC carry kustomize.toolkit.fluxcd.io/prune:
+# disabled in the base, so removing this file stops the database and releases 10.96.0.42 (its Service
+# is pruned), but never deletes the claim.
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: relay-candidate-journal
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 2m
+  timeout: 10m # the database startup probe allows 240 s once the operator runs one replica
+  dependsOn:
+  - name: qnap-storage
+  - name: cert-manager-config
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/relay-candidate-journal
+  prune: true
+  wait: true
