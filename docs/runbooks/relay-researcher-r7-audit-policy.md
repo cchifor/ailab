@@ -139,8 +139,9 @@ POD
 - Run every command from the root of the main checkout (the checker is `scripts/talos-cp-plan-check.py`,
   run by the workstation's Python with PyYAML).
 - The checkout's `.terraform.lock.hcl` must match main's provider pins (talos `~> 0.12`, proxmox
-  `~> 0.122`). On 2026-11-16 it was stale (talos 0.11.0, proxmox 0.114.0). In that case, back up the lock
-  and the state, then run `tofu_cp init -upgrade`.
+  `~> 0.122`). On 2026-11-16 it was stale (talos 0.11.0, proxmox 0.114.0); the operator backed up the lock
+  and the state and ran `tofu_cp init -upgrade`, so the main checkout now has talos 0.12.0, proxmox
+  0.122.0 and local 2.9.1. If a checkout's lock is older, do the same.
 
 ```bash
 T -n $ALL etcd status                                    # 3 members, same raft index, no errors

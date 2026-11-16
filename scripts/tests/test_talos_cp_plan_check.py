@@ -84,6 +84,13 @@ class PlanCheck(unittest.TestCase):
         ok, lines = self.run_check(plan(self.before, self.after), live(self.before), node="cp3")
         self.assertFalse(ok)
 
+    def test_missing_state_config_stops_readably(self):
+        p = plan(self.before, self.after)
+        p["resource_changes"][0]["change"]["before"] = None          # a fresh or tainted resource
+        ok, lines = self.run_check(p, live(self.before))
+        self.assertFalse(ok)
+        self.assertIn("no machine_configuration in its state", lines[0])
+
     def test_unknown_planned_config_stops(self):
         ok, _ = self.run_check(plan(self.before, None), live(self.before))
         self.assertFalse(ok)

@@ -75,8 +75,10 @@ def check(plan, mc_text, node, expected):
     if len(rc) != 1:
         return False, [f"STOP: {address} is not exactly one resource change in the plan"]
     live = json.JSONDecoder().raw_decode(mc_text.lstrip())[0]["spec"]
-    before = rc[0]["change"]["before"]["machine_configuration"]
-    after = rc[0]["change"]["after"]["machine_configuration"]
+    before = (rc[0]["change"].get("before") or {}).get("machine_configuration")
+    after = (rc[0]["change"].get("after") or {}).get("machine_configuration")
+    if not isinstance(before, str):
+        return False, [f"STOP: {address} has no machine_configuration in its state (fresh or tainted)"]
     if not isinstance(after, str):
         return False, [f"STOP: the planned machine_configuration of {address} is unknown"]
     a, b = cmp(live, before), cmp(before, after)
