@@ -493,6 +493,39 @@ def local_policy_digest(installation: dict) -> str:
     return sha256(b"relay.infrastructure/v1/installation-policy\0" + canonical(installation).encode("utf-8"))
 
 
+def candidate_runtime(v: dict) -> dict:
+    """The agent config's candidateRuntime for a validated run: the generator's only per-run config value."""
+    return {
+        **AGENT_PATHS,
+        "bindingSha256": BINDING_SHA256,
+        "trustSha256": v["trustSha256"],
+        "trustConfigMap": v["names"]["trustConfigMap"],
+        "pinConfigMap": v["names"]["pinConfigMap"],
+        "holderSecret": HOLDER_SECRET,
+    }
+
+
+def candidate_config(imported: dict, v: dict) -> dict:
+    """The agent config during the campaign: the config as imported at I5 with the one-time candidate
+    value (policy.bootstrapSecrets true) and the run's candidateRuntime, and nothing else changed.
+    scripts/relay-researcher-bundle.py and its tests compare the committed config with exactly this."""
+    config = json.loads(json.dumps(imported))
+    config["policy"]["bootstrapSecrets"] = True
+    config["candidateRuntime"] = candidate_runtime(v)
+    return config
+
+
+def committed_run(repo: Path) -> dict | None:
+    """The committed run, validated against the repository; None while run/ is the placeholder."""
+    if is_placeholder(repo):
+        return None
+    document = (repo / RUN_DIR / "document.json").read_bytes()
+    run_text = strict_json(utf8(document, "document-json"), "document-json").get("run")
+    if not isinstance(run_text, str):
+        refuse("document-schema")
+    return validate(repo, run_text, document)
+
+
 def agent_config(repo: Path, v: dict) -> bytes:
     path = repo / AGENT / "config.json"
     text = path.read_text(encoding="utf-8")
@@ -534,14 +567,7 @@ def agent_config(repo: Path, v: dict) -> bytes:
             or previous.get("bindingSha256") != BINDING_SHA256
             or previous.get("holderSecret") != HOLDER_SECRET):
         refuse("agent-candidate-runtime-fixed-fields")  # the binding and the holder Secret are frozen
-    config["candidateRuntime"] = {
-        **AGENT_PATHS,
-        "bindingSha256": BINDING_SHA256,
-        "trustSha256": v["trustSha256"],
-        "trustConfigMap": v["names"]["trustConfigMap"],
-        "pinConfigMap": v["names"]["pinConfigMap"],
-        "holderSecret": HOLDER_SECRET,
-    }
+    config["candidateRuntime"] = candidate_runtime(v)
     return (canonical(config) + newline).encode("utf-8")
 
 
@@ -682,11 +708,7 @@ def check(repo: Path, expected_digest: str | None = None) -> tuple[dict, list]:
         expected = placeholder_files()
         diff = [str(path) for path, data in expected.items() if (repo / path).read_bytes() != data]
         return {"kind": "ailab.relay-candidate-run-check", "runDigest": None, "state": "placeholder"}, diff
-    document = (repo / RUN_DIR / "document.json").read_bytes()
-    run_text = strict_json(utf8(document, "document-json"), "document-json").get("run")
-    if not isinstance(run_text, str):
-        refuse("document-schema")
-    v = validate(repo, run_text, document)
+    v = committed_run(repo)
     diff = []
     try:
         expected = generated_files(repo, v)

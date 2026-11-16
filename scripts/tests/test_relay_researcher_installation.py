@@ -408,11 +408,21 @@ class QualificationStage(unittest.TestCase):
         self.assertIn("researcher-runtime-ca.crt", (ROOT / ".gitea/workflows/manifests.yaml").read_text(encoding="utf-8"))
 
 
+def campaign():
+    """(the S-A generator, its validated committed run) during the qualification campaign, else None.
+    The campaign's agent tree is the enrollment one plus exactly the chart's candidate values."""
+    bundle = bundle_module()
+    v = bundle.campaign_run()
+    return None if v is None else (bundle.candidate_generator(), v)
+
+
 class AgentStage(unittest.TestCase):
     """The agent mirror equals the chart's enrollment-only render (proven against the pinned chart
-    by relay-researcher-bundle.py check --chart) and carries only the template's values."""
+    by relay-researcher-bundle.py check --chart) and carries only the template's values; during the
+    qualification campaign, plus exactly the chart's candidate values for the committed run."""
 
     def setUp(self):
+        self.campaign = campaign()
         self.d = template()
         self.objects = by_key([o for f in ("rbac.yaml", "deployment.yaml", "network-policy.yaml")
                                for o in docs(TREE / "agent" / f)])
@@ -427,10 +437,20 @@ class AgentStage(unittest.TestCase):
             {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["create"]},
             {"apiGroups": ["coordination.k8s.io"], "resources": ["leases"], "resourceNames": ["relay-infrastructure-agent"], "verbs": ["get", "update"]},
             {"apiGroups": ["coordination.k8s.io"], "resources": ["leases"], "verbs": ["create"]}])
-        self.assertEqual(roles[("Role", SLOT, "relay-infrastructure-agent-workloads")]["rules"], [
-            {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "create", "delete"]}])
+        slot_rules = [{"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "create", "delete"]}]
+        namespaces = ["kube-system"]
+        if self.campaign:
+            # Relay chart templates/rbac.yaml with candidateRuntime set and policy.bootstrapSecrets true:
+            # the slot's egress policy read (the run measures it), the bootstrap Secrets, and the two
+            # namespaces' reads (their UIDs are pinned by the run).
+            (egress,) = docs(selected_egress())
+            slot_rules += [{"apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"],
+                            "resourceNames": [egress["metadata"]["name"]], "verbs": ["get"]},
+                           {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get", "create", "delete"]}]
+            namespaces += [CONTROL, SLOT]
+        self.assertEqual(roles[("Role", SLOT, "relay-infrastructure-agent-workloads")]["rules"], slot_rules)
         self.assertEqual(roles[("ClusterRole", None, "relay-infrastructure-agent-relay-infra-control-cluster-uid")]["rules"], [
-            {"apiGroups": [""], "resources": ["namespaces"], "resourceNames": ["kube-system"], "verbs": ["get"]}])
+            {"apiGroups": [""], "resources": ["namespaces"], "resourceNames": namespaces, "verbs": ["get"]}])
         subject = [{"kind": "ServiceAccount", "name": "relay-infrastructure-agent", "namespace": CONTROL}]
         for k, v in self.objects.items():
             if k[0] in ("RoleBinding", "ClusterRoleBinding"):
@@ -441,9 +461,11 @@ class AgentStage(unittest.TestCase):
         self.assertIs(sa["automountServiceAccountToken"], False)
         granted = {(r, v) for role in roles.values() for rule in role["rules"]
                    for r in rule["resources"] for v in rule["verbs"]}
+        # Secrets only in the slot and only during the campaign (bootstrapSecrets), pinned above.
+        forbidden = {"secrets", "pods/exec", "pods/attach", "pods/portforward", "pods/log",
+                     "persistentvolumeclaims", "roles", "rolebindings", "*"} - ({"secrets"} if self.campaign else set())
         for resource, _ in granted:
-            self.assertNotIn(resource, {"secrets", "pods/exec", "pods/attach", "pods/portforward", "pods/log",
-                                        "persistentvolumeclaims", "roles", "rolebindings", "*"})
+            self.assertNotIn(resource, forbidden)
         for _, verb in granted:
             self.assertIn(verb, {"get", "create", "update", "delete"})
 
@@ -480,6 +502,17 @@ class AgentStage(unittest.TestCase):
             self.assertNotIn("enrollment-token", vols)
             self.assertNotIn("enrollment-token", mounts)
         self.assertEqual(set(vols), mounts, "every volume is mounted, every mount has a volume")
+        candidate_mounts = [m for m in c["volumeMounts"] if m["name"] == "candidate"]
+        if self.campaign:
+            # The chart's four candidate mounts and the volume of the committed run's control ConfigMap.
+            gen, v = self.campaign
+            self.assertEqual(candidate_mounts, gen.AGENT_MOUNTS)
+            self.assertEqual(vols["candidate"], {"name": "candidate", "configMap": {
+                "name": v["names"]["controlConfigMap"], "defaultMode": 0o444, "optional": False,
+                "items": [{"key": k, "path": k} for k in gen.CONTROL_KEYS]}})
+        else:
+            self.assertEqual(candidate_mounts, [])
+            self.assertNotIn("candidate", vols)
         self.assertEqual(vols["hub-ca"]["configMap"]["name"], self.d["hub"]["caConfigMap"])
         token = vols["kubernetes"]["projected"]["sources"][0]["serviceAccountToken"]
         self.assertEqual(token, {"path": "token", "expirationSeconds": 3600})
@@ -490,7 +523,21 @@ class AgentStage(unittest.TestCase):
         self.assertEqual(np["podSelector"], {"matchLabels": {k: LABELS[k] for k in ("app.kubernetes.io/name", "app.kubernetes.io/instance")}})
         self.assertEqual(np["policyTypes"], ["Ingress", "Egress"])
         self.assertEqual(np["ingress"], [])
-        dns, api, hub = np["egress"]
+        dns, api, hub, *journal = np["egress"]
+        if self.campaign:
+            # The chart's journal egress rule: ipBlocks only, private and off the LAN, on the journal's
+            # port (its CIDRs are the one-time PR's, U9).
+            (rule,) = journal
+            self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": int(journal_render().ORIGIN.rsplit(":", 1)[1])}])
+            self.assertTrue(rule["to"])
+            for peer in rule["to"]:
+                self.assertEqual(set(peer), {"ipBlock"})
+                self.assertEqual(set(peer["ipBlock"]), {"cidr"})
+                block = ipaddress.ip_network(peer["ipBlock"]["cidr"])
+                self.assertTrue(block.is_private, block)
+                self.assertFalse(block.overlaps(ipaddress.ip_network("192.168.0.0/23")), f"{block} reaches the LAN")
+        else:
+            self.assertEqual(journal, [])
         self.assertEqual(dns["to"], [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": net["dnsNamespace"]}},
                                       "podSelector": {"matchLabels": net["dnsPodLabels"]}}])
         self.assertEqual([p["ipBlock"]["cidr"] for p in api["to"]], net["apiServerCidrs"])
@@ -522,7 +569,13 @@ class AgentStage(unittest.TestCase):
         else:
             self.assertNotIn("enrollmentTokenFile", identity)
         self.assertEqual(config["policy"]["executionSlots"], d["executionSlots"])
-        self.assertIs(config["policy"]["bootstrapSecrets"], False)
+        # Off until the campaign; then on, with exactly the generator's candidateRuntime for the run.
+        self.assertIs(config["policy"]["bootstrapSecrets"], self.campaign is not None)
+        if self.campaign:
+            gen, v = self.campaign
+            self.assertEqual(config["candidateRuntime"], gen.candidate_runtime(v))
+        else:
+            self.assertNotIn("candidateRuntime", config)
         self.assertIsNone(config["policy"]["retainedStorageClass"])
 
     def test_trust_bundle_is_the_pinned_mozilla_bundle(self):
@@ -575,6 +628,10 @@ class BundleCheck(unittest.TestCase):
         b = bundle_module()
         d = template()
         committed = json.loads((TREE / "agent/config.json").read_text(encoding="utf-8"))
+        if campaign():
+            # The tool's config is the I5 import: without the campaign's overlay, which check() applies.
+            committed["policy"]["bootstrapSecrets"] = False
+            committed.pop("candidateRuntime", None)
         key = self.committed(committed["identity"]["installationPublicKey"], self.KEY)
         # After step I10 the committed config carries the live fence UID; so does the definition then.
         fence = committed["identity"].get("fenceObjectUid")
