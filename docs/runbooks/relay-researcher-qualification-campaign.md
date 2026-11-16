@@ -35,9 +35,10 @@ is in `main` since `908b0c104`, so one checkout carries every driver; pin it onc
 | R7 | #9 delayed start (E1, pending), immediately before R6 | the launch never starts | 90 s | never sent |
 | R6 | #19 recovery fence, last | installation-wide halt | 90 s | never sent |
 
-**Order:** R1 → R2 → R5 → R3 → R7 → reserve retries (R4 if needed) → R6. Hold one reserve for an R6
-retry. **Count:** 6 runs + 2 reserves (O1): E3 merged as Relay #527, so R3 gives both #10 and #18.
-Between R7 and R6 the pool slot needs a reviewed reconciliation (O8, §6 R7).
+**Order:** R1 → R2 → R5 → R3 → reserve retries (R4 if needed) → R7 → O8 reconciliation → R6. Hold one
+reserve for an R6 retry. **Count:** 6 runs + 2 reserves (O1): E3 merged as Relay #527, so R3 gives both
+#10 and #18. R7 leaves the pool's only slot blocked (§6 R7), so every retry that R7 does not need goes
+before it, and any run after R7 (R6, or a retry) needs the reviewed reconciliation first (O8).
 
 ### Preconditions before R1
 
@@ -507,8 +508,10 @@ matches the cluster (v1.14). A larger skew stops every skew-sensitive driver; do
 
 Suspend `relay-researcher-installation` from §3.7 until §3.10 step 8, and `relay-researcher-agent`
 from §3.5 (installation runbook, "Flux and the in-place ceremonies"; drivers replace the gate, quota
-and egress policy in place, and Flux would silently undo them). Never resume over an unreverted live
-change. Q4 must never run inside a window.
+and egress policy in place, and Flux would silently undo them, as it would the per-launch bundle).
+Driver procedures that suspend and resume Flux around their own in-place change (R2's disruption) run
+inside this window: confirm it is suspended instead, and never resume before §3.10 step 8. Never
+resume over an unreverted live change. Q4 must never run inside a window.
 
 ### 5.3 Native tool approvals
 
@@ -595,9 +598,9 @@ settled usage baseline (`main:packages/worker-runtime/session-replay-observation
 | --- | --- | --- |
 | 1 | Optional spare acceptance [#1, #2] | before step 2 |
 | 2 | Send P2; wait for the answer; `worker-session-replay-observation.ts --preflight <replay cfg> <sha>` until `ready: true` | preflight ready by `T − 470 s`, else skip to step 6 |
-| 3 | Flux suspend `relay-researcher-installation`; save the live egress policy; terminal A: `researcher-hub-disruption-observation.ts` armed | `T − 460 s` |
+| 3 | Confirm `relay-researcher-installation` is still suspended (since §3.7; the procedure's own suspend is then a no-op); save the live egress policy; terminal A: `researcher-hub-disruption-observation.ts` armed | `T − 460 s` |
 | 4 | Terminal B: replay #12 with `seconds = min(300, T − 210 s − now)` (≥ 235); the disruption cuts after the replay turn and a fresh renewal, holds 55 s, restores exactly | replay start by **`T − 450 s`**; cut by `latestCutAt` = `T − 325 s`; restore by `T − 270 s` |
-| 5 | Confirm the restore (resourceVersion and `.spec` equal the saved file), resume Flux; replay `observed` with `disruptionJoin.status: joined` | replay done by `T − 180 s` |
+| 5 | Confirm the restore (resourceVersion and `.spec` equal the saved file); **do not resume Flux** here, unlike the procedure's step 8: the per-launch bundle is live until teardown (§5.2); replay `observed` with `disruptionJoin.status: joined` | replay done by `T − 180 s` |
 | 6 | Cleanup observer, then revocation #11: `researcher-revocation-observation.ts <cfg> <sha> <out>` while idle; one irreversible `POST /api/workers/grants/<grantId>/revoke` | send before **`T − 150 s`**; hub `Date` within 1 s |
 | 7 | Remove, settle (§3.10) | last |
 
