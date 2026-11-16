@@ -620,7 +620,9 @@ Enrollment is not worker readiness. Before the first worker Pod:
 3. The nineteen qualification scenarios on this slot with the merged drivers (delivery plan step 9):
    they need the signed candidate run (`candidateRuntime` values: candidate ConfigMaps,
    `bootstrapSecrets: true`, journal egress) and the independent candidate journal, each its own
-   reviewed change.
+   reviewed change. The delayed-start run (R7) also needs the control planes' kube-apiserver audit
+   policy that logs Pod creates in this slot with their bodies (owner decision O7):
+   [relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md).
 4. The finite ordinary canary (step 10) and then `scripts/activate-ordinary-pod-policy.ts`'s outputs:
    staged guards, Secret quota, the in-place gate replacement and the **one-Pod quota**, plus agent
    values with `ordinaryNamespacePins` (the UIDs of step I6) and `bootstrapSecrets: true`, committed
