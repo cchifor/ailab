@@ -20,6 +20,8 @@ Code references:
 Pin one driver checkout for the whole campaign and its conversion (`main:scripts/qualification/README.md`:
 the converters recompute driver digests from the checkout they run in). PR #519 (defaultCommunication)
 is in `main` since `908b0c104` and E1 since `1ea5ecc9`, so one checkout at or after `1ea5ecc9` carries every driver.
+The hub-document composer (`scripts/compose-candidate-hub-document.ts`, §3.4) comes with Relay #533:
+pin a checkout that also carries it.
 
 ## 1. Campaign overview
 
@@ -96,7 +98,7 @@ installed. Staging of the hub half (§7, O6: S-A, with S-B as the fallback and f
   volume. Everything else is reviewed once in H7. Prepare the branch before signing; open it with
   label `no-automerge` right after §3.1, so CI and review run during §3.2-§3.3; the operator merges
   once those readbacks and CI pass and the diff equals the generator's output for the recorded run
-  digest: `scripts/relay-candidate-run.py check --base origin/main --run-digest <runDigest>` exits 0
+  digest: `python3 scripts/relay-candidate-run.py check --base origin/main --run-digest <runDigest>` exits 0
   (CI checks the committed values' self-consistency; R1's PR is H7's inclusion PR, whose other
   changes the check lists for review by hand). **Deadline: hub rollout read back by `issuedAt` +
   60 min, or abort before the grant** (no tokens spent).
@@ -254,8 +256,8 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
 ### 3.4 Hub candidate files and restart
 
 1. Compose the document (`main:scripts/compose-candidate-hub-document.ts`, which constructs the hub's
-   `CandidateHubAuthority` from it with the permit key before writing), run
-   `scripts/relay-candidate-run.py generate` on the per-run branch, and create the session-permit
+   `CandidateHubAuthority` from it with the permit key before writing; Relay #533), run
+   `python3 scripts/relay-candidate-run.py generate` on the per-run branch, and create the session-permit
    Secret `relay-worker-candidate-key-<runDigest[:16]>` in `relay` from the private key, never via git
    ([relay-candidate-run-generator.md](relay-candidate-run-generator.md) §1-§3). Without the Secret the
    hub Pod waits in `ContainerCreating`.
