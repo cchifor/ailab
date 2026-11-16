@@ -32,6 +32,14 @@ installation is exactly what was reviewed here, and then copies the only two thi
          byte to kubernetes/apps/relay-researcher/agent/config.json. It writes nothing else, creates
          no Kubernetes object and contacts nothing. Review and commit the diff.
 
+During the researcher qualification campaign (a signed run committed in
+kubernetes/components/relay-worker-candidate/run/), the agent tree carries exactly the S-A
+generator's candidate values on top of the I5 import (scripts/relay-candidate-run.py candidate_config:
+policy.bootstrapSecrets true and the run's candidateRuntime; the chart's candidate mounts, volume,
+reads and journal egress). check compares the committed config with exactly that overlay of the
+bundle's config and renders the chart with the matching candidate values; import then writes the
+overlaid config (canonical JSON), so re-importing never drops a running campaign's values.
+
 Stdlib + PyYAML. Never reads a secret: the bundle is public by construction (no key, no token).
 """
 from __future__ import annotations
@@ -39,6 +47,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import importlib.util
 import json
 import re
 import shutil
@@ -59,6 +68,8 @@ INTERNAL_TLS_TERMINATORS = ROOT / "kubernetes/apps/relay-internal-tls/terminator
 JOURNAL_RENDER = ROOT / "kubernetes/optional/relay-candidate-journal/render.py"
 RUNTIME_CA = ROOT / "docs/relay-workers/researcher-runtime-ca.crt"
 RELAY_WORKERS_TF = ROOT / "kubernetes/infra/agent-nodes/relay-workers.tf"
+# The S-A per-run generator of the qualification campaign (docs/runbooks/relay-candidate-run-generator.md).
+CANDIDATE_GENERATOR = ROOT / "scripts/relay-candidate-run.py"
 HUB_CA_PATH = "/etc/relay/hub-ca.pem"
 ROUTER_ORIGIN = "https://router.chifor.me"
 PLACEHOLDER = "OPERATOR-FILLS"
@@ -360,8 +371,51 @@ def check_values(values: dict, definition: dict, agent: dict) -> None:
         fail("30-agent-values.json sets ordinaryNamespacePins; enrollment-only values do not")
 
 
+_GENERATOR = []
+_CAMPAIGN = []  # the validated committed run (or None), once per process
+
+
+def candidate_generator():
+    """scripts/relay-candidate-run.py, loaded once."""
+    if not _GENERATOR:
+        spec = importlib.util.spec_from_file_location("relay_candidate_run", CANDIDATE_GENERATOR)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _GENERATOR.append(module)
+    return _GENERATOR[0]
+
+
+def campaign_run() -> dict | None:
+    """The committed candidate run as the generator validates it, or None before the first run. The
+    overlay is accepted only while the generator's own check passes on the committed tree (the run
+    against the repository and the agent tree, and every generated file equal to its output), so the
+    two never disagree."""
+    if _CAMPAIGN:
+        return _CAMPAIGN[0]
+    gen = candidate_generator()
+    try:
+        run = gen.committed_run(ROOT)
+        if run is not None:
+            _, differences = gen.check(ROOT)
+            if differences:
+                fail(f"the committed candidate run is not the generator's output (relay-candidate-run.py check): "
+                     f"{differences}")
+    except gen.Refusal as refusal:
+        fail(f"the committed candidate run does not validate (relay-candidate-run.py: {refusal.code})")
+    _CAMPAIGN.append(run)
+    return run
+
+
+def committed_config(config: dict) -> dict:
+    """What a bundle's agent config is committed as: itself, or during the campaign exactly the
+    generator's candidate_config of it (bootstrapSecrets true and the run's candidateRuntime)."""
+    v = campaign_run()
+    return config if v is None else candidate_generator().candidate_config(config, v)
+
+
 def check_config(config: dict, definition: dict) -> None:
     committed = json.loads((TREE / "agent/config.json").read_text(encoding="utf-8"))
+    config = committed_config(config)
 
     def walk(expected, actual, path):
         if is_placeholder(expected):
@@ -453,6 +507,32 @@ def check_policy(config: dict, values: dict, definition: dict, report: dict) -> 
         fail("30-agent-values.json identity.fenceObjectUid differs from the definition")
 
 
+def candidate_values(values: dict, v: dict, agent: dict, ns: str) -> dict:
+    """The bundle's chart values with the campaign's candidate values, so the chart renders the agent
+    tree the campaign commits: bootstrapSecrets true; candidateRuntime from the generator for the
+    committed run (its control ConfigMap, the frozen binding, trust and pin ConfigMaps, holder Secret)
+    and the slot's egress policy as networkPolicyName; the journal egress as the committed agent
+    NetworkPolicy states it (its fourth rule; its values are the one-time PR's, U9)."""
+    gen = candidate_generator()
+    runtime = gen.candidate_runtime(v)
+    values = copy.deepcopy(values)
+    values["policy"]["bootstrapSecrets"] = True
+    (policy,) = load_yaml_docs(egress_stage()[1])
+    values["candidateRuntime"] = {
+        "configMap": v["names"]["controlConfigMap"],
+        **{k: runtime[k] for k in ("bindingSha256", "trustSha256", "trustConfigMap", "pinConfigMap", "holderSecret")},
+        "networkPolicyName": policy["metadata"]["name"]}
+    rules = agent[("NetworkPolicy", ns, "relay-infrastructure-agent")]["spec"]["egress"][3:]
+    if (len(rules) != 1 or set(rules[0]) != {"to", "ports"} or len(rules[0]["ports"]) != 1
+            or not rules[0]["to"] or any(set(peer) != {"ipBlock"} or set(peer["ipBlock"]) != {"cidr"}
+                                         for peer in rules[0]["to"])):
+        fail("during the campaign the agent NetworkPolicy's egress must be the three enrollment rules plus one "
+             "journal rule: ipBlock CIDRs only (no except) and one port, as the chart renders candidateJournalCidrs")
+    values["networkPolicy"]["candidateJournalCidrs"] = [peer["ipBlock"]["cidr"] for peer in rules[0]["to"]]
+    values["networkPolicy"]["candidateJournalPort"] = rules[0]["ports"][0]["port"]
+    return values
+
+
 def chart_compare(chart_root: Path, bundle: Path, definition: dict, agent: dict) -> None:
     chart = chart_root / "deploy/infrastructure-agent"
     if not (chart / "Chart.yaml").is_file():
@@ -466,14 +546,22 @@ def chart_compare(chart_root: Path, bundle: Path, definition: dict, agent: dict)
     if dirty:
         fail("--chart checkout has local changes under deploy/infrastructure-agent")
     ns = definition["identity"]["controlNamespace"]
-    rendered = subprocess.run(
-        ["helm", "template", CHART_RELEASE, str(chart), "--namespace", ns, "-f", str(bundle / "30-agent-values.json")],
-        check=True, capture_output=True, text=True).stdout
+    values = json.loads((bundle / "30-agent-values.json").read_text(encoding="utf-8"))
+    v = campaign_run()
+    if v is not None:
+        values = candidate_values(values, v, agent, ns)
+    with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8") as values_file:
+        json.dump(values, values_file)
+        values_file.flush()
+        rendered = subprocess.run(
+            ["helm", "template", CHART_RELEASE, str(chart), "--namespace", ns, "-f", values_file.name],
+            check=True, capture_output=True, text=True).stdout
     docs = {key(d): d for d in yaml.safe_load_all(rendered) if d}
     config_key = ("ConfigMap", ns, "relay-infrastructure-agent-config")
     chart_config = json.loads(docs.pop(config_key)["data"]["config.json"])
-    if chart_config != json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8")):
-        fail("the chart's rendered config.json differs from 31-agent-config.json")
+    if chart_config != committed_config(json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8"))):
+        fail("the chart's rendered config.json differs from 31-agent-config.json"
+             + (" with the campaign's candidate values" if v is not None else ""))
     committed = copy.deepcopy(agent)
     committed.pop(("CiliumNetworkPolicy", ns, "relay-infrastructure-agent-api-egress"))  # ailab addition
     deployment = committed[("Deployment", ns, "relay-infrastructure-agent")]
@@ -565,8 +653,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "import":
             write_pins(definition)
             target = TREE / "agent/config.json"
+            data = (args.bundle / "31-agent-config.json").read_bytes()
+            if campaign_run() is not None:
+                gen = candidate_generator()
+                data = (gen.canonical(committed_config(json.loads(data))) + "\n").encode("utf-8")
             with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as tmp:
-                tmp.write((args.bundle / "31-agent-config.json").read_bytes())
+                tmp.write(data)
             shutil.move(tmp.name, target)
             print("imported: pins/pins.yaml and agent/config.json; review and commit the diff")
         else:

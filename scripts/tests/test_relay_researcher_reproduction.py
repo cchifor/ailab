@@ -54,6 +54,9 @@ class CommittedState(unittest.TestCase):
         self.config = json.loads(self.config_text)
         # Step I5 has landed unless every pin is still the reviewed placeholder (the bundle script's predicate).
         self.imported = not self.bundle.pins_are_placeholders(self.pins)
+        # During the qualification campaign: the S-A generator and its validated committed run.
+        run = self.bundle.campaign_run()
+        self.campaign = None if run is None else (self.bundle.candidate_generator(), run)
 
     def require_imported(self):
         if not self.imported:
@@ -82,29 +85,50 @@ class CommittedState(unittest.TestCase):
         for field, value in self.pins.items():
             self.assertEqual(len(re.findall(rf"^  {field}: {re.escape(json.dumps(value))}$", text, re.M)), 1, field)
 
+    def expected_import(self) -> dict:
+        """agent/config.json as the I5 import writes it for the committed I4 definition, built here from
+        the definition, binding and summary (Relay's AgentConfig for this installation's inputs)."""
+        d = self.definition
+        identity = {k: d["identity"][k] for k in ("tenantId", "installationId", "clusterUid", "controlNamespace",
+                                                  "installationPublicKey", "fenceObjectUid") if k in d["identity"]}
+        identity["installationKeyFile"] = "/run/relay/installation/installation.pem"
+        if "enrollmentTokenSecret" in d["references"]:
+            identity["enrollmentTokenFile"] = "/run/relay/enrollment/token"
+        return {
+            "version": 1,
+            "hub": {"origin": d["hub"]["origin"], "caFile": "/run/relay/hub-ca/ca.crt"},
+            "kubernetes": {"origin": d["kubernetesOrigin"], "caFile": "/run/relay/kubernetes/ca.crt",
+                           "tokenFile": "/run/relay/kubernetes/token"},
+            "identity": identity,
+            "leadership": {"leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2},
+            "policy": {
+                "installation": d["installationPolicy"],
+                "executionSlots": d["executionSlots"],
+                "podTiers": [{k: p[k] for k in ("tier", "binding", "runtimeClassName")} for p in self.binding["placements"]],
+                "allowedRuntimeDigests": [self.summary["runtimeDigest"]],
+                "allowedTemplates": [{"templateId": t["definition"]["templateId"], "revision": t["definition"]["revision"],
+                                      "digest": t["digest"]} for t in self.binding["templates"]],
+                "bootstrapSecrets": False,
+                "retainedStorageClass": None,
+            },
+        }
+
     def test_imported_config_is_the_i4_definition(self):
+        """The committed config is exactly the I5 import of the committed definition, byte for byte in
+        Relay canonicalJson; during the qualification campaign, exactly the S-A generator's
+        candidate_config of it (policy.bootstrapSecrets false -> true and the run's candidateRuntime).
+        Any other field, key or value fails here."""
         self.require_imported()
-        # The importer copies 31-agent-config.json byte for byte: Relay canonicalJson plus a newline.
-        self.assertEqual(self.config_text, json.dumps(self.config, sort_keys=True, separators=(",", ":"),
+        expected = self.expected_import()
+        self.assertEqual(self.config["policy"]["allowedTemplates"], [self.summary["template"]])
+        if self.campaign is not None:
+            gen, run = self.campaign
+            expected = gen.candidate_config(expected, run)
+            self.assertEqual(set(expected["candidateRuntime"]), set(gen.AGENT_PATHS) | {
+                "bindingSha256", "trustSha256", "trustConfigMap", "pinConfigMap", "holderSecret"})
+        self.assertEqual(self.config, expected)
+        self.assertEqual(self.config_text, json.dumps(expected, sort_keys=True, separators=(",", ":"),
                                                       ensure_ascii=False) + "\n")
-        d, identity, policy = self.definition, self.config["identity"], self.config["policy"]
-        for field in ("tenantId", "installationId", "clusterUid", "controlNamespace", "installationPublicKey"):
-            self.assertEqual(identity[field], d["identity"][field], field)
-        self.assertEqual(identity.get("fenceObjectUid"), d["identity"].get("fenceObjectUid"))
-        self.assertEqual("enrollmentTokenFile" in identity, "enrollmentTokenSecret" in d["references"])
-        self.assertEqual((self.config["hub"]["origin"], self.config["kubernetes"]["origin"]),
-                         (d["hub"]["origin"], d["kubernetesOrigin"]))
-        self.assertEqual(policy["installation"], d["installationPolicy"])
-        self.assertEqual(policy["executionSlots"], d["executionSlots"])
-        self.assertEqual(policy["podTiers"], [{k: p[k] for k in ("tier", "binding", "runtimeClassName")}
-                                              for p in self.binding["placements"]])
-        self.assertEqual(policy["allowedRuntimeDigests"], [self.summary["runtimeDigest"]])
-        self.assertEqual(policy["allowedTemplates"], [self.summary["template"]])
-        self.assertEqual(policy["allowedTemplates"], [{"templateId": t["definition"]["templateId"],
-                                                       "revision": t["definition"]["revision"], "digest": t["digest"]}
-                                                      for t in self.binding["templates"]])
-        self.assertIs(policy["bootstrapSecrets"], False)
-        self.assertIsNone(policy["retainedStorageClass"])
 
     def known_digests(self) -> set[str]:
         release, summary = self.inputs["release"], self.summary
