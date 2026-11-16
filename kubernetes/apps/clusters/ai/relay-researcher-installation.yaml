@@ -1,8 +1,7 @@
-# STAGED, NOT APPLIED. This file sits outside kubernetes/apps/clusters/ai, so Flux never reads it.
-# Runbook step I5 (docs/runbooks/relay-researcher-installation.md) moves it, unchanged, to
-# kubernetes/apps/clusters/ai/relay-researcher-installation.yaml in the PR that also fills
-# ../pins/pins.yaml with the approved installation ID. scripts/tests/test_relay_researcher_installation.py
-# refuses that move while any pin is still a placeholder.
+# APPLIED since runbook step I5 (docs/runbooks/relay-researcher-installation.md; ailab #1788,
+# 2026-11-16), which moved this file here from kubernetes/apps/relay-researcher/flux/ in the PR that
+# filled ../pins/pins.yaml with the approved installation ID. scripts/tests/test_relay_researcher_installation.py
+# refuses this tree while any pin is still a placeholder.
 #
 # What applying it creates: the two dedicated namespaces (restricted PSA), their quotas (ZERO Pods in
 # relay-researcher-1), limits, default-deny, the slot's DNS + Relay/Router egress allow-list and the
