@@ -35,7 +35,8 @@ for d in */*.git; do
       printf '=====FILE %s %s %s\n' "$repo" "$mode" "$path"
       git -C "$d" cat-file blob "$sha" | base64 | tr -d '\n' || exit 1
       printf '\n'
-    done || { echo "=====ERROR $repo: reading $dir"; exit 1; }
+    # The leading newline ends a half-written base64 line, so the error starts a line of its own.
+    done || { printf '\n=====ERROR %s: reading %s\n' "$repo" "$dir"; exit 1; }
   done
 done
 echo "=====END"

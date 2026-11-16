@@ -75,8 +75,13 @@ func main() {
 		fmt.Printf("MISMATCH: %d files checked, %d exported\n", total, expected)
 		os.Exit(3)
 	}
+	if total == 0 {
+		// Nothing checked is a failure of the check, not a verdict on any workflow.
+		fmt.Println("no workflow files found")
+		os.Exit(3)
+	}
 	fmt.Printf("checked %d workflow files, %d invalid\n", total, bad)
-	if bad > 0 || total == 0 {
+	if bad > 0 {
 		os.Exit(1)
 	}
 }
