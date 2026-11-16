@@ -239,6 +239,11 @@ class Activation(unittest.TestCase):
         deps = {d['name'] for d in spec['dependsOn']}
         # The StorageClass qnap-iscsi and the ClusterIssuer ailab-ca come first.
         self.assertTrue({'qnap-storage', 'cert-manager-config'} <= deps, deps)
+        # wait:true needs the PVC Bound while the database is at zero replicas: no Pod consumes the claim,
+        # so the StorageClass must bind Immediately (no WaitForFirstConsumer).
+        (storage_class,) = yaml_docs(ROOT / 'kubernetes/apps/qnap-storage/storageclass.yaml')
+        self.assertEqual((storage_class['metadata']['name'], storage_class['reclaimPolicy']), ('qnap-iscsi', 'Retain'))
+        self.assertEqual(storage_class.get('volumeBindingMode', 'Immediate'), 'Immediate')
         # Every dependency is a defined Flux Kustomization: a typo would wait on `dependency not found`.
         cluster = {name for (path, name) in flux if path.startswith(CLUSTER.relative_to(ROOT).as_posix() + '/')}
         self.assertTrue(deps <= cluster, deps)
@@ -262,9 +267,11 @@ class Activation(unittest.TestCase):
         reached = []
         for path in [*(ROOT / 'kubernetes').rglob('kustomization.yaml'), *(ROOT / 'kubernetes').rglob('kustomization.yml'),
                      *(ROOT / 'kubernetes').rglob('Kustomization')]:
-            k = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
             here = path.parent.resolve()
-            for entry in k.get('resources', []) + k.get('components', []) + k.get('bases', []):
+            # yaml_docs: every document; `or []`: a key present with no entries parses as None.
+            entries = [entry for k in yaml_docs(path)
+                       for entry in (k.get('resources') or []) + (k.get('components') or []) + (k.get('bases') or [])]
+            for entry in entries:
                 target = (path.parent / entry).resolve()
                 if (inside(target, BUNDLE) and not inside(here, BUNDLE)) or (inside(target, OVERLAY) and not inside(here, OVERLAY)):
                     reached.append((path.parent.relative_to(ROOT).as_posix(), target.relative_to(ROOT).as_posix()))

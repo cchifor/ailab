@@ -18,7 +18,9 @@
 #                        then keeps this Kustomization not-Ready until both are actually issued.
 #
 # wait:true: the PVC must be Bound and both Certificates Ready; the StatefulSet at 0 replicas is
-# trivially ready and a ClusterIP Service is ready once created. After the operator's reviewed flip to
+# trivially ready and a ClusterIP Service is ready once created. The PVC binds with no consuming Pod:
+# qnap-iscsi sets no volumeBindingMode, so it is Immediate (kubernetes/apps/qnap-storage/storageclass.yaml;
+# the budget ledger's claim bound the same way at zero replicas). After the operator's reviewed flip to
 # ONE replica, the database Pod's readiness becomes part of this health check.
 #
 # prune:true is safe for the data: both Namespaces and the PVC carry kustomize.toolkit.fluxcd.io/prune:
