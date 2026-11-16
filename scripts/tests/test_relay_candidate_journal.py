@@ -260,7 +260,7 @@ class Activation(unittest.TestCase):
             if OVERLAY.resolve() in target.parents or BUNDLE.resolve() in target.parents:
                 continue
             if target in OVERLAY.resolve().parents or target in BUNDLE.resolve().parents:
-                self.assertTrue((target / 'kustomization.yaml').is_file(), key)
+                self.assertTrue(any((target / name).is_file() for name in ('kustomization.yaml', 'kustomization.yml', 'Kustomization')), key)
         # Kustomize entries, resolved, from every kustomization under kubernetes/ (each edge, so any
         # transitive path too): only the overlay names the bundle, only its root directory, and
         # nothing names the overlay, which only its own Flux Kustomization reconciles.

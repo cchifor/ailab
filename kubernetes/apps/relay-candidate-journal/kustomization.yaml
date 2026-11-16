@@ -9,7 +9,7 @@
 #   a `kubectl scale` that Flux would revert;
 # - service.yaml, the protocol Service on the pinned 10.96.0.42, so the address exists before any
 #   signed run and every per-run render. It is the exact object render.py emits (same name, labels
-#   and spec), so applying a render leaves it unchanged.
+#   and spec); the operator applies each render without it, so Flux is its only manager.
 #
 # NEVER add ../../optional/relay-candidate-journal/initialize, a rendered initialization List or a
 # rendered service List here: the initialization Job is an operator-created, one-time object that

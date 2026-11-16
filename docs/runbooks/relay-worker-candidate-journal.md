@@ -67,7 +67,8 @@ unchanged and adds two files:
   `1` after the one-time initialization, each its own reviewed PR, never more;
 - `service.yaml`, the protocol Service `relay-candidate-journal/relay-candidate-journal`
   on the pinned `10.96.0.42`, exactly the object `render.py service` emits, so the
-  address exists before any signed run and a later render never changes it.
+  address exists before any signed run. Flux is its only manager: the operator
+  applies each render without it (qualification campaign runbook, 3.2).
 
 `dependsOn` encodes the install order: `qnap-storage` (the retained StorageClass)
 and `cert-manager-config` (the `ailab-ca` ClusterIssuer). `wait: true` keeps the
@@ -294,8 +295,9 @@ The renderer outputs an immutable ConfigMap containing only these public files,
 a ClusterIP Service, network policy and a Deployment with zero replicas. The
 Service is also the activation overlay's `service.yaml`, which Flux creates at
 activation so the address exists before any signed run; the tests keep the two
-objects equal, so applying a render leaves the Service unchanged. The other three
-objects stay outside Flux: the operator applies and scales them per signed run.
+objects equal. The other three objects stay outside Flux: the operator applies them
+per signed run without the protocol Service, which only Flux manages, and scales
+the Deployment (qualification campaign runbook, 3.2).
 
 The protocol Service's ClusterIP is pinned to `10.96.0.42` (`render.py`
 `CLUSTER_IP`; reserved in `docs/network-plan.md`). Relay's candidate supervisor
@@ -312,8 +314,8 @@ any other address fails closed.
 
 `spec.clusterIP` is immutable. The pin applies when the Service is created: if
 `kubectl -n relay-candidate-journal get svc relay-candidate-journal` already
-shows another address (a Service created from an earlier render), Flux's apply,
-like a render's, is rejected rather than moving it. Then, with the journal
+shows another address (a Service created from an earlier render), Flux's apply
+is rejected rather than moving it. Then, with the journal
 Deployment at zero replicas and no run in flight, delete that Service, let Flux
 create it again from `kubernetes/apps/relay-candidate-journal/service.yaml`
 (`flux reconcile kustomization relay-candidate-journal`), and read back
