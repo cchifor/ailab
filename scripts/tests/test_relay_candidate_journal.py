@@ -189,17 +189,22 @@ def yaml_docs(path):
 
 
 def flux_kustomizations():
-    """Every Flux Kustomization under kubernetes/, by (file, name)."""
+    """Every Flux Kustomization under kubernetes/, by (file, name): .yaml and .yml, inside Lists too."""
     found = {}
-    for path in (ROOT / 'kubernetes').rglob('*.yaml'):
+    for path in [*(ROOT / 'kubernetes').rglob('*.yaml'), *(ROOT / 'kubernetes').rglob('*.yml')]:
         try:
             documents = yaml_docs(path)
         except yaml.YAMLError:
             continue
-        for d in documents:
-            if (isinstance(d, dict) and d.get('kind') == 'Kustomization'
+        while documents:
+            d = documents.pop()
+            if isinstance(d, dict) and d.get('kind') == 'List' and isinstance(d.get('items'), list):
+                documents.extend(d['items'])
+            elif (isinstance(d, dict) and d.get('kind') == 'Kustomization'
                     and str(d.get('apiVersion', '')).startswith('kustomize.toolkit.fluxcd.io/')):
-                found[(path.relative_to(ROOT).as_posix(), d['metadata']['name'])] = d
+                key = (path.relative_to(ROOT).as_posix(), d['metadata']['name'])
+                assert key not in found, key
+                found[key] = d
     return found
 
 
@@ -226,8 +231,10 @@ class Activation(unittest.TestCase):
         self.assertEqual(spec['sourceRef'], {'kind': 'GitRepository', 'name': 'flux-system'})
         self.assertIs(spec['wait'], True, 'the PVC and both Certificates must gate readiness')
         self.assertIs(spec['prune'], True)
-        for key in ('suspend', 'decryption', 'patches', 'components', 'postBuild', 'targetNamespace', 'force'):
-            self.assertNotIn(key, spec)
+        # Exactly these fields: no suspend, decryption, patches, components, postBuild, targetNamespace,
+        # namePrefix/nameSuffix, commonMetadata or force can rename, relabel or reshape what the tests
+        # below check in source (a prefix would move 10.96.0.42 to another Service name).
+        self.assertEqual(set(spec), {'interval', 'retryInterval', 'timeout', 'dependsOn', 'sourceRef', 'path', 'prune', 'wait'})
         deps = {d['name'] for d in spec['dependsOn']}
         # The StorageClass qnap-iscsi and the ClusterIssuer ailab-ca come first.
         self.assertTrue({'qnap-storage', 'cert-manager-config'} <= deps, deps)
@@ -270,6 +277,12 @@ class Activation(unittest.TestCase):
         self.assertTrue(all((BUNDLE / entry).is_file() for entry in base['resources']), base['resources'])
         self.assertEqual(base['configMapGenerator'], [{'name': render.NAME + '-postgres', 'namespace': render.DB_NS,
                                                        'files': ['start.sh', 'pg_hba.conf']}])
+        self.assertEqual(base['labels'], [{'pairs': {'app.kubernetes.io/part-of': render.NAME, 'velero.io/exclude-from-backup': 'true'},
+                                           'includeSelectors': False, 'includeTemplates': True}])
+        # Retained state: removing the Flux file must never delete the namespaces or the claim.
+        for entry in ('namespace.yaml', 'storage.yaml'):
+            for d in yaml_docs(BUNDLE / entry):
+                self.assertEqual(d['metadata']['annotations']['kustomize.toolkit.fluxcd.io/prune'], 'disabled', d['metadata']['name'])
         inventory = sorted((d['kind'], d['metadata'].get('namespace', ''), d['metadata']['name'])
                            for entry in base['resources'] for d in yaml_docs(BUNDLE / entry))
         inventory += [(d['kind'], d['metadata']['namespace'], d['metadata']['name']) for d in yaml_docs(OVERLAY / 'service.yaml')]
