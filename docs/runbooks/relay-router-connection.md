@@ -6,17 +6,18 @@ OpenBao escrow writer, and the order in which the operator brings them up. Owner
 the connection, binding and reader identity: [relay#277 comment 120817](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-120817)
 (caps in 120818 as corrected, amendments in 120903), 2026-11-14.
 
-**Nothing here is active.** Merging installs only inert objects: three OpenBao policies, two
-k8s-auth roles and one token role (no document, no token), and two ExternalSecrets that stay
-not-Ready until the operator writes their documents. Both consuming components are un-included, the
-live Relay overlay still refuses a router connection (`test_relay_v060_activation_gate.py`), and the
-Relay connection is the **last** step below.
+**Nothing here was active when it merged.** Merging installed only inert objects: three OpenBao
+policies, two k8s-auth roles and one token role (no document, no token), and two ExternalSecrets that
+stay not-Ready until the operator writes their documents. The Relay connection is the **last** step
+below; its inclusion PR is hub upgrade step H6
+([relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md)), which also took it off
+`test_relay_v060_activation_gate.py`'s forbidden list. The Router trust stays un-included until step 6.
 
 | Source | Flux Kustomization | Merge effect |
 | --- | --- | --- |
 | `apps/infrastructure/security/openbao/relay-router-provision-job.yaml` | `openbao` | Policies `relay-router-escrow`, `af-app-relay-router`, `af-app-router-relay-keys`; k8s-auth roles of the two `af-app-*` names; token role `relay-router-escrow`. No KV document, no token |
 | `apps/relay-router-connection/credentials/` | `relay-router-credentials` (no wait) | SecretStore + ExternalSecret in `relay` and `llm-router`, not Ready until their documents exist |
-| `components/relay-router-connection` | none (not included) | Nothing until the last step |
+| `components/relay-router-connection` | `apps` (through `kubernetes/apps/apps/relay`, since hub step H6) | Step 10, the Relay connection |
 | `components/llm-router-relay-keys-trust` | none (not included) | Nothing until step 6 |
 
 `scripts/tests/test_relay_router_connection.py` pins the record, the digest, the trust mapping,

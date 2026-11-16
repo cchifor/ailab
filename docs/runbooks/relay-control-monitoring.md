@@ -1,9 +1,12 @@
 # Relay control-plane monitoring
 
-`kubernetes/components/relay-control-monitoring` is opt-in and is not selected
-by the application Kustomization. Activate it only with a reviewed Relay release
-containing the complete control/worker metric catalog and that release's full
-migration set. This document does not assert the currently deployed image.
+`kubernetes/components/relay-control-monitoring` is opt-in. The Relay overlay
+(`kubernetes/apps/apps/relay`) selects it since hub upgrade step H6
+([relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md)), together with
+the agent control plane, which Relay requires for a metrics file. Activate it only with a
+reviewed Relay release containing the complete control/worker metric catalog and
+that release's full migration set. This document does not assert the currently
+deployed image.
 
 ## Credential and network boundaries
 

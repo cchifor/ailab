@@ -17,7 +17,7 @@ The per-run ceremony for H7's signed candidate runs is [relay-researcher-qualifi
 
 ## Staged here
 
-| Component (none included by `kubernetes/apps/apps/relay`) | Sets | Step |
+| Component (`kubernetes/apps/apps/relay` includes each from its step: H3, H4a and H6 so far) | Sets | Step |
 | --- | --- | --- |
 | `relay-restore-fencing` (existing) | `RELAY_RECOVERY_GENERATION_FILE` from the operator's `relay-recovery-generation` ConfigMap | H3 |
 | `relay-infrastructure-installations` (new) | `RELAY_INFRASTRUCTURE_INSTALLATIONS=1` | H3 |
@@ -30,12 +30,14 @@ The per-run ceremony for H7's signed candidate runs is [relay-researcher-qualifi
 
 `scripts/tests/test_relay_v060_activation_gate.py` refuses the new components and their settings, and
 the Router connection and control plane, in the live overlay; each step's PR removes exactly its own
-entries from that list. `relay-restore-fencing` stays includable on its own, because
-a restore of the hub needs it with or without installations. `test_relay_researcher_hub_upgrade.py`
+entries from that list (H3's installation pair and H6's Router connection and control plane are
+gone). `relay-restore-fencing` stays includable on its own, because a restore of the hub needs it with
+or without installations. `test_relay_researcher_hub_upgrade.py`
 pins each patch, and refuses installations without the recovery generation (one way only), the profile
 registry without the installations and budget client or with a placeholder or wrong SHA, the control
 plane without the Router connection or next to `RELAY_ENVIRONMENTS`, `relay-gitea-authority` or
-`relay-notifications`, the candidate files without H6 or next to the profile registry, and an H3 that
+`relay-notifications`, the control-plane collector without the control plane (Relay refuses to start)
+and the worker alerts without the collector, the candidate files without H6 or next to the profile registry, and an H3 that
 runs the fence script; `test_relay_candidate_run.py` refuses a placeholder `run/` in the overlay and any
 committed `run/` or agent candidate value that is not `scripts/relay-candidate-run.py`'s output for the
 committed run. It does not require the registry for the

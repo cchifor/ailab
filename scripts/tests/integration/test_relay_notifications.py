@@ -57,6 +57,11 @@ def named(docs, kind, name):
 RELAY_OVERLAY = ROOT / "kubernetes/apps/apps/relay/kustomization.yaml"
 
 
+def live_relay_components():
+    """The component directory names the live Relay overlay includes, in its order."""
+    return [c.rstrip("/").rsplit("/", 1)[-1] for c in yaml.safe_load(RELAY_OVERLAY.read_text()).get("components", [])]
+
+
 def relay_overlay_without(components, directory):
     """Docker arguments that mount the live Relay overlay's kustomization, minus the listed components,
     over the real one under /work. A fixture that layers one of those components itself renders on this,
@@ -231,13 +236,21 @@ class Notifications(unittest.TestCase):
         self.assertEqual([c for c in deployment["initContainers"] if c["name"] not in ("notification-files",)], base["initContainers"])
         app = next(c for c in deployment["containers"] if c["name"] == "relay")
         base_app = next(c for c in base["containers"] if c["name"] == "relay")
-        # The base remains intentionally inactive until the operator evidence
-        # gate permits a separate activation PR.
-        self.assertNotIn("RELAY_AGENT_CONTROL_PLANE", {e["name"] for e in base_app["env"]})
-        self.assertNotIn("RELAY_ROUTER_CONNECTIONS_FILE", {e["name"] for e in base_app["env"]})
-        self.assertNotIn("RELAY_AGENT_CONTROL_PLANE", {e["name"] for e in app["env"]})
-        self.assertNotIn("RELAY_ROUTER_CONNECTIONS_FILE", {e["name"] for e in app["env"]})
-        self.assertNotIn("relay-router-connection", {v["secret"]["secretName"] for v in deployment["volumes"] if "secret" in v})
+        # Notifications add no managed flag and no router connection. The separate activation PR, hub
+        # upgrade step H6, put both in the base through their own components; this layer keeps every
+        # base env entry as it is, adds only its destinations file, and mounts no Secret but its own
+        # (so never the Router connection's relay-router-files).
+        for entry in base_app["env"]:
+            self.assertIn(entry, app["env"])
+        self.assertEqual({e["name"] for e in app["env"]} - {e["name"] for e in base_app["env"]},
+                         {"RELAY_NOTIFICATION_DESTINATIONS_FILE"})
+        patch = yaml.safe_load((COMPONENTS / "relay/deployment.yaml").read_text())
+        self.assertEqual([e["name"] for c in patch["spec"]["template"]["spec"]["containers"] for e in c.get("env", [])],
+                         ["RELAY_NOTIFICATION_DESTINATIONS_FILE"])
+        secrets = lambda pod: {v["secret"]["secretName"] for v in pod["volumes"] if "secret" in v}
+        self.assertEqual(secrets(deployment) - secrets(base), {"relay-notifications"})
+        for volume in base["volumes"]:
+            self.assertIn(volume, deployment["volumes"])
         self.assertEqual(app["image"], next(c for c in base["containers"] if c["name"] == "relay")["image"])
         initializer = next(c for c in deployment["initContainers"] if c["name"] == "notification-files")
         self.assertEqual(deployment["securityContext"]["fsGroup"], initializer["securityContext"]["runAsGroup"])
