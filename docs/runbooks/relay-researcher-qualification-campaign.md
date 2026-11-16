@@ -60,7 +60,7 @@ Each is read back; a missing one stops the campaign before any signing.
 | E6 rehearsal passed (§4) | this runbook | not run |
 | Dedicated researcher channel, admin browser state, operator kube identity (VAP write, `pods/exec`, NetworkPolicy CAS, SA impersonation incl. a foreign-slot SA, `pods/log` in `relay-internal-tls`) | plan §8 | operator readback |
 | Probe images (egress; storage with `dd` and `sleep`) and reviewed allow/deny targets | plan R5, R4 | not in git |
-| O1, O2, O4-O8 and S2 answered | §7 | open |
+| Owner decisions O1-O8, S3, I4, N1, N2 | §7 | decided; S2 settles in E6 |
 
 **Freeze from R1 to the canary:** hub, Router, agent and runtime images and database identities;
 namespaces and their UIDs; policy and egress digests; CA bundles; the agent's complete
@@ -87,9 +87,9 @@ because the hub's `RELAY_WORKER_CANDIDATE_SHA256` pins the signed run, which can
 `issuedAt` (§3.1). The agent half (`candidateRuntime` values) is applied in place under the
 installation runbook's rule ("Flux and the in-place ceremonies": suspend, apply, confirm, commit the
 final objects, resume), because the agent must not claim the create before the per-launch bundle is
-installed. Proposed staging of the hub half, for the operator and owner (§7, O6):
+installed. Staging of the hub half (§7, O6: S-A, with S-B as the fallback and for the canary):
 
-- **S-A, one mechanical PR per run (default).** H7's PR also adds a generator that writes, from the
+- **S-A, one mechanical PR per run (approved).** H7's PR also adds a generator that writes, from the
   signed run and its public files, exactly the run-bound values: the hub document ConfigMap and its
   `_SHA256`, the session-key Secret name, and the agent's `candidateRuntime` values. Everything else
   is reviewed once in H7. Prepare the branch before signing; open it with label `no-automerge` right
@@ -548,7 +548,7 @@ Keep the originals until the canary.
 
 | Situation | Action |
 | --- | --- |
-| Any §3.0-§3.5 readback fails, a clock is out, or the PR misses `t_s + 60 min` | abort before the grant; the run is wasted but no tokens are spent (whether it counts toward 8 is O1's) |
+| Any §3.0-§3.5 readback fails, a clock is out, or the PR misses `t_s + 60 min` | abort before the grant; no tokens are spent, and a run aborted before its create does not count toward the 8 (O1) |
 | Create returned an error | treat lifetime and allocation as spent; remove and reconcile |
 | create → Pod Running > 5 min, or no `session-observed` | stop, remove, reconcile; the run is wasted |
 | A driver misses its latest start | skip that row in this run; never stretch a threshold |
@@ -678,46 +678,26 @@ Keep the last reserve until R6 passes.
 
 ## 7. Owner decisions
 
-**Decided:**
+All recorded on relay#277 (comments 125299, 125360 and 125437). They are approvals in principle:
+each live step (the audit-policy PR, the reconciliation, every run's apply and grant, the paid
+rehearsal calls) still goes to the owner, through the operator, before it happens.
 
-- **O3, D** (bus 549, relay#277 comment 125299): fix D with the owner when File B is generated:
-  - at least 5 days after File B;
-  - at a working-hours instant whose 48 h window avoids a weekend.
+| Decision | Approved (2026-11-16) |
+| --- | --- |
+| O1 | 6 runs + 2 reserves; more than one lost terminating run needs a new approval; a run aborted before its create does not count toward the 8 |
+| O2 | I = 922,000: 930,192 reserved per call, about six calls per run, an interrupted call ends the run's calls |
+| O3, D | fixed with the owner when File B is generated: at least 5 days after File B, at a working-hours instant whose 48 h window avoids a weekend. If the canary would overrun File B's expiry, reissue File B before signing more runs |
+| O4 | no three-worker no-call run |
+| O5 | up to 6 paid rehearsal calls for E6, inside the existing caps |
+| O6 | S-A: one generated, mechanical ailab PR per run, aborting before the grant if the hub is not read back by `t_s + 60 min`; S-B (in place under Flux suspension, then the same bytes committed) as the fallback; the canary always uses S-B (§2) |
+| O7 | `submittedPod` by offline reconstruction (§3.8) for R1-R6, plus an API server audit policy for R7 only, as its own owner-held PR |
+| O8 | a reviewed hub database reconciliation between R7 and R6, its SQL drafted and reviewed in advance (§6 R7) |
+| S3 | v0.10.4, the hub-only loader fix, including the hub rollout |
+| I4 | the frozen binding, ailab #1782 |
+| N1, N2 | `notifications` under a written owner exception; two release approvals (A1 for the canary, A2 for H4b) |
 
-  If the canary would overrun File B's expiry, reissue File B before signing more runs.
-- **S3** (2026-11-16): ship v0.10.4 (the hub-only loader fix), including the hub rollout.
-- **I4** (2026-11-16): the frozen binding, ailab #1782.
-- **N1** (2026-11-16): `notifications` passes under a written owner exception (relay#277 comment 125360).
-
-**Open** (current one-line options went to the operator on 2026-11-16):
-
-- **O1:** baseline 6 runs + 2 reserves; more than one lost terminating run needs a new approval. Also
-  open: whether a signed run aborted before its create counts toward the 8.
-- **O2:** accept what I = 922,000 means per run:
-  - 930,192 reserved per call;
-  - 69,808 of headroom, about six calls;
-  - an interrupted call ends the run's calls.
-
-  The alternative is a smaller I, backed by fresh provider-enforcement evidence.
-- **O4 (optional):** one no-call run with three workers (R5, R7, R6), each below one reservation. It
-  collides with O8.
-- **O5:** a few paid rehearsal calls for E6.
-- **O6:** S-A or S-B for the per-run hub change (§2).
-- **O7, how `submittedPod` is sourced.**
-  - (a) Offline reconstruction (§3.8; R1-R6 need no cluster change), plus an API server audit policy
-    for R7 only. R7's held Pod never gets a session, so only the create's audit response binds its UID.
-  - (b) The audit policy for every run.
-  - (c) No audit policy; R7's UID then comes from the hub's post-create record, which is weaker.
-
-  The audit policy is a control-plane configuration change with its own PR.
-- **O8:** the pool slot between R7 and R6 (§6 R7):
-  - (a) a reviewed hub database reconciliation, drafted and reviewed in advance;
-  - (b) R7 after R6;
-  - (c) no R7, which makes the canary impossible because it needs all nineteen rows.
-
-**Raised by this runbook, for the operator:**
-
-- **S2:** the mechanism that keeps the agent from claiming the create before the bundle (§3.5).
+Still open, for the operator: **S2**, the mechanism that keeps the agent from claiming the create
+before the bundle (§3.5), settled in the E6 rehearsal.
 
 ## 8. Gaps and UNVERIFIED steps
 
