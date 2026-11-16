@@ -6,7 +6,7 @@ the nineteen researcher scenarios on the owner-approved signed candidate runs (U
 H7 of [relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md) and steps Q1-Q6 of
 [relay-researcher-installation.md](relay-researcher-installation.md). Every write is an operator action
 with the owner's confirmation for that exact run. Anything marked **UNVERIFIED** was not confirmed in
-code; §8 lists them all.
+code; §8 lists them, with the blocking gaps G1-G4.
 
 Code references:
 
@@ -41,20 +41,20 @@ for an R6 retry. **Count:** 7 runs + 1 reserve, or 6 + 2 once E3 is validated (O
 
 Each is read back; a missing one stops the campaign before any signing.
 
-| Precondition | Where | State on 2026-11-16 |
+| Precondition | Where | In git on 2026-11-16 |
 | --- | --- | --- |
-| H6: Router connection, control plane, monitoring | hub runbook H6 | not applied |
-| Q1-Q6: internal TLS, qualification egress `f6d3187c…282f`, Q5 policy UID, Q6 drill config | installation runbook | not applied |
-| Candidate journal on `10.96.0.42`, authority row `ready` | [relay-worker-candidate-journal.md](relay-worker-candidate-journal.md) | not applied |
+| H6: Router connection, control plane, monitoring | hub runbook H6 | not in the live overlay |
+| Q1-Q6: internal TLS, qualification egress `f6d3187c…282f`, Q5 policy UID, Q6 drill config | installation runbook | staged; the installation tree is not in Flux and still selects the enrollment egress |
+| Candidate journal on `10.96.0.42`, authority row `ready` | [relay-worker-candidate-journal.md](relay-worker-candidate-journal.md) | optional bundle, in no Flux inventory |
 | File B: ledger step 7 `qualifications` row; its `tokenPolicyDigest` goes into every run's `router.tokenPolicyDigests` | h4: "H7", "Enablement order at a glance" | waits for U1/O3 |
 | H7 candidate component (hub `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`) | hub runbook H7 | **not staged**; its design decides §2's staging |
 | Agent one-time candidate values: candidate volume, `policy.bootstrapSecrets: true`, journal egress | installation runbook, "Beyond enrollment" item 3 | not staged |
 | PR #519 merged or pinned (its v0.10.3 recipe fetches `main`) | `519:docs/qualification/default-communication-observation.md` | open |
 | E1 delayed start, E2 window + storage converters, E3 lease → two rows (optional), E4 replay disruption | pending Relay PRs | **pending** |
-| `submittedPod` capture, `subject.json` builder, `commandSha256` derivation, session extraction | §8, items 1-4 | **missing; found while writing this runbook** |
+| Gaps found while writing this runbook: the #15 matrix driver fix, `submittedPod` capture, a `subject.json` builder, a `commandSha256` tool | §8, G1-G4 | **missing** |
 | E6 rehearsal passed (§4) | this runbook | not run |
-| Dedicated researcher channel, admin browser state, operator kube identity (VAP write, `pods/exec`, NetworkPolicy CAS, SA impersonation incl. a foreign-slot SA, `pods/log` in `relay-internal-tls`) | plan §8 | not checked |
-| Probe images (egress; storage with `dd` and `sleep`) and reviewed allow/deny targets | plan R5, R4 | not built |
+| Dedicated researcher channel, admin browser state, operator kube identity (VAP write, `pods/exec`, NetworkPolicy CAS, SA impersonation incl. a foreign-slot SA, `pods/log` in `relay-internal-tls`) | plan §8 | operator readback |
+| Probe images (egress; storage with `dd` and `sleep`) and reviewed allow/deny targets | plan R5, R4 | not in git |
 | O1-O5 answered | §7 | open |
 
 **Freeze from R1 to the canary:** hub, Router, agent and runtime images and database identities;
@@ -71,39 +71,44 @@ checkout. A change voids every row already measured (`rel:packages/worker-runtim
 | Journal service re-render | `kubernetes/optional/relay-candidate-journal/render.py service` + `kubectl` | `relay-candidate-journal` objects (optional bundle, in no Flux inventory) | no; operator-reviewed render |
 | Budget scope | `rel:scripts/candidate-budget-scopes.ts` | ledger DB | no |
 | **Hub candidate files** | H7 component | relay Deployment env, ConfigMap, Secret | **yes, every run**: `_SHA256` and the document pin bytes that exist only after signing |
-| **Agent candidate values** | `kubernetes/apps/relay-researcher/agent/config.json` (`candidateRuntime.trustSha256`, `bindingSha256`, ConfigMap names) | agent ConfigMap and restart | **yes, every run**: the trust document contains the signed run |
+| **Agent candidate values** | the agent tree: runtime `config.json` `candidateRuntime` (`bindingSha256`, `trustSha256`, `trustConfigMap`, `pinConfigMap`) and `deployment.yaml`'s candidate volume (the run's control ConfigMap) | agent ConfigMap and Deployment | **yes, every run**, but applied in place first: the agent must stay disabled through the create (§3.5), so the commit may merge after the run |
 | Candidate ConfigMaps and holder Secret | `kubectl` (`rel:deploy/infrastructure-agent/values.yaml`: "All inputs are operator-installed") | control namespace, slot | no |
 | Grant, create, stop, remove | hub API | hub DB | no |
 | Per-launch admission bundle | `rel:scripts/prepare-candidate-policy.ts` + `kubectl`, in place | VAPs, gate, quota | no; in-place ceremony under Flux suspension |
 | Drivers, conversion | `main:scripts/qualification/*` | per driver | no |
 
-**Plainly: every run needs one ailab PR inside its 2 h window**, because the hub's
-`RELAY_WORKER_CANDIDATE_SHA256` and the agent's `candidateRuntime.trustSha256` pin the signed run,
-which cannot exist before `issuedAt` (§3.1). Proposed staging, for the operator and owner (§7, S1):
+**Plainly: every run needs one ailab PR, and its hub half must merge inside the run's 2 h window**,
+because the hub's `RELAY_WORKER_CANDIDATE_SHA256` pins the signed run, which cannot exist before
+`issuedAt` (§3.1). The agent half (`candidateRuntime` values) is applied in place under the
+installation runbook's rule ("Flux and the in-place ceremonies": suspend, apply, confirm, commit the
+final objects, resume), because the agent must not claim the create before the per-launch bundle is
+installed. Proposed staging of the hub half, for the operator and owner (§7, S1):
 
 - **S-A, one mechanical PR per run (default).** H7's PR also adds a generator that writes, from the
   signed run and its public files, exactly the run-bound values: the hub document ConfigMap and its
   `_SHA256`, the session-key Secret name, and the agent's `candidateRuntime` values. Everything else
   is reviewed once in H7. Prepare the branch before signing; open it with label `no-automerge` right
-  after §3.4; the operator merges once CI passes and the diff equals the generator's output for the
-  recorded run digest. **Deadline: merged and read back by `issuedAt` + 60 min, or abort before the
-  grant** (no tokens spent).
-- **S-B, in place, then commit.** The installation runbook's rule ("Flux and the in-place ceremonies":
-  suspend, apply, confirm, commit the final objects, resume) applied to `relay-researcher-agent` and to
-  `apps` (the hub's Kustomization, as in hub step H3). It removes review latency from the window, but
-  leaves every app unreconciled for up to 2 h and puts the run-bound bytes in git only afterwards.
+  after §3.1, so CI and review run during §3.2-§3.3; the operator merges once those readbacks and CI
+  pass and the diff equals the generator's output for the recorded run digest. **Deadline: hub
+  rollout read back by `issuedAt` + 60 min, or abort before the grant** (no tokens spent).
+- **S-B, in place, then commit.** The same rule applied to `apps` (the hub's Kustomization, suspended
+  as in hub step H3). It removes review latency from the window, but leaves every app unreconciled for
+  up to 2 h and puts the run-bound hub bytes in git only afterwards.
 
 ## 3. The per-run ceremony
 
-`kubectl --context admin@ai` throughout. Relay CLIs run from the pinned Relay checkout on a trusted
-Linux operator host (procfs required), as `node --import tsx scripts/...`. Hub SQL reads run as
+`kubectl --context admin@ai` throughout. Relay's operator CLIs (`scripts/candidate-*.ts`,
+`scripts/prepare-candidate-policy.ts`) and the two snippets below run from a clean checkout of the
+release commit `c0fe50f0` on a trusted Linux operator host (procfs required), as
+`node --import tsx scripts/...`; drivers and converters run from the pinned driver checkout. Hub SQL reads run as
 `postgres` in `relay-postgres-0`, database `relay`, tenant `00000000-0000-4000-8000-000000000001`.
 `t_s` is `issuedAt`, `t0` the create, `T` the absolute expiry. A failed readback stops the run.
 
 ### 3.0 Before signing (no clock running)
 
 1. **Previous run released.** `GET /api/workers/<previous workerId>` shows `removed` with
-   `outstandingEnvironments` 0, the journal slot is settled (§3.10), the slot holds no Pod, Flux
+   `outstandingEnvironments` 0, the journal slot is settled (§3.10), the slot holds no Pod, ConfigMap quota headroom ≥ 2 in
+   both namespaces (`kubectl get resourcequota relay-enrollment-quota -n <ns>`), Flux
    `relay-researcher-installation` is resumed and the gate and 0-Pod quota are git's. Otherwise the
    create fails: admission needs a free execution slot (`rel:server/environments/kubernetes-admission.ts`,
    "No free execution slot").
@@ -128,10 +133,10 @@ Linux operator host (procfs required), as `node --import tsx scripts/...`. Hub S
    gives `promptSha256` (the holder hashes the UTF-8 text, `rel:holder/src/worker_candidate.rs:434-441`).
    `commandSha256` is SHA-256 of canonical `{executable, argv, cwd}` of the final native command, which
    contains `sessionId` (`rel:holder/src/worker_candidate.rs:527-545`, `holder/src/release.rs:105-134`).
-   **UNVERIFIED: no operator tool computes it** (§8, item 3). A wrong hash refuses native start.
+   **No operator tool computes it** (§8, G4). A wrong hash refuses native start.
 4. **Keys.** A fresh session-permit Ed25519 key per run (run-scoped:
    `rel:docs/proposals/worker-candidate-qualification.md`, "Signing keys"). One holder journal key for
-   the whole campaign (see §8, item 7). The issuer, agent (= installation), holder, journal-reply and
+   the whole campaign (§3.5). The issuer, agent (= installation), holder, journal-reply and
    permit keys must all differ (`rel:packages/worker-runtime/candidate-signatures.ts:174-181`).
 5. **Unsigned run.** From the previous run's unsigned JSON, change only `runId`, the worker/launch IDs,
    `promptSha256`, `commandSha256`, `leaseSeconds`, `sessionPermitPublicKey` and `owner`; a diff in any
@@ -207,7 +212,7 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
 ### 3.4 Hub candidate files and restart
 
 1. Create the session-permit Secret in `relay` from the private key, never via git.
-2. The run-bound change (S-A PR or S-B): the `CandidateHubDocument`
+2. The run-bound change (merge the S-A PR, or apply in place under S-B): the `CandidateHubDocument`
    (`rel:server/workers/candidate/authority.ts:40-70`: raw run, issuer keys, hub/router/journal pins,
    pool, binding, the exact installed egress policy, profiles), its `RELAY_WORKER_CANDIDATE_SHA256`,
    `RELAY_WORKER_CANDIDATE_SESSION_KEY_FILE`.
@@ -222,15 +227,24 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
 
 ### 3.5 Agent candidate values, agent held disabled
 
-1. `flux suspend kustomization relay-researcher-agent -n flux-system`; scale the agent to 0 replicas
+1. `flux suspend kustomization relay-researcher-agent -n flux-system`, then
+   `kubectl -n relay-infra-control scale deploy/relay-infrastructure-agent --replicas=0`
    (**UNVERIFIED** as the mechanism; `rel:docs/infrastructure-candidate-policy.md` only says "keep agent
    polling and launch admission disabled").
 2. Create the run's immutable control ConfigMap in `relay-infra-control` (`binding.json`, `config.json`
    = the `CandidateAgentTrust` with the signed run, `ca.pem`, `network-policy.json`;
-   `rel:deploy/infrastructure-agent/templates/deployment.yaml:67-71`) and the run's slot trust and pin
-   ConfigMaps under new names (immutable). The holder Secret is the campaign's one Secret.
-3. Land the agent values (`candidateRuntime.configMap`, `bindingSha256`, `trustSha256`,
-   `trustConfigMap`, `pinConfigMap`) with the same S-A PR, or in place (S-B).
+   `rel:deploy/infrastructure-agent/templates/deployment.yaml:67-71`) and the run's immutable slot
+   trust (key `config.json`) and pin (key `sha256`) ConfigMaps under new names
+   (`rel:packages/infrastructure-agent/candidate-volumes.ts:44-75`). The holder Secret (keys
+   `holder-key.pem`, `ca.pem`) is one for the whole campaign: run N's guards freeze slot Secret
+   mutations (`rel:docs/infrastructure-candidate-policy.md`, "Admission boundaries").
+3. Apply the agent values in place, still at 0 replicas. They are runtime fields, not Helm values
+   (`rel:packages/infrastructure-agent/config.ts:113-125`, strict): `config.json`'s
+   `candidateRuntime.bindingSha256`, `trustSha256`, `trustConfigMap`, `pinConfigMap` (the file paths and
+   `holderSecret` stay), and `deployment.yaml`'s candidate volume naming the run's control ConfigMap. Render
+   `kubectl kustomize kubernetes/apps/relay-researcher/agent` from the per-run branch, set the
+   Deployment's `spec.replicas` to 0 in that render, apply it. The same values reach git through the
+   per-run PR; `relay-researcher-agent` stays suspended until §3.10 step 8.
 
 ### 3.6 Grant, then create (`t0`)
 
@@ -285,16 +299,20 @@ has a non-null `binding`. The agent retries the session exchange for only 20 s, 
 `candidate-session-unsettled` (`rel:packages/infrastructure-agent/executor.ts:1062,1103`): an
 unknown slot (§3.10). **create → Pod Running must stay well under 5 min; abort the run past 5 min.**
 
-Driver inputs come from here: `session` and `bindingProvenance` (`{request, reply}`) from that row
-(**UNVERIFIED**, §8 item 2); `submittedPod` from an API audit request-body capture of the Pod create
+Driver inputs come from here: `session` = that row's `permit`, `bindingProvenance` = its `binding`,
+the journal proof `{request, reply}` the coordinator stores (`rel:server/workers/candidate/coordinator.ts:279-282`);
+whether files written from these jsonb columns pass the drivers' pins is **UNVERIFIED** (§8 U1).
+`submittedPod` comes from an API audit request-body capture of the Pod create
 (`main:docs/qualification/worker-runtime-acceptance.md`: "leave acceptance pending" without one;
-§8 item 1).
+§8 G2).
 
 ### 3.9 Drivers
 
 From the pinned driver checkout: `node --import tsx scripts/qualification/<driver>.ts <config> <config-sha256> <report> [seconds]`.
 Each reserves its report exclusively and never overwrites one. Thresholds come from `T` and the
-current lease end `E_L` (read from the guard log), never from `t0` estimates:
+current lease end `E_L` (the latest `published` event's `leaseExpiresAtMs` in
+`kubectl logs <pod> -c supervisor`, `main:scripts/qualification/researcher-hub-partition-observation.ts:167-171`),
+never from `t0` estimates:
 
 | Rule | Source |
 | --- | --- |
@@ -303,7 +321,7 @@ current lease end `E_L` (read from the guard log), never from `t0` estimates:
 | Partition and lease drills: at least 30 s before `T` at start and at the cut; wall/monotonic drift ≤ 1 s | `main:scripts/qualification/researcher-hub-partition-observation.ts:645,825` |
 | Lease expiry needs exit 71 before `T`: cut no later than `T − L − 30 s` | `main:scripts/qualification/researcher-lease-expiry-observation.md`; §6 R3 |
 | Revocation: last published lease ends ≥ 30 s before `T`; latest send ≈ `T − 30 s − L` | `main:scripts/qualification/researcher-revocation-observation.ts:357-361` |
-| Measurement window must finish before `T − L` (lease publisher sampling up to 60 s) | `main:packages/worker-runtime/acceptance.ts:784-800` |
+| Measurement window: the code's deadline is `min(run.expiresAt, T)` and lease sampling lasts up to 60 s; this runbook adds the margin "finish before `T − L`" so the sampled lease is not clamped to `T` | `main:packages/worker-runtime/acceptance.ts:472-476,794-795` |
 | Expiry capture runs passively to `T + 60 s`; nothing runs after it | `main:packages/worker-runtime/expiry-observation.ts:15,50-53` |
 | A drill that removes the Pod's evidence: remove only after its terminal capture | lease and partition drills refuse `pod-absent` |
 
@@ -329,10 +347,15 @@ current lease end `E_L` (read from the guard log), never from `t0` estimates:
    campaign and escalate**, because the next create needs the slot released (§3.0).
 6. Withdraw: `node --import tsx scripts/candidate-worker-authority.ts withdraw /operator/<run>/journal-operator.json <sha>`.
    The budget scope lapses by itself; the hub files are replaced by the next run's §3.4.
-7. Slot back to git: confirm every driver's `outstandingRecovery` is empty and no Pod remains, then
+7. ConfigMap quota: both namespaces cap ConfigMaps at 8 (`installation/containment.yaml`). Delete the
+   previous run's control ConfigMap and stale generated agent config once the agent no longer mounts
+   them. Run N's slot trust and pin ConfigMaps stay frozen by its guards until run N+1's
+   `11-candidate-contract-guards.json` replaces those policies in place (same names,
+   `relay-candidate-<installationId>…`); delete them after that step (**UNVERIFIED**, §8 U4).
+8. Slot back to git: confirm every driver's `outstandingRecovery` is empty and no Pod remains, then
    `flux resume kustomization relay-researcher-installation -n flux-system` (it restores the enrollment
    gate and the 0-Pod quota) and `flux resume kustomization relay-researcher-agent -n flux-system` once
-   the agent's git values match the live ones.
+   the per-run PR has merged and git equals the live agent (replicas included).
 
 ### 3.11 Before the next run
 
@@ -347,25 +370,29 @@ node --import tsx scripts/qualification/researcher-pool-v2-observations.ts \
 ```
 
 Each intended row must come out `observed`. Window and storage reports need E2's converters, the
-lease drill's second row E3's. **Do not sign the next run until this run's rows convert**, and package
-its evidence (§5.5).
+lease drill's second row E3's. The #519 defaultCommunication reports are not V2 rows: they go to their
+own independent review for `ReleaseApproval.defaultCommunication`
+(`519:docs/qualification/default-communication-observation.md`). `subject.json` has no builder yet
+(§8 G3). **Do not sign the next run until this run's rows convert**, and package its evidence (§5.5).
 
 ## 4. Timing budget and the E6 rehearsal
 
-The installers need the run valid, so everything up to the create fits in the 2 h; post-`T` waits
-(settlement, egress, recovery reconciliation) are bounded by `cleanupDeadline` (+24 h) instead.
+The installers need the run valid, so everything up to the create fits in the 2 h. Journal
+inspection and settlement stay allowed after `expiresAt` (`rel:deploy/worker-candidate-journal/001-journal.sql:26-27`:
+`cleanupDeadline` is "not a cleanup authorization expiry"), so post-`T` waits (settlement, egress,
+recovery reconciliation) only need to finish by `cleanupDeadline` for the converters.
 
 | Step (from `t_s`) | Target | Hard limit |
 | --- | --- | --- |
 | 3.1 sign, verify | 5 min | |
 | 3.2 journal render, install, restart | 8 min | |
 | 3.3 budget scope | 3 min | |
-| 3.4 PR merged, Flux, hub rollout (backup ≤ 1800 s) and readback | 30 min | `t_s + 60 min`, else abort before the grant |
-| 3.5 agent objects and values | 5 min, alongside 3.4 | |
-| 3.6 grant, create | 2 min | create ≤ `t_s + 95 min` (`t0 + 900 s ≤ expiresAt`, plus 10 min of teardown) |
+| 3.4 PR (opened after 3.1) merged, Flux, hub rollout (backup ≤ 1800 s), readback | 30 min | `t_s + 60 min`, else abort before the grant |
+| 3.5 agent objects and in-place values | 5 min, alongside 3.4 | |
+| 3.6 grant, create | 2 min | code: `t0 + 900 s ≤ expiresAt`; chosen margin: create ≤ `t_s + 95 min` |
 | 3.7-3.8 bundle, enable, Pod Running, session | ≤ 5 min after `t0` | 5 min, else abort |
 | drivers | to `T` (+60 s capture) | `T ≤ t0 + 900 s` |
-| 3.10 Pod removed, slot settled | 10 min | before `expiresAt` (UNVERIFIED necessity, §8 item 9) |
+| 3.10 Pod removed, slot settled | 10 min | chosen: before `expiresAt`; code allows later |
 
 Target: create by `t_s + 55 min`, done by about `t_s + 85 min`; 35 min of slack, nearly all for the PR.
 
@@ -374,7 +401,8 @@ signed on the live hub.
 
 - [ ] Sign, `verify`, budget `verify` and the journal render with throwaway keys (offline).
 - [ ] Journal service restart on a disposable namespace or the rehearsal journal: apply, scale, Ready.
-- [ ] Per-run PR: open → CI green → merge → Flux apply → agent restart, on a no-op branch.
+- [ ] Per-run PR: open → CI green → merge → Flux apply → hub rollout, on a no-op branch; and the
+      in-place agent apply at 0 replicas.
 - [ ] Hub rollout duration, from the last H-step rollouts' init-container timings (`backup-database`
       dominates).
 - [ ] `prepare-candidate-policy.ts` + prebuilt verifier + transition steps on Relay's disposable
@@ -384,7 +412,7 @@ signed on the live hub.
 - [ ] Each driver's real duration (window, storage staging, admission matrix, egress, replay) to fill
       the latest-start formulas in §6.
 - [ ] P1/P3 call counts on the provider-qualification harness (paid; O5) and native approval prompts.
-- [ ] `commandSha256`, session extraction and `submittedPod` capture proven end to end (§8, 1-3).
+- [ ] `commandSha256`, session files and `submittedPod` capture proven end to end (§8 G2, G4, U1).
 
 ## 5. Cross-cutting checks
 
@@ -405,7 +433,7 @@ matches the cluster (v1.14). A larger skew stops every skew-sensitive driver; do
 
 ### 5.2 Flux
 
-Suspend `relay-researcher-installation` from §3.7 until §3.10 step 7, and `relay-researcher-agent`
+Suspend `relay-researcher-installation` from §3.7 until §3.10 step 8, and `relay-researcher-agent`
 from §3.5 (installation runbook, "Flux and the in-place ceremonies"; drivers replace the gate, quota
 and egress policy in place, and Flux would silently undo them). Never resume over an unreverted live
 change. Q4 must never run inside a window.
@@ -425,7 +453,8 @@ next is admitted only while charged ≤ **69,808** (llm-router `inference-budget
 reservation. Codex does not retry (`rel:packages/codex-launcher/main.ts:223-224`). Rules:
 
 - read `GET /api/workers/<id>/environments/<environmentId>/inference-meter` (`consumedTokens`) before
-  every prompt (its coverage for candidate workers is **UNVERIFIED**);
+  every prompt (`rel:server/workers/routes.ts:160-210`; 409 `inference_meter_unavailable` until the
+  credential is metered);
 - send a prompt only if `consumedTokens` + its planned turn stays under 60,000;
 - the call that can be interrupted (lease cut, partition, disruption) is always the run's last.
 
@@ -482,7 +511,9 @@ first is a non-observed outcome (`main:docs/qualification/worker-runtime-accepta
 ### R2: replay, then revocation
 
 Signed: L 120, a tool-free one-line first prompt. 2-3 requests (first prompt, replay exactly 1, none
-after the revoke). Needs R1's proof of session control and of per-key usage reads.
+after the revoke). Needs R1's proof of session control. Before step 3, confirm the per-key provider
+usage reading settles for this worker: the replay refuses before prompting without a usable baseline
+(`main:packages/worker-runtime/session-replay-observation.ts:298-314`).
 
 | Step | Driver / action | Latest start, stop/go |
 | --- | --- | --- |
@@ -502,7 +533,7 @@ Signed: L 90, P5 with a new marker. 2-4 requests.
 | 2 | #519 observe, P5, wait for the observer | P5 by `T − 600 s` |
 | 3 | Cleanup observer, then remove (§3.10) | remove by `T − 360 s` |
 | 4 | Settlement #13 with the transition report | start by `T − 240 s` |
-| 5 | Matrix #15: `researcher-pool-admission-observation.ts <cfg> <sha> <out>`; slot Pod absent; dry runs only; CREATE paths only, UPDATE paths stay `unmeasured` | start by `T − 60 s − D_egress-start` |
+| 5 | Matrix #15: `researcher-pool-admission-observation.ts <cfg> <sha> <out>`; slot Pod absent; dry runs only; CREATE paths only, UPDATE paths stay `unmeasured`. **Blocked until G1 is fixed** |  start by `T − D_matrix − 60 s`, so egress still starts before `T` |
 | 6 | Egress #16: `researcher-pool-egress-observation.ts <cfg> <sha> <out>`; zero Pods; replaces the gate in place under CAS; 600 s window; never overlapping step 5 | start before `T`; finish before `cleanupDeadline` |
 
 ### R3 (+R4): storage, then one lease-expiry drill
@@ -541,7 +572,7 @@ Signed: L 90, prompt never sent, 0 requests.
 
 | Step | Driver / action | Latest start, stop/go |
 | --- | --- | --- |
-| 0 | Prerequisites: a passing `worker-budget-restore.ts --router-root <llm-router> --work-dir <dir> --report <file>` (Node 24, clean trees); an older Relay snapshot that predates this Pod (INFERRED: §3.4's own pre-migration dump qualifies); a 0600 management token for the disposable hub | before signing |
+| 0 | Prerequisites: a passing `worker-budget-restore.ts --router-root <llm-router> --work-dir <dir> --report <file>` (Node 24, clean trees); an older Relay snapshot that predates this Pod (**UNVERIFIED**: §3.4's own pre-migration dump may qualify); a 0600 management token for the disposable hub | before signing |
 | 1 | `researcher-recovery-fence-observation.ts <cfg> <sha> <out>`, `denialWaitMs` ≤ 10 min, `reconcileWaitMs` ≤ 30 min | **before** the restored hub is pointed at the installation; before `T` |
 | 2 | Freeze external authority; restore the older snapshot as a disposable hub; point it at the installation | |
 | 3 | Halt (`fence_stale`), orphan deletion, reconciliation; then explicit operator recovery | bounded by `cleanupDeadline` |
@@ -563,31 +594,45 @@ Owner decisions from rev 2, **not answered here**:
 
 Raised by this runbook, for the operator and owner:
 
-- **S1:** S-A or S-B for the per-run hub and agent change (§2), decided with H7's component design.
+- **S1:** S-A or S-B for the per-run hub change (§2), decided with H7's component design.
 - **S2:** the mechanism that keeps the agent from claiming the create before the bundle (§3.5).
 
-## 8. UNVERIFIED
+## 8. Blocking gaps and UNVERIFIED steps
 
-1. **`submittedPod` capture.** Every acceptance-config driver needs the exact Pod create request body;
-   the agent does not export it and the only route is API audit `requestObject`. No audit policy is in
-   this repository (Talos default assumed), so request bodies are likely **not** recorded today.
-2. **Session and `bindingProvenance` files.** No operator route or documented extraction; this runbook
-   reads `worker_candidate_sessions.permit` and `.binding` (both jsonb; verification canonicalizes,
-   so key order should not matter).
-3. **`commandSha256`.** No operator tool; it must reproduce the holder's final command.
-4. **`subject.json`.** Only the library function `createPodMeasurementSubject` builds it; no CLI exists,
-   so §3.11 cannot run yet.
-5. The agent-disable mechanism (scale to 0), and whether the create needs a live agent.
-6. Per-run PR latency and the hub rollout duration (`backup-database` up to 1800 s).
-7. Slot trust/pin ConfigMap and holder Secret layout; reusing one holder Secret, since run N's guards
-   freeze slot Secret mutations.
-8. Between runs: Flux resume restores the enrollment gate and 0-Pod quota; leftover
+**Blocking gaps, confirmed in code** (none is in E1-E4; each needs an operator-side Relay change or an
+infrastructure prerequisite before the run that needs it):
+
+- **G1, #15 matrix (before R5).** The per-launch policy pins `activeDeadlineSeconds <= <seconds left
+  when the bundle was generated>` (`rel:packages/infrastructure-agent/pod-renderer.ts:248-255`,
+  `pod-contract-cel.ts:89-90`). The matrix driver regenerates the bundle at its own start time and
+  requires semantic equality with the installed policies
+  (`main:scripts/qualification/candidate-admission-observation.ts:307,381-383`), so it refuses a
+  policy generated earlier. Fix in the driver, for example by regenerating at the installed bundle's
+  `report.json.generatedAt`.
+- **G2, `submittedPod` (before R1).** Every acceptance-config driver needs the exact Pod create request
+  body; the agent does not export it, and the documented source is an API audit `requestObject`. This
+  repository sets no API audit policy, so whether ailab records request bodies is **UNVERIFIED** and
+  likely not.
+- **G3, `subject.json` (before R1's conversion).** Only the library function
+  `createPodMeasurementSubject` builds it (`rel:packages/worker-runtime/measurement-subject.ts:159-178`);
+  no CLI exists, so §3.11 cannot run.
+- **G4, `commandSha256` (before signing R1).** No operator tool reproduces the holder's final command
+  hash (`rel:holder/src/worker_candidate.rs:527-545`).
+
+**UNVERIFIED:**
+
+1. U1: files written from `worker_candidate_sessions.permit` and `.binding` (jsonb) pass the drivers'
+   `session` and `bindingProvenance` pins (signature checks canonicalize, so key order should not matter).
+2. U2: scaling the agent to 0 as the "disabled" mechanism, and whether the create needs a live agent.
+3. U3: the per-run PR latency and the hub rollout duration (`backup-database` up to 1800 s).
+4. U4: run N's guards keep its slot trust/pin ConfigMaps and the holder Secret frozen until run N+1's
+   guards replace them; reusing the one holder Secret across runs works under that freeze.
+5. U5: Flux resume restores the enrollment gate and 0-Pod quota; leftover
    `relay-candidate-<installationId>-<n>` policies of earlier runs are harmless.
-9. Whether the agent can still settle the journal slot after `run.expiresAt` (hence "before `expiresAt`").
-10. Settling an unknown slot: no operator command or UI at `c0fe50f0`.
-11. The inference-meter route's coverage for candidate workers.
-12. How often local-tool prompts raise native approval requests.
-13. The R1 whole-second `T` (supported by `least(original, grant)`; the 71/73 race remains).
-14. The agent's journal egress values (`networkPolicy.candidateJournalCidrs`, port 8443).
-15. R6's older snapshot taken from §3.4's own pre-migration dump.
-16. All durations in §4 and every `D_x`, until E6 measures them.
+6. U6: settling an unknown slot by hand: no operator command or UI at `c0fe50f0`.
+7. U7: how often local-tool prompts raise native approval requests.
+8. U8: the R1 whole-second `T` (supported by `least(original, grant)`; the 71/73 race remains).
+9. U9: the agent's journal egress values (`networkPolicy.candidateJournalCidrs`, port 8443).
+10. U10: R6's older snapshot taken from §3.4's own pre-migration dump.
+11. U11: the Talos and `chronyc` clock commands on the operator's hosts.
+12. U12: all durations in §4 and every `D_x`, until E6 measures them.
