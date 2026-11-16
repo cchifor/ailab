@@ -792,7 +792,11 @@ account with **no Relay membership at rest**:
    `enrollment-token ID [--ttl S]`. There is no approve, no grant, no policy and no key reveal;
 4. `POST /api/auth/logout` with `Origin` (without it the 403 would leave the session alive for 8 h),
    then `/api/auth/me` must answer 401;
-5. in a `finally`: delete the identity's memberships and sessions, and read back `0 memberships, 0 sessions`.
+5. in a `finally` that already covers the grant (`member.js` can commit and still report a transport
+   error): delete the identity's memberships and sessions (the subject travels as a psql variable, never
+   interpolated into the SQL), read back `0 memberships, 0 sessions`, and end its Keycloak SSO sessions.
+   A failure there is printed loudly and becomes exit code 3 (revoke not confirmed) or 5 (Keycloak
+   logout). A Relay logout that did not close the session exits 4.
 
 **Never let it approve anything durable.** Relay re-checks the approver's CURRENT admin membership at
 every use of a worker grant, creation policy, management authority, delegation or repository grant
@@ -813,14 +817,17 @@ python scripts/relay-operator.py call enrollment-token <installation-id> --ttl 9
 (On Windows, `kubectl.exe` has no `/dev/stdin`. Build the Secret JSON in memory and pipe it to
 `kubectl create -f -` instead.)
 
-**Audit.** Keycloak records `LOGIN`, `CODE_TO_TOKEN`, `LOGOUT` and errors for the account (realm events,
-90 days: `kc get events -r relay -q user=72e99c0a-fce0-42f1-8e2a-af1363b5aa4f`). Relay's own events name
+**Audit.** Keycloak records `LOGIN`, `CODE_TO_TOKEN` and errors for the account (realm events,
+90 days: `kc get events -r relay -q user=72e99c0a-fce0-42f1-8e2a-af1363b5aa4f`). Relay's logout does not
+end the Keycloak SSO session, so the cleanup ends it with an admin logout of the user
+(`users/<id>/logout`); that is an admin action, not a user `LOGOUT` event. Relay's own events name
 user `a2d7daaa-…` (for example `enrollment-reissued`).
 
 **Operations.**
 - `python scripts/relay-operator.py status`: Relay membership/session counts (expect 0/0) and the
   Keycloak user state.
-- `revoke`: delete its membership and sessions again (idempotent). Use it after any interrupted `call`.
+- `revoke`: delete its membership and sessions and end its Keycloak SSO sessions again (idempotent).
+  Use it after any interrupted `call`, or whenever `call` exits 3 or 5.
 - `provision --rotate`: a new random password, set in Keycloak and OpenBao, verified by a sha256 prefix.
   Never retry a failed login: the realm has brute-force protection, so repeated failures lock the account.
 - **Retire it:** `revoke`, then `kc update users/72e99c0a-… -r relay -s enabled=false` (or delete it),

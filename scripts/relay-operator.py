@@ -69,9 +69,11 @@ def kc(*args, stdin: bytes | None = None) -> bytes:
                       "sh", "-c", KCADM, "kc", *args], stdin)
 
 
-def psql(sql: str) -> str:
+def psql(sql: str, **params: str) -> str:
+    """SQL on stdin; values only as psql variables (`:'name'` in the SQL), never interpolated into it."""
+    var = [a for k, v in params.items() for a in ("-v", f"{k}={v}")]
     return run(CTX + ["-n", "relay", "exec", "-i", "relay-postgres-0", "-c", "postgres", "--",
-                      "psql", "-U", "postgres", "-d", "relay", "-v", "ON_ERROR_STOP=1", "-tA"],
+                      "psql", "-U", "postgres", "-d", "relay", "-v", "ON_ERROR_STOP=1", *var, "-tA"],
                sql.encode()).decode().strip()
 
 
@@ -124,18 +126,21 @@ def _json_tail(raw: bytes):
     return json.loads(t[t.find("{"):])
 
 
+REVOKED = "0 memberships, 0 sessions"
+
+
 def counts(subject: str) -> str:
     return psql(
-        "SELECT (SELECT count(*) FROM memberships m JOIN users u ON u.id=m.user_id WHERE u.subject='%s')"
-        "||' memberships, '||(SELECT count(*) FROM sessions s JOIN users u ON u.id=s.user_id WHERE u.subject='%s')"
-        "||' sessions'" % (subject, subject))
+        "SELECT (SELECT count(*) FROM memberships m JOIN users u ON u.id=m.user_id WHERE u.subject=:'subject')"
+        "||' memberships, '||(SELECT count(*) FROM sessions s JOIN users u ON u.id=s.user_id WHERE u.subject=:'subject')"
+        "||' sessions'", subject=subject)
 
 
 def revoke(subject: str) -> str:
     psql(
-        "BEGIN; DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE subject='%s'); "
-        "DELETE FROM memberships WHERE user_id IN (SELECT id FROM users WHERE subject='%s'); COMMIT;"
-        % (subject, subject))
+        "BEGIN; DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE subject=:'subject'); "
+        "DELETE FROM memberships WHERE user_id IN (SELECT id FROM users WHERE subject=:'subject'); COMMIT;",
+        subject=subject)
     return counts(subject)
 
 
@@ -144,15 +149,40 @@ def grant(subject: str) -> None:
                "--subject", subject, "--name", NAME, "--role", "admin"])
 
 
+def end_sso(uid: str) -> None:
+    """End the account's Keycloak SSO sessions (admin logout of the user)."""
+    kc("create", f"users/{uid}/logout", "-r", REALM)
+
+
+def cleanup(subject: str, uid: str, rc: int) -> int:
+    """Always runs after a grant was ATTEMPTED (member.js may commit and still report a transport error).
+    Never raises: a failure is reported loudly and turned into a non-zero rc."""
+    try:
+        after = revoke(subject)
+    except SystemExit as e:
+        after = f"revoke failed: {e}"
+    print(f"relay-operator: revoked ({after})", file=sys.stderr)
+    if after != REVOKED:
+        print("relay-operator: REVOKE NOT CONFIRMED - run `revoke` again NOW", file=sys.stderr)
+        rc = rc or 3
+    try:
+        end_sso(uid)
+        print("relay-operator: Keycloak SSO sessions ended", file=sys.stderr)
+    except SystemExit as e:
+        print(f"relay-operator: Keycloak logout failed ({e}); sessions expire at the realm idle timeout", file=sys.stderr)
+        rc = rc or 5
+    return rc
+
+
 def call(op_args: list[str]) -> int:
     c = creds()
-    subject, username, pw = c["subject"], c["username"], c["password"]
+    subject, username, pw, uid = c["subject"], c["username"], c["password"], c["keycloak_user_id"]
     c = None
     tool = str(Path(__file__).resolve().parent)
     rc = 1
-    grant(subject)
-    print(f"relay-operator: granted admin ({counts(subject)})", file=sys.stderr)
-    try:
+    try:  # the grant is INSIDE the cleanup scope: whatever fails after it starts, the finally revokes
+        grant(subject)
+        print(f"relay-operator: granted admin ({counts(subject)})", file=sys.stderr)
         p = subprocess.run(["docker", "run", "--rm", "-i", "--network", "bridge", "-v", f"{tool}:/tool:ro", IMAGE,
                             "python3", "-I", "/tool/relay-admin-call.py", "--username", username, *op_args],
                            input=(pw + "\n").encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -162,11 +192,7 @@ def call(op_args: list[str]) -> int:
         sys.stdout.flush()
         rc = p.returncode
     finally:
-        after = revoke(subject)
-        print(f"relay-operator: revoked ({after})", file=sys.stderr)
-        if after != "0 memberships, 0 sessions":
-            print("relay-operator: REVOKE NOT CONFIRMED - run `revoke` again", file=sys.stderr)
-            rc = rc or 3
+        rc = cleanup(subject, uid, rc)
     return rc
 
 
@@ -186,8 +212,9 @@ def main() -> int:
         return call(a.op)
     subject = creds()["subject"]
     if a.cmd == "revoke":
-        print(revoke(subject))
-        return 0
+        rc = cleanup(subject, subject.rsplit("|", 1)[1], 0)
+        print(counts(subject))
+        return rc
     uid = subject.rsplit("|", 1)[1]
     u = _json_tail(kc("get", f"users/{uid}", "-r", REALM, "--fields", "id,username,emailVerified,enabled,requiredActions"))
     print(json.dumps({"relay": counts(subject), "keycloakUser": u}, indent=1))

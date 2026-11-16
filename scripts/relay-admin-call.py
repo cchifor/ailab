@@ -149,12 +149,14 @@ def login(c: Client, username: str, password: str) -> None:
                    f"role={me.get('role') if isinstance(me, dict) else '-'!r} (want {EXPECTED_NAME!r}, admin)")
 
 
-def logout(c: Client) -> str:
+def logout(c: Client) -> tuple[str, bool]:
+    """(message, closed). Closed = no session was opened, or logout 200 and /api/auth/me 401 afterwards."""
     if not c.has_session():
-        return "no session"
+        return "no session", True
     st, _ = c.api("POST", "/api/auth/logout", {})
     st2, _ = c.api("GET", "/api/auth/me")
-    return f"logout {st}, /api/auth/me after {st2}" + ("" if st == 200 and st2 == 401 else " (NOT CLOSED)")
+    closed = st == 200 and st2 == 401
+    return f"logout {st}, /api/auth/me after {st2}" + ("" if closed else " (NOT CLOSED)"), closed
 
 
 def redact(o):
@@ -188,13 +190,7 @@ def main() -> int:
     try:
         login(c, a.username, password)
         password = ""
-        if a.op == "me":
-            st, out = c.api("GET", "/api/auth/me")
-        elif a.op == "list-installations":
-            st, out = c.api("GET", "/api/infrastructure/installations")
-        elif a.op == "get-installation":
-            st, out = c.api("GET", f"/api/infrastructure/installations/{a.id}")
-        else:
+        if a.op == "enrollment-token":
             op_id = str(uuid.uuid4())
             st, out = c.api("POST", f"/api/infrastructure/installations/{a.id}/enrollment-token",
                             {"operationId": op_id, "enrollmentTtlSeconds": a.ttl})
@@ -206,14 +202,20 @@ def main() -> int:
                 raise Fail(f"enrollment-token: HTTP {st}, no fresh token (a retry must use a NEW operationId)")
             sys.stdout.write(tok)
             sys.stdout.flush()
-            return 0
-        print(json.dumps({"status": st, "body": redact(out)}, indent=1))
-        rc = 0 if st == 200 else 1
+        else:
+            path = {"me": "/api/auth/me", "list-installations": "/api/infrastructure/installations",
+                    "get-installation": f"/api/infrastructure/installations/{getattr(a, 'id', '')}"}[a.op]
+            st, out = c.api("GET", path)
+            print(json.dumps({"status": st, "body": redact(out)}, indent=1))
+            rc = 0 if st == 200 else 1
     except Fail as e:
         print(f"relay-admin-call: {e}", file=sys.stderr)
         rc = 2
     finally:
-        print(f"relay-admin-call: {logout(c)}", file=sys.stderr)
+        msg, closed = logout(c)
+        print(f"relay-admin-call: {msg}", file=sys.stderr)
+        if not closed:
+            rc = rc or 4  # the operator's DB revoke still deletes the session; the caller must know
     return rc
 
 
