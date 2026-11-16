@@ -7,17 +7,16 @@ kind: Kustomization
 #   execution-egress.yaml  the slot's DNS + Relay/Router allow-list        (ailab-owned CNI artifact)
 #   admission-deny.yaml    the deny-all Pod gate                          (Relay 21-admission-deny.json)
 #
-# INERT: no Flux Kustomization in kubernetes/apps/clusters/ai references this path. The reviewed one
-# waits in ../flux/relay-researcher-installation.yaml until the installation is approved in Relay and
-# ../pins carries its ID.
+# APPLIED since step I5 (ailab #1788) by kubernetes/apps/clusters/ai/relay-researcher-installation.yaml.
 resources:
 - namespaces.yaml
 - containment.yaml
 # EXACTLY ONE egress stage of relay-researcher-egress (the definition's executionEgressArtifacts pin is
 # its digest; the tests refuse zero, two, or a pin that is not the included stage's):
 #   execution-egress.yaml      DNS + the two Cloudflare addresses; enrollment only (removable)
-#   qualification-egress.yaml  the internal TLS terminators and the candidate journal; no DNS (G3)
-- execution-egress.yaml
+#   qualification-egress.yaml  the internal TLS terminators and the candidate journal; no DNS (G3);
+#                              included since step Q4
+- qualification-egress.yaml
 - admission-deny.yaml
 components:
 - ../pins
