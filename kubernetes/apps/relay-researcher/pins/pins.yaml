@@ -24,6 +24,6 @@ metadata:
   annotations:
     config.kubernetes.io/local-config: "true"
 data:
-  installationId: operator-fills-installation-id
-  agentImage: registry.chifor.me/relay/infrastructure-agent@sha256:operator-fills-from-publish-receipt
-  sourceCommit: operator-fills-reviewed-relay-commit
+  installationId: "b380ff7f-0716-478d-8b01-3d39f30e750b"
+  agentImage: "registry.chifor.me/relay/infrastructure-agent@sha256:ba4cdd9cf94362a0ab8f06565460c48dbe2a1262ae87e50a77bd145c8811a4ef"
+  sourceCommit: "c0fe50f030eac65d78a113e42797c5fe8c395233"

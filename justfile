@@ -212,6 +212,13 @@ af-verify-hashes:
 manifest-lint:
     bash scripts/manifest-lint.sh
 
+# Needs the pinned Relay checkout (`npm ci` done), Node 22.21+ and helm on PATH, and the five pinned
+# release assets (docs/runbooks/relay-researcher-installation.md, I5). CI cannot run it: the Relay
+# repository and its release assets are private.
+# Re-run the Relay researcher I4 generator and I5 import against `ref`; fail on any byte difference
+relay-researcher-reproduce relay assets ref="HEAD":
+    python3 scripts/relay-researcher-reproduce.py --relay {{relay}} --assets {{assets}} --ref {{ref}}
+
 # Verify the two LiteLLM consumer spans (Open WebUI's Local-group model_ids, litellm.yaml's
 # checksum/config annotation) still agree with litellm.yaml's model_list that derives them. dsh is
 # not one: it takes its models from llm-router (ADR 0039). Static-only; this is what
