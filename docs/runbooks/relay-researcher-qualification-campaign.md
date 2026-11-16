@@ -50,8 +50,8 @@ Each is read back; a missing one stops the campaign before any signing.
 | Q1-Q6: internal TLS, qualification egress `f6d3187c…282f`, Q5 policy UID, Q6 drill config | installation runbook | staged; the installation tree is not in Flux and still selects the enrollment egress |
 | Candidate journal on `10.96.0.42`, authority row `ready` | [relay-worker-candidate-journal.md](relay-worker-candidate-journal.md) | optional bundle, in no Flux inventory |
 | File B: ledger step 7 `qualifications` row; its `tokenPolicyDigest` goes into every run's `router.tokenPolicyDigests` | h4: "H7", "Enablement order at a glance" | not generated; D is fixed with the owner when it is (O3, §7) |
-| H7 candidate component (hub `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`) | hub runbook H7 | **not staged**; its design decides §2's staging |
-| Agent one-time candidate values: candidate volume, `policy.bootstrapSecrets: true`, journal egress | installation runbook, "Beyond enrollment" item 3 | not staged |
+| H7 candidate component (hub `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`) and the S-A generator | hub runbook H7; [relay-candidate-run-generator.md](relay-candidate-run-generator.md) | staged, not included: R1's per-run PR includes it |
+| Agent one-time candidate values: candidate volume, `policy.bootstrapSecrets: true`, journal egress | installation runbook, "Beyond enrollment" item 3; the generator's "One-time prerequisites" | not staged |
 | E2 window + storage converters (#523), E3 lease → two rows (#527), E4 replay disruption (#524), defaultCommunication observer (#519) | Relay `main` | merged |
 | E1 delayed start: pre-session observer, converter branch, hold procedure | Relay #532 | merged (`1ea5ecc9`); R7 also needs O7's audit policy and O8's reconciliation |
 | Hub v0.10.4: the `c0fe50f0` candidate loader refuses every real binding | §8 G0; fixed by #525, released as v0.10.4, pinned by ailab #1789 | **live** since 2026-11-16 10:08Z (`…@sha256:d1482bc1…57a7`, schema 79; ailab #1789 comment 125493) |
@@ -75,9 +75,9 @@ the one driver checkout. A change voids every row already measured (`rel:package
 | Journal install, inspect, withdraw | `rel:scripts/candidate-worker-authority.ts` | journal DB | no |
 | Journal service re-render | `kubernetes/optional/relay-candidate-journal/render.py service` + `kubectl` | `relay-candidate-journal` objects (optional bundle, in no Flux inventory) | no; operator-reviewed render |
 | Budget scope | `rel:scripts/candidate-budget-scopes.ts` | ledger DB | no |
-| **Hub candidate files** | H7 component | relay Deployment env, ConfigMap, Secret | **yes, every run**: `_SHA256` and the document pin bytes that exist only after signing |
-| **Agent candidate values** | the agent tree: runtime `config.json` `candidateRuntime` (`trustSha256`, `trustConfigMap`, `pinConfigMap`; `bindingSha256` stays byte-identical, the binding is frozen) and `deployment.yaml`'s candidate volume (the run's control ConfigMap) | agent ConfigMap and Deployment | **yes, every run**, applied in place first (the agent must stay disabled through the create, §3.5) and committed in the same per-run PR (S-A) or afterwards (S-B); `relay-researcher-agent` stays suspended until §3.10 step 8 |
-| Candidate ConfigMaps and holder Secret | `kubectl` (`rel:deploy/infrastructure-agent/values.yaml`: "All inputs are operator-installed") | control namespace, slot | no |
+| **Hub candidate files** | `main:scripts/compose-candidate-hub-document.ts` (the document), then `scripts/relay-candidate-run.py generate` (`run/` of the H7 component `kubernetes/components/relay-worker-candidate`) | relay Deployment env, the run's ConfigMap; the session-key Secret by `kubectl`, never git | **yes, every run**: `_SHA256` and the document pin bytes that exist only after signing |
+| **Agent candidate values** | `scripts/relay-candidate-run.py generate`, into the agent tree: runtime `config.json` `candidateRuntime` (`trustSha256`, `trustConfigMap`, `pinConfigMap`; `bindingSha256` stays byte-identical, the binding is frozen) and `deployment.yaml`'s candidate volume (the run's control ConfigMap) | agent ConfigMap and Deployment | **yes, every run**, applied in place first (the agent must stay disabled through the create, §3.5) and committed in the same per-run PR (S-A) or afterwards (S-B); `relay-researcher-agent` stays suspended until §3.10 step 8 |
+| Candidate ConfigMaps and holder Secret | `kubectl create -f` of the generator's `--operator-out` ConfigMaps; the holder Secret once (`rel:deploy/infrastructure-agent/values.yaml`: "All inputs are operator-installed") | control namespace, slot | no |
 | Grant, create, stop, remove | hub API | hub DB | no |
 | Per-launch admission bundle | `rel:scripts/prepare-candidate-policy.ts` + `kubectl`, in place | VAPs, gate, quota | no; in-place ceremony under Flux suspension |
 | Drivers, conversion | `main:scripts/qualification/*` | per driver | no |
@@ -89,16 +89,22 @@ installation runbook's rule ("Flux and the in-place ceremonies": suspend, apply,
 final objects, resume), because the agent must not claim the create before the per-launch bundle is
 installed. Staging of the hub half (§7, O6: S-A, with S-B as the fallback and for the canary):
 
-- **S-A, one mechanical PR per run (approved).** H7's PR also adds a generator that writes, from the
-  signed run and its public files, exactly the run-bound values: the hub document ConfigMap and its
-  `_SHA256`, the session-key Secret name, and the agent's `candidateRuntime` values. Everything else
-  is reviewed once in H7. Prepare the branch before signing; open it with label `no-automerge` right
-  after §3.1, so CI and review run during §3.2-§3.3; the operator merges once those readbacks and CI
-  pass and the diff equals the generator's output for the recorded run digest. **Deadline: hub
-  rollout read back by `issuedAt` + 60 min, or abort before the grant** (no tokens spent).
+- **S-A, one mechanical PR per run (approved).** The generator `scripts/relay-candidate-run.py`
+  ([relay-candidate-run-generator.md](relay-candidate-run-generator.md)) writes, from the signed run
+  and the composed hub document, exactly the run-bound values: the hub document ConfigMap and its
+  `_SHA256`, the session-key Secret name, and the agent's `candidateRuntime` values and candidate
+  volume. Everything else is reviewed once in H7. Prepare the branch before signing; open it with
+  label `no-automerge` right after §3.1, so CI and review run during §3.2-§3.3; the operator merges
+  once those readbacks and CI pass and the diff equals the generator's output for the recorded run
+  digest: `scripts/relay-candidate-run.py check --base origin/main --run-digest <runDigest>` exits 0
+  (CI checks the committed values' self-consistency; R1's PR is H7's inclusion PR, whose other
+  changes the check lists for review by hand). **Deadline: hub rollout read back by `issuedAt` +
+  60 min, or abort before the grant** (no tokens spent).
 - **S-B, in place, then commit.** The same rule applied to `apps` (the hub's Kustomization, suspended
-  as in hub step H3). It removes review latency from the window, but leaves every app unreconciled for
-  up to 2 h and puts the run-bound hub bytes in git only afterwards.
+  as in hub step H3): the run's ConfigMap and the `relay` Deployment from the branch's render, applied
+  server-side, then the same generated files committed (generator runbook §4b). It removes review
+  latency from the window, but leaves every app unreconciled for up to 2 h and puts the run-bound hub
+  bytes in git only afterwards.
 
 ## 3. The per-run ceremony
 
@@ -247,16 +253,26 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
 
 ### 3.4 Hub candidate files and restart
 
-1. Create the session-permit Secret in `relay` from the private key, never via git.
+1. Compose the document (`main:scripts/compose-candidate-hub-document.ts`, which constructs the hub's
+   `CandidateHubAuthority` from it with the permit key before writing), run
+   `scripts/relay-candidate-run.py generate` on the per-run branch, and create the session-permit
+   Secret `relay-worker-candidate-key-<runDigest[:16]>` in `relay` from the private key, never via git
+   ([relay-candidate-run-generator.md](relay-candidate-run-generator.md) §1-§3). Without the Secret the
+   hub Pod waits in `ContainerCreating`.
 2. The run-bound change (merge the S-A PR, or apply in place under S-B): the `CandidateHubDocument`
    (`rel:server/workers/candidate/authority.ts:40-70`: raw run, issuer keys, hub/router/journal pins,
    pool, binding, the exact installed egress policy, profiles), its `RELAY_WORKER_CANDIDATE_SHA256`,
    `RELAY_WORKER_CANDIDATE_SESSION_KEY_FILE`. Write the document as **compact JSON** (no indentation):
    the hub reads at most 65,536 bytes (`rel:packages/worker-runtime/candidate-files.ts:32,40`), and the
    document with the real binding measures about 56.8 KB compact, so an indented one does not fit.
+   These are the generator's `run/` files: `document.json` in ConfigMap
+   `relay-worker-candidate-<runDigest[:16]>`, its pin, and the Secret's name. The component's init
+   container copies the key into a Memory `emptyDir` as UID 1000 with mode 0400, because no Secret
+   volume meets the reader's `secret` rule for a non-root hub.
 3. The merge is a Recreate rollout: `backup-database` (bounded at 1800 s), `backup-artifacts`,
    `migrate`, then `relay` (`kubernetes/apps/apps/relay/relay.yaml`). Relay is down meanwhile.
-4. Readback (H7's): budget startup `started`, `RelayWorkerBudgetStartupFailed` clear, no
+4. Readback (H7's): the init container `candidate-session-key` exited 0, the Pod's
+   `RELAY_WORKER_CANDIDATE_SHA256` is the generator summary's `document.sha256`, budget startup `started`, `RelayWorkerBudgetStartupFailed` clear, no
    `worker_budget_authority_unavailable` and **no `worker_candidate_unavailable`**: a file that does not
    verify (expired, not yet valid, wrong key) only logs that warning and the hub starts without
    candidate authority (`rel:server/main.ts:288-305`). **This readback needs the v0.10.4 hub
@@ -275,7 +291,9 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
    = the `CandidateAgentTrust` with the signed run, `ca.pem`, `network-policy.json`;
    `rel:deploy/infrastructure-agent/templates/deployment.yaml:67-71`) and the run's immutable slot
    trust (key `config.json`) and pin (key `sha256`) ConfigMaps under new names
-   (`rel:packages/infrastructure-agent/candidate-volumes.ts:44-75`). The holder Secret (keys
+   (`rel:packages/infrastructure-agent/candidate-volumes.ts:44-75`): `kubectl create -f` of the
+   generator's `--operator-out` files, named `relay-candidate-control-`, `-trust-` and
+   `-pin-<runDigest[:16]>`. The holder Secret `relay-candidate-holder` (keys
    `holder-key.pem`, `ca.pem`) is one for the whole campaign: run N's guards freeze slot Secret
    mutations (`rel:docs/infrastructure-candidate-policy.md`, "Admission boundaries").
 3. Apply the agent values in place, still at 0 replicas. They are runtime fields, not Helm values
@@ -284,7 +302,8 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
    `bindingSha256` stay; assert `bindingSha256` equals the previous run's, since the binding is frozen), and `deployment.yaml`'s candidate volume naming the run's control ConfigMap. Render
    `kubectl kustomize kubernetes/apps/relay-researcher/agent` from the per-run branch, set the
    Deployment's `spec.replicas` to 0 in that render, apply it. The same values reach git through the
-   per-run PR; `relay-researcher-agent` stays suspended until §3.10 step 8.
+   per-run PR (the generator's two agent files; it refuses a changed `bindingSha256` or
+   `holderSecret`); `relay-researcher-agent` stays suspended until §3.10 step 8.
 
 ### 3.6 Grant, then create (`t0`)
 
