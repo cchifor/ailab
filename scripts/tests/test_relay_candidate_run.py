@@ -457,71 +457,121 @@ class Generator(unittest.TestCase):
         config.write_text(json.dumps(AGENT_CONFIG, indent=2) + "\n")
         self.assertEqual(self.refusal(c), "agent-config-not-imported")
         config.write_text(canonical(AGENT_CONFIG) + "\n")
+        # Structural refusals, built from whatever candidate structure the fixture carries (the
+        # committed one once it exists): the parsed Deployment, changed and dumped without comments.
         deployment = self.root / gen.AGENT / "deployment.yaml"
         text = deployment.read_text()
-        deployment.write_text(text.replace(AGENT_MOUNT_LINES, ""))
-        self.assertEqual(self.refusal(c), "agent-candidate-mounts")
-        deployment.write_text(text.replace("          optional: false\n", ""))
-        self.assertEqual(self.refusal(c), "agent-candidate-volume")
-        # The same volume in flow style: equal when parsed, but not the layout whose name line is replaced.
-        flow = ("      - name: candidate\n        configMap: {name: relay-candidate-control-unset, defaultMode: 0444, "
-                "optional: false, items: [" + ", ".join(f"{{key: {k}, path: {k}}}" for k in gen.CONTROL_KEYS) + "]}\n")
-        deployment.write_text(text.replace(AGENT_VOLUME, flow))
-        self.assertEqual(self.refusal(c), "agent-candidate-volume-layout")
-        deployment.write_text(text.replace("      - name: candidate\n", "      - name: candidate\n  - broken: [\n"))
-        self.assertEqual(self.refusal(c), "agent-deployment-yaml")
+        [parsed] = [d for d in yaml.safe_load_all(text) if d]
+
+        def dumped(mutate):
+            d = copy.deepcopy(parsed)
+            mutate(d["spec"]["template"]["spec"])
+            return yaml.safe_dump(d, default_flow_style=False, sort_keys=False)
+
+        def drop_mounts(spec):
+            [agent] = [c for c in spec["containers"] if c["name"] == "agent"]
+            agent["volumeMounts"] = [m for m in agent["volumeMounts"] if m["name"] != "candidate"]
+
+        def configmap_first(spec):
+            spec["volumes"] = [{"configMap": v["configMap"], "name": v["name"]} if v["name"] == "candidate" else v
+                               for v in spec["volumes"]]
+
+        def drop_optional(spec):
+            [v] = [v for v in spec["volumes"] if v["name"] == "candidate"]
+            del v["configMap"]["optional"]
+        for body, code in [(dumped(drop_mounts), "agent-candidate-mounts"),
+                           (dumped(drop_optional), "agent-candidate-volume"),
+                           # The same volume with `configMap:` before `name:`: equal when parsed, but not
+                           # the block layout whose name line is replaced.
+                           (dumped(configmap_first), "agent-candidate-volume-layout"),
+                           (text.replace("      - name: candidate\n", "      - name: candidate\n  - broken: [\n", 1),
+                            "agent-deployment-yaml")]:
+            deployment.write_text(body)
+            self.assertEqual(self.refusal(c), code)
         deployment.write_text(text)
         self.generate(c)
 
     def test_base_check_is_the_merge_gate(self):
-        """S-A: the PR's working tree must be exactly the generator's output on the PR's base."""
+        """S-A: the committed HEAD must be exactly the generator's output on the PR's base."""
         def run_git(*args):
             subprocess.run(["git", "-C", str(self.root), "-c", "user.name=test", "-c", "user.email=test@example.invalid",
-                            "-c", "commit.gpgsign=false",
-                            *args], check=True, capture_output=True)
-        # The fixture tree as the repository: its run/ is the placeholder unless a run is committed.
-        if not gen.is_placeholder(self.root):
-            for path, data in gen.placeholder_files().items():
-                (self.root / path).write_bytes(data)
+                            "-c", "commit.gpgsign=false", *args], check=True, capture_output=True)
+
+        def commit(message):
+            run_git("add", "-A")
+            run_git("commit", "-q", "--allow-empty", "-m", message)
+
+        # The fixture tree as the repository, with the placeholder run/ as its base.
+        for path, data in gen.placeholder_files().items():
+            (self.root / path).write_bytes(data)
         run_git("init", "-q", "-b", "main")
-        run_git("add", "-A")
-        run_git("commit", "-q", "-m", "base")
+        commit("base")
         first = self.generate(campaign(self.root, self.now))
-        # The first run is H7's inclusion PR: generated values self-consistent, the rest by hand.
-        (self.root / "kubernetes/apps/apps").mkdir(parents=True, exist_ok=True)
-        (self.root / "kubernetes/apps/apps/relay-inclusion.txt").write_text("- ../../../components/relay-worker-candidate\n")
-        result, diff = gen.check_against_base(self.root, "main", first["runDigest"])
+        inclusion = self.root / "kubernetes/apps/apps/relay-inclusion.txt"
+        inclusion.parent.mkdir(parents=True, exist_ok=True)
+        inclusion.write_text("- ../../../components/relay-worker-candidate\n")
+        deployment = self.root / gen.AGENT / "deployment.yaml"
+        original = deployment.read_text()
+        deployment.write_text(original.replace("talos-agent-node-3", "talos-agent-node-2"))
+        commit("R1")
+        # The first run is H7's inclusion PR: run-bound values self-consistent, the rest by hand,
+        # including any other change to the partly generated agent files.
+        result, diff = gen.check_against_base(self.root, "HEAD~1", first["runDigest"])
         self.assertEqual(diff, [])
         self.assertEqual((result["firstRun"], result["reviewByHand"]),
-                         (True, ["kubernetes/apps/apps/relay-inclusion.txt"]))
-        run_git("add", "-A")
-        run_git("commit", "-q", "-m", "R1")
+                         (True, sorted([str(gen.AGENT / "config.json"), str(gen.AGENT / "deployment.yaml"),
+                                        "kubernetes/apps/apps/relay-inclusion.txt"])))
+        run_git("branch", "-f", "r1")
 
         def next_run(run, _document):
             run["payload"]["runId"] = "3d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f6a"
         second = self.generate(campaign(self.root, self.now, next_run), tag="s")
-        result, diff = gen.check_against_base(self.root, "main", second["runDigest"])
+        commit("R2")
+        result, diff = gen.check_against_base(self.root, "r1", second["runDigest"])
         self.assertEqual(diff, [])
         self.assertIs(result["firstRun"], False)
-        self.assertEqual(gen.check_against_base(self.root, "main", first["runDigest"])[1],
+        self.assertEqual(gen.check_against_base(self.root, "r1", first["runDigest"])[1],
                          [f"run digest {second['runDigest']} is not the expected {first['runDigest']}"])
+
+        def amended(edit, expected_diff, restore_in_worktree=False):
+            run_git("reset", "-q", "--hard", "HEAD")
+            before = {p: (self.root / p).read_bytes() for p in edit}
+            for p, change in edit.items():
+                change(self.root / p)
+            commit("R2 amended")
+            if restore_in_worktree:  # an uncommitted revert never hides a committed change
+                for p, data in before.items():
+                    (self.root / p).write_bytes(data)
+            try:
+                self.assertEqual(gen.check_against_base(self.root, "r1", second["runDigest"])[1], expected_diff)
+            finally:
+                run_git("reset", "-q", "--hard", "HEAD~1")
+
         # Anything beyond the generated values fails, even an edit the self-check cannot see.
-        deployment = self.root / gen.AGENT / "deployment.yaml"
-        original = deployment.read_text()
-        deployment.write_text(original.replace("talos-agent-node-3", "talos-agent-node-2"))
+        node = {str(gen.AGENT / "deployment.yaml"):
+                lambda f: f.write_text(f.read_text().replace("talos-agent-node-2", "talos-agent-node-1"))}
         self.assertEqual(gen.check(self.root, second["runDigest"])[1], [])
-        self.assertEqual(gen.check_against_base(self.root, "main", second["runDigest"])[1],
-                         [f"not the generator output for the base: {gen.AGENT / 'deployment.yaml'}"])
-        deployment.write_text(original)
-        config = self.root / gen.AGENT / "config.json"
-        original_config = config.read_text()
-        config.write_text(original_config.replace("/run/relay/hub-ca/ca.crt", "/run/relay/hub-ca/other.crt"))
-        self.assertEqual(gen.check_against_base(self.root, "main", second["runDigest"])[1],
-                         [f"not the generator output for the base: {gen.AGENT / 'config.json'}"])
-        config.write_text(original_config)
-        (self.root / "kubernetes/apps/apps/relay-inclusion.txt").write_text("changed\n")
-        self.assertEqual(gen.check_against_base(self.root, "main", second["runDigest"])[1],
-                         ["not generated: kubernetes/apps/apps/relay-inclusion.txt"])
+        amended(node, [f"not the generator output for the base: {gen.AGENT / 'deployment.yaml'}"])
+        amended(node, [f"not the generator output for the base: {gen.AGENT / 'deployment.yaml'}"],
+                restore_in_worktree=True)
+        amended({str(gen.AGENT / "config.json"):
+                 lambda f: f.write_text(f.read_text().replace("/run/relay/hub-ca/ca.crt", "/run/relay/hub-ca/x.crt"))},
+                [f"not the generator output for the base: {gen.AGENT / 'config.json'}"])
+        amended({"kubernetes/apps/apps/relay-inclusion.txt": lambda f: f.write_text("changed\n")},
+                ["not generated: kubernetes/apps/apps/relay-inclusion.txt"])
+
+        # A generated path committed as a symlink to the right bytes is refused.
+        def symlink(f):
+            target = Path(self.tmp.name) / "outside.yaml"
+            target.write_bytes(f.read_bytes())
+            f.unlink()
+            f.symlink_to(target)
+        run_git("reset", "-q", "--hard", "HEAD")
+        symlink(self.root / gen.AGENT / "deployment.yaml")
+        commit("R2 symlink")
+        with self.assertRaises(gen.Refusal) as caught:
+            gen.check_against_base(self.root, "r1", second["runDigest"])
+        self.assertEqual(caught.exception.code, "git-entry")
         with self.assertRaises(gen.Refusal):
             gen.check_against_base(self.root, "no-such-ref")
 

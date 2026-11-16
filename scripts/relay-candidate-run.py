@@ -42,9 +42,10 @@ refuses (`agent-...`): no candidate run can launch without those values.
       paths otherwise. With --run-digest, the committed run must be that run. The placeholder state
       (no run yet) must equal the generator's placeholder exactly. Without --base this is
       self-consistency (what CI runs): the agent files' other content is taken as committed.
-      With --base (the PR's base, e.g. origin/main) it is the S-A merge gate: the generator runs on
-      the BASE revision's files with the committed run, and the working tree must equal that output
-      in every generated file and change nothing else. The first run's PR (base run/ still the
+      With --base (the PR's base, e.g. origin/main) it is the S-A merge gate on the committed HEAD
+      (uncommitted changes are ignored): the generator runs on the BASE revision's files with HEAD's
+      run, and HEAD must equal that output in every generated file, as regular files, and change
+      nothing else. The first run's PR (base run/ still the
       placeholder) is H7's inclusion PR: its generated values are checked for self-consistency and
       every other changed path is listed under reviewByHand.
 
@@ -706,50 +707,65 @@ def git(repo: Path, *args: str) -> bytes:
     return result.stdout
 
 
-def changed_paths(repo: Path, base: str) -> set[str]:
-    """Tracked paths that differ from `base` in the working tree, and untracked files."""
-    tracked = git(repo, "diff", "--name-only", base, "--").decode().split("\n")
-    untracked = git(repo, "ls-files", "--others", "--exclude-standard").decode().split("\n")
-    return {p for p in tracked + untracked if p}
+def extract(repo: Path, rev: str, into: Path) -> None:
+    """The generator's inputs at `rev`, as regular files (a symlink or other entry is refused)."""
+    present = [str(p) for p in GENERATOR_INPUTS if git(repo, "ls-tree", "--name-only", rev, "--", str(p)).strip()]
+    if not present:
+        return
+    with tarfile.open(fileobj=io.BytesIO(git(repo, "archive", "--format=tar", rev, "--", *present))) as tar:
+        for member in tar.getmembers():
+            if (not (member.isfile() or member.isdir()) or member.name.startswith("/")
+                    or ".." in Path(member.name).parts):
+                refuse("git-entry")
+        if hasattr(tarfile, "data_filter"):
+            tar.extractall(into, filter="data")
+        else:
+            tar.extractall(into)
+
+
+def blob(repo: Path, rev: str, path: str) -> bytes | None:
+    """A regular, non-executable file's bytes at `rev`; None when absent; refused for any other entry."""
+    entry = git(repo, "ls-tree", "-z", rev, "--", path).decode()
+    if not entry:
+        return None
+    mode, kind, obj = entry.split("\t", 1)[0].split()
+    if (mode, kind) != ("100644", "blob"):
+        refuse("git-entry")
+    return git(repo, "cat-file", "blob", obj)
 
 
 def check_against_base(repo: Path, base: str, expected_digest: str | None = None) -> tuple[dict, list]:
-    git(repo, "rev-parse", "--verify", "--quiet", base + "^{commit}")
-    changed = changed_paths(repo, base)
-    if is_placeholder(repo):
-        # Not a per-run PR (staging, or the removal before the canary): run/ must be the placeholder.
-        result, diff = check(repo, expected_digest)
-        result.update(base=base, reviewByHand=sorted(changed))
-        return result, diff
-    present = [str(p) for p in GENERATOR_INPUTS if git(repo, "ls-tree", "--name-only", base, "--", str(p)).strip()]
+    """The S-A merge gate: the committed HEAD against `base`. Uncommitted changes are ignored: what
+    merges is HEAD."""
+    for rev in (base, "HEAD"):
+        git(repo, "rev-parse", "--verify", "--quiet", rev + "^{commit}")
+    changed = {p for p in git(repo, "diff", "--name-only", "-z", base, "HEAD", "--").decode().split("\0") if p}
+    run_files = {str(RUN_DIR / name) for name in ("document.json", "kustomization.yaml", "deployment.yaml")}
     with tempfile.TemporaryDirectory() as tmp:
-        if present:
-            archive = git(repo, "archive", "--format=tar", base, "--", *present)
-            with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
-                for member in tar.getmembers():
-                    if (not (member.isfile() or member.isdir()) or member.name.startswith("/")
-                            or ".." in Path(member.name).parts):
-                        refuse("git")
-                if hasattr(tarfile, "data_filter"):
-                    tar.extractall(tmp, filter="data")
-                else:
-                    tar.extractall(tmp)
-        base_tree = Path(tmp)
-        if not (base_tree / RUN_DIR / "document.json").is_file() or is_placeholder(base_tree):
-            # H7's inclusion PR (the first run): generated values self-consistent; the inclusion and any
-            # one-time agent structure are reviewed by hand.
-            result, diff = check(repo, expected_digest)
-            generated = set(result["files"])
-            result.update(base=base, firstRun=True, reviewByHand=sorted(changed - generated))
+        base_tree, head_tree = Path(tmp) / "base", Path(tmp) / "head"
+        base_tree.mkdir()
+        head_tree.mkdir()
+        extract(repo, base, base_tree)
+        extract(repo, "HEAD", head_tree)
+        if is_placeholder(head_tree):
+            # Not a per-run PR (staging, or the removal before the canary): run/ must be the placeholder.
+            result, diff = check(head_tree, expected_digest)
+            result.update(base=base, reviewByHand=sorted(changed))
             return result, diff
-        document = (repo / RUN_DIR / "document.json").read_bytes()
+        if not (base_tree / RUN_DIR / "document.json").is_file() or is_placeholder(base_tree):
+            # H7's inclusion PR (the first run): its run-bound values are checked for self-consistency;
+            # every other change, including the rest of the agent files, is reviewed by hand.
+            result, diff = check(head_tree, expected_digest)
+            result.update(base=base, firstRun=True, reviewByHand=sorted(changed - run_files))
+            return result, diff
+        document = blob(repo, "HEAD", str(RUN_DIR / "document.json"))
         run_text = strict_json(utf8(document, "document-json"), "document-json").get("run")
         if not isinstance(run_text, str):
             refuse("document-schema")
         v = validate(base_tree, run_text, document)
         expected = generated_files(base_tree, v)
     diff = [f"not the generator output for the base: {path}" for path, data in expected.items()
-            if (repo / path).read_bytes() != data]
+            if blob(repo, "HEAD", str(path)) != data]
     diff += sorted(f"not generated: {p}" for p in changed - {str(path) for path in expected})
     if expected_digest and expected_digest != v["runDigest"]:
         diff.append(f"run digest {v['runDigest']} is not the expected {expected_digest}")
