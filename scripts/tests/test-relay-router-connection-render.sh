@@ -15,7 +15,12 @@
 #     is a strategic-merge list keyed by name, so a shared name would be silently overwritten);
 #   * (Relay) its egress NetworkPolicy selects the live Deployment's pods: its podSelector labels are
 #     a subset of the rendered pod template labels, or the in-cluster baoOrigin would be unreachable.
-# The components are NOT part of any Flux path, which is why manifest-lint.sh does not build them.
+# Every render starts from the live overlay with this app's two components (the connection component
+# and the budget-ledger consumer) removed, so the checks hold whether or not the live overlay already
+# includes either one (hub step H4a includes the Relay budget client, budget runbook step 8 the Router
+# reader, hub step H6 the Relay connection). The live overlay itself must then render exactly like the
+# matching combination ("plain", "with", "budget" or "both"), compared order-insensitively for env,
+# volumes and mounts, so what is checked is what Flux applies.
 # Requires docker. Exit non-zero on the first broken expectation.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -24,34 +29,64 @@ KUSTOMIZE_IMAGE="$(sed -n 's/^KUSTOMIZE_IMAGE="\(.*\)"$/\1/p' "$REPO_ROOT/script
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
+# A copy of kubernetes/ in which each app overlay lists neither its connection component nor its budget
+# component. Every render below starts from it; nothing else in the copy differs from the repo.
+mkdir -p "$WORK/stripped"
+cp -r "$REPO_ROOT/kubernetes" "$WORK/stripped/kubernetes"
+
 for app in relay llm-router; do
   case "$app" in
     relay) component=relay-router-connection; budget=relay-worker-budget-client ;;
     llm-router) component=llm-router-relay-keys-trust; budget=llm-router-worker-budget-reader ;;
   esac
-  mkdir -p "$WORK/plain/$app" "$WORK/with/$app" "$WORK/budget/$app" "$WORK/both/$app"
-  printf 'resources: [../../repo/kubernetes/apps/apps/%s]\n' "$app" > "$WORK/plain/$app/kustomization.yaml"
-  printf 'resources: [../../repo/kubernetes/apps/apps/%s]\ncomponents: [../../repo/kubernetes/components/%s]\n' \
-    "$app" "$component" > "$WORK/with/$app/kustomization.yaml"
-  printf 'resources: [../../repo/kubernetes/apps/apps/%s]\ncomponents: [../../repo/kubernetes/components/%s]\n' \
-    "$app" "$budget" > "$WORK/budget/$app/kustomization.yaml"
-  printf 'resources: [../../repo/kubernetes/apps/apps/%s]\ncomponents: [../../repo/kubernetes/components/%s, ../../repo/kubernetes/components/%s]\n' \
-    "$app" "$budget" "$component" > "$WORK/both/$app/kustomization.yaml"
+  # which of the two the live overlay includes: plain, with, budget or both
+  live=$("$PY" - "$WORK/stripped/kubernetes/apps/apps/$app/kustomization.yaml" "$component" "$budget" <<'STRIP'
+import sys, yaml
+path, component, budget = sys.argv[1:4]
+k = yaml.safe_load(open(path, encoding="utf-8"))
+entries = k.get("components") or []
+name = lambda e: e.rstrip("/").split("/")[-1]
+found = {n: sum(1 for e in entries if name(e) == n) for n in (component, budget)}
+assert all(v <= 1 for v in found.values()), f"{path}: a component is listed more than once: {found}"
+kept = [e for e in entries if name(e) not in (component, budget)]
+if len(kept) != len(entries):
+    if kept:
+        k["components"] = kept
+    else:
+        del k["components"]
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(k, f, sort_keys=False)
+print({(0, 0): "plain", (1, 0): "with", (0, 1): "budget", (1, 1): "both"}[(found[component], found[budget])])
+STRIP
+)
+  echo "$live" > "$WORK/live-$app"
+  echo "$app: the live overlay renders as '$live'"
+  base="../../stripped/kubernetes/apps/apps/$app"
+  mkdir -p "$WORK/plain/$app" "$WORK/with/$app" "$WORK/budget/$app" "$WORK/both/$app" "$WORK/live/$app"
+  printf 'resources: [%s]\n' "$base" > "$WORK/plain/$app/kustomization.yaml"
+  printf 'resources: [%s]\ncomponents: [../../repo/kubernetes/components/%s]\n' \
+    "$base" "$component" > "$WORK/with/$app/kustomization.yaml"
+  printf 'resources: [%s]\ncomponents: [../../repo/kubernetes/components/%s]\n' \
+    "$base" "$budget" > "$WORK/budget/$app/kustomization.yaml"
+  printf 'resources: [%s]\ncomponents: [../../repo/kubernetes/components/%s, ../../repo/kubernetes/components/%s]\n' \
+    "$base" "$budget" "$component" > "$WORK/both/$app/kustomization.yaml"
+  printf 'resources: [../../repo/kubernetes/apps/apps/%s]\n' "$app" > "$WORK/live/$app/kustomization.yaml"
 done
 chmod -R a+rX "$WORK"
 
-render() { # <plain|with|budget|both> <app>
-  docker run --rm --network none -v "$REPO_ROOT:/repo:ro" -v "$WORK/$1:/$1:ro" -w "/$1" \
-    "$KUSTOMIZE_IMAGE" build "$2" > "$WORK/$1-$2.yaml"
+render() { # <plain|with|budget|both|live> <app>
+  docker run --rm --network none -v "$REPO_ROOT:/repo:ro" -v "$WORK/stripped:/stripped:ro" \
+    -v "$WORK/$1:/$1:ro" -w "/$1" "$KUSTOMIZE_IMAGE" build "$2" > "$WORK/$1-$2.yaml"
 }
 for app in relay llm-router; do
   render plain "$app"
   render with "$app"
   render budget "$app"
   render both "$app"
+  render live "$app"
 done
 
-PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
 "$PY" - "$WORK" "$REPO_ROOT/kubernetes/components/relay-router-connection/connections.json" <<'PY'
 import copy, sys, yaml
 work, record = sys.argv[1:3]
@@ -126,6 +161,22 @@ for app, (deployment, container, env_names, volumes, added) in CASES.items():
     [bc] = [x for x in both["containers"] if x["name"] == container]
     paths = [m["mountPath"] for m in bc["volumeMounts"]]
     assert len(paths) == len(set(paths)), f"{app}: mount collision {paths}"
+    # The live overlay renders exactly like the combination it includes (env, volumes and mounts
+    # compared as sets: component order in the overlay may order them differently).
+    def normal(objs):
+        out = copy.deepcopy(objs)
+        for d in out.values():
+            if d["kind"] != "Deployment":
+                continue
+            ps = d["spec"]["template"]["spec"]
+            ps["volumes"] = sorted(ps.get("volumes", []), key=lambda v: v["name"])
+            for cc in ps["containers"]:
+                cc["env"] = sorted(cc.get("env", []), key=lambda e: e["name"])
+                cc["volumeMounts"] = sorted(cc.get("volumeMounts", []), key=lambda m: m["mountPath"])
+        return out
+    live_as = open(f"{work}/live-{app}", encoding="utf-8").read().strip()
+    assert normal(load(f"{work}/live-{app}.yaml")) == normal(load(f"{work}/{live_as}-{app}.yaml")), \
+        f"{app}: the live overlay does not render like '{live_as}'"
     print(f"{app}: {len(added_env)} env, {len(mounts)} read-only mounts, {len(vols)} volumes, "
           f"{len(extra)} added objects; nothing else changed; combines with the budget component "
           f"({len(own)} + {len(budgets)} env, no collision)")

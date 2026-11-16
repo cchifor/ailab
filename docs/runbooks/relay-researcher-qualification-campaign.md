@@ -14,14 +14,16 @@ Code references:
 | --- | --- | --- |
 | `rel:` | Relay v0.10.3 `c0fe50f0` | agent, runtime, the journal/budget/policy operator CLIs; the hub except its candidate loader |
 | `rel4:` | Relay v0.10.4 `e77bd09a` (release PR #526, Gitea release v0.10.4) | the hub image: `rel:` plus the fraction-safe candidate loader (§8 G0); worker images stay v0.10.3 |
-| `main:` | Relay `origin/main` `1ea5ecc9` (E1 merged) | the ceremony tools, drivers and converters |
+| `main:` | Relay `origin/main` `9e09962f` (E1, the O8 SQL, R7's Secret hold #536 and the composer #533 merged) | the ceremony tools, drivers and converters |
 | `h4:` | `relay-researcher-hub-upgrade.md` at ailab `e5a2f3b9` | File B before H7 |
 
 Pin one driver checkout for the whole campaign and its conversion (`main:scripts/qualification/README.md`:
 the converters recompute driver digests from the checkout they run in). PR #519 (defaultCommunication)
-is in `main` since `908b0c104` and E1 since `1ea5ecc9`, so one checkout at or after `1ea5ecc9` carries every driver.
-The hub-document composer (`scripts/compose-candidate-hub-document.ts`, §3.4) comes with Relay #533:
-pin a checkout that also carries it.
+is in `main` since `908b0c104`, E1 since `1ea5ecc9`, and R7's bootstrap-Secret check since `eb6033fd`
+(Relay #536). The hub-document composer (`scripts/compose-candidate-hub-document.ts`, §3.4) comes with
+Relay #533. One checkout at or after `9e09962f` carries all of them. An older checkout cannot convert R7:
+the delayed-start converter requires the driver's `bootstrapSecret` facts, which only the #536 driver records.
+The `main:` line references below are unchanged between `1ea5ecc9` and `9e09962f`.
 
 ## 1. Campaign overview
 
@@ -34,7 +36,7 @@ pin a checkout that also carries it.
 | R5 | defaultCommunication attempt 2 before the stop; #13 cleanup; #15 matrix (CREATE only) and #16 egress on the empty slot | normal stop | 90 s | P5, new marker |
 | R3 | #17 storage (staging driver), then one lease-expiry drill with `routerTraffic: required` giving #10 and #18 (E3, #527) | hub cut, exit 71 | 60 s | multi-step, local tools only |
 | R4 | reserve only: #18 again if R3's partition row is not `observed` | hub cut | 60 s | as R3 |
-| R7 | #9 delayed start (E1, Relay #532), immediately before R6 | the launch never starts | 90 s | never sent |
+| R7 | #9 delayed start (E1, Relay #532), immediately before R6 | the launch never starts | 120 s (#536) | never sent |
 | R6 | #19 recovery fence, last | installation-wide halt | 90 s | never sent |
 
 **Order:** R1 → R2 → R5 → R3 → reserve retries (R4 if needed) → R7 → O8 reconciliation → R6. Hold one
@@ -55,7 +57,7 @@ Each is read back; a missing one stops the campaign before any signing.
 | H7 candidate component (hub `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`) and the S-A generator | hub runbook H7; [relay-candidate-run-generator.md](relay-candidate-run-generator.md) | staged, not included: R1's per-run PR includes it |
 | Agent one-time candidate values: candidate volume, `policy.bootstrapSecrets: true`, journal egress | installation runbook, "Beyond enrollment" item 3; the generator's "One-time prerequisites" | not staged |
 | E2 window + storage converters (#523), E3 lease → two rows (#527), E4 replay disruption (#524), defaultCommunication observer (#519) | Relay `main` | merged |
-| E1 delayed start: pre-session observer, converter branch, hold procedure | Relay #532 | merged (`1ea5ecc9`); R7 also needs O7's audit policy and O8's reconciliation |
+| E1 delayed start: pre-session observer, converter branch, hold procedure | Relay #532; bootstrap-Secret hold #536 | merged (`1ea5ecc9`, `eb6033fd`); R7 also needs O7's audit policy and O8's reconciliation |
 | Hub v0.10.4: the `c0fe50f0` candidate loader refuses every real binding | §8 G0; fixed by #525, released as v0.10.4, pinned by ailab #1789 | **live** since 2026-11-16 10:08Z (`…@sha256:d1482bc1…57a7`, schema 79; ailab #1789 comment 125493) |
 | Ceremony tools and driver fixes (G1-G5): signer, `commandSha256`, `subject.json`, `submittedPod`, the matrix's installed-bundle check, fraction-safe parsing | §8; Relay #523, #528, #529, #530 | merged; `submittedPod` by reconstruction needs O7 |
 | `deployment.json` and `subject.json` composed and frozen (§3.0 step 7) | this runbook | after the v0.10.4 rollout |
@@ -509,7 +511,8 @@ signed on the live hub.
 - [ ] R7's hold and release on a rehearsal Pod outside the candidate slot (E1's procedure): the held
       Pod survives past `T`, release-to-exit latency, the audit event's shape (O7: the probe and the
       extraction rehearsal in [relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md)),
-      exact-UID cleanup.
+      exact-UID cleanup, and the agent at zero keeping the bootstrap Secret past its expiry `E`
+      (Relay #536).
 
 ## 5. Cross-cutting checks
 
@@ -667,11 +670,39 @@ Router request must complete after the cut: land the cut during a local step and
 
 ### R7: delayed start (E1, Relay #532)
 
-Signed: L 90, prompt never sent, 0 requests. The full procedure, inputs and rehearsal are
-`main:docs/qualification/researcher-delayed-start-observation.md`; in summary:
+Signed: L 120 (the maximum), and the worker grant is approved with `leaseSeconds: 120` too: the
+bootstrap lease takes the grant's value. Prompt never sent, 0 requests. The full procedure, inputs and
+rehearsal are `main:docs/qualification/researcher-delayed-start-observation.md`; in summary:
 
 - **Hold.** Cordon `relay-worker-1` before enabling the agent, so the created Pod stays Pending and
   unscheduled. Uncordon at `T + 5 s` (never before `T + 1 s`).
+- **Keep the bootstrap Secret (Relay #536).** A running agent's idle sweep deletes the held Pod's
+  bootstrap Secret once its enrollment expires, at `E`, long before `T`. The Pod's `bootstrap` volume
+  is not optional, so a Pod released after that can never start. So (procedure steps 3a-3b, 6, 9):
+  - read the create's `execute` receipt (`present`, the Pod UID, `candidate-session-unsettled`) and the
+    enrollment's `secret_object_uid` (`bootstrapSecretUid`) and `expires_at` (`E`) from the hub
+    database; never scale the agent down before the receipt is recorded, because O8 needs it;
+  - scale `relay-infrastructure-agent` to 0 no later than `E − 60 s`, and wait until its Pod is gone,
+    before `E`;
+  - if the receipt is not recorded by `E − 60 s`, abort R7: no #9 row, and the run still counts
+    toward the 8, because its create was made (O1). The procedure scales the agent down anyway. O8
+    cannot settle this state as written, because its preconditions require that `execute` receipt
+    (Relay `delayed-start-slot-reconciliation.md`, "Preconditions", "The Pod"). So:
+    - scale the agent back to 1 (the Secret no longer matters once R7 is aborted);
+    - repeat O8's step 2 queries;
+    - run O8 only if they show the `execute` receipt with the Pod `present` and its UID. Otherwise
+      stop with the slot blocked, record the hub, journal and Pod state, and take it to the owner.
+      Releasing the slot then needs a new reviewed reconciliation before R6 or any R7 retry;
+  - read the Secret's UID back after the scale and again right before the release; it must equal
+    `bootstrapSecretUid`. If it is gone, stop before `T` and record why. The driver also checks it at
+    its first read after `T` and ends `inconclusive` (`bootstrap-secret-missing-before-release`), so
+    its kubeconfig needs named `get` on that Secret (it prints only the UID);
+  - keep the agent at 0 through the release and the capture. `RelayInfrastructureAgentUnavailable`
+    fires after 10 minutes at zero; it is expected, record it in the run log. Flux stays suspended for
+    both Kustomizations: a resumed Flux would scale the agent back;
+  - scale the agent back to 1 only after the report and the evidence are written, then follow O8 from
+    its step 2. O8's step 1 is the check that R7 is finished (report written, evidence kept, R6 not
+    signed), which this point satisfies.
 - **Driver.** A pre-session observer bound to the signed run, the hub-admitted intent, the journal's
   `admitted` entry (its `podDigest` covers the submitted Pod), the submitted Pod, the guard's
   `--absolute-expires-at-ms` and the created Pod's UID. That UID comes from the create's own
@@ -752,9 +783,12 @@ before the bundle (§3.5), settled in the E6 rehearsal.
 - **G5, fraction-safe parsing in drivers.** Closed:
   - both converters read `subject.json` through `main:scripts/qualification/runtime-v2-subject.ts` (Relay #523);
   - the admission drivers read the policy definition with `parseOperatorJson` (Relay #529).
-- **G6, delayed start (E1).** Closed by Relay #532 (`1ea5ecc9`). R7 still needs the API audit policy
-  (O7, its own owner-held ailab PR: [relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md))
-  and leaves R6's slot blocked until the reviewed reconciliation (O8).
+- **G6, delayed start (E1).** Closed by Relay #532 (`1ea5ecc9`); the bootstrap Secret's early deletion
+  that would have kept the held Pod from ever starting is handled by Relay #536 (`eb6033fd`: L 120, the
+  agent at zero before `E`, the Secret UID read back and checked by the driver). R7 still needs the API
+  audit policy on the control planes (O7: merged as ailab #1790 and applied one control plane at a time
+  by [relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md)) and leaves R6's slot
+  blocked until the reviewed reconciliation (O8).
 
 **UNVERIFIED:**
 
