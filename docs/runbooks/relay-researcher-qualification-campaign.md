@@ -510,7 +510,7 @@ signed on the live hub.
       (`main:docs/qualification/session-replay-hub-disruption.md`).
 - [ ] R7's hold and release on a rehearsal Pod outside the candidate slot (E1's procedure): the held
       Pod survives past `T`, release-to-exit latency, the audit event's shape (O7), exact-UID cleanup, and
-  the agent at zero keeping the bootstrap Secret past its expiry `E` (Relay #536).
+      the agent at zero keeping the bootstrap Secret past its expiry `E` (Relay #536).
 
 ## 5. Cross-cutting checks
 
@@ -681,7 +681,16 @@ rehearsal are `main:docs/qualification/researcher-delayed-start-observation.md`;
     enrollment's `secret_object_uid` (`bootstrapSecretUid`) and `expires_at` (`E`) from the hub
     database; never scale the agent down before the receipt is recorded, because O8 needs it;
   - scale `relay-infrastructure-agent` to 0 no later than `E − 60 s`, and wait until its Pod is gone,
-    before `E`. If the receipt is not recorded by `E − 60 s`, abort R7, and scale the agent down anyway;
+    before `E`;
+  - if the receipt is not recorded by `E − 60 s`, abort R7: no #9 row, and the run still counts
+    toward the 8, because its create was made (O1). The procedure scales the agent down anyway. O8
+    cannot settle this state as written, because its preconditions require that `execute` receipt
+    (Relay `delayed-start-slot-reconciliation.md`, "Preconditions", "The Pod"). So:
+    - scale the agent back to 1 (the Secret no longer matters once R7 is aborted);
+    - repeat O8's step 2 queries;
+    - run O8 only if they show the `execute` receipt with the Pod `present` and its UID. Otherwise
+      stop with the slot blocked, record the hub, journal and Pod state, and take it to the owner.
+      Releasing the slot then needs a new reviewed reconciliation before R6 or any R7 retry;
   - read the Secret's UID back after the scale and again right before the release; it must equal
     `bootstrapSecretUid`. If it is gone, stop before `T` and record why. The driver also checks it at
     its first read after `T` and ends `inconclusive` (`bootstrap-secret-missing-before-release`), so
@@ -690,7 +699,8 @@ rehearsal are `main:docs/qualification/researcher-delayed-start-observation.md`;
     fires after 10 minutes at zero; it is expected, record it in the run log. Flux stays suspended for
     both Kustomizations: a resumed Flux would scale the agent back;
   - scale the agent back to 1 only after the report and the evidence are written, then follow O8 from
-    its step 2.
+    its step 2. O8's step 1 is the check that R7 is finished (report written, evidence kept, R6 not
+    signed), which this point satisfies.
 - **Driver.** A pre-session observer bound to the signed run, the hub-admitted intent, the journal's
   `admitted` entry (its `podDigest` covers the submitted Pod), the submitted Pod, the guard's
   `--absolute-expires-at-ms` and the created Pod's UID. That UID comes from the create's own
