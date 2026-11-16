@@ -250,7 +250,7 @@ On 2026-11-16, before this PR, a Docker-only `registry.k8s.io/kube-apiserver:v1.
 was run (ailab runs 1.35.9). It had no kubelet, scheduler or controller-manager. It used the policy
 exactly as `talosctl` v1.14.2 renders it from this template onto a contract-v1.11.2 config, the
 namespaces' Pod Security labels, the `relay-gvisor` RuntimeClass and the enrollment gate. Relay #532 was
-at `5957f067a`.
+at its head `5957f067a`. It merged as `1ea5ecc9` with the same driver, comparator and parser.
 
 - **The R7 class.** A Pod create in the slot with a real ServiceAccount token produced **one** event:
   `RequestResponse`, `ResponseComplete`, no `RequestReceived`. About 22 KB, user the agent, no
