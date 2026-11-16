@@ -105,6 +105,11 @@ def pins() -> dict:
     return doc["data"]
 
 
+def pins_are_placeholders(p: dict) -> bool:
+    """Every pin is still the reviewed placeholder (`operator-fills-...`): step I5 has not landed."""
+    return all("operator-fills" in str(value) for value in p.values())
+
+
 def pins_filled(p: dict) -> bool:
     return bool(
         UUID.match(p["installationId"]) and COMMIT.match(p["sourceCommit"]) and AGENT_IMAGE.match(p["agentImage"])
