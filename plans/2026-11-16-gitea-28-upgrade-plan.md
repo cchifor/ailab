@@ -166,3 +166,13 @@ runbook as printed, six cases:
 - a re-run after it: stops, and the backup is still the original;
 - a stale backup present, a failed backup copy, a failed candidate write, and the key already gone: each stops, and
   `app.ini` is unchanged.
+
+**reviewer-claude, PR review** (on `3594cfae`, then `ca8af31b`): it corroborated the finding above, which `ca8af31b`
+resolved, and found one more, accepted. Rollback step 3 said to remove the two new `[security]` keys "with the step-5
+rewrite", but that block was hard-wired to `[webhook] ALLOWED_HOST_LIST` and one line, so run verbatim it stops on an
+empty diff. Fixed: the block's first line now sets the section, the keys (whole names, `|` between them), the line count
+and the backup suffix. Rollback step 3 gives its own first line: `[security]`, `EGRESS_MODE|ALLOWED_HOST_LIST`, 2,
+`pre-rollback`. Re-tested in the 28.4.0 image, nine cases, the block and the rollback line extracted from the runbook:
+the six above, a CRLF file with an indented `[webhook]` key (only that line goes, every other byte kept), the rollback
+removing both keys while `INSTALL_LOCK` and an `ALLOWED_HOST_LIST_EXTRA` key stay, and a rollback with only one key
+present, which stops.
