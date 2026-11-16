@@ -372,6 +372,15 @@ otherwise: the bundle tests follow the committed pins and config, and `test_mani
 the tree to its reviewed path set once its Flux file is in `clusters/ai` (likewise I7 and Q3). Merging
 applies the namespaces and their containment in one Flux apply.
 
+Reproduce it before review, and again whenever the generator, its inputs or these files change:
+`just relay-researcher-reproduce /path/to/relay /operator/release-assets` (the same checkout and
+assets as I4) re-runs the generator, `prepare-pod-installation.ts`, `check --chart` and `import`
+against the committed tree and fails on any byte difference from `docs/relay-workers/researcher-i4/`,
+`pins.yaml` or `agent/config.json`. CI cannot run it, because the Relay repository and its release
+assets are private and ailab's runners hold no credential for them.
+`scripts/tests/test_relay_researcher_reproduction.py` checks in CI that the committed I4 output, the
+imported pins and config, the provenance record and the pinned inputs agree with each other.
+
 **I6. Containment readback.** Nothing may receive Pod rights before this passes:
 
 ```sh
