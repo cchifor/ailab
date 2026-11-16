@@ -34,7 +34,7 @@ Talos's default policy logs everything at `Metadata`: no request or response bod
 | # | Rule | Effect |
 | --- | --- | --- |
 | 1 | `Metadata` for `secrets`, `serviceaccounts/token` and `authentication.k8s.io` `tokenreviews` | No body for Secret or token material, whatever a later rule says. Same level and stages as rule 3, so nothing changes today. |
-| 2 | `RequestResponse` for `create` of core `pods` in `relay-researcher-1`, `omitStages: [RequestReceived]` | **The change.** One `ResponseComplete` event per create, with `requestObject` and `responseObject`. |
+| 2 | `RequestResponse` for `create` of core `pods` in `relay-researcher-1`, `omitStages: [RequestReceived]` | **The change.** One `ResponseComplete` event per create, with `requestObject` and `responseObject`. A create never has `ResponseStarted`. A handler panic is still logged (`Panic`), as it is today. |
 | 3 | `Metadata` | Talos's default, unchanged. Every other request keeps its level and its stages. |
 
 - **Before this change**, the effective policy was Talos's default, `rules: [{level: Metadata}]`.
@@ -50,7 +50,9 @@ Talos's default policy logs everything at `Metadata`: no request or response bod
   stay at `Metadata` (rule 1).
 - **Not limited to the agent's user.** The policy could add
   `users: [system:serviceaccount:relay-infra-control:relay-infrastructure-agent]`, but then the
-  operator could verify it only by minting a token for the agent. Admission already restricts the
+  operator could verify it only by minting a token for the agent. Rule matching uses the
+  authenticated user, not an impersonated one, so a `kubectl --as=<agent>` probe lands at `Metadata`
+  (checked on the disposable API server below). Admission already restricts the
   slot to the agent: the enrollment gate refuses every Pod, and the per-launch policies admit exactly
   the launch's Pod. The driver checks the user itself.
 - **Where it is written.** Each control plane writes only the requests it served, to
@@ -81,14 +83,16 @@ expect refused connections to that one node only, for about a minute (the measur
 **Never apply this with an untargeted apply.** `talos_machine_configuration_apply.cp` covers all three
 control planes in one apply, so all three API servers would restart at once.
 
-`just plan` and `just apply` drive the `tofu/` root (the Proxmox storage), not `kubernetes/infra`. Call
-OpenTofu on that root directly, from the main checkout on the Windows workstation in Git Bash, where
-its state lives.
+`just plan` and `just apply` drive the `tofu/` root (the Proxmox storage), not `kubernetes/infra`.
+Run OpenTofu in `kubernetes/infra` of the main checkout, on the Windows workstation in Git Bash, where
+its state lives. `tofu_cp` below changes into that directory instead of passing `-chdir`, because
+`MSYS_NO_PATHCONV=1` would hand the Windows binary an unconverted POSIX path.
 
 ```bash
 OUT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out"
 export TALOSCONFIG="$OUT/talosconfig" MSYS_NO_PATHCONV=1
-T="$OUT/talosctl-1142.exe"; K="kubectl --context admin@ai"; TOFU="$HOME/.tofubin/tofu.exe -chdir=kubernetes/infra"
+T="$OUT/talosctl-1142.exe"; K="kubectl --context admin@ai"
+tofu_cp() { (cd "$OUT/.." && "$HOME/.tofubin/tofu.exe" "$@"); }
 W="$OUT/r7-audit"; mkdir -p "$W"
 CPS="192.168.0.41 192.168.0.42 192.168.0.43"; ALL=192.168.0.41,192.168.0.42,192.168.0.43
 declare -A KEY=([192.168.0.41]=cp1 [192.168.0.42]=cp2 [192.168.0.43]=cp3)
@@ -99,7 +103,7 @@ started(){ local o; for o in $CPS; do [ "$o" != "$1" ] && break; done
 rules()  { "$T" -n "$1" get auditpolicyconfigs audit-policy -o jsonpath='{.spec.config.rules}'; echo; }
 # probe <cp>: a server-side dry-run Pod create in the slot, sent to that control plane only. Nothing is
 # persisted (dry run), and the slot's admission refuses it anyway. Prints that CP's audit events for it.
-probe()  { local name="r7-audit-probe-${1##*.}-$(date +%s)"
+probe()  { local name="r7-audit-probe-${1##*.}-$(date +%s)" id
            $K --server "https://$1:6443" -n relay-researcher-1 create --dry-run=server -f - <<POD 2>&1 | tail -1
 apiVersion: v1
 kind: Pod
@@ -114,8 +118,12 @@ spec:
     resources: {limits: {cpu: 10m, memory: 16Mi, ephemeral-storage: 16Mi}}
 POD
            sleep 2
-           "$T" -n "$1" read /var/log/audit/kube/kube-apiserver.log | grep -F "\"name\":\"$name\"" |
-             jq -c '{level, stage, code: .responseStatus.code, body: (.requestObject != null), dryRun: (.requestURI | test("[?&]dryRun="))}'; }
+           "$T" -n "$1" read /var/log/audit/kube/kube-apiserver.log > "$W/probe.log"
+           # a create's RequestReceived event has no name yet: find the request by name, list it by auditID
+           id=$(grep -F "\"name\":\"$name\"" "$W/probe.log" | jq -r .auditID | sort -u)
+           grep -F "\"auditID\":\"$id\"" "$W/probe.log" |
+             jq -c '{level, stage, code: .responseStatus.code, body: (.requestObject != null), dryRun: (.requestURI | test("[?&]dryRun="))}'
+           rm -f "$W/probe.log"; }
 ```
 
 **Before the first control plane:**
@@ -123,8 +131,9 @@ POD
 ```bash
 "$T" -n $ALL etcd status                                    # 3 members, same raft index, no errors
 for c in $CPS; do echo "$c $($K --server https://$c:6443 get --raw /readyz)"; done   # ok on all three
-for c in $CPS; do echo "$c $(rules $c)"; done              # [{"level":"Metadata"}] on all three
-for c in $CPS; do probe $c; done                           # per CP: two lines, both level Metadata, body false
+for c in $CPS; do echo "$c $(rules $c)"; done              # one rule, level Metadata, on all three
+for c in $CPS; do probe $c; done
+#   per CP two lines, Metadata, body false: stage RequestReceived (code null), then ResponseComplete (403)
 for c in $CPS; do "$T" -n $c ls -l /var/log/audit/kube; done   # keep: the backups' times give the rotation rate
 ```
 
@@ -132,11 +141,12 @@ for c in $CPS; do "$T" -n $c ls -l /var/log/audit/kube; done   # keep: the backu
 
 ```bash
 "$T" -n $ALL etcd status                                    # 3/3 in sync, before EVERY control plane
-$TOFU plan -target="talos_machine_configuration_apply.cp[\"${KEY[$cp]}\"]"
+tofu_cp plan -target="talos_machine_configuration_apply.cp[\"${KEY[$cp]}\"]"
 #   the only change: that CP's config_patches gain the cluster.apiServer.auditPolicy block (plus the
-#   template comment). Anything else in the plan: stop.
+#   template comment). machine_configuration_input must not change (it would show as a sensitive
+#   value), and nothing else may change. Otherwise: stop.
 before=$(started $cp)
-$TOFU apply -target="talos_machine_configuration_apply.cp[\"${KEY[$cp]}\"]"
+tofu_cp apply -target="talos_machine_configuration_apply.cp[\"${KEY[$cp]}\"]"
 until s=$(started $cp) && [ -n "$s" ] && [ "$s" != "$before" ]; do sleep 3; done
 until [ "$($K --server https://$cp:6443 get --raw /readyz 2>/dev/null)" = ok ]; do sleep 3; done
 rules $cp                                                   # the three rules of the table above
@@ -149,7 +159,7 @@ probe $cp
 ```
 
 Wait about 5 minutes and check that `$K get --raw /readyz` stays `ok` through the VIP before the next
-control plane. After the third, `$TOFU plan` with no target shows no changes.
+control plane. After the third, `tofu_cp plan` with no target shows no changes.
 
 **Readback for the owner:** per control plane, the `rules` output (three rules), the restarted
 kube-apiserver's new `startedAt`, `etcd status` 3/3, and the `probe` line above.
@@ -157,11 +167,18 @@ kube-apiserver's new `startedAt`, `etcd status` 3/3, and the `probe` line above.
 ## Verify: probe, then the E6 rehearsal
 
 The `probe` above is the live check. It is a harmless dry-run create in the slot, recorded by this
-policy on each control plane in turn. The E6 rehearsal's R7 item ("the audit event's shape (O7)")
-also needs a real `201` create. The rehearsal Pod lives in `relay-delayed-start-rehearsal`, which
-this policy does not cover. So E6 checks the probe event on every control plane, and the extraction
-below on that probe's name. The `201` shape was checked against a disposable API server (below), and
-the live one is first seen in R7 itself, two minutes or more before `T`.
+policy on each control plane in turn. The rehearsal Pod of the E6 rehearsal's R7 item ("the audit
+event's shape (O7)") lives in `relay-delayed-start-rehearsal`, which this policy does not cover. So
+E6 does two things:
+
+- It runs `probe` on every control plane.
+- It rehearses the extraction below on one probe. Set `POD` to the probe's name. In the jq filter,
+  replace `(.requestURI | test("[?&]dryRun=") | not)` with `(.requestURI | test("[?&]dryRun="))`.
+  Expect exactly one line, `403`, from the probed control plane and none from the others.
+
+That rehearses reading all three logs and the selection. The `201` shape and #532's checks of it
+were run against a disposable API server (below). The live `201` is first seen in R7 itself, at
+least two minutes before `T`.
 
 ## Extract R7's event
 
@@ -218,11 +235,13 @@ Then compare the hub's pinned UID (`infrastructure_environment_objects.object_ui
 with the event's UID, and record both. Retain `create-audit-event.json` with R7's evidence. Delete `$W`'s
 `r7-*.jsonl` afterwards: they hold other requests' metadata.
 
-**How long the event survives on the node.** It stays in the active file until that file reaches
-100 MB. It then survives in the backups until ten more rotations, and never past 30 days. The
-`ls -l` taken before the apply gives this cluster's rotation rate: the event survives about ten
-rotation periods after it leaves the active file. The node copy is only a source. Extract it within
-minutes, before `T`. The pinned file is the evidence.
+**How long the event survives on the node.**
+- **Active file.** The event stays in the active file until that file reaches 100 MB and rotates.
+- **Backups.** It then sits in a backup until ten newer backups push it out. A backup is also deleted
+  at a later rotation once it is more than 30 days past its own rotation time.
+- **This cluster's rate.** The `ls -l` taken before the apply gives the rotation period. After the
+  event leaves the active file, expect it to last about ten rotation periods.
+- **Extract within minutes, before `T`.** The node copy is only a source. The pinned file is the evidence.
 
 ## Event shape: checked against a disposable API server
 
@@ -251,13 +270,16 @@ at `5957f067a`.
     `managedFields`.
   - #532's comparator accepts each of these. A real Pod therefore matches only if, like the renderer's,
     it sets `requests` and every list it relies on.
-- **Every other class stayed `Metadata` with both stages:**
+- **Every other class stayed `Metadata` with all its stages:**
   - a Secret create in the slot (its value appears nowhere in the log);
   - TokenRequests (no token in the log);
   - a Pod create in another namespace;
   - reads and watches.
 
-  The probe produced one `RequestResponse` event with code 403 and a `Status` response.
+  The probe produced one `RequestResponse` event with code 403 and a `Status` response. Under
+  Talos's default policy it produced the two `Metadata` events documented above.
+- **A user-scoped rule** (`users: [<agent>]`) logged the agent's own create at `RequestResponse`. The
+  same create made by an administrator with `--as=<agent>` stayed at `Metadata`.
 
 What stays for the live cluster: the policy on Talos itself (the readbacks above), the real agent's
 create, and which control plane serves it.
@@ -266,7 +288,7 @@ create, and which control plane serves it.
 
 - **Planned removal (after the canary), or rollback of a healthy apply:** revert the template block in
   a PR, then roll it exactly like the apply: per control plane, plan and apply with `-target`, wait
-  for the container, `readyz`, `etcd status`. `rules` is back to `[{"level":"Metadata"}]` and `probe`
+  for the container, `readyz`, `etcd status`. `rules` is back to one rule, level `Metadata`, and `probe`
   prints two `Metadata` lines. Each control plane restarts kube-apiserver once more.
 - **A control plane whose kube-apiserver does not come back after the apply:** stop the roll. The
   Talos API does not depend on kube-apiserver, so on **that** control plane put back the default

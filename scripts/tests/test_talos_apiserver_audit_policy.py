@@ -110,7 +110,7 @@ def evaluate(pol: dict, req: dict) -> tuple[str, frozenset]:
     for rule in pol["rules"]:
         if rule_matches(rule, req):
             return rule["level"], frozenset(rule.get("omitStages", [])) | frozenset(pol.get("omitStages", []))
-    return "None", frozenset()
+    return "None", frozenset(pol.get("omitStages", []))
 
 
 def requests():
@@ -125,8 +125,11 @@ def requests():
              ("admin", ["system:masters", "system:authenticated"]),
              ("system:kube-scheduler", ["system:authenticated"])]
     for verb, ns, (group, resource, sub), (user, groups) in itertools.product(verbs, namespaces, targets, users):
+        # The checker runs before the body is decoded: a create (POST to the collection), list, watch or
+        # deletecollection has no name.
+        name = "" if verb in ("create", "list", "watch", "deletecollection") and not sub else "relay-x-g1"
         yield {"verb": verb, "namespace": ns, "group": group, "resource": resource, "subresource": sub,
-               "name": "relay-x-g1", "user": user, "groups": groups}
+               "name": name, "user": user, "groups": groups}
     for url, (user, groups) in itertools.product(["/healthz", "/livez", "/readyz", "/metrics", "/version", "/api"], users):
         yield {"verb": "get", "url": url, "user": user, "groups": groups}
 
@@ -172,7 +175,7 @@ class AuditPolicyTest(unittest.TestCase):
     def test_r7_rule_scope(self):
         pol = policy()
         base = {"verb": "create", "namespace": SLOT, "group": "", "resource": "pods", "subresource": "",
-                "name": "relay-x-g1", "user": AGENT, "groups": ["system:serviceaccounts"]}
+                "name": "", "user": AGENT, "groups": ["system:serviceaccounts"]}
         self.assertEqual(evaluate(pol, base)[0], "RequestResponse")
         for change in ({"verb": "update"}, {"verb": "patch"}, {"verb": "delete"}, {"verb": "get"},
                        {"namespace": "relay-researcher-2"}, {"namespace": CONTROL}, {"subresource": "binding"},

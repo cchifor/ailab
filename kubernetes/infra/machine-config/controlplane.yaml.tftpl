@@ -140,8 +140,9 @@ cluster:
   # - Before this, the effective policy was Talos's default, one rule `level: Metadata`. Config
   #   contract v1.11.2 generates it into this very field (v1alpha1 APIServerDefaultAuditPolicy). The
   #   field merges as "replace", so this block is the whole policy, not rules appended to the default.
-  # - Rule 2 is the change. Pod `create` in relay-researcher-1 is logged at RequestResponse, only at
-  #   ResponseComplete. R7's driver (Relay #532) takes the created Pod's UID from that event's
+  # - Rule 2 is the change. Pod `create` in relay-researcher-1 is logged at RequestResponse, without its
+  #   RequestReceived stage: one event per create, at ResponseComplete (a handler panic is still logged,
+  #   as today). R7's driver (Relay #532) takes the created Pod's UID from that event's
   #   responseObject.metadata.uid: a held Pod never gets a session, and no other record names the Pod
   #   the create made. It also records Pod creates of every other run in that slot while it is live:
   #   Pod bodies carry no secret (the bootstrap Secret is a volume reference).
