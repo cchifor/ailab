@@ -283,7 +283,7 @@ Secrets or other resources selected by app/ledger backup.
 
 ### Consumer wiring
 
-Two components hold the wiring; neither is included by the live overlays yet. Each
+Two components hold the wiring. Each
 mounts its namespace's ESO Secret as three read-only `subPath` files under `/run/`
 (never `/var/run`, a symlink), mode 0440 root:1000, and sets the variables above.
 `scripts/tests/test-relay-budget-consumers-render.sh` proves each changes nothing
@@ -302,18 +302,16 @@ else in its Deployment.
   before use). The activation test refuses the inclusion while the
   placeholder remains. Inclusion is a `Recreate` rollout of the router. The
   plugin stays disabled until step 9.
-- `kubernetes/components/relay-worker-budget-client`: inert on the live Relay
-  (v0.9.1, `a53a3ee8`), which predates these variables (first in Relay `0badd1e3`,
-  not yet released). A Relay that has them starts the authority only with
+- `kubernetes/components/relay-worker-budget-client`: included alone by hub upgrade
+  step H4a (`docs/runbooks/relay-researcher-hub-upgrade.md`). The live Relay
+  (v0.10.4) reads these variables, but starts the authority only with
   `RELAY_INFRASTRUCTURE_INSTALLATIONS`, a router connection
-  (`RELAY_ROUTER_CONNECTIONS_FILE`, still refused by
-  `test_relay_v060_activation_gate.py`; the reviewed record is the un-included
-  `kubernetes/components/relay-router-connection`, included last) and a profile
-  source: the candidate or ordinary-canary file, or the pinned worker-profile
-  registry, which needs the genuine release approval and so comes last
-  (`docs/runbooks/relay-researcher-hub-upgrade.md`, H7 and H4b). Include it with that
-  reviewed Relay release, not before. Included alone (hub upgrade H4a) it leaves
-  budget startup `start_failed` until H7's candidate file.
+  (`RELAY_ROUTER_CONNECTIONS_FILE`, from the reviewed
+  `kubernetes/components/relay-router-connection` that hub step H6 includes) and a
+  profile source: the candidate or ordinary-canary file, or the pinned
+  worker-profile registry, which needs the genuine release approval and so comes
+  last (H7 and H4b). Until H7's candidate file, budget startup stays
+  `start_failed`.
 
 Including either before its Secret exists leaves the new Pod unable to mount the
 volume. Both use `Recreate`, so that is an outage: check `kubectl get
