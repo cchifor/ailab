@@ -22,8 +22,7 @@
   },
   "kubernetesOrigin": "https://kubernetes.default.svc:443",
   "references": {
-    "installationKeySecret": "relay-infrastructure-agent-key",
-    "enrollmentTokenSecret": "relay-infrastructure-agent-enrollment"
+    "installationKeySecret": "relay-infrastructure-agent-key"
   },
   "controlPlacement": {
     "nodeSelector": {

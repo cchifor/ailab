@@ -509,8 +509,10 @@ signed on the live hub.
 - [ ] R2's disruption on a rehearsal worker: arm, cut, hold 55 s, exact restore, recovery
       (`main:docs/qualification/session-replay-hub-disruption.md`).
 - [ ] R7's hold and release on a rehearsal Pod outside the candidate slot (E1's procedure): the held
-      Pod survives past `T`, release-to-exit latency, the audit event's shape (O7), exact-UID cleanup, and
-      the agent at zero keeping the bootstrap Secret past its expiry `E` (Relay #536).
+      Pod survives past `T`, release-to-exit latency, the audit event's shape (O7: the probe and the
+      extraction rehearsal in [relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md)),
+      exact-UID cleanup, and the agent at zero keeping the bootstrap Secret past its expiry `E`
+      (Relay #536).
 
 ## 5. Cross-cutting checks
 
@@ -784,8 +786,9 @@ before the bundle (§3.5), settled in the E6 rehearsal.
 - **G6, delayed start (E1).** Closed by Relay #532 (`1ea5ecc9`); the bootstrap Secret's early deletion
   that would have kept the held Pod from ever starting is handled by Relay #536 (`eb6033fd`: L 120, the
   agent at zero before `E`, the Secret UID read back and checked by the driver). R7 still needs the API
-  audit policy (O7, its own owner-held ailab PR) and leaves R6's slot blocked until the reviewed
-  reconciliation (O8).
+  audit policy on the control planes (O7: merged as ailab #1790 and applied one control plane at a time
+  by [relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md)) and leaves R6's slot
+  blocked until the reviewed reconciliation (O8).
 
 **UNVERIFIED:**
 
