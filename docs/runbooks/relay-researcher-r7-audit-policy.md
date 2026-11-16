@@ -87,6 +87,7 @@ control planes in one apply, so all three API servers would restart at once.
 Run OpenTofu in `kubernetes/infra` of the main checkout, on the Windows workstation in Git Bash, where
 its state lives. `tofu_cp` below changes into that directory instead of passing `-chdir`, because
 `MSYS_NO_PATHCONV=1` would hand the Windows binary an unconverted POSIX path.
+Native `jq.exe` ends its lines with CRLF, so the commands strip `\r` wherever a jq value is reused.
 
 ```bash
 OUT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out"
@@ -120,7 +121,7 @@ POD
            sleep 2
            "$T" -n "$1" read /var/log/audit/kube/kube-apiserver.log > "$W/probe.log"
            # a create's RequestReceived event has no name yet: find the request by name, list it by auditID
-           id=$(grep -F "\"name\":\"$name\"" "$W/probe.log" | jq -r .auditID | sort -u)
+           id=$(grep -F "\"name\":\"$name\"" "$W/probe.log" | jq -r .auditID | tr -d '\r' | sort -u)
            grep -F "\"auditID\":\"$id\"" "$W/probe.log" |
              jq -c '{level, stage, code: .responseStatus.code, body: (.requestObject != null), dryRun: (.requestURI | test("[?&]dryRun="))}'
            rm -f "$W/probe.log"; }
@@ -186,7 +187,7 @@ Do this in R7's step 4 ("capture the inputs before T"), as soon as the agent's c
 `POD` is the submitted Pod's name.
 
 ```bash
-POD=$(jq -r .metadata.name /operator/r7/submitted-pod.json); NS=relay-researcher-1
+POD=$(jq -r .metadata.name /operator/r7/submitted-pod.json | tr -d '\r'); NS=relay-researcher-1
 for c in $CPS; do
   "$T" -n $c read /var/log/audit/kube/kube-apiserver.log | grep -F "\"name\":\"$POD\"" > "$W/r7-$c.jsonl"
 done

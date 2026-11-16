@@ -3,7 +3,8 @@
 
 docs/runbooks/relay-researcher-r7-audit-policy.md (owner decision O7, relay#277 comment 125437). The
 policy lives in kubernetes/infra/machine-config/controlplane.yaml.tftpl as cluster.apiServer.auditPolicy.
-It adds exactly one class: Pod `create` in the researcher slot at RequestResponse, ResponseComplete only.
+It adds exactly one class: Pod `create` in the researcher slot at RequestResponse, without its
+RequestReceived stage (one ResponseComplete event per create; a handler panic is still logged).
 Every other request keeps Talos's default (Metadata, every stage), and no Secret or token body is ever
 logged. The evaluator below follows the API server's first-match rule semantics
 (k8s.io/apiserver/pkg/audit/policy/checker.go).
