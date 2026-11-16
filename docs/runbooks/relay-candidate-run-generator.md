@@ -248,6 +248,16 @@ from a Secret under `fsGroup` (`root:1000 0440`) → `signer-file-untrusted`; fr
   suspension; the generator then owns only the values above.
 - **The qualification egress stage** (installation runbook Q4) selected in the installation tree.
 
+The installation's I5 checks accept exactly this overlay while a run is committed, so R1's PR and every
+later run's PR pass them unchanged. `scripts/relay-researcher-bundle.py` (and with it
+`just relay-researcher-reproduce`) compares the committed agent config with this generator's
+`candidate_config()` of the I5 import, which sets `policy.bootstrapSecrets` true and adds the run's
+`candidateRuntime` and nothing else, and renders the pinned chart with the matching candidate values.
+It accepts the campaign only while this generator's `check` passes on the committed tree. Its tests
+pin the chart's candidate RBAC (the two namespaces' reads, the slot egress policy read, the slot's
+bootstrap Secrets), the four mounts and the volume, and one journal egress rule (private CIDRs off the
+LAN, port 8443; its CIDRs are U9's). Any other difference in the agent tree still fails.
+
 ## After the campaign
 
 Relay's design removes the candidate authority before the ordinary canary: one PR drops the
