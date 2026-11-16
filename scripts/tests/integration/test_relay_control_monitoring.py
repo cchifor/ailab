@@ -279,6 +279,10 @@ class Monitoring(unittest.TestCase):
         self.assertEqual(secrets(self.spec) - secrets(base), {'relay-control-metrics', 'relay-notifications'})
         for volume in base['volumes']:
             self.assertIn(volume, self.spec['volumes'])
+        # Exactly the two layers' own volumes are added, so no second projection of a base Secret either.
+        self.assertEqual({v['name'] for v in self.spec['volumes']} - {v['name'] for v in base['volumes']},
+                         {'metrics-setup', 'metrics-input', 'metrics-files',
+                          'notification-setup', 'notification-input', 'notification-files'})
         self.assertNotIn('metrics-input', {v['name'] for v in application['volumeMounts']})
         inputs = next(v['secret'] for v in self.spec['volumes'] if v['name'] == 'metrics-input')
         self.assertEqual(inputs['secretName'], 'relay-control-metrics')

@@ -259,6 +259,9 @@ class Notifications(unittest.TestCase):
         self.assertEqual(secrets(deployment) - secrets(base), {"relay-notifications"})
         for volume in base["volumes"]:
             self.assertIn(volume, deployment["volumes"])
+        # Exactly the layer's own volumes are added, so no second projection of a base Secret either.
+        self.assertEqual({v["name"] for v in deployment["volumes"]} - {v["name"] for v in base["volumes"]},
+                         {"notification-setup", "notification-input", "notification-files"})
         self.assertEqual(app["image"], next(c for c in base["containers"] if c["name"] == "relay")["image"])
         initializer = next(c for c in deployment["initContainers"] if c["name"] == "notification-files")
         self.assertEqual(deployment["securityContext"]["fsGroup"], initializer["securityContext"]["runAsGroup"])
