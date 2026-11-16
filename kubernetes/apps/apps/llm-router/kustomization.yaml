@@ -16,3 +16,8 @@ resources:
   - llm-router-oidc.sops.yaml # SOPS: Keycloak client secret, router_auth DB URL, break-glass token (llm-router#121)
 # The Relay trust bridge remains opt-in. The activation gate test requires
 # operator evidence before a follow-up PR may include it here.
+components:
+  # Budget authority runbook step 8 (docs/runbooks/relay-worker-budget-authority.md): the router's
+  # reader files for the worker budget ledger. The worker-budget-authority plugin stays DISABLED
+  # (step 9 enables it through the admin API, never a manifest).
+  - ../../../components/llm-router-worker-budget-reader
