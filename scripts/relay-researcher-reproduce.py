@@ -23,6 +23,11 @@ neither help nor hurt) and exits 1 on any byte difference. It never touches the 
   4. if the committed pins are filled (step I5 has landed), runs `import` in the exported tree and
      compares the two files it writes with the committed ones, byte for byte. While the pins are
      placeholders (before I5) there is nothing to compare; the script says so and checks the rest.
+     During the qualification campaign (a signed run committed under
+     kubernetes/components/relay-worker-candidate/run/) the exported tree's check and import apply
+     exactly the S-A generator's candidate values to the agent config (policy.bootstrapSecrets true,
+     the run's candidateRuntime) and render the chart with them, so the committed campaign state is
+     reproduced byte for byte too, and any other difference still fails.
 
   relay-researcher-reproduce.py --relay <pinned relay checkout> --assets <release-asset dir> [--ref HEAD]
 
@@ -166,6 +171,11 @@ def reproduce(relay: Path, assets: Path, ref: str) -> list[str]:
             differences += imported
             print("I5: import rewrote pins.yaml and agent/config.json: "
                   + ("byte-identical" if not imported else "DIFFERENT"))
+            exported = bundle_module(tree)
+            campaign = exported.campaign_run() if hasattr(exported, "campaign_run") else None
+            if campaign is not None:
+                print(f"campaign: run {campaign['runDigest']} is committed; the check and the import applied the "
+                      "generator's candidate values (bootstrapSecrets, candidateRuntime, the chart's candidate objects)")
         else:
             print("I5: the committed pins are placeholders (step I5 has not landed): no import to compare")
         return differences
