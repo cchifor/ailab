@@ -327,7 +327,8 @@ class Activation(unittest.TestCase):
     def test_flux_service_is_exactly_the_rendered_pinned_service(self):
         # The per-run render applies the same object, so it never moves or changes the Service.
         config, _, _ = self.fixture()
-        rendered = [o for o in render.service(config) if o['kind'] == 'Service']
+        # By name: an opted-in render also carries the separate relay-candidate-journal-metrics Service.
+        rendered = [o for o in render.service(config) if o['kind'] == 'Service' and o['metadata']['name'] == render.NAME]
         (service,) = yaml_docs(OVERLAY / 'service.yaml')
         self.assertEqual(rendered, [service])
         self.assertEqual(service['spec']['clusterIP'], '10.96.0.42')
