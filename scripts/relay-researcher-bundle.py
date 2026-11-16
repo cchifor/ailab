@@ -174,6 +174,31 @@ def internal_tls_addresses() -> dict:
             "candidateJournal": journal[0]}
 
 
+def strip_hcl_comments(text: str) -> str:
+    """The text without HCL comments (`#` and `//` to the end of the line, `/* */`) outside quoted strings."""
+    out, i, quoted = [], 0, False
+    while i < len(text):
+        ch = text[i]
+        if quoted:
+            out.append(text[i:i + 2] if ch == "\\" else ch)
+            quoted = ch != '"'
+            i += 2 if ch == "\\" else 1
+        elif ch == '"':
+            out.append(ch)
+            quoted = True
+            i += 1
+        elif ch == "#" or text.startswith("//", i):
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = len(text) if end < 0 else end + 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
 def runtime_class_scheduling() -> tuple[dict, list[dict]]:
     """relay-gvisor's scheduling.nodeSelector and tolerations, read from the RuntimeClass manifest
     (kubernetes/infra/agent-nodes/relay-workers.tf, never a second copy here). RuntimeClass admission
@@ -182,8 +207,9 @@ def runtime_class_scheduling() -> tuple[dict, list[dict]]:
     exactly the class's tolerations (Relay docs/infrastructure-candidate-policy.md)."""
     text = RELAY_WORKERS_TF.read_text(encoding="utf-8")
     block = re.search(r'resource "kubernetes_manifest" "relay_gvisor" \{(.*?)\n\}', text, re.S)
+    # Comments are not configuration: drop them before reading (an attribute must still parse).
     scheduling = re.search(r"scheduling = \{\s*nodeSelector = \{(.*?)\}\s*tolerations = \[(.*?)\]",
-                           block.group(1) if block else "", re.S)
+                           strip_hcl_comments(block.group(1)) if block else "", re.S)
     if not scheduling:
         fail("relay-workers.tf has no relay-gvisor RuntimeClass scheduling block")
     selector = dict(re.findall(r'"([^"]+)"\s*=\s*"([^"]*)"', scheduling.group(1)))

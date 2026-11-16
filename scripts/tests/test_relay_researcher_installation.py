@@ -905,29 +905,38 @@ class BundleCheck(unittest.TestCase):
 
     def test_runtime_class_tolerations_keep_every_attribute(self):
         # A numeric attribute (tolerationSeconds) is read, not dropped, so the placement comparison sees
-        # it; an attribute the reader does not understand is refused rather than skipped.
+        # it; HCL comments are not configuration and change nothing; an attribute the reader does not
+        # understand is refused rather than skipped.
         tf = ROOT / "kubernetes/infra/agent-nodes/relay-workers.tf"
         text = tf.read_text(encoding="utf-8")
         effect = '        effect   = "NoSchedule"\n'
         self.assertEqual(text.count(effect), 1)
-        for extra, reason in (('        tolerationSeconds = 300\n', None),
-                              ('        tolerationSeconds = var.seconds\n', "toleration attribute not understood"),
-                              ('        effect = "NoExecute"\n', "toleration attribute not understood")):
-            with self.subTest(extra.strip()), tempfile.TemporaryDirectory() as tmp:
+        numeric, unchanged = "tolerations are not relay-gvisor's", "accepted"
+        for replacement, expect in (
+                (effect + '        tolerationSeconds = 300\n', numeric),
+                ('        # the dedicated pool\n        effect   = "NoSchedule" # trailing, with a } brace\n'
+                 '        // and a line comment\n        /* and a\n           block comment */\n', unchanged),
+                (effect + '        tolerationSeconds = var.seconds\n', "toleration attribute not understood"),
+                (effect + '        effect = "NoExecute"\n', "toleration attribute not understood")):
+            with self.subTest(replacement.strip()), tempfile.TemporaryDirectory() as tmp:
                 patched = Path(tmp) / "relay-workers.tf"
-                patched.write_text(text.replace(effect, effect + extra), encoding="utf-8")
+                patched.write_text(text.replace(effect, replacement), encoding="utf-8")
                 module = bundle_module()
                 with mock.patch.object(module, "RELAY_WORKERS_TF", patched), \
                         mock.patch.dict(globals(), {"bundle_module": lambda: module}):
-                    if reason is None:
+                    if expect == numeric:
                         _, tolerations = module.runtime_class_scheduling()
                         self.assertEqual(tolerations[0]["tolerationSeconds"], 300)
                         # A placement without it no longer matches the class, so the bundle is refused.
-                        self.run_check(self.make_bundle(), reason="tolerations are not relay-gvisor's")
+                        self.run_check(self.make_bundle(), reason=numeric)
+                    elif expect == unchanged:
+                        self.assertEqual(module.runtime_class_scheduling()[1], [
+                            {"key": "dedicated", "operator": "Equal", "value": "relay-worker", "effect": "NoSchedule"}])
+                        self.assertEqual(self.run_check(self.make_bundle()), 0)
                     else:
                         with self.assertRaises(module.Mismatch) as refused:
                             module.runtime_class_scheduling()
-                        self.assertIn(reason, str(refused.exception))
+                        self.assertIn(expect, str(refused.exception))
 
     def test_refuses_a_tampered_file(self):
         bundle = self.make_bundle()
