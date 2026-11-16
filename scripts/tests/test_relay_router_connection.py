@@ -421,8 +421,9 @@ class InclusionGate(unittest.TestCase):
         self.assertEqual(including(RELAY_COMPONENT), [relay],
                          "only the live Relay overlay includes the connection (hub upgrade step H6)")
         k = yaml.safe_load(relay.read_text(encoding="utf-8"))
-        self.assertEqual(k["components"].count("../../../components/relay-router-connection"), 1)
-        self.assertNotIn("../../../components/relay-router-connection", k.get("resources", []))
+        resolved = lambda key: [(relay.parent / e).resolve() for e in k.get(key) or []]
+        self.assertEqual(resolved("components").count(RELAY_COMPONENT.resolve()), 1, "included once, as a component")
+        self.assertNotIn(RELAY_COMPONENT.resolve(), resolved("resources"))
 
     def test_router_component_is_not_live_with_the_token_placeholder(self):
         tokens = trust_document()["issuers"][0]["tenants"][0]["workerBudgets"]["maxTokens"]

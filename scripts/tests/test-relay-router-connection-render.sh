@@ -47,6 +47,11 @@ for app in relay llm-router; do
 import sys, yaml
 path, component, budget = sys.argv[1:4]
 k = yaml.safe_load(open(path, encoding="utf-8"))
+# Only the components list is rewritten: an overlay entry that could target what a stripped component
+# supplies (patches, replacements, transformers and the like) would fail the renders for an unrelated
+# reason, so any other key fails here, naming this script.
+extra = set(k) - {"apiVersion", "kind", "resources", "components"}
+assert not extra, f"{path}: test-relay-router-connection-render.sh strips only components, but the overlay also has {sorted(extra)}"
 entries = k.get("components") or []
 name = lambda e: e.rstrip("/").split("/")[-1]
 found = {n: sum(1 for e in entries if name(e) == n) for n in (component, budget)}
