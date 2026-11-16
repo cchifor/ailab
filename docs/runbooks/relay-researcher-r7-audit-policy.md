@@ -87,21 +87,28 @@ control planes in one apply, so all three API servers would restart at once.
 Run OpenTofu in `kubernetes/infra` of the main checkout, on the Windows workstation in Git Bash, where
 its state lives. `tofu_cp` below changes into that directory instead of passing `-chdir`, because
 `MSYS_NO_PATHCONV=1` would hand the Windows binary an unconverted POSIX path.
-Native `jq.exe` ends its lines with CRLF, so the commands strip `\r` wherever a jq value is reused.
+For the same reason every path given to `talosctl.exe` is a Windows path (`cygpath -m`): with a POSIX
+`TALOSCONFIG` it reports "talos config file is empty". The wrapper `T` also passes the endpoints
+explicitly; without them `talosctl` fails with "failed to determine endpoints". Any control plane's Talos
+API can proxy to the others, and none depends on kube-apiserver, so the three endpoints stay valid
+while one API server restarts.
+Native `jq.exe` ends its lines with CRLF, so the commands strip `\r` wherever a jq value is reused, and it
+gets its input on stdin (a redirect), never as a POSIX path argument.
 
 ```bash
 OUT="$(cd "$(git rev-parse --git-common-dir)/.." && pwd -P)/kubernetes/infra/_out"
-export TALOSCONFIG="$OUT/talosconfig" MSYS_NO_PATHCONV=1
-T="$OUT/talosctl-1142.exe"; K="kubectl --context admin@ai"
+export MSYS_NO_PATHCONV=1 TALOSCONFIG="$(cygpath -m "$OUT")/talosconfig"
+TALOSCTL="$OUT/talosctl-1142.exe"; K="kubectl --context admin@ai"
+T() { "$TALOSCTL" -e 192.168.0.41,192.168.0.42,192.168.0.43 "$@"; }
 tofu_cp() { (cd "$OUT/.." && "$HOME/.tofubin/tofu.exe" "$@"); }
-W="$OUT/r7-audit"; mkdir -p "$W"
+W="$OUT/r7-audit"; mkdir -p "$W"; WW="$(cygpath -m "$W")"   # WW: the same directory for native Windows tools
 CPS="192.168.0.41 192.168.0.42 192.168.0.43"; ALL=192.168.0.41,192.168.0.42,192.168.0.43
 declare -A KEY=([192.168.0.41]=cp1 [192.168.0.42]=cp2 [192.168.0.43]=cp3)
 declare -A POD=([192.168.0.41]=kube-apiserver-talos-cp1 [192.168.0.42]=kube-apiserver-talos-cp2 [192.168.0.43]=kube-apiserver-talos-cp3)
 # start time of $1's kube-apiserver container, asked through ANOTHER control plane (the VIP may sit on $1)
 started(){ local o; for o in $CPS; do [ "$o" != "$1" ] && break; done
            $K --server "https://$o:6443" -n kube-system get pod "${POD[$1]}" -o jsonpath='{.status.containerStatuses[0].state.running.startedAt}'; }
-rules()  { "$T" -n "$1" get auditpolicyconfigs audit-policy -o jsonpath='{.spec.config.rules}'; echo; }
+rules()  { T -n "$1" get auditpolicyconfigs audit-policy -o jsonpath='{.spec.config.rules}'; echo; }
 # probe <cp>: a server-side dry-run Pod create in the slot, sent to that control plane only. Nothing is
 # persisted (dry run), and the slot's admission refuses it anyway. Prints that CP's audit events for it.
 probe()  { local name="r7-audit-probe-${1##*.}-$(date +%s)" id
@@ -119,7 +126,7 @@ spec:
     resources: {limits: {cpu: 10m, memory: 16Mi, ephemeral-storage: 16Mi}}
 POD
            sleep 2
-           "$T" -n "$1" read /var/log/audit/kube/kube-apiserver.log > "$W/probe.log"
+           T -n "$1" read /var/log/audit/kube/kube-apiserver.log > "$W/probe.log"
            # a create's RequestReceived event has no name yet: find the request by name, list it by auditID
            id=$(grep -F "\"name\":\"$name\"" "$W/probe.log" | jq -r .auditID | tr -d '\r' | sort -u)
            grep -F "\"auditID\":\"$id\"" "$W/probe.log" |
@@ -129,30 +136,46 @@ POD
 
 **Before the first control plane:**
 
+- Run every command from the root of the main checkout (the checker is `scripts/talos-cp-plan-check.py`,
+  run by the workstation's Python with PyYAML).
+- The checkout's `.terraform.lock.hcl` must match main's provider pins (talos `~> 0.12`, proxmox
+  `~> 0.122`). On 2026-11-16 it was stale (talos 0.11.0, proxmox 0.114.0). In that case, back up the lock
+  and the state, then run `tofu_cp init -upgrade`.
+
 ```bash
-"$T" -n $ALL etcd status                                    # 3 members, same raft index, no errors
+T -n $ALL etcd status                                    # 3 members, same raft index, no errors
 for c in $CPS; do echo "$c $($K --server https://$c:6443 get --raw /readyz)"; done   # ok on all three
 for c in $CPS; do echo "$c $(rules $c)"; done              # one rule, level Metadata, on all three
 for c in $CPS; do probe $c; done
 #   per CP two lines, Metadata, body false: stage RequestReceived (code null), then ResponseComplete (403)
-for c in $CPS; do "$T" -n $c ls -l /var/log/audit/kube; done   # keep: the backups' times give the rotation rate
+for c in $CPS; do T -n $c ls -l /var/log/audit/kube; done   # keep: the backups' times give the rotation rate
 ```
 
 **For each control plane in turn** (`cp=192.168.0.41`, then `.42`, then `.43`):
 
 ```bash
-"$T" -n $ALL etcd status                                    # 3/3 in sync, before EVERY control plane
-tofu_cp plan -target="talos_machine_configuration_apply.cp[\"${KEY[$cp]}\"]"
+T -n $ALL etcd status                                    # 3/3 in sync, before EVERY control plane
+tofu_cp plan -target="talos_machine_configuration_apply.cp[\"${KEY[$cp]}\"]" -out="_out/r7-audit/${KEY[$cp]}.tfplan"
 #   the only change: that CP's config_patches gain the cluster.apiServer.auditPolicy block (plus the
-#   template comment). machine_configuration_input must not change (it would show as a sensitive
-#   value), and nothing else may change. Otherwise: stop.
+#   template comment), and nothing else may change. Otherwise: stop.
+# Content check. talos provider 0.12 makes machine_configuration_input write-only, so the plan cannot
+# show whether the input changed. The checker prints key paths only (the configs hold cluster secrets):
+tofu_cp show -json "_out/r7-audit/${KEY[$cp]}.tfplan" > "$W/plan.json"
+T -n $cp get machineconfig -o json > "$W/mc.json"
+python3 scripts/talos-cp-plan-check.py "$WW/plan.json" "$WW/mc.json" "${KEY[$cp]}"
+#   other resources changing: none
+#   live vs state-before: IDENTICAL
+#   state-before vs planned: ['v1alpha1~/cluster/apiServer/auditPolicy/rules']
+#   VERDICT: PASS        (anything else, or exit 1: stop, and shred the files below)
+shred -u "$W/plan.json" "$W/mc.json"
 before=$(started $cp)
-tofu_cp apply -target="talos_machine_configuration_apply.cp[\"${KEY[$cp]}\"]"
+tofu_cp apply "_out/r7-audit/${KEY[$cp]}.tfplan"             # exactly the plan that was checked
+shred -u "$W/${KEY[$cp]}.tfplan"                             # it holds the CP's secrets too
 until s=$(started $cp) && [ -n "$s" ] && [ "$s" != "$before" ]; do sleep 3; done
 until [ "$($K --server https://$cp:6443 get --raw /readyz 2>/dev/null)" = ok ]; do sleep 3; done
 rules $cp                                                   # the three rules of the table above
-"$T" -n $cp read /system/config/kubernetes/kube-apiserver/auditpolicy.yaml   # the file it loaded: the same rules
-"$T" -n $ALL etcd status                                    # still 3/3 (etcd was not touched)
+T -n $cp read /system/config/kubernetes/kube-apiserver/auditpolicy.yaml   # the file it loaded: the same rules
+T -n $ALL etcd status                                    # still 3/3 (etcd was not touched)
 probe $cp
 #   exactly ONE line: {"level":"RequestResponse","stage":"ResponseComplete","code":403,"body":true,"dryRun":true}
 #   (403: the slot's admission refused it; 404 if the namespace does not exist yet. Either way the
@@ -187,16 +210,16 @@ Do this in R7's step 4 ("capture the inputs before T"), as soon as the agent's c
 `CANDIDATE` is the submitted Pod's name (`POD` above holds the API server pod names).
 
 ```bash
-CANDIDATE=$(jq -r .metadata.name /operator/r7/submitted-pod.json | tr -d '\r'); NS=relay-researcher-1
+CANDIDATE=$(jq -r .metadata.name < /operator/r7/submitted-pod.json | tr -d '\r'); NS=relay-researcher-1
 for c in $CPS; do
-  "$T" -n $c read /var/log/audit/kube/kube-apiserver.log | grep -F "\"name\":\"$CANDIDATE\"" > "$W/r7-$c.jsonl"
+  T -n $c read /var/log/audit/kube/kube-apiserver.log | grep -F "\"name\":\"$CANDIDATE\"" > "$W/r7-$c.jsonl"
 done
 for c in $CPS; do
   jq -r --arg ns "$NS" --arg pod "$CANDIDATE" 'select(.verb == "create" and .stage == "ResponseComplete"
       and .objectRef.resource == "pods" and .objectRef.subresource == null and .objectRef.namespace == $ns
       and .objectRef.name == $pod and (.requestURI | test("[?&]dryRun=") | not))
     | "\(.auditID) \(.level) \(.responseStatus.code) \(.responseObject.metadata.uid // "-") \(.user.username) \(.impersonatedUser.username // "-")"' \
-    "$W/r7-$c.jsonl" | sed "s/^/$c /"
+    < "$W/r7-$c.jsonl" | sed "s/^/$c /"
 done | tee "$W/r7-hits.txt"
 ```
 
@@ -205,7 +228,7 @@ done | tee "$W/r7-hits.txt"
 - **Other outcomes:**
   - A line that is not `201` is a refused attempt; look for the `201`.
   - No line on any control plane: the create was not recorded. Check `rules` on all three, and
-    `"$T" -n $c ls -l /var/log/audit/kube` for a rotation since the create; read any newer
+    `T -n $c ls -l /var/log/audit/kube` for a rotation since the create; read any newer
     `kube-apiserver-<time>.log` the same way. Without the event, R7 cannot bind its Pod: abort before `T`.
   - Two `201` lines for one name: stop. Something deleted and re-created the Pod.
 - **Write the file.** Copy that one line unchanged, as the API server logged it:
@@ -245,7 +268,10 @@ with the event's UID, and record both. Retain `create-audit-event.json` with R7'
 - **Backups.** It then sits in a backup until ten newer backups push it out. A backup is also deleted
   at a later rotation once it is more than 30 days past its own rotation time.
 - **This cluster's rate.** The `ls -l` taken before the apply gives the rotation period. After the
-  event leaves the active file, expect it to last about ten rotation periods.
+  event leaves the active file, expect it to last about ten rotation periods. Measured on 2026-11-16,
+  the day the policy went live: about every 25-60 minutes on cp1 and cp2, and about 2.5 hours on cp3.
+  So the event can leave the active file within half an hour: if it is not there, read the newest
+  backups on that control plane the same way.
 - **Extract within minutes, before `T`.** The node copy is only a source. The pinned file is the evidence.
 
 ## Event shape: checked against a disposable API server
@@ -302,7 +328,7 @@ create, and which control plane serves it.
 
   ```bash
   printf 'cluster:\n  apiServer:\n    auditPolicy:\n      apiVersion: audit.k8s.io/v1\n      kind: Policy\n      rules:\n        - level: Metadata\n' > "$W/audit-default.yaml"
-  "$T" -n $cp patch mc --patch @"$W/audit-default.yaml" --mode=no-reboot
+  T -n $cp patch mc --patch @"$(cygpath -m "$W")/audit-default.yaml" --mode=no-reboot
   ```
 
   Then wait for `readyz` and check `etcd status` and `rules`. Read the failed container's log through another
