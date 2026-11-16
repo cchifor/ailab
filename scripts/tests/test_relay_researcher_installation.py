@@ -540,36 +540,70 @@ class AgentStage(unittest.TestCase):
         self.assertTrue((TREE / "agent/relay-researcher-rules.test.yaml").is_file())
 
 
+def included_stage() -> str:
+    """The egress stage the installation tree includes: enrollment until step Q4, qualification after."""
+    return {p.name: stage for stage, p in EGRESS.items()}[selected_egress().name]
+
+
 class BundleCheck(unittest.TestCase):
     """scripts/relay-researcher-bundle.py accepts a bundle shaped like the tool's for this installation
-    and refuses every reviewed difference. The bundle here is synthetic test input, never committed."""
+    and refuses every reviewed difference. The bundle here is synthetic test input, never committed.
+
+    It follows the committed tree in every runbook state: before step I5 the pins and the release-derived
+    parts of agent/config.json are placeholders and the bundle synthesizes them; once I5 commits the real
+    pins and config (and after Q4 switches the egress stage) it carries exactly those, because check()
+    compares a bundle with filled pins and config. Every other value stays synthetic, so each refusal
+    below still comes from its own guard in every state (the accept tests prove the baseline passes)."""
 
     IID = "0f0e0d0c-0b0a-4908-8706-050403020100"
+    SOURCE = "a" * 40
+    AGENT = "registry.chifor.me/relay/infrastructure-agent@sha256:" + "b" * 64
+    KEY = "A" * 43
 
-    def make_bundle(self, mutate=None) -> Path:
+    @staticmethod
+    def committed(value, synthetic):
+        """The committed value once the operator has filled it, else the synthetic stand-in."""
+        return synthetic if bundle_module().is_placeholder(value) else copy.deepcopy(value)
+
+    def setUp(self):
+        p = pins()
+        if bundle_module().pins_filled(p):
+            self.IID, self.SOURCE, self.AGENT = p["installationId"], p["sourceCommit"], p["agentImage"]
+
+    def make_bundle(self, mutate=None, stage=None) -> Path:
+        """`stage`: the egress stage whose digest the definition pins; default the included one."""
         b = bundle_module()
         d = template()
-        d["sourceCommit"] = "a" * 40
-        d["agentImage"] = "registry.chifor.me/relay/infrastructure-agent@sha256:" + "b" * 64
+        committed = json.loads((TREE / "agent/config.json").read_text(encoding="utf-8"))
+        key = self.committed(committed["identity"]["installationPublicKey"], self.KEY)
+        d["sourceCommit"] = self.SOURCE
+        d["agentImage"] = self.AGENT
         d["identity"]["installationId"] = self.IID
-        d["identity"]["installationPublicKey"] = "A" * 43
-        d["installationPolicy"]["allowedImageDigests"] = ["c" * 64]
-        d["installationPolicy"]["allowedHarnessAdapters"] = ["codex"]
-        d["installationPolicy"]["allowedEgressDestinations"] = []
-        runtime_image = "registry.chifor.me/relay/worker-runtime@sha256:" + "c" * 64
-        placement = {"tier": "sandboxed-pod", "binding": "researcher", "runtimeClassName": "relay-gvisor",
-                     "overhead": {"milliCpu": 80, "memoryMiB": 24},
-                     # Every key of relay-gvisor's scheduling.nodeSelector (RuntimeClass admission merges it).
-                     "nodeSelector": {"ailab.io/relay-worker-pool": "true", "ailab.io/runtime-gvisor": "true",
-                                      "kubernetes.io/hostname": "relay-worker-1"},
-                     "tolerations": [{"key": "dedicated", "operator": "Equal", "value": "relay-worker", "effect": "NoSchedule"}]}
+        d["identity"]["installationPublicKey"] = key
+        installation = copy.deepcopy(d["installationPolicy"])
+        installation.update(allowedImageDigests=["c" * 64], allowedHarnessAdapters=["codex"],
+                            allowedEgressDestinations=[])
+        policy = {"installation": self.committed(committed["policy"]["installation"], installation),
+                  "podTiers": self.committed(committed["policy"]["podTiers"], [
+                      {"tier": "sandboxed-pod", "binding": "researcher", "runtimeClassName": "relay-gvisor"}]),
+                  "allowedRuntimeDigests": self.committed(committed["policy"]["allowedRuntimeDigests"], ["d" * 64]),
+                  "allowedTemplates": self.committed(committed["policy"]["allowedTemplates"], [
+                      {"templateId": "researcher", "revision": 1, "digest": "e" * 64}])}
+        d["installationPolicy"] = copy.deepcopy(policy["installation"])
+        runtime_image = ("registry.chifor.me/relay/worker-runtime@sha256:"
+                         + policy["installation"]["allowedImageDigests"][0])
+        # The tool maps placements to podTiers and templates to allowedTemplates; invert that mapping.
+        placements = [{**tier, "overhead": {"milliCpu": 80, "memoryMiB": 24},
+                       # Every key of relay-gvisor's scheduling.nodeSelector (RuntimeClass admission merges it).
+                       "nodeSelector": {"ailab.io/relay-worker-pool": "true", "ailab.io/runtime-gvisor": "true",
+                                        "kubernetes.io/hostname": "relay-worker-1"},
+                       "tolerations": [{"key": "dedicated", "operator": "Equal", "value": "relay-worker",
+                                        "effect": "NoSchedule"}]}
+                      for tier in policy["podTiers"]]
+        templates = [{"definition": {"templateId": t["templateId"], "revision": t["revision"]}, "digest": t["digest"]}
+                     for t in policy["allowedTemplates"]]
         d["binding"] = {"installationId": self.IID, "policyDigest": "f" * 64, "runtime": {"image": runtime_image},
-                        "placements": [placement],
-                        "templates": [{"definition": {"templateId": "researcher", "revision": 1}, "digest": "e" * 64}]}
-        policy = {"installation": d["installationPolicy"],
-                  "podTiers": [{"tier": "sandboxed-pod", "binding": "researcher", "runtimeClassName": "relay-gvisor"}],
-                  "allowedRuntimeDigests": ["d" * 64],
-                  "allowedTemplates": [{"templateId": "researcher", "revision": 1, "digest": "e" * 64}]}
+                        "placements": placements, "templates": templates}
         inst = TREE / "installation"
         lists = {
             "10-namespaces.json": b.with_installation_id(docs(inst / "namespaces.yaml"), self.IID),
@@ -585,9 +619,9 @@ class BundleCheck(unittest.TestCase):
             "hub": {"origin": d["hub"]["origin"], "caConfigMap": d["hub"]["caConfigMap"]},
             "kubernetes": {"origin": d["kubernetesOrigin"]},
             "identity": {"tenantId": d["identity"]["tenantId"], "installationId": self.IID,
-                         "clusterUid": d["identity"]["clusterUid"], "installationPublicKey": "A" * 43, "fenceObjectUid": "",
+                         "clusterUid": d["identity"]["clusterUid"], "installationPublicKey": key, "fenceObjectUid": "",
                          "installationKeySecret": d["references"]["installationKeySecret"],
-                         "enrollmentTokenSecret": d["references"]["enrollmentTokenSecret"]},
+                         "enrollmentTokenSecret": d["references"].get("enrollmentTokenSecret", "")},
             "policy": {**copy.deepcopy(policy), "retainedStorageClass": None, "persistentVolumeClaims": False,
                        "bootstrapSecrets": False},
             "podRuntime": {"configMap": "", "bindingSha256": "", "qualificationSha256": ""},
@@ -601,9 +635,9 @@ class BundleCheck(unittest.TestCase):
                               "hubCidrs": d["controlNetwork"]["hubCidrs"], "hubPort": 443,
                               "candidateJournalCidrs": [], "candidateJournalPort": 443},
         }
-        config = json.loads((TREE / "agent/config.json").read_text(encoding="utf-8"))
+        config = committed
         config["identity"]["installationId"] = self.IID
-        config["identity"]["installationPublicKey"] = "A" * 43
+        config["identity"]["installationPublicKey"] = key
         config["policy"].update(copy.deepcopy(policy))
         files = {
             "00-definition.json": d,
@@ -612,12 +646,13 @@ class BundleCheck(unittest.TestCase):
             "40-planned-pod-envelope.json": {"status": "planned-not-compiled"},
             "report.json": {"status": "enrollment-only-worker-creation-disabled", "workloadCreationEnabled": False,
                             "identity": {"sourceCommit": d["sourceCommit"], "agentImage": d["agentImage"],
-                                         "runtimeImage": runtime_image, "runtimeDigest": "d" * 64,
+                                         "runtimeImage": runtime_image,
+                                         "runtimeDigest": policy["allowedRuntimeDigests"][0],
                                          "bindingDigest": "9" * 64, "installationId": self.IID,
                                          "clusterUid": d["identity"]["clusterUid"], "policyDigest": "f" * 64}},
         }
         # The reviewed shape carries G3 in both stages (the binding never changes between them).
-        self.g3(files)
+        self.g3(files, stage or included_stage())
         if mutate:
             mutate(files)
         out = Path(tempfile.mkdtemp())
@@ -657,8 +692,9 @@ class BundleCheck(unittest.TestCase):
         self.assertIsNot(bundle_module(), bundle_module())
 
     @staticmethod
-    def g3(files, stage="enrollment"):
-        """The release binding's G3 fields, as the qualification stage needs them."""
+    def g3(files, stage=None):
+        """The release binding's G3 fields, as the qualification stage needs them; the definition pins
+        `stage`'s egress digest (default: the included stage)."""
         d = files["00-definition.json"]
         pem = {"installPath": "/etc/relay/hub-ca.pem", "sha256": RUNTIME_CA_SHA256}
         d["binding"]["hostAliases"] = {"hub": "10.96.0.40", "router": "10.96.0.41", "candidateJournal": "10.96.0.42"}
@@ -671,7 +707,7 @@ class BundleCheck(unittest.TestCase):
             "artifacts": [{"role": "hub-ca", **pem}, {"role": "holder", "installPath": "/opt/relay/relay-holder",
                                                       "sha256": "1" * 64}],
             "holderProfiles": {"workerTemplates": [{"definition": {"holder": holder}}]}}
-        BundleCheck.g3_pin(files, stage)
+        BundleCheck.g3_pin(files, stage or included_stage())
 
     @staticmethod
     def g3_pin(files, stage):
@@ -679,8 +715,11 @@ class BundleCheck(unittest.TestCase):
         files["00-definition.json"]["executionEgressArtifacts"][0]["sha256"] = bundle_module().measurement_digest(egress)
 
     def test_accepts_the_g3_binding_in_both_stages(self):
+        # The included stage as committed, then each stage as after its switch PR.
         self.assertEqual(self.run_check(self.make_bundle()), 0)
-        self.assertEqual(self.run_check(self.make_bundle(lambda f: self.g3(f, "qualification")), "qualification"), 0)
+        for stage in ("enrollment", "qualification"):
+            with self.subTest(stage=stage):
+                self.assertEqual(self.run_check(self.make_bundle(stage=stage), stage), 0)
 
     def test_both_stages_require_the_g3_binding_and_their_own_pin(self):
         # The binding never changes between the stages: a binding without G3 is refused at enrollment
@@ -701,8 +740,8 @@ class BundleCheck(unittest.TestCase):
                     self.run_check(self.make_bundle(lambda f, m=mutate, s=stage: m(f, s)), stage,
                                    reason="the binding has no hostAliases")
         # The enrollment pin with the qualification stage selected, and the reverse.
-        self.run_check(self.make_bundle(), "qualification", reason="/executionEgressArtifacts differs")
-        self.run_check(self.make_bundle(lambda f: self.g3(f, "qualification")), reason="/executionEgressArtifacts differs")
+        self.run_check(self.make_bundle(stage="enrollment"), "qualification", reason="/executionEgressArtifacts differs")
+        self.run_check(self.make_bundle(stage="qualification"), "enrollment", reason="/executionEgressArtifacts differs")
 
     def test_refuses_each_g3_difference(self):
         def m(files):
@@ -798,12 +837,47 @@ class BundleCheck(unittest.TestCase):
             files["report.json"]["identity"]["runtimeDigest"] = "4" * 64
         def empty_fill(files):
             files["00-definition.json"]["installationPolicy"]["allowedHarnessAdapters"] = []
-        for mutate in (quota, ceiling, unfilled, gate, egress, hub, secrets, label, config, config_ceiling,
-                       config_registries, values_tiers, tiers_not_binding, templates_not_binding, two_runtimes,
-                       placement_off_node, placement_overhead, runtime_not_allowed, report_policy, report_runtime,
-                       empty_fill):
+        # The same joins from the definition's side, so they stay proven once I5 has committed the policy.
+        def definition_policy(files):
+            files["00-definition.json"]["installationPolicy"]["allowedImageDigests"].append("9" * 64)
+        def binding_tiers(files):
+            files["00-definition.json"]["binding"]["placements"][0]["binding"] = "other-binding"
+        def binding_templates(files):
+            files["00-definition.json"]["binding"]["templates"][0]["digest"] = "7" * 64
+        # Before I5 the tool's policy is checked only by its join to the definition; once I5 commits the
+        # real config, the committed config pins it and refuses a different one first.
+        committed = json.loads((TREE / "agent/config.json").read_text(encoding="utf-8"))
+        filled = not bundle_module().is_placeholder(committed["policy"]["installation"])
+        def pinned(leaf, join):
+            return f"31-agent-config.json /policy/{leaf} = " if filled else join
+        installation_join = "31-agent-config.json policy.installation differs from the definition's installationPolicy"
+        for mutate, reason in (
+                (quota, "20-containment.json: ('ResourceQuota', 'relay-researcher-1', 'relay-enrollment-quota') differs"),
+                (ceiling, "definition /installationPolicy/resourceCeiling/milliCpu differs from the reviewed template"),
+                (unfilled, "definition /binding is still a placeholder"),
+                (gate, "21-admission-deny.json: ('ValidatingAdmissionPolicy', None, 'relay-enrollment-"),
+                (egress, "definition /executionEgressArtifacts differs from the reviewed template"),
+                (hub, "30-agent-values.json networkPolicy.hubCidrs = ['0.0.0.0/1']"),
+                (secrets, "30-agent-values.json policy.bootstrapSecrets = True"),
+                (label, "10-namespaces.json: ('Namespace', None, 'relay-researcher-1') differs"),
+                (config, "31-agent-config.json /hub/origin = 'https://elsewhere.example'"),
+                (config_ceiling, pinned("installation/resourceCeiling/milliCpu", installation_join)),
+                (config_registries, pinned("installation/allowedRegistries", installation_join)),
+                (values_tiers, "30-agent-values.json policy.podTiers differs from 31-agent-config.json"),
+                (tiers_not_binding, pinned("podTiers", "policy.podTiers is not the binding's placements")),
+                (templates_not_binding, pinned("allowedTemplates", "policy.allowedTemplates is not the binding's templates")),
+                (two_runtimes, pinned("allowedRuntimeDigests", "policy.allowedRuntimeDigests is not exactly one runtime digest")),
+                (definition_policy, installation_join),
+                (binding_tiers, "policy.podTiers is not the binding's placements"),
+                (binding_templates, "policy.allowedTemplates is not the binding's templates"),
+                (placement_off_node, "a placement does not pin kubernetes.io/hostname relay-worker-1"),
+                (placement_overhead, "a placement's overhead is not relay-gvisor's 80m / 24Mi"),
+                (runtime_not_allowed, "the binding's runtime image is not a digest-pinned registry.chifor.me image"),
+                (report_policy, "report.json identity.policyDigest differs from the definition"),
+                (report_runtime, "report.json identity.runtimeDigest differs from the definition"),
+                (empty_fill, "definition /installationPolicy/allowedHarnessAdapters is empty")):
             with self.subTest(mutate.__name__):
-                self.assertEqual(self.run_check(self.make_bundle(mutate)), 1)
+                self.run_check(self.make_bundle(mutate), reason=reason)
 
     def test_placement_carries_the_runtime_class_scheduling(self):
         # relay-gvisor's scheduling block, read from its manifest: RuntimeClass admission merges it into
@@ -823,20 +897,52 @@ class BundleCheck(unittest.TestCase):
             placement(files)["tolerations"].append({"key": "dedicated", "operator": "Equal", "value": "agent",
                                                     "effect": "NoSchedule"})
         selector, tolerations = "lacks relay-gvisor's scheduling.nodeSelector", "tolerations are not relay-gvisor's"
-        stage = bundle_module().egress_stage()[0]  # whichever stage the tree includes
+        # make_bundle follows the committed pins, config and egress stage, so these hold in every state.
         for mutate, reason in ((without_class_selector, selector), (other_class_selector_value, selector),
                                (other_toleration, tolerations), (extra_toleration, tolerations)):
             with self.subTest(mutate.__name__):
-                def staged(files, mutate=mutate):
-                    self.g3(files, stage)
-                    mutate(files)
-                self.run_check(self.make_bundle(staged), stage, reason=reason)
+                self.run_check(self.make_bundle(mutate), reason=reason)
+
+    def test_runtime_class_tolerations_keep_every_attribute(self):
+        # A numeric attribute (tolerationSeconds) is read, not dropped, so the placement comparison sees
+        # it; HCL comments are not configuration and change nothing; an attribute the reader does not
+        # understand is refused rather than skipped.
+        tf = ROOT / "kubernetes/infra/agent-nodes/relay-workers.tf"
+        text = tf.read_text(encoding="utf-8")
+        effect = '        effect   = "NoSchedule"\n'
+        self.assertEqual(text.count(effect), 1)
+        numeric, unchanged = "tolerations are not relay-gvisor's", "accepted"
+        for replacement, expect in (
+                (effect + '        tolerationSeconds = 300\n', numeric),
+                ('        # the dedicated pool\n        effect   = "NoSchedule" # trailing, with a } brace\n'
+                 '        // and a line comment\n        /* and a\n           block comment */\n', unchanged),
+                (effect + '        tolerationSeconds = var.seconds\n', "toleration attribute not understood"),
+                (effect + '        effect = "NoExecute"\n', "toleration attribute not understood")):
+            with self.subTest(replacement.strip()), tempfile.TemporaryDirectory() as tmp:
+                patched = Path(tmp) / "relay-workers.tf"
+                patched.write_text(text.replace(effect, replacement), encoding="utf-8")
+                module = bundle_module()
+                with mock.patch.object(module, "RELAY_WORKERS_TF", patched), \
+                        mock.patch.dict(globals(), {"bundle_module": lambda: module}):
+                    if expect == numeric:
+                        _, tolerations = module.runtime_class_scheduling()
+                        self.assertEqual(tolerations[0]["tolerationSeconds"], 300)
+                        # A placement without it no longer matches the class, so the bundle is refused.
+                        self.run_check(self.make_bundle(), reason=numeric)
+                    elif expect == unchanged:
+                        self.assertEqual(module.runtime_class_scheduling()[1], [
+                            {"key": "dedicated", "operator": "Equal", "value": "relay-worker", "effect": "NoSchedule"}])
+                        self.assertEqual(self.run_check(self.make_bundle()), 0)
+                    else:
+                        with self.assertRaises(module.Mismatch) as refused:
+                            module.runtime_class_scheduling()
+                        self.assertIn(expect, str(refused.exception))
 
     def test_refuses_a_tampered_file(self):
         bundle = self.make_bundle()
         path = bundle / "20-containment.json"
         path.write_bytes(path.read_bytes().replace(b'"pods":"0"', b'"pods":"9"'))
-        self.assertEqual(self.run_check(bundle), 1)
+        self.run_check(bundle, reason="20-containment.json does not match bundle-manifest.json")
 
 
 if __name__ == "__main__":

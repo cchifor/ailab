@@ -38,7 +38,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const AILAB = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -346,7 +346,7 @@ async function main() {
   files["summary.json"] = canonical(summary);
 
   const out = resolve(args["--out"]);
-  if (!isAbsolute(out) || existsSync(out)) refuse(`--out ${out} must be a new directory`);
+  if (existsSync(out)) refuse(`--out ${out} must be a new directory`);
   mkdirSync(out, { mode: 0o755 });
   for (const [name, body] of Object.entries(files)) writeFileSync(join(out, name), body, { flag: "wx", mode: 0o644 });
   process.stdout.write(JSON.stringify(summary, null, 2) + "\n");

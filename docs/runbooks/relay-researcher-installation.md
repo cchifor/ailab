@@ -367,8 +367,10 @@ definition's SHA-256 in the operator evidence.
 
 **I5. Installation stage PR.** One PR: the imported `pins.yaml` and `agent/config.json`, and
 `git mv kubernetes/apps/relay-researcher/flux/relay-researcher-installation.yaml kubernetes/apps/clusters/ai/`.
-Re-run step I2's `dig` first. The tests refuse the move with any placeholder pin. Merging applies
-the namespaces and their containment in one Flux apply.
+Re-run step I2's `dig` first. The tests refuse the move with any placeholder pin, and need no edit
+otherwise: the bundle tests follow the committed pins and config, and `test_manifest_paths.py` adds
+the tree to its reviewed path set once its Flux file is in `clusters/ai` (likewise I7 and Q3). Merging
+applies the namespaces and their containment in one Flux apply.
 
 **I6. Containment readback.** Nothing may receive Pod rights before this passes:
 
