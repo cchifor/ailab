@@ -13,6 +13,8 @@ Live today (operator readback, recheck before acting): Relay v0.9.1, source `a53
 generation, no Router connection, no worker identity. Every write below is an operator action with the
 owner's direct confirmation for the exact reviewed rollout.
 
+The per-run ceremony for H7's signed candidate runs is [relay-researcher-qualification-campaign.md](relay-researcher-qualification-campaign.md).
+
 ## Staged here
 
 | Component (none included by `kubernetes/apps/apps/relay`) | Sets | Step |
