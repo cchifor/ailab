@@ -281,7 +281,7 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
     - `ci-rerun-watchdog` scans with `errors=[]`, and `cloud-power` logged no error;
     - the first `gitea-actions-run-retention` run on 28.4.0 (14:17) completed: `deleted=136 ... gate=ok`, so its
       `status=completed` listing still works;
-    - not yet done when this was written: the owner's OIDC login through Authelia.
+    - the owner's login through Authelia (the owner, 2026-11-16, after the window).
   - **Regression: two workflows stopped.** 28.x rejects a job-level `if:` that names a context other than `github`,
     `gitea`, `needs`, `vars` or `inputs`, and drops the whole workflow with a warning. 1.27 accepted it.
     - platform `ci.yml` (job `python`, `needs.changes.outputs[matrix.name]`): no `ci.yml` run, and so no required
