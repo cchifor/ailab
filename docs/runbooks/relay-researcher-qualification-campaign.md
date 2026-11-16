@@ -507,7 +507,9 @@ signed on the live hub.
 - [ ] R2's disruption on a rehearsal worker: arm, cut, hold 55 s, exact restore, recovery
       (`main:docs/qualification/session-replay-hub-disruption.md`).
 - [ ] R7's hold and release on a rehearsal Pod outside the candidate slot (E1's procedure): the held
-      Pod survives past `T`, release-to-exit latency, the audit event's shape (O7), exact-UID cleanup.
+      Pod survives past `T`, release-to-exit latency, the audit event's shape (O7: the probe and the
+      extraction rehearsal in [relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md)),
+      exact-UID cleanup.
 
 ## 5. Cross-cutting checks
 
@@ -751,7 +753,8 @@ before the bundle (§3.5), settled in the E6 rehearsal.
   - both converters read `subject.json` through `main:scripts/qualification/runtime-v2-subject.ts` (Relay #523);
   - the admission drivers read the policy definition with `parseOperatorJson` (Relay #529).
 - **G6, delayed start (E1).** Closed by Relay #532 (`1ea5ecc9`). R7 still needs the API audit policy
-  (O7, its own owner-held ailab PR) and leaves R6's slot blocked until the reviewed reconciliation (O8).
+  (O7, its own owner-held ailab PR: [relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md))
+  and leaves R6's slot blocked until the reviewed reconciliation (O8).
 
 **UNVERIFIED:**
 
