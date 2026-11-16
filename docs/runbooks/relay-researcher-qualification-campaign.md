@@ -14,12 +14,12 @@ Code references:
 | --- | --- | --- |
 | `rel:` | Relay v0.10.3 `c0fe50f0` | agent, runtime, the journal/budget/policy operator CLIs; the hub except its candidate loader |
 | `rel4:` | Relay v0.10.4 `e77bd09a` (release PR #526, Gitea release v0.10.4) | the hub image: `rel:` plus the fraction-safe candidate loader (§8 G0); worker images stay v0.10.3 |
-| `main:` | Relay `origin/main` `908b0c104` | the ceremony tools, drivers and converters |
+| `main:` | Relay `origin/main` `1ea5ecc9` (E1 merged) | the ceremony tools, drivers and converters |
 | `h4:` | `relay-researcher-hub-upgrade.md` at ailab `e5a2f3b9` | File B before H7 |
 
 Pin one driver checkout for the whole campaign and its conversion (`main:scripts/qualification/README.md`:
 the converters recompute driver digests from the checkout they run in). PR #519 (defaultCommunication)
-is in `main` since `908b0c104`, so one checkout carries every driver; pin it once E1 has merged (§8 G6).
+is in `main` since `908b0c104` and E1 since `1ea5ecc9`, so one checkout at or after `1ea5ecc9` carries every driver.
 
 ## 1. Campaign overview
 
@@ -32,7 +32,7 @@ is in `main` since `908b0c104`, so one checkout carries every driver; pin it onc
 | R5 | defaultCommunication attempt 2 before the stop; #13 cleanup; #15 matrix (CREATE only) and #16 egress on the empty slot | normal stop | 90 s | P5, new marker |
 | R3 | #17 storage (staging driver), then one lease-expiry drill with `routerTraffic: required` giving #10 and #18 (E3, #527) | hub cut, exit 71 | 60 s | multi-step, local tools only |
 | R4 | reserve only: #18 again if R3's partition row is not `observed` | hub cut | 60 s | as R3 |
-| R7 | #9 delayed start (E1, pending), immediately before R6 | the launch never starts | 90 s | never sent |
+| R7 | #9 delayed start (E1, Relay #532), immediately before R6 | the launch never starts | 90 s | never sent |
 | R6 | #19 recovery fence, last | installation-wide halt | 90 s | never sent |
 
 **Order:** R1 → R2 → R5 → R3 → reserve retries (R4 if needed) → R7 → O8 reconciliation → R6. Hold one
@@ -53,7 +53,7 @@ Each is read back; a missing one stops the campaign before any signing.
 | H7 candidate component (hub `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`) | hub runbook H7 | **not staged**; its design decides §2's staging |
 | Agent one-time candidate values: candidate volume, `policy.bootstrapSecrets: true`, journal egress | installation runbook, "Beyond enrollment" item 3 | not staged |
 | E2 window + storage converters (#523), E3 lease → two rows (#527), E4 replay disruption (#524), defaultCommunication observer (#519) | Relay `main` | merged |
-| E1 delayed start: pre-session observer, converter branch, hold procedure | Relay PR (pending) | **pending** (§8 G6) |
+| E1 delayed start: pre-session observer, converter branch, hold procedure | Relay #532 | merged (`1ea5ecc9`); R7 also needs O7's audit policy and O8's reconciliation |
 | Hub v0.10.4: the `c0fe50f0` candidate loader refuses every real binding | §8 G0; fixed by #525, released as v0.10.4, pinned by ailab #1789 | **live** since 2026-11-16 10:08Z (`…@sha256:d1482bc1…57a7`, schema 79; ailab #1789 comment 125493) |
 | Ceremony tools and driver fixes (G1-G5): signer, `commandSha256`, `subject.json`, `submittedPod`, the matrix's installed-bundle check, fraction-safe parsing | §8; Relay #523, #528, #529, #530 | merged; `submittedPod` by reconstruction needs O7 |
 | `deployment.json` and `subject.json` composed and frozen (§3.0 step 7) | this runbook | after the v0.10.4 rollout |
@@ -355,8 +355,9 @@ The config (`kind: relay-candidate-submitted-pod-reconstruction`) pins the run's
 `session` files and the installed bundle's `30-rendered-contracts.json` as `bundleContracts`. The tool
 varies only `activeDeadlineSeconds` and keeps the Pod whose digest equals the session permit's
 hub-signed `journalAdmission.podDigest`, so a match is the body the agent posted
-(`main:scripts/qualification/candidate-submitted-pod.ts:1-35`); anything else is refused. R7 has no
-session, so it needs the create's API audit event instead (§6 R7).
+(`main:scripts/qualification/candidate-submitted-pod.ts:1-40`); anything else is refused. R7 has no
+session: there the same tool takes `journalAdmission` (the journal's `admitted` entry) in place of
+`session`, and R7 also needs the create's API audit event for the Pod UID (§6 R7).
 
 ### 3.9 Drivers
 
@@ -368,7 +369,7 @@ never from `t0` estimates:
 
 | Rule | Source |
 | --- | --- |
-| Every report must **start** in `[session.notBefore, T)` to convert | `main:scripts/qualification/researcher-runtime-v2-observations.ts:76-95`; `researcher-pool-v2-observations.ts:1004-1007` |
+| Every report must **start** in `[session.notBefore, T)` to convert | `main:scripts/qualification/researcher-runtime-v2-observations.ts:87-105`; `researcher-pool-v2-observations.ts:1004-1007` |
 | Drivers using the acceptance config refuse once the session or run has expired, **including cleanup settlement and #519** | `main:packages/worker-runtime/acceptance.ts:151-178`; `main:scripts/qualification/worker-cleanup-settlement.ts:117` |
 | Partition and lease drills: at least 30 s before `T` at start and at the cut; wall/monotonic drift ≤ 1 s | `main:scripts/qualification/researcher-hub-partition-observation.ts:695,840` |
 | Lease expiry needs exit 71 before `T`: cut no later than `T − L − 30 s` | `main:scripts/qualification/researcher-lease-expiry-observation.md`; §6 R3 |
@@ -439,7 +440,7 @@ Each intended row must come out `observed`. The same two commands convert every 
 
 The #519 defaultCommunication reports are not V2 rows: they go to their own independent review for
 `ReleaseApproval.defaultCommunication` (`main:docs/qualification/default-communication-observation.md`).
-R7's delayed-start report converts through E1's runtime-converter branch (§8 G6). **Do not sign the next
+R7's delayed-start report converts through the runtime converter's delayed-start branch (Relay #532). **Do not sign the next
 run until this run's rows convert**, and package its evidence (§5.5).
 
 ## 4. Timing budget and the E6 rehearsal
@@ -580,7 +581,7 @@ Must be the campaign's first candidate launch.
 | 6 | Remove, journal slot settled (§3.10); no #13 here | after the capture |
 
 Go/no-go: harness exit 72 at `T`. A lease lapse (71) or lease rejection (73) reaching the guard
-first is a non-observed outcome (`main:docs/qualification/worker-runtime-acceptance.md:284-292`), and
+first is a non-observed outcome (`main:docs/qualification/worker-runtime-acceptance.md:290-298`), and
 #8 then needs the reserve.
 
 ### R2: replay, then revocation
@@ -641,10 +642,10 @@ Router request must complete after the cut: land the cut during a local step and
 69,808 for that call; a call still in flight at the exit is charged 930,192 and is the last. Exit 71 or
 72 both count. Cut by `T − 30 s` at the latest (the driver refuses later).
 
-### R7: delayed start (E1, pending)
+### R7: delayed start (E1, Relay #532)
 
-Signed: L 90, prompt never sent, 0 requests. The interface below follows the open E1 PR; re-check it
-when E1 merges (§8 G6).
+Signed: L 90, prompt never sent, 0 requests. The full procedure, inputs and rehearsal are
+`main:docs/qualification/researcher-delayed-start-observation.md`; in summary:
 
 - **Hold.** Cordon `relay-worker-1` before enabling the agent, so the created Pod stays Pending and
   unscheduled. Uncordon at `T + 5 s` (never before `T + 1 s`).
@@ -656,8 +657,8 @@ when E1 merges (§8 G6).
   - a read at or after `T` that still finds no node;
   - after the release, the same UID's harness exiting 72 with an `absolute-expiry` guard record and no
     `started` record.
-- **Converter.** `sessionDigest` and `journalProvenanceDigest` are null, with `sessionAuthority` and
-  `journalBinding` under `unmeasured` (`rel:packages/worker-runtime/measurement-subject.ts:221-225`).
+- **Converter.** `sessionDigest` and `journalProvenanceDigest` are null, with `sessionAuthority`,
+  `journalBinding` and the other fixed facets under `unmeasured` (`rel:packages/worker-runtime/measurement-subject.ts:221-225`).
 - **Afterwards.** The launch ends `candidate-session-unsettled`. The hub's create operation stays
   `unknown` and keeps the pool's single execution slot, and `rel:` has no settle path, so R6's create
   fails ("No free execution slot") until a reviewed hub reconciliation releases it (O8). Delete the held
@@ -728,8 +729,8 @@ before the bundle (§3.5), settled in the E6 rehearsal.
 - **G5, fraction-safe parsing in drivers.** Closed:
   - both converters read `subject.json` through `main:scripts/qualification/runtime-v2-subject.ts` (Relay #523);
   - the admission drivers read the policy definition with `parseOperatorJson` (Relay #529).
-- **G6, delayed start (E1).** The Relay PR is pending. R7 needs the API audit policy (O7) and leaves
-  R6's slot blocked (O8).
+- **G6, delayed start (E1).** Closed by Relay #532 (`1ea5ecc9`). R7 still needs the API audit policy
+  (O7, its own owner-held ailab PR) and leaves R6's slot blocked until the reviewed reconciliation (O8).
 
 **UNVERIFIED:**
 
