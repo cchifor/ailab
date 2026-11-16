@@ -770,3 +770,14 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
   spills to the VM's own disk instead of OOM-killing. Verify on a VM: `free -h` shows ~12 GiB+ and an
   8 GiB swap; on the host `qm config <vmid> | grep -E 'memory|balloon'` shows `memory: 24576` +
   `balloon: 12288`. To re-assert: `tofu apply` (floor) + `just runners` (swap).
+  (The module default is now 10240; see `runner_memory_floating_mib`.)
+- **Stack lanes time out / `du` crawls / swap-in on a runner whose host sits at ~80% RAM (2026-11-16):**
+  on such a host pvestatd never inflates a runner above its floor, so the floor IS the working size.
+  ai-node1's runners sat at 10 GiB all day while node2's floated to 12-13.5 and node3's to 24, and a
+  heavy job (workbricks' full profile, ~20 containers) lost its file cache and thrashed the host's one
+  NVMe (ci-runner-9: 43% full IO pressure; node1 IO stall ~10x node3's). Check: `free -m` + `vmstat 1 5`
+  (`si`, `bi`) + `/proc/pressure/io` in the guest, `/proc/pressure/io` on the host, and per-guest
+  `pve_memory_usage_bytes` over a day. Fix: a per-runner floor in `runner_nodes[*].memory_floating_mib`
+  (ci-runner-4/-9: 14336). Apply it live first, since `qm set --balloon` alone does not inflate a
+  running guest at the 80% line: `qm set <vmid> --balloon 14336` then `echo 'balloon 14336' | qm monitor
+  <vmid>`, then `sudo swapoff -a && sudo swapon -a` in the guest. `tofu plan` must then show No changes.

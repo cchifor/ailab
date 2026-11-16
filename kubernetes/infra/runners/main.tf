@@ -48,9 +48,11 @@ resource "proxmox_virtual_environment_vm" "runner" {
   # so idle runners return RAM to the host. Independent of the runner service's systemd MemoryMax cap.
   # The floor is held at 12 GiB (not the bpg default 1 GiB) because host RAM pressure was ballooning
   # the guests down to 1-2 GiB and OOM-killing CI jobs — see cchifor/platform#620 + variables.tf.
+  # Per-runner floor override (runner_nodes[*].memory_floating_mib) for runners on a host that sits at
+  # pvestatd's ~80% line, where the floor IS the working size; see variables.tf.
   memory {
     dedicated = var.runner_memory_mib
-    floating  = var.runner_memory_floating_mib
+    floating  = coalesce(each.value.memory_floating_mib, var.runner_memory_floating_mib)
   }
 
   scsi_hardware = "virtio-scsi-single"
@@ -105,5 +107,10 @@ resource "proxmox_virtual_environment_vm" "runner" {
     # cache. Ignoring it is the same reasoning that already applies to `initialization`: both are
     # first-boot-only inputs. Added 2026-09-07 while adopting ci-runner-6..10 (4106-4110).
     ignore_changes = [initialization, agent, disk[0].import_from]
+    # PVE requires balloon floor <= memory ceiling; fail at plan, naming the runner.
+    precondition {
+      condition     = coalesce(each.value.memory_floating_mib, var.runner_memory_floating_mib) <= var.runner_memory_mib
+      error_message = "runner_nodes[\"${each.key}\"]: effective balloon floor exceeds runner_memory_mib."
+    }
   }
 }
