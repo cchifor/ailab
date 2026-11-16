@@ -72,7 +72,7 @@ checkout. A change voids every row already measured (`rel:packages/worker-runtim
 | Journal service re-render | `kubernetes/optional/relay-candidate-journal/render.py service` + `kubectl` | `relay-candidate-journal` objects (optional bundle, in no Flux inventory) | no; operator-reviewed render |
 | Budget scope | `rel:scripts/candidate-budget-scopes.ts` | ledger DB | no |
 | **Hub candidate files** | H7 component | relay Deployment env, ConfigMap, Secret | **yes, every run**: `_SHA256` and the document pin bytes that exist only after signing |
-| **Agent candidate values** | the agent tree: runtime `config.json` `candidateRuntime` (`bindingSha256`, `trustSha256`, `trustConfigMap`, `pinConfigMap`) and `deployment.yaml`'s candidate volume (the run's control ConfigMap) | agent ConfigMap and Deployment | **yes, every run**, but applied in place first: the agent must stay disabled through the create (§3.5), so the commit may merge after the run |
+| **Agent candidate values** | the agent tree: runtime `config.json` `candidateRuntime` (`trustSha256`, `trustConfigMap`, `pinConfigMap`; `bindingSha256` stays byte-identical, the binding is frozen) and `deployment.yaml`'s candidate volume (the run's control ConfigMap) | agent ConfigMap and Deployment | **yes, every run**, applied in place first (the agent must stay disabled through the create, §3.5) and committed in the same per-run PR (S-A) or afterwards (S-B); `relay-researcher-agent` stays suspended until §3.10 step 8 |
 | Candidate ConfigMaps and holder Secret | `kubectl` (`rel:deploy/infrastructure-agent/values.yaml`: "All inputs are operator-installed") | control namespace, slot | no |
 | Grant, create, stop, remove | hub API | hub DB | no |
 | Per-launch admission bundle | `rel:scripts/prepare-candidate-policy.ts` + `kubectl`, in place | VAPs, gate, quota | no; in-place ceremony under Flux suspension |
@@ -130,8 +130,17 @@ release commit `c0fe50f0` on a trusted Linux operator host (procfs required), as
    node --import tsx ids.mts <tenant> <approver user UUID> <approve op> <workerId> <create op>
    ```
 
-3. **Prompt and hashes.** Exact bytes, no trailing newline: `printf '%s' '<text>' > P.txt; sha256sum P.txt`
-   gives `promptSha256` (the holder hashes the UTF-8 text, `rel:holder/src/worker_candidate.rs:434-441`).
+3. **Prompt and hashes.** Exact bytes, no trailing newline. Write the text with a quoted heredoc (safe
+   for any quote), drop the final newline, check the byte count, then hash; the holder hashes the UTF-8
+   text as sent (`rel:holder/src/worker_candidate.rs:434-441`):
+
+   ```sh
+   cat > P.raw <<'PROMPT'
+   <exact prompt text>
+   PROMPT
+   head -c -1 P.raw > P.txt; wc -c P.txt; tail -c 1 P.txt | od -c; sha256sum P.txt   # = promptSha256
+   ```
+
    `commandSha256` is SHA-256 of canonical `{executable, argv, cwd}` of the final native command, which
    contains `sessionId` (`rel:holder/src/worker_candidate.rs:527-545`, `holder/src/release.rs:105-134`).
    **No operator tool computes it** (§8, G4). A wrong hash refuses native start.
@@ -171,7 +180,7 @@ Object.assign(doc.payload, { issuedAt: now, notBefore: now, expiresAt: now + 7_2
 delete doc.signature;
 doc.signature = sign(null, candidateTranscript(doc), createPrivateKey(readFileSync(0))).toString("base64url");
 const raw = JSON.stringify(doc);
-verifyCandidateRun(raw, new Map([[doc.issuerKeyId, issuerPublic]]));
+verifyCandidateRun(raw, new Map([[doc.issuerKeyId, issuerPublic]])); // throws on every refusal
 process.stdout.write(raw);
 EOF
 <issuer PEM from the secret manager> | node --import tsx sign-candidate-run.mts unsigned.json <issuer public key> > run.json
@@ -179,7 +188,9 @@ sha256sum run.json
 node --import tsx scripts/candidate-worker-authority.ts verify /operator/<run>/journal-operator.json <config sha256>
 ```
 
-`verify` prints `runDigest` and `expiresAt`; record both with `t_s`.
+`verifyCandidateRun` returns only on success and throws `candidate-document-invalid` on every refusal
+(`rel:packages/worker-runtime/candidate-signatures.ts:14-16,191-205`), so the script prints nothing and
+exits non-zero for a bad run. `verify` prints `runDigest` and `expiresAt`; record both with `t_s`.
 
 ### 3.2 Journal: re-render with exactly this run.json, install, restart
 
@@ -242,8 +253,8 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
    mutations (`rel:docs/infrastructure-candidate-policy.md`, "Admission boundaries").
 3. Apply the agent values in place, still at 0 replicas. They are runtime fields, not Helm values
    (`rel:packages/infrastructure-agent/config.ts:113-125`, strict): `config.json`'s
-   `candidateRuntime.bindingSha256`, `trustSha256`, `trustConfigMap`, `pinConfigMap` (the file paths and
-   `holderSecret` stay), and `deployment.yaml`'s candidate volume naming the run's control ConfigMap. Render
+   `candidateRuntime.trustSha256`, `trustConfigMap`, `pinConfigMap` (the file paths, `holderSecret` and
+   `bindingSha256` stay; assert `bindingSha256` equals the previous run's, since the binding is frozen), and `deployment.yaml`'s candidate volume naming the run's control ConfigMap. Render
    `kubectl kustomize kubernetes/apps/relay-researcher/agent` from the per-run branch, set the
    Deployment's `spec.replicas` to 0 in that render, apply it. The same values reach git through the
    per-run PR; `relay-researcher-agent` stays suspended until §3.10 step 8.
@@ -299,7 +310,9 @@ Running with both containers and zero restarts; `GET /api/workers/<workerId>` sh
 `session-observed`; `SELECT permit, binding FROM worker_candidate_sessions WHERE (permit->>'workerId')='<workerId>';`
 has a non-null `binding`. The agent retries the session exchange for only 20 s, then reports
 `candidate-session-unsettled` (`rel:packages/infrastructure-agent/executor.ts:1062,1103`): an
-unknown slot (§3.10). **create → Pod Running must stay well under 5 min; abort the run past 5 min.**
+unknown slot (§3.10). **create → Pod Running must stay well under 5 min; abort the run past 5 min**
+(a chosen campaign limit from rev 2's E6, not a code timeout: it keeps at least 10 of the 15 minutes
+for the drivers).
 
 Driver inputs come from here: `session` = that row's `permit`, `bindingProvenance` = its `binding`,
 the journal proof `{request, reply}` the coordinator stores (`rel:server/workers/candidate/coordinator.ts:279-282`);
@@ -392,7 +405,7 @@ recovery reconciliation) only need to finish by `cleanupDeadline` for the conver
 | 3.4 PR (opened after 3.1) merged, Flux, hub rollout (backup ≤ 1800 s), readback | 30 min | `t_s + 60 min`, else abort before the grant |
 | 3.5 agent objects and in-place values | 5 min, alongside 3.4 | |
 | 3.6 grant, create | 2 min | code: `t0 + 900 s ≤ expiresAt`; chosen margin: create ≤ `t_s + 95 min` |
-| 3.7-3.8 bundle, enable, Pod Running, session | ≤ 5 min after `t0` | 5 min, else abort |
+| 3.7-3.8 bundle, enable, Pod Running, session | ≤ 5 min after `t0` | chosen (rev 2 E6): 5 min, else abort |
 | drivers | to `T` (+60 s capture) | `T ≤ t0 + 900 s` |
 | 3.10 Pod removed, slot settled | 10 min | chosen: before `expiresAt`; code allows later |
 
@@ -541,7 +554,10 @@ Signed: L 90, P5 with a new marker. 2-4 requests.
 ### R3 (+R4): storage, then one lease-expiry drill
 
 Signed: L 60, multi-step prompt with local tools only (for example sequential `sleep 10` steps).
-3-5 requests; the cut-off call is charged 930,192 and is the last.
+3-5 requests. A hub-only cut leaves the Router rule in place, so calls keep flowing until the worker
+exits: land the cut during a local step, keep `consumedTokens` ≤ 69,808 minus one turn so the next
+call after the cut is admitted and completes (`routerTraffic: required`), and accept that the call in
+flight at exit 71 is charged 930,192 and is the run's last.
 
 | Step | Driver / action | Latest start, stop/go |
 | --- | --- | --- |
@@ -555,8 +571,9 @@ Signed: L 60, multi-step prompt with local tools only (for example sequential `s
 
 Signed: as R3. Steps 1-2 as R3, then send the prompt and run
 `researcher-hub-partition-observation.ts <cfg> <sha> <out>` with `routerTraffic: required`: at least one
-Router request must complete after the cut, so leave headroom under 69,808 for it. Exit 71 or 72 both
-count. Cut by `T − 30 s` at the latest (the driver refuses later).
+Router request must complete after the cut: land the cut during a local step and leave headroom under
+69,808 for that call; a call still in flight at the exit is charged 930,192 and is the last. Exit 71 or
+72 both count. Cut by `T − 30 s` at the latest (the driver refuses later).
 
 ### R7: delayed start (PENDING E1)
 
