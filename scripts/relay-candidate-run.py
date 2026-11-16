@@ -47,7 +47,9 @@ refuses (`agent-...`): no candidate run can launch without those values.
       run, and HEAD must equal that output in every generated file, as regular files, and change
       nothing else. The first run's PR (base run/ still the
       placeholder) is H7's inclusion PR: its generated values are checked for self-consistency and
-      every other changed path is listed under reviewByHand.
+      every other changed path is listed under reviewByHand. The gate refuses a branch that does
+      not contain the base (base-not-in-branch: merge origin/main into it first) and an expired run
+      (run-expired), and reports hubReadbackDeadlinePassed past t_s + 60 min.
 
 Deterministic: the same inputs give the same bytes. Offline: no cluster, hub, Router or journal
 access, and it never reads a private key. The run's issuer signature is verified by Relay's composer
@@ -57,14 +59,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import io
 import json
 import os
 import re
 import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -614,6 +614,10 @@ def operator_objects(v: dict, journal_ca: bytes) -> dict:
     }
 
 
+def iso_ms(text: str) -> int:
+    return round(datetime.strptime(text, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+
 def iso(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
@@ -708,19 +712,17 @@ def git(repo: Path, *args: str) -> bytes:
 
 
 def extract(repo: Path, rev: str, into: Path) -> None:
-    """The generator's inputs at `rev`, as regular files (a symlink or other entry is refused)."""
-    present = [str(p) for p in GENERATOR_INPUTS if git(repo, "ls-tree", "--name-only", rev, "--", str(p)).strip()]
-    if not present:
-        return
-    with tarfile.open(fileobj=io.BytesIO(git(repo, "archive", "--format=tar", rev, "--", *present))) as tar:
-        for member in tar.getmembers():
-            if (not (member.isfile() or member.isdir()) or member.name.startswith("/")
-                    or ".." in Path(member.name).parts):
-                refuse("git-entry")
-        if hasattr(tarfile, "data_filter"):
-            tar.extractall(into, filter="data")
-        else:
-            tar.extractall(into)
+    """The generator's inputs at `rev`, read from the tree object itself (never `git archive`, which
+    applies export attributes), as files; a symlink, submodule or other entry is refused."""
+    listing = git(repo, "ls-tree", "-r", "-z", rev, "--", *map(str, GENERATOR_INPUTS)).decode()
+    for entry in filter(None, listing.split("\0")):
+        meta, path = entry.split("\t", 1)
+        mode, kind, obj = meta.split()
+        if kind != "blob" or mode not in ("100644", "100755") or path.startswith("/") or ".." in Path(path).parts:
+            refuse("git-entry")
+        target = into / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(git(repo, "cat-file", "blob", obj))
 
 
 def blob(repo: Path, rev: str, path: str) -> bytes | None:
@@ -734,11 +736,18 @@ def blob(repo: Path, rev: str, path: str) -> bytes | None:
     return git(repo, "cat-file", "blob", obj)
 
 
-def check_against_base(repo: Path, base: str, expected_digest: str | None = None) -> tuple[dict, list]:
+def check_against_base(repo: Path, base: str, expected_digest: str | None = None,
+                       now_ms: int | None = None) -> tuple[dict, list]:
     """The S-A merge gate: the committed HEAD against `base`. Uncommitted changes are ignored: what
     merges is HEAD."""
     for rev in (base, "HEAD"):
         git(repo, "rev-parse", "--verify", "--quiet", rev + "^{commit}")
+    # The generator runs against the base tip (a hub image bump there must count), so the branch must
+    # contain it; otherwise every change on the base would show as "not generated".
+    if subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", base, "HEAD"],
+                      capture_output=True).returncode:
+        refuse("base-not-in-branch")  # merge the base (origin/main) into the branch, then re-run
+    now = int(time.time() * 1000) if now_ms is None else now_ms
     changed = {p for p in git(repo, "diff", "--name-only", "-z", base, "HEAD", "--").decode().split("\0") if p}
     run_files = {str(RUN_DIR / name) for name in ("document.json", "kustomization.yaml", "deployment.yaml")}
     with tempfile.TemporaryDirectory() as tmp:
@@ -756,7 +765,10 @@ def check_against_base(repo: Path, base: str, expected_digest: str | None = None
             # H7's inclusion PR (the first run): its run-bound values are checked for self-consistency;
             # every other change, including the rest of the agent files, is reviewed by hand.
             result, diff = check(head_tree, expected_digest)
-            result.update(base=base, firstRun=True, reviewByHand=sorted(changed - run_files))
+            if now >= iso_ms(result["expiresAt"]):
+                refuse("run-expired")
+            result.update(base=base, firstRun=True, reviewByHand=sorted(changed - run_files),
+                          hubReadbackDeadlinePassed=now > iso_ms(result["issuedAt"]) + HUB_READBACK_DEADLINE_MS)
             return result, diff
         document = blob(repo, "HEAD", str(RUN_DIR / "document.json"))
         run_text = strict_json(utf8(document, "document-json"), "document-json").get("run")
@@ -764,13 +776,16 @@ def check_against_base(repo: Path, base: str, expected_digest: str | None = None
             refuse("document-schema")
         v = validate(base_tree, run_text, document)
         expected = generated_files(base_tree, v)
+    if now >= v["payload"]["expiresAt"]:
+        refuse("run-expired")  # merging it would only roll the hub to log worker_candidate_unavailable
     diff = [f"not the generator output for the base: {path}" for path, data in expected.items()
             if blob(repo, "HEAD", str(path)) != data]
     diff += sorted(f"not generated: {p}" for p in changed - {str(path) for path in expected})
     if expected_digest and expected_digest != v["runDigest"]:
         diff.append(f"run digest {v['runDigest']} is not the expected {expected_digest}")
     result = summary(v, expected)
-    result.update(kind="ailab.relay-candidate-run-check", base=base, firstRun=False)
+    result.update(kind="ailab.relay-candidate-run-check", base=base, firstRun=False,
+                  hubReadbackDeadlinePassed=now > v["payload"]["issuedAt"] + HUB_READBACK_DEADLINE_MS)
     return result, diff
 
 

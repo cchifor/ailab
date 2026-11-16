@@ -516,6 +516,8 @@ class Generator(unittest.TestCase):
         commit("R1")
         # The first run is H7's inclusion PR: run-bound values self-consistent, the rest by hand,
         # including any other change to the partly generated agent files.
+        with self.assertRaises(gen.Refusal):
+            gen.check_against_base(self.root, "HEAD~1", now_ms=self.now + 7_200_000)
         result, diff = gen.check_against_base(self.root, "HEAD~1", first["runDigest"])
         self.assertEqual(diff, [])
         self.assertEqual((result["firstRun"], result["reviewByHand"]),
@@ -526,10 +528,30 @@ class Generator(unittest.TestCase):
         def next_run(run, _document):
             run["payload"]["runId"] = "3d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f6a"
         second = self.generate(campaign(self.root, self.now, next_run), tag="s")
+        # Export attributes never change what the gate reads: it reads tree objects, not git archive.
+        (self.root / ".gitattributes").write_text("kubernetes/** export-ignore\ndocs/** export-ignore\n")
         commit("R2")
         result, diff = gen.check_against_base(self.root, "r1", second["runDigest"])
+        self.assertEqual(diff, ["not generated: .gitattributes"])
+        (self.root / ".gitattributes").unlink()
+        commit("R2 without attributes")
+        result, diff = gen.check_against_base(self.root, "r1", second["runDigest"], now_ms=self.now)
         self.assertEqual(diff, [])
-        self.assertIs(result["firstRun"], False)
+        self.assertEqual((result["firstRun"], result["hubReadbackDeadlinePassed"]), (False, False))
+        self.assertIs(gen.check_against_base(self.root, "r1", now_ms=self.now + 3_600_001)[0]
+                      ["hubReadbackDeadlinePassed"], True)
+        # An expired run never passes the gate; plain check stays time-free (CI after expiry).
+        with self.assertRaises(gen.Refusal) as caught:
+            gen.check_against_base(self.root, "r1", now_ms=self.now + 7_200_000)
+        self.assertEqual(caught.exception.code, "run-expired")
+        self.assertEqual(gen.check(self.root)[1], [])
+        # A base that moved on since the branch was cut: merge it first.
+        moved = subprocess.run(["git", "-C", str(self.root), "-c", "user.name=test",
+                                "-c", "user.email=test@example.invalid", "commit-tree", "r1^{tree}", "-p", "r1",
+                                "-m", "main moved"], check=True, capture_output=True, text=True).stdout.strip()
+        with self.assertRaises(gen.Refusal) as caught:
+            gen.check_against_base(self.root, moved, second["runDigest"])
+        self.assertEqual(caught.exception.code, "base-not-in-branch")
         self.assertEqual(gen.check_against_base(self.root, "r1", first["runDigest"])[1],
                          [f"run digest {second['runDigest']} is not the expected {first['runDigest']}"])
 

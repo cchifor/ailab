@@ -132,10 +132,17 @@ operator run it on the PR branch: it runs the generator on the base revision's f
 committed run and requires the branch to equal that output and to change nothing else:
 
 ```sh
-git fetch origin main
+git fetch origin main && git merge --no-edit origin/main     # the branch must contain the base tip
 python3 scripts/relay-candidate-run.py check --base origin/main --run-digest <runDigest recorded at t_s>
-# exit 0, "equal": true, "firstRun": false
+# exit 0, "equal": true, "firstRun": false, "hubReadbackDeadlinePassed": false
 ```
+
+It reads both revisions from git's tree objects (uncommitted changes never count) and refuses with
+`base-not-in-branch` when main has moved on since the branch was cut (merge it and re-run; the run's
+values are checked against the new base, so a hub image bump there is caught), and with `run-expired`
+for a run past its `expiresAt` (merging it would only roll the hub to log
+`worker_candidate_unavailable`). `hubReadbackDeadlinePassed: true` means `t_s + 60 min` is gone:
+abort the run before the grant instead of merging.
 
 R1's PR is H7's inclusion PR: its base still has the placeholder `run/`, so the check reports
 `"firstRun": true`, checks the generated values for self-consistency and lists every other changed
