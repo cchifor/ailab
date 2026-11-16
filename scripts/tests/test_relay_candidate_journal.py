@@ -235,23 +235,54 @@ class Activation(unittest.TestCase):
         cluster = {name for (path, name) in flux if path.startswith(CLUSTER.relative_to(ROOT).as_posix() + '/')}
         self.assertTrue(deps <= cluster, deps)
 
-    def test_only_the_overlay_reaches_the_bundle_and_nothing_reaches_initialization(self):
-        # Flux paths: exactly the overlay; none inside the bundle (its initialize/ above all).
+    def test_only_the_overlay_reaches_the_bundle_and_nothing_reaches_the_overlay(self):
+        # Flux paths, resolved: exactly ours names the overlay, none points into the bundle (its
+        # initialize/ above all), and none is an ancestor that Flux would expand without a
+        # kustomization.yaml (that generates one over every manifest below it, ours included).
         paths = {key: (ROOT / d['spec'].get('path', '')).resolve() for key, d in flux_kustomizations().items()}
         self.assertEqual([key for key, target in paths.items() if inside(target, OVERLAY)],
                          [('kubernetes/apps/clusters/ai/relay-candidate-journal.yaml', 'relay-candidate-journal')])
         self.assertEqual([key for key, target in paths.items() if inside(target, BUNDLE)], [])
-        # Kustomize entries, resolved: only the overlay names the bundle, and only its root directory.
+        for key, target in paths.items():
+            if OVERLAY.resolve() in target.parents or BUNDLE.resolve() in target.parents:
+                continue
+            if target in OVERLAY.resolve().parents or target in BUNDLE.resolve().parents:
+                self.assertTrue((target / 'kustomization.yaml').is_file(), key)
+        # Kustomize entries, resolved, from every kustomization under kubernetes/ (each edge, so any
+        # transitive path too): only the overlay names the bundle, only its root directory, and
+        # nothing names the overlay, which only its own Flux Kustomization reconciles.
         reached = []
-        for path in (ROOT / 'kubernetes').rglob('kustomization.yaml'):
+        for path in [*(ROOT / 'kubernetes').rglob('kustomization.yaml'), *(ROOT / 'kubernetes').rglob('kustomization.yml'),
+                     *(ROOT / 'kubernetes').rglob('Kustomization')]:
             k = yaml.safe_load(path.read_text(encoding='utf-8')) or {}
-            for entry in k.get('resources', []) + k.get('components', []):
+            here = path.parent.resolve()
+            for entry in k.get('resources', []) + k.get('components', []) + k.get('bases', []):
                 target = (path.parent / entry).resolve()
-                if inside(target, BUNDLE) and not inside(path.parent.resolve(), BUNDLE):
+                if (inside(target, BUNDLE) and not inside(here, BUNDLE)) or (inside(target, OVERLAY) and not inside(here, OVERLAY)):
                     reached.append((path.parent.relative_to(ROOT).as_posix(), target.relative_to(ROOT).as_posix()))
         self.assertEqual(reached, [(OVERLAY.relative_to(ROOT).as_posix(), BUNDLE.relative_to(ROOT).as_posix())])
+
+    def test_flux_inventory_is_exactly_the_stopped_base_and_the_pinned_service(self):
+        # Every object Flux can create here, from the base's own resource files, its one generator and
+        # the overlay's Service: no Job, Deployment, Secret or workload beyond the StatefulSet at 0/1.
         base = yaml.safe_load((BUNDLE / 'kustomization.yaml').read_text())
-        self.assertFalse(any('initialize' in entry for entry in base['resources']), base['resources'])
+        self.assertEqual(set(base), {'apiVersion', 'kind', 'resources', 'configMapGenerator', 'labels'})
+        self.assertTrue(all((BUNDLE / entry).is_file() for entry in base['resources']), base['resources'])
+        self.assertEqual(base['configMapGenerator'], [{'name': render.NAME + '-postgres', 'namespace': render.DB_NS,
+                                                       'files': ['start.sh', 'pg_hba.conf']}])
+        inventory = sorted((d['kind'], d['metadata'].get('namespace', ''), d['metadata']['name'])
+                           for entry in base['resources'] for d in yaml_docs(BUNDLE / entry))
+        inventory += [(d['kind'], d['metadata']['namespace'], d['metadata']['name']) for d in yaml_docs(OVERLAY / 'service.yaml')]
+        db, svc = render.DB_NS, render.SERVICE_NS
+        self.assertEqual(sorted(inventory), sorted([
+            ('Namespace', '', db), ('Namespace', '', svc),
+            ('PersistentVolumeClaim', db, render.NAME + '-postgres-data'),
+            ('Certificate', db, render.NAME + '-postgres-tls'), ('Certificate', svc, render.NAME + '-tls'),
+            ('Service', db, render.NAME + '-postgres'), ('StatefulSet', db, render.NAME + '-postgres'),
+            ('NetworkPolicy', db, 'default-deny'), ('NetworkPolicy', svc, 'default-deny'),
+            ('NetworkPolicy', db, 'postgres-clients'), ('NetworkPolicy', db, 'operator-client'),
+            ('NetworkPolicy', db, 'postgres-operator'),
+            ('Service', svc, render.NAME)]))
 
     def test_overlay_is_the_base_the_replica_count_and_the_pinned_service(self):
         self.assertEqual(sorted(p.name for p in OVERLAY.iterdir()), ['kustomization.yaml', 'replicas.yaml', 'service.yaml'])
@@ -266,9 +297,6 @@ class Activation(unittest.TestCase):
         self.assertIn(patch['spec']['replicas'], (0, 1))
         self.assertIs(type(patch['spec']['replicas']), int)
         (service,) = yaml_docs(OVERLAY / 'service.yaml')
-        for path in OVERLAY.iterdir():
-            for d in yaml_docs(path):
-                self.assertNotIn(d.get('kind'), ('Job', 'Deployment', 'Secret', 'List', 'ConfigMap'), path)
         self.assertEqual(service['kind'], 'Service')
 
     def test_flux_service_is_exactly_the_rendered_pinned_service(self):

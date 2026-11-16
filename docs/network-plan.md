@@ -198,9 +198,11 @@ comment 123028, approval in comment 123063), word for word: "candidate-only alia
 ClusterIP-pinning exception for 10.96.0.40-42". Owner: the ailab operator, who keeps the three
 addresses free until their Services exist, repeats the collision check at apply time and fails closed
 if a Service gets a different ClusterIP (step Q2 of `docs/runbooks/relay-researcher-installation.md`),
-and releases them. Release, at the trigger in the table: delete the Service, then remove its row here
-in the same PR as its source. Each address goes on its own trigger: releasing `.42` leaves `.40` and
-`.41` in place.
+and releases them. Release, at the trigger in the table: one PR removes the Service's source and its
+row here. All three Services are Flux-owned (`prune: true`), so Flux deletes the Service once that PR
+merges; deleting it by hand earlier releases nothing, because Flux creates it again until its source is
+gone. The address is free once `kubectl get svc` no longer lists it. Each address goes on its own
+trigger: releasing `.42` leaves `.40` and `.41` in place.
 
 ## Dedicated storage fabric — `10.55.0.0/24`
 

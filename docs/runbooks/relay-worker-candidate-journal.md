@@ -100,10 +100,11 @@ every Secret stay operator actions with no manifest change:
 The activation PR replaced the base test's "no kustomization outside the bundle
 references it" with "exactly the activation overlay does" and added the
 `Activation` gates in `scripts/tests/test_relay_candidate_journal.py` (the Flux
-path and `dependsOn`, no Flux path or kustomization reaching `initialize/`, the
-overlay's exact content, replicas 0 or 1, the Service equal to the render's and
-named as the network plan's source); `scripts/tests/test_manifest_paths.py` lists
-the overlay path.
+path and `dependsOn`; no other Flux path or kustomization reaching the bundle, its
+`initialize/` or the overlay; the exact inventory Flux can create, with no Job,
+Deployment or Secret; the overlay's exact content; replicas 0 or 1; the Service
+equal to the render's and named as the network plan's source);
+`scripts/tests/test_manifest_paths.py` lists the overlay path.
 
 ## Reviewed inputs and initialization
 
