@@ -12,9 +12,8 @@ kind: Component
 # through the authenticated admin API (POST /admin/v1/plugins/worker-budget-authority
 # {"enabled":true}) only after the ceremony, qualification and authority ready=true (runbook step 9).
 #
-# NOT INCLUDED by kubernetes/apps/apps/llm-router yet. The operator's inclusion PR replaces the
-# deployment-digest placeholder in deployment.yaml with the 64-hex digest of the reviewed Relay router
-# deployment record (the same value as readers.deployment_digest); scripts/tests/
-# test_relay_budget_authority_activation.py refuses the inclusion while the placeholder is there.
+# INCLUDED by kubernetes/apps/apps/llm-router since budget runbook step 8, in the PR that also set the
+# reviewed deployment digest in deployment.yaml (scripts/tests/test_relay_budget_authority_activation.py
+# refuses an inclusion with the placeholder, and a real digest without the inclusion).
 patches:
 - path: deployment.yaml

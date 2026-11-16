@@ -11,10 +11,15 @@ import unittest
 import uuid
 
 import yaml
-from test_relay_notifications import docker, KUSTOMIZE, KUBECONFORM, named
+from test_relay_notifications import docker, KUSTOMIZE, KUBECONFORM, named, relay_overlay_without
 
 ROOT = Path(__file__).resolve().parents[3]
 COMPONENT = ROOT / 'kubernetes/components/relay-control-monitoring'
+# The monitoring components this fixture layers below (the wrapper is built from this list). Every
+# render starts from the live Relay overlay without them (test_relay_notifications.relay_overlay_without),
+# so each is layered once even where hub upgrade step H6 includes it live; a component that adds
+# resources cannot be layered twice.
+LAYERED = ['relay-control-monitoring', 'relay-worker-monitoring', 'relay-candidate-monitoring']
 
 
 class Monitoring(unittest.TestCase):
@@ -29,28 +34,27 @@ class Monitoring(unittest.TestCase):
         wrapper = cls.root / 'render'
         wrapper.mkdir()
         base = ROOT / 'kubernetes/apps/apps/relay'
+        overlay = relay_overlay_without(LAYERED, cls.root)
         cls.base_docs = list(yaml.safe_load_all(docker(
-            'run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
+            'run', '--rm', '-v', f'{ROOT}:/work:ro', *overlay, '-w', '/work', KUSTOMIZE,
             'build', str(base.relative_to(ROOT))).stdout))
         (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump({
             'apiVersion': 'kustomize.config.k8s.io/v1beta1', 'kind': 'Kustomization',
             'resources': [os.path.relpath(base, wrapper)],
-            'components': [os.path.relpath(COMPONENT, wrapper),
-                           os.path.relpath(ROOT / 'kubernetes/components/relay-worker-monitoring', wrapper),
-                           os.path.relpath(ROOT / 'kubernetes/components/relay-candidate-monitoring', wrapper),
+            'components': [*(os.path.relpath(ROOT / 'kubernetes/components' / name, wrapper) for name in LAYERED),
                            os.path.relpath(ROOT / 'kubernetes/components/relay-notifications/relay', wrapper)],
         }))
-        raw = docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
+        raw = docker('run', '--rm', '-v', f'{ROOT}:/work:ro', *overlay, '-w', '/work', KUSTOMIZE,
                      'build', str(wrapper.relative_to(ROOT))).stdout
         cls.docs = list(yaml.safe_load_all(raw))
         configuration = yaml.safe_load((wrapper / 'kustomization.yaml').read_text())
         configuration.setdefault('components', []).append(os.path.relpath(ROOT / 'kubernetes/components/relay-recovery-monitoring', wrapper))
         (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump(configuration))
-        cls.baseline_recovery_docs = list(yaml.safe_load_all(docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
+        cls.baseline_recovery_docs = list(yaml.safe_load_all(docker('run', '--rm', '-v', f'{ROOT}:/work:ro', *overlay, '-w', '/work', KUSTOMIZE,
             'build', str(wrapper.relative_to(ROOT))).stdout))
         configuration['components'].extend(os.path.relpath(ROOT / 'kubernetes/components' / component, wrapper) for component in ['relay-recovery-monitoring-schema43', 'relay-restore-fencing'])
         (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump(configuration))
-        cls.recovery_docs = list(yaml.safe_load_all(docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
+        cls.recovery_docs = list(yaml.safe_load_all(docker('run', '--rm', '-v', f'{ROOT}:/work:ro', *overlay, '-w', '/work', KUSTOMIZE,
             'build', str(wrapper.relative_to(ROOT))).stdout))
         cls.spec = named(cls.docs, 'Deployment', 'relay')['spec']['template']['spec']
         init = next(c for c in cls.spec['initContainers'] if c['name'] == 'metrics-files')

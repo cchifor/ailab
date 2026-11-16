@@ -135,6 +135,45 @@ cluster:
   scheduler:
     extraArgs:
       bind-address: 0.0.0.0
+  # kube-apiserver audit policy (2026-11-16): the Relay researcher campaign's delayed-start run R7,
+  # owner decision O7 (relay#277 comment 125437), docs/runbooks/relay-researcher-r7-audit-policy.md.
+  # - Before this, the effective policy was Talos's default, one rule `level: Metadata`. Config
+  #   contract v1.11.2 generates it into this very field (v1alpha1 APIServerDefaultAuditPolicy). The
+  #   field merges as "replace", so this block is the whole policy, not rules appended to the default.
+  # - Rule 2 is the change. Pod `create` in relay-researcher-1 is logged at RequestResponse, without its
+  #   RequestReceived stage: one event per create, at ResponseComplete (a handler panic is still logged,
+  #   as today). R7's driver (Relay #532) takes the created Pod's UID from that event's
+  #   responseObject.metadata.uid: a held Pod never gets a session, and no other record names the Pod
+  #   the create made. It also records Pod creates of every other run in that slot while it is live:
+  #   Pod bodies carry no secret (the bootstrap Secret is a volume reference).
+  # - Rule 1 pins Secrets, ServiceAccount tokens and TokenReviews to Metadata ahead of any later rule.
+  #   It has the catch-all's level and stages, so it changes nothing today.
+  # - Rule 3 is Talos's default, unchanged: every other request keeps its level and its stages.
+  # - Applying this restarts kube-apiserver on that node only (the static pod's config version moves);
+  #   no reboot, no etcd restart. Roll ONE CP at a time with
+  #   -target='talos_machine_configuration_apply.cp["cpN"]' (the runbook). Remove it after the canary.
+  # - It stays the deprecated v1alpha1 field until the contract migration (P8): under contract
+  #   v1.11.2, a KubeAuditPolicyConfig document conflicts with the generated field and is refused.
+  # scripts/tests/test_talos_apiserver_audit_policy.py pins it.
+  apiServer:
+    auditPolicy:
+      apiVersion: audit.k8s.io/v1
+      kind: Policy
+      rules:
+        - level: Metadata
+          resources:
+            - group: ""
+              resources: ["secrets", "serviceaccounts/token"]
+            - group: authentication.k8s.io
+              resources: ["tokenreviews"]
+        - level: RequestResponse
+          verbs: ["create"]
+          namespaces: ["relay-researcher-1"]
+          resources:
+            - group: ""
+              resources: ["pods"]
+          omitStages: ["RequestReceived"]
+        - level: Metadata
 ---
 # etcd client + peer ports accept only the three control planes (2026-09-27). Talos ingress firewall,
 # default action pinned to ACCEPT just below (so this rule's meaning cannot silently invert if a

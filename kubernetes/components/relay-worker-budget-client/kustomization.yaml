@@ -5,19 +5,15 @@ kind: Component
 # ESO-rendered Secret relay/relay-worker-budget (kubernetes/apps/relay-budget-authority/credentials/)
 # as read-only subPath files and names them in RELAY_WORKER_BUDGET_{DSN,CA,WITNESS}_FILE. Nothing else.
 #
-# NOT INCLUDED by kubernetes/apps/apps/relay yet, and including it alone enables nothing:
-#   * the live Relay release (v0.9.1, a53a3ee8) predates these variables entirely; the first source
-#     that reads them is Relay 0badd1e3, in no release yet;
-#   * a release that has them starts the budget authority only with RELAY_INFRASTRUCTURE_INSTALLATIONS,
-#     a router connection (RELAY_ROUTER_CONNECTIONS_FILE, still refused by
-#     scripts/tests/test_relay_v060_activation_gate.py) and a profile source: the candidate or
-#     ordinary-canary file, or the pinned worker-profile registry, which needs the genuine release
-#     approval and so comes last, each its own reviewed change. Hub upgrade step H4a
-#     (docs/runbooks/relay-researcher-hub-upgrade.md) includes this component alone; budget startup
-#     then stays start_failed until step H7's candidate file;
+# INCLUDED by kubernetes/apps/apps/relay since hub upgrade step H4a
+# (docs/runbooks/relay-researcher-hub-upgrade.md), alone. Including it enables nothing by itself:
+#   * the hub (Relay v0.10.4) reads these variables, but starts the budget authority only with
+#     RELAY_INFRASTRUCTURE_INSTALLATIONS, a router connection (RELAY_ROUTER_CONNECTIONS_FILE, step H6)
+#     and a profile source: the candidate or ordinary-canary file, or the pinned worker-profile
+#     registry, which needs the genuine release approval and so comes last, each its own reviewed
+#     change. Budget startup stays start_failed until step H7's candidate file;
 #   * and even then every allocation is refused until the operator sets
 #     worker_budget.authority.ready=true in the ledger (runbook step 8).
-# A Recreate rollout of Relay (with its pre-migration backup) is the price of including it, so
-# include it together with the Relay release that consumes it.
+# Including or removing it is a Recreate rollout of Relay (with its pre-migration backup).
 patches:
 - path: deployment.yaml

@@ -1,16 +1,16 @@
-# STAGED, NOT APPLIED. Outside kubernetes/apps/clusters/ai, so Flux never reads it. Runbook step I7
-# (docs/runbooks/relay-researcher-installation.md) moves it to
-# kubernetes/apps/clusters/ai/relay-researcher-agent.yaml in its own PR, after the installation stage
-# (whose step-I5 PR already committed the imported pins and generated config.json) is applied and its
-# containment and denial have been read back (step I6).
-# scripts/tests/test_relay_researcher_installation.py refuses the move while config.json or a pin
+# APPLIED since runbook step I7 (docs/runbooks/relay-researcher-installation.md; ailab #1792,
+# 2026-11-16), which moved this file here from kubernetes/apps/relay-researcher/flux/ in its own PR,
+# after the installation stage was applied and its containment and denial were read back (step I6).
+# scripts/tests/test_relay_researcher_installation.py refuses this tree while config.json or a pin
 # still carries a placeholder, or while the installation stage is not included.
 #
 # What applying it creates in relay-infra-control: the agent's ServiceAccount, its Roles (control
 # namespace and the slot) and the kube-system read, its config and trust ConfigMaps, its egress
-# policies, the Deployment (one replica, Recreate) and the PrometheusRule. It needs the two
-# operator-created Secrets relay-infrastructure-agent-key and relay-infrastructure-agent-enrollment
-# first; without them the Pod waits in ContainerCreating and this Kustomization stays not Ready.
+# policies, the Deployment (one replica, Recreate) and the PrometheusRule. It needs the
+# operator-created Secret relay-infrastructure-agent-key (step I8); without it the Pod waits in
+# ContainerCreating and this Kustomization stays not Ready. The one-use enrollment Secret was needed
+# only until enrollment: step I10 removes its mount, and the operator deletes the consumed Secret
+# after that change has rolled out.
 #
 # prune: true is safe here: removing the tree stops the agent and removes its permissions. It never
 # touches the agent-owned fence ConfigMap relay-installation-fence, which no Flux inventory contains.

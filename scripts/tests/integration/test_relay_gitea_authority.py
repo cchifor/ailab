@@ -12,7 +12,7 @@ import unittest
 import uuid
 
 import yaml
-from test_relay_notifications import docker, KUSTOMIZE, KUBECONFORM, named
+from test_relay_notifications import docker, KUSTOMIZE, KUBECONFORM, named, relay_overlay_without
 
 ROOT = Path(__file__).resolve().parents[3]
 COMPONENTS = ROOT / 'kubernetes/components'
@@ -50,7 +50,10 @@ class GiteaAuthority(unittest.TestCase):
                          'fieldPaths': ['spec.template.spec.containers.[name=reconciler].image']}],
         }]
         (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump(cls.config))
-        raw = docker('run', '--rm', '-v', f'{ROOT}:/work:ro', '-w', '/work', KUSTOMIZE,
+        # The collector is layered above; render from the overlay without it, so it is layered once
+        # even where hub upgrade step H6 includes it live.
+        overlay = relay_overlay_without(['relay-control-monitoring'], cls.root)
+        raw = docker('run', '--rm', '-v', f'{ROOT}:/work:ro', *overlay, '-w', '/work', KUSTOMIZE,
                      'build', str(wrapper.relative_to(ROOT))).stdout
         cls.docs = list(yaml.safe_load_all(raw))
         cls.web = named(cls.docs, 'Deployment', 'relay')['spec']['template']['spec']
