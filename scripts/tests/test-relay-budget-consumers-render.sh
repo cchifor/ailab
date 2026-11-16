@@ -7,7 +7,11 @@
 #   * changes nothing but that Deployment's one container env/volumeMounts and one added volume:
 #     every other rendered object, every other container and every pre-existing env entry is
 #     byte-for-byte the plain render (so ROUTER_PLUGIN_CONFIG, the plugin's enable state, is untouched).
-# The components are NOT part of any Flux path yet, which is why manifest-lint.sh does not build them.
+# A component that its live overlay does not include yet is checked by adding it ("with") to the live
+# overlay ("plain"). One that the live overlay already includes (hub step H4a for the Relay client,
+# budget runbook step 8 for the Router reader) is checked the other way round: "with" is the live
+# overlay itself and "plain" is a copy of that overlay with only that component's entry removed. The
+# same comparison runs either way, so the inclusion PR keeps the guarantee instead of losing the check.
 # Requires docker. Exit non-zero on the first broken expectation.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -15,6 +19,12 @@ KUSTOMIZE_IMAGE="$(sed -n 's/^KUSTOMIZE_IMAGE="\(.*\)"$/\1/p' "$REPO_ROOT/script
 [ -n "$KUSTOMIZE_IMAGE" ] || { echo "cannot find KUSTOMIZE_IMAGE in scripts/manifest-lint.sh" >&2; exit 1; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
+
+# A copy of kubernetes/ in which each included consumer component's entry is removed from its overlay.
+# Only the "plain" render of an included component reads it; nothing else in the copy differs.
+mkdir -p "$WORK/stripped"
+cp -r "$REPO_ROOT/kubernetes" "$WORK/stripped/kubernetes"
 
 for app in relay llm-router; do
   case "$app" in
@@ -22,22 +32,46 @@ for app in relay llm-router; do
     llm-router) component=llm-router-worker-budget-reader ;;
   esac
   mkdir -p "$WORK/plain/$app" "$WORK/with/$app"
-  printf 'resources: [../../repo/kubernetes/apps/apps/%s]\n' "$app" > "$WORK/plain/$app/kustomization.yaml"
-  printf 'resources: [../../repo/kubernetes/apps/apps/%s]\ncomponents: [../../repo/kubernetes/components/%s]\n' \
-    "$app" "$component" > "$WORK/with/$app/kustomization.yaml"
+  included=$("$PY" - "$WORK/stripped/kubernetes/apps/apps/$app/kustomization.yaml" "$component" <<'STRIP'
+import sys, yaml
+path, component = sys.argv[1], sys.argv[2]
+k = yaml.safe_load(open(path, encoding="utf-8"))
+entries = k.get("components") or []
+kept = [e for e in entries if e.rstrip("/").split("/")[-1] != component]
+assert len(entries) - len(kept) in (0, 1), f"{path}: {component} is listed more than once"
+if len(kept) == len(entries):
+    print("no")
+else:
+    if kept:
+        k["components"] = kept
+    else:
+        del k["components"]
+    with open(path, "w", encoding="utf-8") as f:
+        yaml.safe_dump(k, f, sort_keys=False)
+    print("yes")
+STRIP
+)
+  if [ "$included" = yes ]; then
+    printf 'resources: [../../stripped/kubernetes/apps/apps/%s]\n' "$app" > "$WORK/plain/$app/kustomization.yaml"
+    printf 'resources: [../../repo/kubernetes/apps/apps/%s]\n' "$app" > "$WORK/with/$app/kustomization.yaml"
+  else
+    printf 'resources: [../../repo/kubernetes/apps/apps/%s]\n' "$app" > "$WORK/plain/$app/kustomization.yaml"
+    printf 'resources: [../../repo/kubernetes/apps/apps/%s]\ncomponents: [../../repo/kubernetes/components/%s]\n' \
+      "$app" "$component" > "$WORK/with/$app/kustomization.yaml"
+  fi
+  echo "$app: $component included by the live overlay: $included"
 done
 chmod -R a+rX "$WORK"
 
 render() { # <plain|with> <app>
-  docker run --rm --network none -v "$REPO_ROOT:/repo:ro" -v "$WORK/$1:/$1:ro" -w "/$1" \
-    "$KUSTOMIZE_IMAGE" build "$2" > "$WORK/$1-$2.yaml"
+  docker run --rm --network none -v "$REPO_ROOT:/repo:ro" -v "$WORK/stripped:/stripped:ro" \
+    -v "$WORK/$1:/$1:ro" -w "/$1" "$KUSTOMIZE_IMAGE" build "$2" > "$WORK/$1-$2.yaml"
 }
 for app in relay llm-router; do
   render plain "$app"
   render with "$app"
 done
 
-PY=python3; command -v python3 >/dev/null 2>&1 || PY=python
 "$PY" - "$WORK" <<'PY'
 import copy, sys, yaml
 work = sys.argv[1]
