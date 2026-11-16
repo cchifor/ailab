@@ -12,6 +12,9 @@
   "rememberMe": false,
   "editUsernameAllowed": false,
   "bruteForceProtected": true,
+  "eventsEnabled": true,
+  "eventsExpiration": 7776000,
+  "enabledEventTypes": ["LOGIN", "LOGIN_ERROR", "LOGOUT", "CODE_TO_TOKEN", "CODE_TO_TOKEN_ERROR"],
   "passwordPolicy": "length(12) and notUsername and notEmail",
   "clients": [
     {
