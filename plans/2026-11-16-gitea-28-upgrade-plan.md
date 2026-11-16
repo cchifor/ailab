@@ -155,3 +155,14 @@ findings, all accepted.
 
 Codex reported nothing on the egress behaviour for webhooks, mirrors, OIDC or LFS, on rollback, or on the release
 notes.
+
+**reviewer-codex, PR review** (on `3594cfae`, verdict findings): one finding, accepted. The rewrite printed `STOP`
+but carried on. With a `$b` left by an earlier attempt and a failed copy, `awk` read that stale backup, and the
+line-count check could pass and write stale configuration over `app.ini`. A re-run after a successful rewrite also
+overwrote the original backup. Fixed in the runbook: the steps run in a subshell, and every check exits before the
+write: an existing `$b`, the copy, `awk`, the line count. Tested in the 28.4.0 image on the snippet extracted from the
+runbook as printed, six cases:
+- a normal rewrite: inode, owner and mode kept, and the backup is the original;
+- a re-run after it: stops, and the backup is still the original;
+- a stale backup present, a failed backup copy, a failed candidate write, and the key already gone: each stops, and
+  `app.ini` is unchanged.

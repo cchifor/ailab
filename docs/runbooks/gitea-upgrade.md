@@ -91,23 +91,31 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
 
      ```sh
      f=<data>/gitea/conf/app.ini; b="$f.pre-<version>"; c=/tmp/app.ini.candidate
-     cp -p "$f" "$b" && cmp "$f" "$b" || echo "STOP: backup copy failed"
-     # 28.x: [webhook] ALLOWED_HOST_LIST moved to [security]. Matching ignores CR and leading blanks, and every
-     # section header (indented or not) ends the previous section; the other lines are copied byte for byte.
-     awk '{ l=$0; sub(/\r$/,"",l) } l ~ /^[ \t]*\[/ { s=l; gsub(/^[ \t]+|[ \t]+$/,"",s) }
-          !(s=="[webhook]" && l ~ /^[ \t]*ALLOWED_HOST_LIST[ \t]*=/)' "$b" > "$c" || echo "STOP: awk failed"
-     diff "$b" "$c"                               # read it: only the [webhook] ALLOWED_HOST_LIST line goes
-     # awk can only drop lines, so "exactly one line shorter" means exactly that line (any diff output format)
-     [ -s "$c" ] && [ "$(wc -l < "$b")" -eq "$(( $(wc -l < "$c") + 1 ))" ] \
-       && cat "$c" > "$f" && cmp "$c" "$f" && echo REWRITTEN
+     (
+       stop() { echo "STOP: $*; app.ini was not changed"; exit 1; }
+       # An existing $b is the original from an earlier run: never overwrite it, never read it as the current file.
+       [ ! -e "$b" ] || stop "$b already exists"
+       cp -p "$f" "$b" && cmp "$f" "$b" || stop "backup copy failed"
+       # 28.x: [webhook] ALLOWED_HOST_LIST moved to [security]. Matching ignores CR and leading blanks, and every
+       # section header (indented or not) ends the previous section; the other lines are copied byte for byte.
+       awk '{ l=$0; sub(/\r$/,"",l) } l ~ /^[ \t]*\[/ { s=l; gsub(/^[ \t]+|[ \t]+$/,"",s) }
+            !(s=="[webhook]" && l ~ /^[ \t]*ALLOWED_HOST_LIST[ \t]*=/)' "$b" > "$c" || stop "awk failed"
+       diff "$b" "$c"                             # read it: only the [webhook] ALLOWED_HOST_LIST line goes
+       # awk can only drop lines, so "exactly one line shorter" means exactly that line (any diff output format)
+       [ -s "$c" ] && [ "$(wc -l < "$b")" -eq "$(( $(wc -l < "$c") + 1 ))" ] || stop "not exactly one line removed"
+       cat "$c" > "$f" && cmp "$c" "$f" || { echo "FAILED writing app.ini: restore it with cat \"$b\" > \"$f\""; exit 2; }
+       echo REWRITTEN
+     )
      stat -c '%u:%g %a' "$f"                      # 1000:1000 660
      ```
 
-     No `REWRITTEN` means the file was not touched; an empty `diff` means the key is already gone. If the copy over
-     `$f` itself fails, put the original back with
-     `cat "$b" > "$f"` (the Velero backup holds it too). Skipping this step does not break 28.x: the old `[webhook]`
-     key still applies (with `external` dropped as invalid), and it logs two startup errors. Delete `$b` and `$c`
-     after step 7; they hold the same secrets as `app.ini`.
+     Each check ends the subshell before the write, so every `STOP` leaves `app.ini` as it was; an empty `diff` means
+     the key is already gone. If it stops because `$b` already exists, run `cmp "$f" "$b"`: identical means no earlier
+     run rewrote the file, so delete `$b` and run again; different means the rewrite already happened and `$b` is the
+     original. If the copy over `$f` itself fails (`FAILED`), put the original back with `cat "$b" > "$f"` (the Velero
+     backup holds it too). Skipping this step does not break 28.x: the old `[webhook]` key still applies (with
+     `external` dropped as invalid), and it logs two startup errors. Delete `$b` and `$c` after step 7; they hold the
+     same secrets as `app.ini`.
    - Name the kinds in full: `kubectl -n velero get backups.velero.io gitea-pre-<version>`. The short name
      `backup` resolves to CNPG's `Backup` kind first, so a wait on it answers NotFound until it times out
      (2026-11-08: it cost 9 of the 14 minutes of outage).
