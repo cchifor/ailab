@@ -52,9 +52,12 @@ spec:
       type: Recreate
     image:
       rootless: true
-      # Pinned above the chart's appVersion (12.7.0 ships 1.27.0, which has GHSA-rcr6-4jqh-j84m; fixed in 1.27.1).
-      # The chart appends "-rootless". 1.27.3 fixes GHSA-w5pg-649r-p6gg (stale approvals across PR retargeting).
-      tag: "1.27.3"
+      # Pinned above the chart's appVersion (12.7.0 ships 1.27.0); the chart appends "-rootless".
+      # 28.4.0 is the release after 1.27.x: Gitea dropped the "1." prefix, so 28.0 is what 1.28 would
+      # have been. 12.7.0 is still the newest chart; its init scripts' CLI calls (config edit-ini,
+      # admin user/auth, migrate) exist in 28.4.0. Plan and rehearsal:
+      # plans/2026-11-16-gitea-28-upgrade-plan.md.
+      tag: "28.4.0"
     # Lean single-instance: no HA subcharts. Gitea falls back to its own defaults (memory cache/
     # session, leveldb queue) set explicitly under gitea.config below.
     postgresql-ha: { enabled: false }
@@ -171,16 +174,20 @@ spec:
           ENABLE_AUTO_REGISTRATION: true # first OIDC login auto-creates the Gitea account
           USERNAME: preferred_username
           ACCOUNT_LINKING: auto # link an OIDC login to a pre-existing account by email (site-admin bootstrap)
-        # Gitea refuses webhook delivery to private IPs by default; "external" PRESERVES that default
-        # for public targets, the CIDR enables the LAN agentforge receivers (dw1-6 :8700 — ADR 0018).
-        # 10.96.0.0/12 = the Talos service subnet: AgentForge v2 receivers are in-cluster Services
-        # (af-orch-*-delivery.af-tenant-*.svc:8700) and Gitea was denying every delivery to them —
-        # the hostmatcher checks the RESOLVED ClusterIP, and a CIDR entry is the only form that
-        # matches multi-label svc DNS names reliably (glob `*` does not cross dots). Scope note:
-        # this permits webhook targets on any ClusterIP; webhook config is repo-admin-only
-        # (cchifor + the orchestrator), same trust as the LAN CIDR above.
-        webhook:
-          ALLOWED_HOST_LIST: "external, 192.168.0.0/24, 10.96.0.0/12"
+        # Outbound allowlist (Gitea 28 egress policy). EGRESS_MODE lax allows every PUBLIC target and
+        # denies non-public ones (private, loopback, link-local, CGNAT) unless an IP entry here allows
+        # them. That is what the old `[webhook] ALLOWED_HOST_LIST = "external, ..."` meant: 28.0 removed
+        # the "external" builtin (lax replaces it) and deprecated the [webhook] key for this one.
+        # Explicit lax also silences the startup warning an unmoded list raises.
+        # Consumers of this list in 28.4.0: webhook delivery (the [webhook] key falls back to it), OpenID
+        # sign-in (off above) and OAuth2 avatar fetches. Push/pull mirrors and migrations use the
+        # separate [migrations] list, which stays empty: our only mirror targets are on github.com.
+        # 192.168.0.0/24 = the reviewer VMs' org webhooks (.24/.25:8477). 10.96.0.0/12 = the Talos
+        # service subnet, kept from the AgentForge v2 receivers (in-cluster Services; a CIDR is the
+        # only form that matches a resolved ClusterIP); no webhook targets it as of 2026-11-16.
+        security:
+          EGRESS_MODE: lax
+          ALLOWED_HOST_LIST: "192.168.0.0/24, 10.96.0.0/12"
         # Periodic `git gc` on every repository. OFF by default in Gitea, and the cost of leaving it
         # off is paid on every clone: CI fetches this forge constantly (5 runners, many jobs each), and
         # each fetch runs git-upload-pack, which must search every pack and loose object in the repo.
@@ -214,6 +221,13 @@ spec:
           # QuTS LUN can't UNMAP-reclaim, so bounding growth is what matters). Fixing the S3 transfer of
           # huge logs is a tracked follow-up. Backlog clears over ~2 weeks as tasks age past 14d.
           LOG_RETENTION_DAYS: 14
+          # Gitea 28's own run deletion (cron.cleanup_action_runs, @midnight, default 400 days) is OFF:
+          # 0 = keep forever (28.0 gave 0 that meaning for all three retention keys). Run history is
+          # deleted by the PACED gitea-actions-run-retention CronJob (actions-run-retention.yaml,
+          # 16 days, replication-gated). An unpaced midnight sweep over run history (cron.cleanup_actions,
+          # 3.5 M deletes) pushed infra-pg's replica past its slot budget on 2026-09-28; the CronJob
+          # stays the only thing that deletes runs.
+          RUN_RETENTION_DAYS: 0
         # Actions artifacts + logs on a LOCAL PVC, not versitygw S3 (W1 of the USB failure-domain
         # plan). Until 2026-09-08 these lived in versitygw on a USB disk attached to the QNAP; when
         # that disk stalled, Gitea could not COLD START, because it opens Actions storage during

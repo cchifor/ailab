@@ -1,4 +1,8 @@
-# Gitea Actions RUN-HISTORY retention - the piece Gitea itself does not have.
+# Gitea Actions RUN-HISTORY retention - the piece Gitea itself did not have before 28.0.
+#
+# Gitea 28.0 added its own (RUN_RETENTION_DAYS + cron.cleanup_action_runs, default 400 days). gitea.yaml
+# sets it to 0 (off): that sweep runs @midnight in one unpaced pass, the shape described below, so this
+# paced, replication-gated job stays the only thing that deletes runs.
 #
 # WHY THIS EXISTS (ailab#923, 2026-09-28): LOG_RETENTION_DAYS / ARTIFACT_RETENTION_DAYS (14, gitea.yaml)
 # purge logs and artifacts, NOT runs. Run/job/task/step rows are kept forever: on 2026-09-28 the

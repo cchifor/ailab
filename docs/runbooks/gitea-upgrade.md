@@ -3,7 +3,8 @@
 Every Gitea version bump runs database migrations that cannot be undone: an older Gitea refuses to start on a migrated
 database. So an upgrade is a one-way door with a restore as the only way back. This runbook is the procedure. It was
 written for 1.26.1 → 1.27.3 (chart 12.6.0 → 12.7.0, 2026-11-08); the plan and its review are in
-`plans/2026-11-08-gitea-1-27-upgrade-plan.md`.
+`plans/2026-11-08-gitea-1-27-upgrade-plan.md`. 1.27.3 → 28.4.0 (chart unchanged at 12.7.0) follows it too:
+`plans/2026-11-16-gitea-28-upgrade-plan.md`. Gitea dropped the `1.` prefix at 28.0, so 28.x is the release after 1.27.x.
 
 ## What is in place
 
@@ -12,6 +13,14 @@ written for 1.26.1 → 1.27.3 (chart 12.6.0 → 12.7.0, 2026-11-08); the plan an
 - **Pinned image.** The release pins `image.tag`, so the chart's default appVersion never slips in unreviewed.
 - **No native database backup.** infra-pg has no WAL archive or Barman, and Velero skips its data volumes. The upgrade
   backup is therefore a `pg_dump` taken during a write freeze, kept off-cluster.
+- **`app.ini` is merged, never rewritten.** The chart's `init-app-ini` container runs
+  `gitea config edit-ini --apply-env` onto the existing `/data/gitea/conf/app.ini` on the data volume. It adds and
+  changes keys but never deletes one, so a key removed from the HelmRelease values stays in the file and keeps taking
+  effect. Removing one is a file edit while Gitea is down (step 5).
+- **Views on Gitea's tables.** The gitea database holds the `credential_inventory` views
+  (`kubernetes/apps/databases/gitea-credential-inventory.sql`), which read `"user"`, `access_token` and `oauth2_grant`.
+  A migration that drops or rebuilds one of those tables fails while the views exist. The rehearsal catches this,
+  because the dump includes the views.
 
 ## Procedure
 
@@ -22,8 +31,14 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
      `pg_restore --exit-on-error`).
    - Run the target image's `gitea migrate` against it. Record the duration and the resulting
      `select version from version`; that is the acceptance value for step 6.
-2. **Audit.** Check workflows for the release's breaking changes (for 1.27: cross-instance reusable workflows, by URL)
-   in every repository with Actions, and custom templates under `/data/gitea/templates`.
+   - Query the `credential_inventory` views as `pg_monitor` on the migrated copy, and diff `team` and `team_unit`
+     against an untouched copy (`create database <x> template gitea` before migrating).
+   - Smoke-boot the target image on a copy of the migrated database with the new config, on a
+     `docker network create --internal` network: the copy's pending webhooks and mirrors must not reach anything.
+     Read its startup log for config problems (`[E]`/`[W]`, `Deprecation`), and its `/metrics` families.
+2. **Audit.** Check workflows for the release's breaking changes (for 1.27: cross-instance reusable workflows, by URL;
+   for 28.x: the plan's list) in every repository with Actions, and custom templates under `/data/gitea/templates`.
+   Render the chart with the new values (`helm template`) and diff it against the old render.
 3. **Stage recovery files on the workstation, before anything stops:**
    - `helm -n gitea get values gitea -a -o yaml > gitea-values-before.yaml`;
    - `helm -n gitea get manifest gitea > gitea-manifest-before.yaml`;
@@ -64,7 +79,25 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
      (RWO, so only after the Gitea pod is gone). Create a Velero `Backup` named `gitea-pre-<version>` from the
      `velero-daily` template, restricted to `includedNamespaces: [gitea]`, with `defaultVolumesToFsBackup: true` and
      `ttl: 720h`. Wait for `Completed`, and for both `PodVolumeBackup`s (`-l velero.io/backup-name=gitea-pre-<version>`)
-     to be `Completed`. Then delete the holder pod and wait until it is gone.
+     to be `Completed`. Then remove any keys the change deletes from the values (next bullet), and delete the holder
+     pod and wait until it is gone.
+   - **Keys removed from the values** (see "`app.ini` is merged"). In the holder pod, after the backup, with `<data>`
+     the holder's mount of `gitea-shared-storage`: copy the file, rewrite it in place from the copy without the key,
+     and check the result. The rewrite goes through a redirection, so the file keeps its inode, owner `1000:1000`
+     and mode 660. `sed -i` would replace it with a file owned by the holder's user, which Gitea's init container
+     (uid 1000) cannot rewrite.
+
+     ```sh
+     f=<data>/gitea/conf/app.ini
+     cp -p "$f" "$f.pre-<version>"
+     # 28.x: [webhook] ALLOWED_HOST_LIST moved to [security]
+     awk '/^\[/{s=$0} !(s=="[webhook]" && /^ALLOWED_HOST_LIST[[:space:]]*=/)' "$f.pre-<version>" > "$f"
+     diff "$f.pre-<version>" "$f"   # exactly the removed line(s), nothing else
+     stat -c '%u:%g %a' "$f"        # 1000:1000 660
+     ```
+
+     Skipping this does not break 28.x: the old `[webhook]` key still applies (with `external` dropped as invalid), and
+     it logs two startup errors. Delete `$f.pre-<version>` after step 7; it holds the same secrets as `app.ini`.
    - Name the kinds in full: `kubectl -n velero get backups.velero.io gitea-pre-<version>`. The short name
      `backup` resolves to CNPG's `Backup` kind first, so a wait on it answers NotFound until it times out
      (2026-11-08: it cost 9 of the 14 minutes of outage).
@@ -87,6 +120,16 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
    - a real OIDC login through Authelia (the owner);
    - the reviewer bots post a review;
    - the credential-inventory metrics are present.
+   - **28.x additions:**
+     - the startup log carries no config problem: `kubectl -n gitea logs deploy/gitea -c gitea | grep -E
+       'Deprecation|ALLOWED_HOST_LIST|EGRESS|invalid entry'` prints nothing;
+     - the org webhooks to the reviewer VMs deliver (the reviewer-bot review above), and their latest deliveries are
+       green in the org's webhook settings;
+     - a clone over SSH (`gitea-ssh`; 28.0 replaced the built-in SSH server's library);
+     - the UI's WebSocket upgrades through the edge: `/-/ws` (28.0 replaced server-sent events) answers
+       `101 Switching Protocols` to a signed-in browser (DevTools, Network, WS);
+     - the next `gitea-actions-run-retention` execution completes (`retention: deleted=...`), and `ci-rerun-watchdog`
+       and `cloud-power` log no Gitea API errors.
 
 ## Rollback (data written after step 6 is lost)
 
@@ -106,6 +149,10 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
    - Render first: `helm template gitea <old chart .tgz> -n gitea -f gitea-values-before.yaml --set
      image.tag=<old> --set replicaCount=0`, and check the image of every container and init container.
    - Then run `helm upgrade` with the same arguments.
+   - `app.ini` keeps the keys the new values added unless step 4 restores the volume. For 28.4.0 → 1.27.3 those are
+     `[security] EGRESS_MODE`, which 1.27 ignores, and `[security] ALLOWED_HOST_LIST` without `external`. On 1.27 that
+     list makes Gitea refuse public OAuth2 avatar fetches (cosmetic; webhooks get their own `[webhook]` list back from
+     the old values). Remove both keys with the step-5 rewrite while Gitea is at 0 replicas, or restore the volumes.
 4. **Restore the volumes, only if their data must match the restored database** (for example, after pushes made
    during the failed window):
    - With Gitea still at 0 replicas, delete the PVCs `gitea-shared-storage` and `gitea-actions-storage` and wait until
