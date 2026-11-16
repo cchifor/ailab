@@ -6,7 +6,7 @@ the nineteen researcher scenarios on the owner-approved signed candidate runs (U
 H7 of [relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md) and steps Q1-Q6 of
 [relay-researcher-installation.md](relay-researcher-installation.md). Every write is an operator action
 with the owner's confirmation for that exact run. Anything marked **UNVERIFIED** was not confirmed in
-code; §8 lists them, with the blocking gaps G1-G4.
+code; §8 lists them, with the blocking gaps G0-G5.
 
 Code references:
 
@@ -51,7 +51,8 @@ Each is read back; a missing one stops the campaign before any signing.
 | Agent one-time candidate values: candidate volume, `policy.bootstrapSecrets: true`, journal egress | installation runbook, "Beyond enrollment" item 3 | not staged |
 | PR #519 merged or pinned (its v0.10.3 recipe fetches `main`) | `519:docs/qualification/default-communication-observation.md` | open |
 | E1 delayed start, E2 window + storage converters, E3 lease → two rows (optional), E4 replay disruption | pending Relay PRs | **pending** |
-| Gaps found while writing this runbook: the #15 matrix driver fix, `submittedPod` capture, a `subject.json` builder, a `commandSha256` tool | §8, G1-G4 | **missing** |
+| **Hub fix: the `c0fe50f0` candidate loader refuses every real binding** (a new hub release and rollout, before R1's freeze) | §8, G0 | **blocking** |
+| Gaps found while writing this runbook: the #15 matrix driver fix, `submittedPod` capture, a `subject.json` builder, a `commandSha256` tool, fraction-safe parsing in the matrix driver and both converters | §8, G1-G5 | **missing** |
 | E6 rehearsal passed (§4) | this runbook | not run |
 | Dedicated researcher channel, admin browser state, operator kube identity (VAP write, `pods/exec`, NetworkPolicy CAS, SA impersonation incl. a foreign-slot SA, `pods/log` in `relay-internal-tls`) | plan §8 | operator readback |
 | Probe images (egress; storage with `dd` and `sleep`) and reviewed allow/deny targets | plan R5, R4 | not in git |
@@ -221,7 +222,8 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
 4. Readback (H7's): budget startup `started`, `RelayWorkerBudgetStartupFailed` clear, no
    `worker_budget_authority_unavailable` and **no `worker_candidate_unavailable`**: a file that does not
    verify (expired, not yet valid, wrong key) only logs that warning and the hub starts without
-   candidate authority (`rel:server/main.ts:288-305`). **Never create while it is logged:** an
+   candidate authority (`rel:server/main.ts:288-305`). **At `c0fe50f0` this readback cannot pass:
+   the loader refuses every document with a real binding (§8 G0).** **Never create while it is logged:** an
    unrecognized worker takes ordinary admission, and the lifetime can freeze before the refusal
    (`rel:server/workers/service.ts:1543-1570`). Connectors and relay-bus keys answer again.
 
@@ -373,7 +375,7 @@ Each intended row must come out `observed`. Window and storage reports need E2's
 lease drill's second row E3's. The #519 defaultCommunication reports are not V2 rows: they go to their
 own independent review for `ReleaseApproval.defaultCommunication`
 (`519:docs/qualification/default-communication-observation.md`). `subject.json` has no builder yet
-(§8 G3). **Do not sign the next run until this run's rows convert**, and package its evidence (§5.5).
+(§8 G3), and both converters refuse a real `subject.json` today (§8 G5). **Do not sign the next run until this run's rows convert**, and package its evidence (§5.5).
 
 ## 4. Timing budget and the E6 rehearsal
 
@@ -533,7 +535,7 @@ Signed: L 90, P5 with a new marker. 2-4 requests.
 | 2 | #519 observe, P5, wait for the observer | P5 by `T − 600 s` |
 | 3 | Cleanup observer, then remove (§3.10) | remove by `T − 360 s` |
 | 4 | Settlement #13 with the transition report | start by `T − 240 s` |
-| 5 | Matrix #15: `researcher-pool-admission-observation.ts <cfg> <sha> <out>`; slot Pod absent; dry runs only; CREATE paths only, UPDATE paths stay `unmeasured`. **Blocked until G1 is fixed** |  start by `T − D_matrix − 60 s`, so egress still starts before `T` |
+| 5 | Matrix #15: `researcher-pool-admission-observation.ts <cfg> <sha> <out>`; slot Pod absent; dry runs only; CREATE paths only, UPDATE paths stay `unmeasured`. **Blocked until G1 and G5 are fixed** |  start by `T − D_matrix − 60 s`, so egress still starts before `T` |
 | 6 | Egress #16: `researcher-pool-egress-observation.ts <cfg> <sha> <out>`; zero Pods; replaces the gate in place under CAS; 600 s window; never overlapping step 5 | start before `T`; finish before `cleanupDeadline` |
 
 ### R3 (+R4): storage, then one lease-expiry drill
@@ -596,11 +598,24 @@ Raised by this runbook, for the operator and owner:
 
 - **S1:** S-A or S-B for the per-run hub change (§2), decided with H7's component design.
 - **S2:** the mechanism that keeps the agent from claiming the create before the bundle (§3.5).
+- **S3:** the G0 hub fix: a new Relay release and hub rollout before R1, so the freeze starts on the
+  fixed image (§8 G0).
 
 ## 8. Blocking gaps and UNVERIFIED steps
 
-**Blocking gaps, confirmed in code** (none is in E1-E4; each needs an operator-side Relay change or an
-infrastructure prerequisite before the run that needs it):
+**Blocking gaps, confirmed in code** (none is in E1-E4):
+
+- **G0, the hub cannot load a candidate document (before R1; hub image).** The loader parses the
+  whole `CandidateHubDocument` with the integer-only candidate parser (`rel:server/workers/candidate/load.ts:38`;
+  `rel:packages/worker-runtime/candidate-signatures.ts:107`). The document's `binding` carries the runtime
+  manifest's `supervisorConfig.renewAfterFraction`, a fraction by schema (0.2-0.8,
+  `rel:packages/worker-runtime/supervisor/config.ts:36`; 0.5 for the researcher,
+  `rel:deploy/worker-images/researcher/inputs.json:36`). An offline test against the `c0fe50f0` parser
+  refuses `0.5`. The load therefore ends `document-invalid`, and §3.4's readback cannot pass. `main`
+  has the same loader. The agent and the bundle tool already read bindings with `JSON.parse`
+  (`rel:packages/worker-runtime/acceptance.ts:181-183`; `rel:packages/infrastructure-agent/offline-bundle.ts:55-58`).
+  The fix changes the hub image, so it means a new Relay release and hub rollout, which the freeze
+  allows only before R1. Owner decision.
 
 - **G1, #15 matrix (before R5).** The per-launch policy pins `activeDeadlineSeconds <= <seconds left
   when the bundle was generated>` (`rel:packages/infrastructure-agent/pod-renderer.ts:248-255`,
@@ -618,6 +633,12 @@ infrastructure prerequisite before the run that needs it):
   no CLI exists, so §3.11 cannot run.
 - **G4, `commandSha256` (before signing R1).** No operator tool reproduces the holder's final command
   hash (`rel:holder/src/worker_candidate.rs:527-545`).
+- **G5, fraction-safe parsing in drivers (before R1's conversion, and R5).** The same integer-only
+  parser reads the matrix driver's definition, which embeds the binding
+  (`main:scripts/qualification/researcher-pool-admission-observation.ts:571`), and both converters'
+  `subject.json` (`main:scripts/qualification/researcher-runtime-v2-observations.ts:610`;
+  `researcher-pool-v2-observations.ts:848`). Each needs an operator-side fix that keeps strict parsing
+  for signed documents.
 
 **UNVERIFIED:**
 
