@@ -431,6 +431,12 @@ curl -sS --fail -b "$COOKIES" -H 'Origin: https://relay.chifor.me' -H 'Content-T
 The kubelet retries the mount and the agent enrolls. If the token expires first, reissue (allowed
 only while `approved`); never create a second installation.
 
+Without a browser session, use the just-in-time operator identity for the second Secret
+(docs/runbooks/relay.md, "Operator automation identity"): `python scripts/relay-operator.py call
+enrollment-token <id> --ttl 900` writes only the raw token to stdout. It holds Relay admin only for that
+one call. The reissue answers HTTP 200; a replayed operationId returns no token. Done this way on
+2026-11-16 (reissue revision 3; the agent enrolled 14:34:02Z, epoch 1).
+
 **I9. Enrollment readback.** `GET /api/infrastructure/installations/<id>` is `ready` with a pinned
 fence UID and the hub epoch acknowledged; `kubectl -n relay-infra-control get configmap
 relay-installation-fence -o jsonpath='{.metadata.uid}'` equals it; the Lease
