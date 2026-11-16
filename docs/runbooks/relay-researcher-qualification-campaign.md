@@ -6,19 +6,20 @@ the nineteen researcher scenarios on the owner-approved signed candidate runs (U
 H7 of [relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md) and steps Q1-Q6 of
 [relay-researcher-installation.md](relay-researcher-installation.md). Every write is an operator action
 with the owner's confirmation for that exact run. Anything marked **UNVERIFIED** was not confirmed in
-code; §8 lists them, with the blocking gaps G0-G5.
+code; §8 lists them, with the gaps G0-G6 and how each is closed.
 
 Code references:
 
 | Key | Source | Used for |
 | --- | --- | --- |
-| `rel:` | Relay v0.10.3 `c0fe50f0` | hub, agent, runtime, operator CLIs |
-| `main:` | Relay `origin/main` `5b1c0c1ed` (its `scripts/qualification` is unchanged since `ac3fe1141`) | drivers and converters |
-| `519:` | Relay PR #519 head `b2a7f5944` | the defaultCommunication observer |
-| `h4:` | ailab #1783 (held), `relay-researcher-hub-upgrade.md` at `09bc7c7b` | File B before H7 |
+| `rel:` | Relay v0.10.3 `c0fe50f0` | agent, runtime, the journal/budget/policy operator CLIs; the hub except its candidate loader |
+| `rel4:` | Relay v0.10.4 `e77bd09a` (release PR #526, Gitea release v0.10.4) | the hub image: `rel:` plus the fraction-safe candidate loader (§8 G0); worker images stay v0.10.3 |
+| `main:` | Relay `origin/main` `908b0c104` | the ceremony tools, drivers and converters |
+| `h4:` | `relay-researcher-hub-upgrade.md` at ailab `e5a2f3b9` | File B before H7 |
 
 Pin one driver checkout for the whole campaign and its conversion (`main:scripts/qualification/README.md`:
-the converters recompute driver digests from the checkout they run in), plus the #519 checkout.
+the converters recompute driver digests from the checkout they run in). PR #519 (defaultCommunication)
+is in `main` since `908b0c104`, so one checkout carries every driver; pin it once E1 has merged (§8 G6).
 
 ## 1. Campaign overview
 
@@ -29,13 +30,14 @@ the converters recompute driver digests from the checkout they run in), plus the
 | R1 | first session (nativeRuntime); #1, #2, #14; window #3-#7; defaultCommunication attempt 1; #8 last | guard exit 72 at T; grant `expiresAt` on a whole second | 90 s | P1, marker `relay-comm-<24 hex>` |
 | R2 | #12 replay (bounded disruption after the replay turn), then #11 revocation last | revocation | 120 s | tool-free one-line first prompt |
 | R5 | defaultCommunication attempt 2 before the stop; #13 cleanup; #15 matrix (CREATE only) and #16 egress on the empty slot | normal stop | 90 s | P5, new marker |
-| R3 (+R4) | #17 storage, then one lease-expiry drill with `routerTraffic: required` giving #10 and #18 (needs E3) | hub cut, exit 71 | 60 s | multi-step, local tools only |
-| R4 | only if E3 is not ready: #17 + #18 | hub cut | 60 s | as R3 |
-| R7 | #9 delayed start (needs E1), immediately before R6 | the launch never starts | 90 s | never sent |
+| R3 | #17 storage (staging driver), then one lease-expiry drill with `routerTraffic: required` giving #10 and #18 (E3, #527) | hub cut, exit 71 | 60 s | multi-step, local tools only |
+| R4 | reserve only: #18 again if R3's partition row is not `observed` | hub cut | 60 s | as R3 |
+| R7 | #9 delayed start (E1, pending), immediately before R6 | the launch never starts | 90 s | never sent |
 | R6 | #19 recovery fence, last | installation-wide halt | 90 s | never sent |
 
-**Order:** R1 → R2 → R5 → R3 (+R4) → R4 if needed → R7 → reserve retries → R6. Hold one reserve
-for an R6 retry. **Count:** 7 runs + 1 reserve, or 6 + 2 once E3 is validated (O1).
+**Order:** R1 → R2 → R5 → R3 → R7 → reserve retries (R4 if needed) → R6. Hold one reserve for an R6
+retry. **Count:** 6 runs + 2 reserves (O1): E3 merged as Relay #527, so R3 gives both #10 and #18.
+Between R7 and R6 the pool slot needs a reviewed reconciliation (O8, §6 R7).
 
 ### Preconditions before R1
 
@@ -46,28 +48,29 @@ Each is read back; a missing one stops the campaign before any signing.
 | H6: Router connection, control plane, monitoring | hub runbook H6 | not in the live overlay |
 | Q1-Q6: internal TLS, qualification egress `f6d3187c…282f`, Q5 policy UID, Q6 drill config | installation runbook | staged; the installation tree is not in Flux and still selects the enrollment egress |
 | Candidate journal on `10.96.0.42`, authority row `ready` | [relay-worker-candidate-journal.md](relay-worker-candidate-journal.md) | optional bundle, in no Flux inventory |
-| File B: ledger step 7 `qualifications` row; its `tokenPolicyDigest` goes into every run's `router.tokenPolicyDigests` | h4: "H7", "Enablement order at a glance" | waits for U1/O3 |
+| File B: ledger step 7 `qualifications` row; its `tokenPolicyDigest` goes into every run's `router.tokenPolicyDigests` | h4: "H7", "Enablement order at a glance" | not generated; D is fixed with the owner when it is (O3, §7) |
 | H7 candidate component (hub `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`) | hub runbook H7 | **not staged**; its design decides §2's staging |
 | Agent one-time candidate values: candidate volume, `policy.bootstrapSecrets: true`, journal egress | installation runbook, "Beyond enrollment" item 3 | not staged |
-| PR #519 merged or pinned (its v0.10.3 recipe fetches `main`) | `519:docs/qualification/default-communication-observation.md` | open |
-| E1 delayed start, E2 window + storage converters, E3 lease → two rows (optional), E4 replay disruption | pending Relay PRs | **pending** |
-| **Hub fix: the `c0fe50f0` candidate loader refuses every real binding** (a new hub release and rollout, before R1's freeze) | §8, G0 | **blocking** |
-| Gaps found while writing this runbook: the #15 matrix driver fix, `submittedPod` capture, a `subject.json` builder, a `commandSha256` tool, fraction-safe parsing in the matrix driver and both converters | §8, G1-G5 | **missing** |
+| E2 window + storage converters (#523), E3 lease → two rows (#527), E4 replay disruption (#524), defaultCommunication observer (#519) | Relay `main` | merged |
+| E1 delayed start: pre-session observer, converter branch, hold procedure | Relay PR (pending) | **pending** (§8 G6) |
+| **Hub v0.10.4: the `c0fe50f0` candidate loader refuses every real binding** | §8 G0; fixed by #525, released as v0.10.4 (S3 approved 2026-11-16) | **pending: the ailab hub pin and its rollout**, before H7's readback and before `subject.json` is frozen |
+| Ceremony tools and driver fixes (G1-G5): signer, `commandSha256`, `subject.json`, `submittedPod`, the matrix's installed-bundle check, fraction-safe parsing | §8; Relay #523, #528, #529, #530 | merged; `submittedPod` by reconstruction needs O7 |
+| `deployment.json` and `subject.json` composed and frozen (§3.0 step 7) | this runbook | after the v0.10.4 rollout |
 | E6 rehearsal passed (§4) | this runbook | not run |
 | Dedicated researcher channel, admin browser state, operator kube identity (VAP write, `pods/exec`, NetworkPolicy CAS, SA impersonation incl. a foreign-slot SA, `pods/log` in `relay-internal-tls`) | plan §8 | operator readback |
 | Probe images (egress; storage with `dd` and `sleep`) and reviewed allow/deny targets | plan R5, R4 | not in git |
-| O1-O5 answered | §7 | open |
+| O1, O2, O4-O8 and S2 answered | §7 | open |
 
 **Freeze from R1 to the canary:** hub, Router, agent and runtime images and database identities;
 namespaces and their UIDs; policy and egress digests; CA bundles; the agent's complete
-`PodRuntimeBinding` (including the `candidateJournal` alias); the driver checkout and the #519
-checkout. A change voids every row already measured (`rel:packages/worker-runtime/measurement-subject.ts:73-118`).
+`PodRuntimeBinding` (including the `candidateJournal` alias); `deployment.json` and `subject.json`;
+the one driver checkout. A change voids every row already measured (`rel:packages/worker-runtime/measurement-subject.ts:73-118`).
 
 ## 2. What needs a reviewed git PR, and what is operator-local
 
 | Step | Tool | Writes | Git PR? |
 | --- | --- | --- | --- |
-| Sign the run | operator signer (§3.1); **no Relay CLI signs** (`rel:deploy/worker-candidate-journal/README.md`: "does not implement an operator signing ceremony") | none | no |
+| Sign the run | `main:scripts/sign-candidate-run.ts`, offline (§3.1); `rel:` has no signer (`rel:deploy/worker-candidate-journal/README.md`: "does not implement an operator signing ceremony") | none | no |
 | Journal install, inspect, withdraw | `rel:scripts/candidate-worker-authority.ts` | journal DB | no |
 | Journal service re-render | `kubernetes/optional/relay-candidate-journal/render.py service` + `kubectl` | `relay-candidate-journal` objects (optional bundle, in no Flux inventory) | no; operator-reviewed render |
 | Budget scope | `rel:scripts/candidate-budget-scopes.ts` | ledger DB | no |
@@ -83,7 +86,7 @@ because the hub's `RELAY_WORKER_CANDIDATE_SHA256` pins the signed run, which can
 `issuedAt` (§3.1). The agent half (`candidateRuntime` values) is applied in place under the
 installation runbook's rule ("Flux and the in-place ceremonies": suspend, apply, confirm, commit the
 final objects, resume), because the agent must not claim the create before the per-launch bundle is
-installed. Proposed staging of the hub half, for the operator and owner (§7, S1):
+installed. Proposed staging of the hub half, for the operator and owner (§7, O6):
 
 - **S-A, one mechanical PR per run (default).** H7's PR also adds a generator that writes, from the
   signed run and its public files, exactly the run-bound values: the hub document ConfigMap and its
@@ -98,10 +101,14 @@ installed. Proposed staging of the hub half, for the operator and owner (§7, S1
 
 ## 3. The per-run ceremony
 
-`kubectl --context admin@ai` throughout. Relay's operator CLIs (`scripts/candidate-*.ts`,
-`scripts/prepare-candidate-policy.ts`) and the two snippets below run from a clean checkout of the
-release commit `c0fe50f0` on a trusted Linux operator host (procfs required), as
-`node --import tsx scripts/...`; drivers and converters run from the pinned driver checkout. Hub SQL reads run as
+`kubectl --context admin@ai` throughout. Relay's journal, budget-scope and policy CLIs
+(`scripts/candidate-worker-authority.ts`, `candidate-budget-scopes.ts`, `prepare-candidate-policy.ts`)
+and the ID snippet below run from a clean checkout of the release commit `c0fe50f0` on a trusted Linux
+operator host (procfs required), as `node --import tsx scripts/...`. The ceremony tools
+(`sign-candidate-run.ts`, `candidate-command-sha256.ts`, `compose-measurement-subject.ts`,
+`qualification/candidate-submitted-pod.ts`), drivers and converters run from the pinned driver
+checkout; the ceremony tools are checked against `c0fe50f0`'s own verifiers
+(`main:docs/qualification/candidate-ceremony-tools.md`). Hub SQL reads run as
 `postgres` in `relay-postgres-0`, database `relay`, tenant `00000000-0000-4000-8000-000000000001`.
 `t_s` is `issuedAt`, `t0` the create, `T` the absolute expiry. A failed readback stops the run.
 
@@ -143,19 +150,43 @@ release commit `c0fe50f0` on a trusted Linux operator host (procfs required), as
 
    `commandSha256` is SHA-256 of canonical `{executable, argv, cwd}` of the final native command, which
    contains `sessionId` (`rel:holder/src/worker_candidate.rs:527-545`, `holder/src/release.rs:105-134`).
-   **No operator tool computes it** (§8, G4). A wrong hash refuses native start.
+   A wrong hash refuses native start. Compute it offline from the frozen binding:
+
+   ```sh
+   node --import tsx scripts/candidate-command-sha256.ts \
+     /operator/binding.json <binding sha256> <profileTemplateDigest> <sessionId>
+   ```
+
+   For the researcher image the command is `/opt/relay/harness/codex/node
+   /opt/relay/harness/codex/relay-codex.mjs --home /run/relay-holder/state/native-homes/<sessionId>`
+   in `/workspace` (`main:docs/qualification/candidate-ceremony-tools.md`, "`commandSha256`").
 4. **Keys.** A fresh session-permit Ed25519 key per run (run-scoped:
    `rel:docs/proposals/worker-candidate-qualification.md`, "Signing keys"). One holder journal key for
    the whole campaign (§3.5). The issuer, agent (= installation), holder, journal-reply and
    permit keys must all differ (`rel:packages/worker-runtime/candidate-signatures.ts:174-181`).
-5. **Unsigned run.** From the previous run's unsigned JSON, change only `runId`, the worker/launch IDs,
-   `promptSha256`, `commandSha256`, `leaseSeconds`, `sessionPermitPublicKey` and `owner`; a diff in any
-   other field breaks the freeze. Common values: one worker, `maxActiveWorkers: 1`,
-   `maxGenerations: 1`, `maxLifetimeSeconds: 900`, `providerTokenCap: 1000000`,
-   `providerRequestCap: 8`, `allowedScenarios` = all 19, `egressPolicySha256` = `f6d3187c…282f`,
-   `router.tokenPolicyDigests` = [File B digest].
+5. **Signing input.** `signing-input.json` (`kind: relay.candidate-run-signing-input`): `issuerKeyId`,
+   `validitySeconds: 7200`, `cleanupSeconds: 86400` and the whole payload except its four times
+   (`main:docs/qualification/candidate-ceremony-tools.md`, "Signing a run"). From the previous run's,
+   change only `runId`, the worker/launch IDs, `promptSha256`, `commandSha256`, `leaseSeconds`,
+   `sessionPermitPublicKey` and `owner`; a diff in any other field breaks the freeze. Common values:
+   one worker, `maxActiveWorkers: 1`, `maxGenerations: 1`, `maxLifetimeSeconds: 900`,
+   `providerTokenCap: 1000000`, `providerRequestCap: 8`, `allowedScenarios` = all 19,
+   `egressPolicySha256` = `f6d3187c…282f`, `router.tokenPolicyDigests` = [File B digest], the Router CA
+   = the researcher template's pin `3d109e83…c4c3` (the agent refuses any other), the hub image = the
+   running v0.10.4 digest.
 6. **Configs** for every CLI and driver of the run, with only the run SHA-256 left to fill; the per-run
    PR branch (S-A); clock checks (§5.1); an operator ready on the session page (§5.3); a stopwatch log.
+7. **Once, before R1: `deployment.json` and `subject.json`.** After the v0.10.4 hub rollout, write
+   `deployment.json` (a `MeasurementDeployment`, `main:packages/worker-runtime/measurement-subject.ts:84-96`)
+   from readbacks, as the field table in `main:docs/qualification/candidate-ceremony-tools.md`
+   ("`subject.json`") says: `tenantId`; `clusterUid` (namespace `kube-system`'s UID); `hub` origin, CA
+   (the image's `hub-ca` artifact), the running hub image digest and a declared `databaseIdentity`;
+   `router` origin, CA `3d109e83…c4c3`, image and a declared `databaseIdentity`; the control and
+   execution namespaces with their UIDs; and the four contract digests (SHA-256 of each reviewed
+   manifest at the frozen commit). The two `databaseIdentity` UUIDs and the four contract digests are
+   declarations no code checks: choose them once and never change them. Then
+   `node --import tsx scripts/compose-measurement-subject.ts /operator/binding.json <sha> /operator/deployment.json <sha> /operator/subject.json`.
+   Both files are frozen until the canary; every run is checked against them in §3.1.
 
 ### 3.1 Sign (`t_s`)
 
@@ -164,33 +195,25 @@ Never a future `notBefore`: the schema allows it (`rel:packages/contracts/worker
 but the hub, journal and budget-scope installers all refuse `now < notBefore`
 (`rel:packages/worker-runtime/candidate-signatures.ts:199-201`), so it only shrinks the window. The
 signed bytes are `relay.candidate-run/v1\n` + canonical JSON of the envelope without `signature`
-(`rel:candidate-signatures.ts:122-130`). This signer was verified offline against `c0fe50f0`'s
-`verifyCandidateRun` with throwaway keys; keep the issuer key off disk:
+(`rel:candidate-signatures.ts:122-130`). The offline signer sets the four times itself and verifies
+the result with `verifyCandidateRun` against the expected issuer key before writing it; it also refuses
+any payload key that is not canonical unpadded base64url, which the holder's strict decoder would
+refuse. Keep the issuer key off disk (`-` reads it from standard input):
 
 ```sh
-cat > sign-candidate-run.mts <<'EOF'
-import { readFileSync } from "node:fs";
-import { createPrivateKey, sign } from "node:crypto";
-import { candidateTranscript, verifyCandidateRun } from "./packages/worker-runtime/candidate-signatures.ts";
-const [unsignedPath, issuerPublic] = process.argv.slice(2);
-const doc = JSON.parse(readFileSync(unsignedPath, "utf8"));
-const now = Date.now();
-Object.assign(doc.payload, { issuedAt: now, notBefore: now, expiresAt: now + 7_200_000,
-  cleanupDeadline: now + 7_200_000 + 86_400_000 });
-delete doc.signature;
-doc.signature = sign(null, candidateTranscript(doc), createPrivateKey(readFileSync(0))).toString("base64url");
-const raw = JSON.stringify(doc);
-verifyCandidateRun(raw, new Map([[doc.issuerKeyId, issuerPublic]])); // throws on every refusal
-process.stdout.write(raw);
-EOF
-<issuer PEM from the secret manager> | node --import tsx sign-candidate-run.mts unsigned.json <issuer public key> > run.json
-sha256sum run.json
-node --import tsx scripts/candidate-worker-authority.ts verify /operator/<run>/journal-operator.json <config sha256>
+<issuer PEM from the secret manager> | node --import tsx scripts/sign-candidate-run.ts \
+  /operator/<run>/signing-input.json <sha256> - <issuer public key> /operator/<run>/run.json
+node --import tsx scripts/compose-measurement-subject.ts /operator/binding.json <sha> /operator/deployment.json <sha> \
+  /operator/<run>/subject-check.json /operator/<run>/run.json <run sha256>
+cmp /operator/subject.json /operator/<run>/subject-check.json
+node --import tsx scripts/candidate-worker-authority.ts verify /operator/<run>/journal-operator.json <config sha256>   # rel: checkout
 ```
 
-`verifyCandidateRun` returns only on success and throws `candidate-document-invalid` on every refusal
-(`rel:packages/worker-runtime/candidate-signatures.ts:14-16,191-205`), so the script prints nothing and
-exits non-zero for a bad run. `verify` prints `runDigest` and `expiresAt`; record both with `t_s`.
+The signer prints `runDigest` and `sha256` (the file pin for the journal, budget-scope and hub configs)
+and never overwrites a file; on any refusal it prints only `Refusal: <code>` and exits 2. The subject
+check refuses (`subject-run-mismatch:<fields>`) a run whose hub, Router, tenant, cluster, namespace,
+image, runtime, template or CA pins differ from the frozen subject, and `cmp` confirms the frozen file
+is unchanged. `verify` prints `runDigest` and `expiresAt`; record both with `t_s`.
 
 ### 3.2 Journal: re-render with exactly this run.json, install, restart
 
@@ -227,14 +250,17 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
 2. The run-bound change (merge the S-A PR, or apply in place under S-B): the `CandidateHubDocument`
    (`rel:server/workers/candidate/authority.ts:40-70`: raw run, issuer keys, hub/router/journal pins,
    pool, binding, the exact installed egress policy, profiles), its `RELAY_WORKER_CANDIDATE_SHA256`,
-   `RELAY_WORKER_CANDIDATE_SESSION_KEY_FILE`.
+   `RELAY_WORKER_CANDIDATE_SESSION_KEY_FILE`. Write the document as **compact JSON** (no indentation):
+   the hub reads at most 65,536 bytes (`rel:packages/worker-runtime/candidate-files.ts:32,40`), and the
+   document with the real binding measures about 56.8 KB compact, so an indented one does not fit.
 3. The merge is a Recreate rollout: `backup-database` (bounded at 1800 s), `backup-artifacts`,
    `migrate`, then `relay` (`kubernetes/apps/apps/relay/relay.yaml`). Relay is down meanwhile.
 4. Readback (H7's): budget startup `started`, `RelayWorkerBudgetStartupFailed` clear, no
    `worker_budget_authority_unavailable` and **no `worker_candidate_unavailable`**: a file that does not
    verify (expired, not yet valid, wrong key) only logs that warning and the hub starts without
-   candidate authority (`rel:server/main.ts:288-305`). **At `c0fe50f0` this readback cannot pass:
-   the loader refuses every document with a real binding (§8 G0).** **Never create while it is logged:** an
+   candidate authority (`rel:server/main.ts:288-305`). **This readback needs the v0.10.4 hub
+   (`rel4:server/workers/candidate/load.ts:40`): `c0fe50f0`'s loader refuses every document with a real
+   binding (§8 G0).** **Never create while it is logged:** an
    unrecognized worker takes ordinary admission, and the lifetime can freeze before the refusal
    (`rel:server/workers/service.ts:1543-1570`). Connectors and relay-bus keys answer again.
 
@@ -317,23 +343,33 @@ for the drivers).
 Driver inputs come from here: `session` = that row's `permit`, `bindingProvenance` = its `binding`,
 the journal proof `{request, reply}` the coordinator stores (`rel:server/workers/candidate/coordinator.ts:279-282`);
 whether files written from these jsonb columns pass the drivers' pins is **UNVERIFIED** (§8 U1).
-`submittedPod` comes from an API audit request-body capture of the Pod create
-(`main:docs/qualification/worker-runtime-acceptance.md`: "leave acceptance pending" without one;
-§8 G2).
+`submittedPod` is rebuilt offline once the session exists (owner decision O7, §7):
+
+```sh
+node --import tsx scripts/qualification/candidate-submitted-pod.ts \
+  /operator/<run>/submitted-pod-config.json <sha> /operator/<run>/submitted-pod.json
+```
+
+The config (`kind: relay-candidate-submitted-pod-reconstruction`) pins the run's `trust`, `binding` and
+`session` files and the installed bundle's `30-rendered-contracts.json` as `bundleContracts`. The tool
+varies only `activeDeadlineSeconds` and keeps the Pod whose digest equals the session permit's
+hub-signed `journalAdmission.podDigest`, so a match is the body the agent posted
+(`main:scripts/qualification/candidate-submitted-pod.ts:1-35`); anything else is refused. R7 has no
+session, so it needs the create's API audit event instead (§6 R7).
 
 ### 3.9 Drivers
 
 From the pinned driver checkout: `node --import tsx scripts/qualification/<driver>.ts <config> <config-sha256> <report> [seconds]`.
 Each reserves its report exclusively and never overwrites one. Thresholds come from `T` and the
 current lease end `E_L` (the latest `published` event's `leaseExpiresAtMs` in
-`kubectl logs <pod> -c supervisor`, `main:scripts/qualification/researcher-hub-partition-observation.ts:167-171`),
+`kubectl logs <pod> -c supervisor`, `main:scripts/qualification/researcher-hub-partition-observation.ts:169-173`),
 never from `t0` estimates:
 
 | Rule | Source |
 | --- | --- |
-| Every report must **start** in `[session.notBefore, T)` to convert | `main:scripts/qualification/researcher-runtime-v2-observations.ts:73-91`; `researcher-pool-v2-observations.ts:730-733` |
+| Every report must **start** in `[session.notBefore, T)` to convert | `main:scripts/qualification/researcher-runtime-v2-observations.ts:76-95`; `researcher-pool-v2-observations.ts:1004-1007` |
 | Drivers using the acceptance config refuse once the session or run has expired, **including cleanup settlement and #519** | `main:packages/worker-runtime/acceptance.ts:151-178`; `main:scripts/qualification/worker-cleanup-settlement.ts:117` |
-| Partition and lease drills: at least 30 s before `T` at start and at the cut; wall/monotonic drift ≤ 1 s | `main:scripts/qualification/researcher-hub-partition-observation.ts:645,825` |
+| Partition and lease drills: at least 30 s before `T` at start and at the cut; wall/monotonic drift ≤ 1 s | `main:scripts/qualification/researcher-hub-partition-observation.ts:695,840` |
 | Lease expiry needs exit 71 before `T`: cut no later than `T − L − 30 s` | `main:scripts/qualification/researcher-lease-expiry-observation.md`; §6 R3 |
 | Revocation: last published lease ends ≥ 30 s before `T`; latest send ≈ `T − 30 s − L` | `main:scripts/qualification/researcher-revocation-observation.ts:357-361` |
 | Measurement window: the code's deadline is `min(run.expiresAt, T)` and lease sampling lasts up to 60 s; this runbook adds the margin "finish before `T − L`" so the sampled lease is not clamped to `T` | `main:packages/worker-runtime/acceptance.ts:472-476,794-795` |
@@ -384,11 +420,26 @@ node --import tsx scripts/qualification/researcher-pool-v2-observations.ts \
   /abs/acceptance.json <sha> /abs/subject.json <sha> /abs/pool-report.json <sha> /abs/v2-row.json [/abs/subresource.json <sha>]
 ```
 
-Each intended row must come out `observed`. Window and storage reports need E2's converters, the
-lease drill's second row E3's. The #519 defaultCommunication reports are not V2 rows: they go to their
-own independent review for `ReleaseApproval.defaultCommunication`
-(`519:docs/qualification/default-communication-observation.md`). `subject.json` has no builder yet
-(§8 G3), and both converters refuse a real `subject.json` today (§8 G5). **Do not sign the next run until this run's rows convert**, and package its evidence (§5.5).
+Each intended row must come out `observed`. The same two commands convert every report
+(`main:scripts/qualification/README.md`):
+
+- **Runtime converter:**
+  - acceptance A and B;
+  - the measurement window: five rows, with the window's own acceptance config, whose SHA-256 must equal
+    the report's `acceptanceSha256`;
+  - lease expiry (#10), revocation and replay;
+  - cleanup settlement, with its transition report as the extra pair.
+- **Pool converter:**
+  - RBAC;
+  - storage staging (#17);
+  - the admission matrix, with the subresource report as the extra pair when there is one;
+  - egress;
+  - the same lease-expiry report again (#18), the hub partition and the recovery fence.
+
+The #519 defaultCommunication reports are not V2 rows: they go to their own independent review for
+`ReleaseApproval.defaultCommunication` (`main:docs/qualification/default-communication-observation.md`).
+R7's delayed-start report converts through E1's runtime-converter branch (§8 G6). **Do not sign the next
+run until this run's rows convert**, and package its evidence (§5.5).
 
 ## 4. Timing budget and the E6 rehearsal
 
@@ -427,7 +478,13 @@ signed on the live hub.
 - [ ] Each driver's real duration (window, storage staging, admission matrix, egress, replay) to fill
       the latest-start formulas in §6.
 - [ ] P1/P3 call counts on the provider-qualification harness (paid; O5) and native approval prompts.
-- [ ] `commandSha256`, session files and `submittedPod` capture proven end to end (§8 G2, G4, U1).
+- [ ] The ceremony tools end to end on a rehearsal launch: `commandSha256` accepted by the holder,
+      session files passing the drivers' pins (U1), `submittedPod` reconstructed, and `subject.json`
+      accepted by both converters.
+- [ ] R2's disruption on a rehearsal worker: arm, cut, hold 55 s, exact restore, recovery
+      (`main:docs/qualification/session-replay-hub-disruption.md`).
+- [ ] R7's hold and release on a rehearsal Pod outside the candidate slot (E1's procedure): the held
+      Pod survives past `T`, release-to-exit latency, the audit event's shape (O7), exact-UID cleanup.
 
 ## 5. Cross-cutting checks
 
@@ -507,7 +564,7 @@ Each table lists the steps after §3.8. Latest starts use `D_x`, the E6-measured
 
 Signed: L 90, lifetime 900, grant `expiresAt` = whole second `G`, P1 with a fresh
 `relay-comm-<openssl rand -hex 12>`, names the researcher channel, asks for a broadcast and a reply
-with the message ID (`519:docs/qualification/default-communication-observation.md:68-86`). 2-4 requests.
+with the message ID (`main:docs/qualification/default-communication-observation.md:68-86`). 2-4 requests.
 Must be the campaign's first candidate launch.
 
 | Step | Driver / action | Latest start, stop/go |
@@ -520,23 +577,29 @@ Must be the campaign's first candidate launch.
 | 6 | Remove, journal slot settled (§3.10); no #13 here | after the capture |
 
 Go/no-go: harness exit 72 at `T`. A lease lapse (71) or lease rejection (73) reaching the guard
-first is a non-observed outcome (`main:docs/qualification/worker-runtime-acceptance.md:251-259`), and
+first is a non-observed outcome (`main:docs/qualification/worker-runtime-acceptance.md:284-292`), and
 #8 then needs the reserve.
 
 ### R2: replay, then revocation
 
-Signed: L 120, a tool-free one-line first prompt. 2-3 requests (first prompt, replay exactly 1, none
-after the revoke). Needs R1's proof of session control. Before step 3, confirm the per-key provider
-usage reading settles for this worker: the replay refuses before prompting without a usable baseline
-(`main:packages/worker-runtime/session-replay-observation.ts:298-314`).
+Signed: L 120, a tool-free one-line first prompt (P2). 2-3 requests (P2, replay exactly 1, none after
+the revoke). Needs R1's proof of session control. R2 runs **no** #519 observer (the communication
+attempts are R1 and R5), so skip that half of step 1 in the procedure below. The whole sequence is
+`main:docs/qualification/session-replay-hub-disruption.md` (E4, #524): inputs pinned before signing
+(replay config with its `disruption` entry; disruption config with `holdSeconds: 55`,
+`leaseMarginSeconds: 30`, `expiryReserveSeconds: 270`, `hubRuleIndex: 0`, `routerRuleIndex: 1`), the
+disruption kubeconfig's rights, and the recovery cases. The replay refuses before prompting without a
+settled usage baseline (`main:packages/worker-runtime/session-replay-observation.ts:400-419`).
 
 | Step | Driver / action | Latest start, stop/go |
 | --- | --- | --- |
 | 1 | Optional spare acceptance [#1, #2] | before step 2 |
-| 2 | Send the signed first prompt; wait for the answer | headroom check |
-| 3 | Replay #12: `worker-session-replay-observation.ts <cfg> <sha> <out> <seconds>`; config selects only #12; unsigned replay prompt ≤ 8 KiB, the driver appends `relay-replay-<24 hex>`. **PENDING E4:** the bounded hub-rule cut (≥ 30 s, inside the current lease, loss and recovery observed, exact restore, Flux suspended), done after the replay turn | by `T − 150 s − D_replay`; refuses with < 10 s left |
-| 4 | Revocation #11: `researcher-revocation-observation.ts <cfg> <sha> <out>` while idle; one irreversible `POST /api/workers/grants/<grantId>/revoke` | send by `T − 150 s` (`T − 30 s − L`); hub `Date` within 1 s |
-| 5 | Remove, settle (§3.10) | last |
+| 2 | Send P2; wait for the answer; `worker-session-replay-observation.ts --preflight <replay cfg> <sha>` until `ready: true` | preflight ready by `T − 470 s`, else skip to step 6 |
+| 3 | Flux suspend `relay-researcher-installation`; save the live egress policy; terminal A: `researcher-hub-disruption-observation.ts` armed | `T − 460 s` |
+| 4 | Terminal B: replay #12 with `seconds = min(300, T − 210 s − now)` (≥ 235); the disruption cuts after the replay turn and a fresh renewal, holds 55 s, restores exactly | replay start by **`T − 450 s`**; cut by `latestCutAt` = `T − 325 s`; restore by `T − 270 s` |
+| 5 | Confirm the restore (resourceVersion and `.spec` equal the saved file), resume Flux; replay `observed` with `disruptionJoin.status: joined` | replay done by `T − 180 s` |
+| 6 | Cleanup observer, then revocation #11: `researcher-revocation-observation.ts <cfg> <sha> <out>` while idle; one irreversible `POST /api/workers/grants/<grantId>/revoke` | send before **`T − 150 s`**; hub `Date` within 1 s |
+| 7 | Remove, settle (§3.10) | last |
 
 ### R5: communication 2, cleanup, matrix, egress
 
@@ -548,10 +611,10 @@ Signed: L 90, P5 with a new marker. 2-4 requests.
 | 2 | #519 observe, P5, wait for the observer | P5 by `T − 600 s` |
 | 3 | Cleanup observer, then remove (§3.10) | remove by `T − 360 s` |
 | 4 | Settlement #13 with the transition report | start by `T − 240 s` |
-| 5 | Matrix #15: `researcher-pool-admission-observation.ts <cfg> <sha> <out>`; slot Pod absent; dry runs only; CREATE paths only, UPDATE paths stay `unmeasured`. **Blocked until G1 and G5 are fixed** |  start by `T − D_matrix − 60 s`, so egress still starts before `T` |
+| 5 | Matrix #15: `researcher-pool-admission-observation.ts <cfg> <sha> <out>`; slot Pod absent; dry runs only; CREATE paths only, UPDATE paths stay `unmeasured`; the config adds the policy `definition` and the installed bundle's `installedReport` (`main:scripts/qualification/researcher-pool-admission-observation.md`) |  start by `T − D_matrix − 60 s`, so egress still starts before `T` |
 | 6 | Egress #16: `researcher-pool-egress-observation.ts <cfg> <sha> <out>`; zero Pods; replaces the gate in place under CAS; 600 s window; never overlapping step 5 | start before `T`; finish before `cleanupDeadline` |
 
-### R3 (+R4): storage, then one lease-expiry drill
+### R3: storage, then one lease-expiry drill (#10 and #18)
 
 Signed: L 60, multi-step prompt with local tools only (for example sequential `sleep 10` steps).
 3-5 requests. A hub-only cut leaves the Router rule in place, so calls keep flowing until the worker
@@ -562,28 +625,40 @@ flight at exit 71 is charged 930,192 and is the run's last.
 | Step | Driver / action | Latest start, stop/go |
 | --- | --- | --- |
 | 1 | Pod `native-started`, ≥ 2 lease publications and a renewal | |
-| 2 | Storage #17: `researcher-storage-policy-staging.ts <cfg> <sha> <out>`; the researcher Pod is the only Pod; quota `pods` hard = used = 1; raises the quota to 2, adds a no-egress policy, replaces the gate; 600 s budget. **PENDING E2** for its converter | start by `T − D_storage − 240 s`; else skip #17; restore confirmed before step 3 |
+| 2 | Storage #17: `researcher-storage-policy-staging.ts <cfg> <sha> <out>`; the researcher Pod is the only Pod; quota `pods` hard = used = 1; raises the quota to 2, adds a no-egress policy, replaces the gate; 600 s budget; converts with the pool converter | start by `T − D_storage − 240 s`; else skip #17; restore confirmed before step 3 |
 | 3 | Send the prompt (headroom check), then the lease drill: `researcher-lease-expiry-observation.ts <cfg> <sha> <out>` with `routerTraffic: required`, egress and endpoints from Q6 | cut by `T − L − 30 s` = `T − 90 s`; exit 71 before `T` (72 is `inconclusive`) |
-| 4 | **PENDING E3:** convert the drill to #10 and #18 | |
+| 4 | Convert the one report twice: runtime converter → #10, pool converter → #18. #18 is `observed` only with the drill's own `restored` and worker Router traffic observed after the cut; a traffic miss lowers only #18 (`main:scripts/qualification/researcher-lease-expiry-observation.md`) | |
 | 5 | After the terminal capture: restore checked, remove; spare #13 if settlement can start before `T` | |
 
-### R4: storage and hub partition (only without E3)
+### R4: hub partition (reserve only, if R3's #18 is not `observed`)
 
-Signed: as R3. Steps 1-2 as R3, then send the prompt and run
+Signed: as R3. Step 1 as R3 (storage only if #17 is also missing), then send the prompt and run
 `researcher-hub-partition-observation.ts <cfg> <sha> <out>` with `routerTraffic: required`: at least one
 Router request must complete after the cut: land the cut during a local step and leave headroom under
 69,808 for that call; a call still in flight at the exit is charged 930,192 and is the last. Exit 71 or
 72 both count. Cut by `T − 30 s` at the latest (the driver refuses later).
 
-### R7: delayed start (PENDING E1)
+### R7: delayed start (E1, pending)
 
-Signed: L 90, prompt never sent, 0 requests. **PENDING E1**, against its documented interface: a
-pre-session observer bound to the signed run, the admission evidence, the submitted Pod and its UID,
-and the guard's `--absolute-expires-at-ms`; its converter emits `sessionDigest` and
-`journalProvenanceDigest` as null with `sessionAuthority` under `unmeasured`
-(`rel:packages/worker-runtime/measurement-subject.ts:221-225`); a reviewed hold, release and cleanup
-procedure rehearsed outside the candidate slot. The launch ends `candidate-session-unsettled`, an
-unknown slot to reconcile by hand; R6 cannot be created until it is released (§3.0).
+Signed: L 90, prompt never sent, 0 requests. The interface below follows the open E1 PR; re-check it
+when E1 merges (§8 G6).
+
+- **Hold.** Cordon `relay-worker-1` before enabling the agent, so the created Pod stays Pending and
+  unscheduled. Uncordon at `T + 5 s` (never before `T + 1 s`).
+- **Driver.** A pre-session observer bound to the signed run, the hub-admitted intent, the journal's
+  `admitted` entry (its `podDigest` covers the submitted Pod), the submitted Pod, the guard's
+  `--absolute-expires-at-ms` and the created Pod's UID. That UID comes from the create's own
+  `RequestResponse` API audit event, so R7 needs the audit policy (O7). It observes:
+  - a positive control before `T` (Pending, no node);
+  - a read at or after `T` that still finds no node;
+  - after the release, the same UID's harness exiting 72 with an `absolute-expiry` guard record and no
+    `started` record.
+- **Converter.** `sessionDigest` and `journalProvenanceDigest` are null, with `sessionAuthority` and
+  `journalBinding` under `unmeasured` (`rel:packages/worker-runtime/measurement-subject.ts:221-225`).
+- **Afterwards.** The launch ends `candidate-session-unsettled`. The hub's create operation stays
+  `unknown` and keeps the pool's single execution slot, and `rel:` has no settle path, so R6's create
+  fails ("No free execution slot") until a reviewed hub reconciliation releases it (O8). Delete the held
+  Pod only by exact UID, then settle the journal slot by hand (§3.10 step 5).
 
 ### R6: recovery fence, last
 
@@ -598,64 +673,79 @@ Signed: L 90, prompt never sent, 0 requests.
 
 Keep the last reserve until R6 passes.
 
-## 7. Open decisions
+## 7. Owner decisions
 
-Owner decisions from rev 2, **not answered here**:
+**Decided:**
 
-- **O1:** baseline 7 runs + 1 reserve (6 + 2 once E3 is validated); more than one lost terminating run
-  needs a new approval. Also open: does a signed run aborted before the create count toward the 8?
-- **O2:** accept what I = 922,000 means per run (930,192 reserved per call, 69,808 headroom, about six
-  calls, an interrupted call ends the run's calls), or a smaller I with fresh provider-enforcement
-  evidence.
-- **O3:** D, the canary's deadline. Proposal: 2026-11-27T18:00Z, if File B lands by 2026-11-20.
-- **O4 (optional):** one no-call run with three workers (R5, R7, R6), each below one reservation.
+- **O3, D** (bus 549, relay#277 comment 125299): fix D with the owner when File B is generated:
+  - at least 5 days after File B;
+  - at a working-hours instant whose 48 h window avoids a weekend.
+
+  If the canary would overrun File B's expiry, reissue File B before signing more runs.
+- **S3** (2026-11-16): ship v0.10.4 (the hub-only loader fix), including the hub rollout.
+- **I4** (2026-11-16): the frozen binding, ailab #1782.
+- **N1** (2026-11-16): `notifications` passes under a written owner exception (relay#277 comment 125360).
+
+**Open** (current one-line options went to the operator on 2026-11-16):
+
+- **O1:** baseline 6 runs + 2 reserves; more than one lost terminating run needs a new approval. Also
+  open: whether a signed run aborted before its create counts toward the 8.
+- **O2:** accept what I = 922,000 means per run:
+  - 930,192 reserved per call;
+  - 69,808 of headroom, about six calls;
+  - an interrupted call ends the run's calls.
+
+  The alternative is a smaller I, backed by fresh provider-enforcement evidence.
+- **O4 (optional):** one no-call run with three workers (R5, R7, R6), each below one reservation. It
+  collides with O8.
 - **O5:** a few paid rehearsal calls for E6.
+- **O6:** S-A or S-B for the per-run hub change (§2).
+- **O7, how `submittedPod` is sourced.**
+  - (a) Offline reconstruction (§3.8; R1-R6 need no cluster change), plus an API server audit policy
+    for R7 only. R7's held Pod never gets a session, so only the create's audit response binds its UID.
+  - (b) The audit policy for every run.
+  - (c) No audit policy; R7's UID then comes from the hub's post-create record, which is weaker.
 
-Raised by this runbook, for the operator and owner:
+  The audit policy is a control-plane configuration change with its own PR.
+- **O8:** the pool slot between R7 and R6 (§6 R7):
+  - (a) a reviewed hub database reconciliation, drafted and reviewed in advance;
+  - (b) R7 after R6;
+  - (c) no R7, which makes the canary impossible because it needs all nineteen rows.
 
-- **S1:** S-A or S-B for the per-run hub change (§2), decided with H7's component design.
+**Raised by this runbook, for the operator:**
+
 - **S2:** the mechanism that keeps the agent from claiming the create before the bundle (§3.5).
-- **S3:** the G0 hub fix: a new Relay release and hub rollout before R1, so the freeze starts on the
-  fixed image (§8 G0).
 
-## 8. Blocking gaps and UNVERIFIED steps
+## 8. Gaps and UNVERIFIED steps
 
-**Blocking gaps, confirmed in code** (none is in E1-E4):
+**Gaps found in code while writing this runbook, and how each is closed:**
 
-- **G0, the hub cannot load a candidate document (before R1; hub image).** The loader parses the
-  whole `CandidateHubDocument` with the integer-only candidate parser (`rel:server/workers/candidate/load.ts:38`;
-  `rel:packages/worker-runtime/candidate-signatures.ts:107`). The document's `binding` carries the runtime
-  manifest's `supervisorConfig.renewAfterFraction`, a fraction by schema (0.2-0.8,
-  `rel:packages/worker-runtime/supervisor/config.ts:36`; 0.5 for the researcher,
-  `rel:deploy/worker-images/researcher/inputs.json:36`). An offline test against the `c0fe50f0` parser
-  refuses `0.5`. The load therefore ends `document-invalid`, and §3.4's readback cannot pass. `main`
-  has the same loader. The agent and the bundle tool already read bindings with `JSON.parse`
-  (`rel:packages/worker-runtime/acceptance.ts:181-183`; `rel:packages/infrastructure-agent/offline-bundle.ts:55-58`).
-  The fix changes the hub image, so it means a new Relay release and hub rollout, which the freeze
-  allows only before R1. Owner decision.
-
-- **G1, #15 matrix (before R5).** The per-launch policy pins `activeDeadlineSeconds <= <seconds left
-  when the bundle was generated>` (`rel:packages/infrastructure-agent/pod-renderer.ts:248-255`,
-  `pod-contract-cel.ts:89-90`). The matrix driver regenerates the bundle at its own start time and
-  requires semantic equality with the installed policies
-  (`main:scripts/qualification/candidate-admission-observation.ts:307,381-383`), so it refuses a
-  policy generated earlier. Fix in the driver, for example by regenerating at the installed bundle's
-  `report.json.generatedAt`.
-- **G2, `submittedPod` (before R1).** Every acceptance-config driver needs the exact Pod create request
-  body; the agent does not export it, and the documented source is an API audit `requestObject`. This
-  repository sets no API audit policy, so whether ailab records request bodies is **UNVERIFIED** and
-  likely not.
-- **G3, `subject.json` (before R1's conversion).** Only the library function
-  `createPodMeasurementSubject` builds it (`rel:packages/worker-runtime/measurement-subject.ts:159-178`);
-  no CLI exists, so §3.11 cannot run.
-- **G4, `commandSha256` (before signing R1).** No operator tool reproduces the holder's final command
-  hash (`rel:holder/src/worker_candidate.rs:527-545`).
-- **G5, fraction-safe parsing in drivers (before R1's conversion, and R5).** The same integer-only
-  parser reads the matrix driver's definition, which embeds the binding
-  (`main:scripts/qualification/researcher-pool-admission-observation.ts:571`), and both converters'
-  `subject.json` (`main:scripts/qualification/researcher-runtime-v2-observations.ts:610`;
-  `researcher-pool-v2-observations.ts:848`). Each needs an operator-side fix that keeps strict parsing
-  for signed documents.
+- **G0, the hub cannot load a candidate document.** Released; the rollout is still pending.
+  - **The bug.** `c0fe50f0`'s loader parses the whole `CandidateHubDocument` with the integer-only
+    candidate parser (`rel:server/workers/candidate/load.ts:38`; `rel:packages/worker-runtime/candidate-signatures.ts:107`).
+    The document's `binding` carries `supervisorConfig.renewAfterFraction`, a fraction by schema
+    (`rel:packages/worker-runtime/supervisor/config.ts:36`; 0.5 for the researcher). So every real
+    document ends `document-invalid`.
+  - **The fix.** Relay #525 adds a fraction-safe parser used only by the hub loader for this pinned,
+    unsigned document; signed run and session documents stay integer-only.
+  - **The release.** Released as v0.10.4 (`rel4:`), hub-only: the worker images, the binding and the I4
+    pins stay v0.10.3.
+  - **Still to do.** The ailab hub pin and its rollout, before H7 and before `subject.json` is frozen:
+    the hub image is in `deployment.json`.
+- **G1, #15 matrix.** Closed by Relay #529. The driver now regenerates the installed bundle at its own
+  `generatedAt`, requires the pinned bytes, and takes `installedReport`. The per-launch policy pins the
+  seconds left when the bundle was generated (`rel:packages/infrastructure-agent/pod-renderer.ts:248-255`).
+- **G2, `submittedPod`.** Closed by Relay #530, the offline reconstruction against the hub-signed
+  `podDigest` (§3.8); owner decision O7. ailab sets no API audit policy, so an audit capture is not
+  available today.
+- **G3, `subject.json`.** Closed by Relay #528 (`compose-measurement-subject.ts`, §3.0 step 7).
+- **G4, `commandSha256`, and the signer.** Closed by Relay #528 (`candidate-command-sha256.ts`,
+  `sign-candidate-run.ts`).
+- **G5, fraction-safe parsing in drivers.** Closed:
+  - both converters read `subject.json` through `main:scripts/qualification/runtime-v2-subject.ts` (Relay #523);
+  - the admission drivers read the policy definition with `parseOperatorJson` (Relay #529).
+- **G6, delayed start (E1).** The Relay PR is pending. R7 needs the API audit policy (O7) and leaves
+  R6's slot blocked (O8).
 
 **UNVERIFIED:**
 
