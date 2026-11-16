@@ -903,6 +903,32 @@ class BundleCheck(unittest.TestCase):
             with self.subTest(mutate.__name__):
                 self.run_check(self.make_bundle(mutate), reason=reason)
 
+    def test_runtime_class_tolerations_keep_every_attribute(self):
+        # A numeric attribute (tolerationSeconds) is read, not dropped, so the placement comparison sees
+        # it; an attribute the reader does not understand is refused rather than skipped.
+        tf = ROOT / "kubernetes/infra/agent-nodes/relay-workers.tf"
+        text = tf.read_text(encoding="utf-8")
+        effect = '        effect   = "NoSchedule"\n'
+        self.assertEqual(text.count(effect), 1)
+        for extra, reason in (('        tolerationSeconds = 300\n', None),
+                              ('        tolerationSeconds = var.seconds\n', "toleration attribute not understood"),
+                              ('        effect = "NoExecute"\n', "toleration attribute not understood")):
+            with self.subTest(extra.strip()), tempfile.TemporaryDirectory() as tmp:
+                patched = Path(tmp) / "relay-workers.tf"
+                patched.write_text(text.replace(effect, effect + extra), encoding="utf-8")
+                module = bundle_module()
+                with mock.patch.object(module, "RELAY_WORKERS_TF", patched), \
+                        mock.patch.dict(globals(), {"bundle_module": lambda: module}):
+                    if reason is None:
+                        _, tolerations = module.runtime_class_scheduling()
+                        self.assertEqual(tolerations[0]["tolerationSeconds"], 300)
+                        # A placement without it no longer matches the class, so the bundle is refused.
+                        self.run_check(self.make_bundle(), reason="tolerations are not relay-gvisor's")
+                    else:
+                        with self.assertRaises(module.Mismatch) as refused:
+                            module.runtime_class_scheduling()
+                        self.assertIn(reason, str(refused.exception))
+
     def test_refuses_a_tampered_file(self):
         bundle = self.make_bundle()
         path = bundle / "20-containment.json"

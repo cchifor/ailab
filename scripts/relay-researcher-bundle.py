@@ -187,8 +187,17 @@ def runtime_class_scheduling() -> tuple[dict, list[dict]]:
     if not scheduling:
         fail("relay-workers.tf has no relay-gvisor RuntimeClass scheduling block")
     selector = dict(re.findall(r'"([^"]+)"\s*=\s*"([^"]*)"', scheduling.group(1)))
-    tolerations = [dict(re.findall(r'(\w+)\s*=\s*"([^"]*)"', body))
-                   for body in re.findall(r"\{(.*?)\}", scheduling.group(2), re.S)]
+    tolerations = []
+    for body in re.findall(r"\{(.*?)\}", scheduling.group(2), re.S):
+        # Every attribute, a number (tolerationSeconds) included: one left out would be merged into the
+        # Pod yet missing from the comparison.
+        toleration = {}
+        for attribute in filter(None, (a.strip() for a in re.split(r"[\n,]", body))):
+            match = re.fullmatch(r'(\w+)\s*=\s*(?:"([^"]*)"|(\d+))', attribute)
+            if not match or match.group(1) in toleration:
+                fail(f"relay-workers.tf relay-gvisor toleration attribute not understood: {attribute!r}")
+            toleration[match.group(1)] = match.group(2) if match.group(2) is not None else int(match.group(3))
+        tolerations.append(toleration)
     if not selector or not tolerations:
         fail("relay-workers.tf relay-gvisor scheduling has no nodeSelector or tolerations")
     return selector, tolerations
