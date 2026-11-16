@@ -576,10 +576,14 @@ class BundleCheck(unittest.TestCase):
         d = template()
         committed = json.loads((TREE / "agent/config.json").read_text(encoding="utf-8"))
         key = self.committed(committed["identity"]["installationPublicKey"], self.KEY)
+        # After step I10 the committed config carries the live fence UID; so does the definition then.
+        fence = committed["identity"].get("fenceObjectUid")
         d["sourceCommit"] = self.SOURCE
         d["agentImage"] = self.AGENT
         d["identity"]["installationId"] = self.IID
         d["identity"]["installationPublicKey"] = key
+        if fence:
+            d["identity"]["fenceObjectUid"] = fence
         installation = copy.deepcopy(d["installationPolicy"])
         installation.update(allowedImageDigests=["c" * 64], allowedHarnessAdapters=["codex"],
                             allowedEgressDestinations=[])
@@ -619,7 +623,7 @@ class BundleCheck(unittest.TestCase):
             "hub": {"origin": d["hub"]["origin"], "caConfigMap": d["hub"]["caConfigMap"]},
             "kubernetes": {"origin": d["kubernetesOrigin"]},
             "identity": {"tenantId": d["identity"]["tenantId"], "installationId": self.IID,
-                         "clusterUid": d["identity"]["clusterUid"], "installationPublicKey": key, "fenceObjectUid": "",
+                         "clusterUid": d["identity"]["clusterUid"], "installationPublicKey": key, "fenceObjectUid": fence or "",
                          "installationKeySecret": d["references"]["installationKeySecret"],
                          "enrollmentTokenSecret": d["references"].get("enrollmentTokenSecret", "")},
             "policy": {**copy.deepcopy(policy), "retainedStorageClass": None, "persistentVolumeClaims": False,
