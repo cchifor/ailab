@@ -1,0 +1,52 @@
+{
+  "_comment": "Inputs of scripts/relay-researcher-binding.mts, which rebuilds the researcher installation's PodRuntimeBinding and the complete operator definition for runbook step I4 (docs/runbooks/relay-researcher-installation.md) with the pinned Relay checkout's own code. `release` pins the Relay v0.10.3 release (Gitea release 2142) and the sha256 of each asset the generator reads: it refuses any other bytes and any checkout whose HEAD is not sourceCommit. `derived` holds the values the reviewed template's binding leaf requires (researcher-installation-definition.json), plus the relay-gvisor RuntimeClass's scheduling.nodeSelector key ailab.io/runtime-gvisor (RuntimeClass admission merges it into every Pod, and Relay pins the placement selector exactly); scripts/tests/test_relay_researcher_binding.py compares them with the template, relay-workers.tf and the internal TLS and journal manifests. `decisions` holds every binding value that is NOT derived from the release, the template or a Relay constant, as the owner decided them on 2026-11-15 (runbook, 'Binding inputs that are decisions'). `installation` is the identity Relay approved at step I3 (public values; fingerprint = Relay's publicKeyFingerprint, the first 16 hex of sha256 over the base64url key text): the generator refuses any other installation ID or public key, and researcher-i4/ is its committed output for exactly this identity.",
+  "schema": "ailab.relay-researcher-binding-inputs/v1",
+  "release": {
+    "tag": "v0.10.3",
+    "giteaReleaseId": 2142,
+    "sourceCommit": "c0fe50f030eac65d78a113e42797c5fe8c395233",
+    "assets": {
+      "SHA256SUMS": "0fbbc3cfdb314aa91a3d661cacc9d12b1d1a625fb2f10f0c755b80c09a9c63ee",
+      "manifest.json": "24e88c02dfc73805b5331e31246093f1cb4e9205adcb124eded482201ba21cda",
+      "worker-image-infrastructure-agent-133788.json": "cc119a6ac87a3554103a2471605277881793dc9701abdaeebe86914f86a94434",
+      "worker-image-worker-runtime-133788.json": "269954687b5d25c344d744a8c9a682dcd9beba602be33fe781adc644f5001598",
+      "worker-runtime-manifest-133788.json": "593e34b69b85abf4c0429ec563c97c73d74f39eb4ad0b68abab97eb659aa3d61"
+    },
+    "runtimeManifest": "worker-runtime-manifest-133788.json",
+    "runtimeReceipt": "worker-image-worker-runtime-133788.json",
+    "agentReceipt": "worker-image-infrastructure-agent-133788.json",
+    "runtimeImage": "registry.chifor.me/relay/worker-runtime@sha256:39aed234fe31d6c819fa472dea3422f305031d5d5a0716962c3547c960cc9b6d",
+    "runtimeDigest": "d758093f66f080a69a28fc5f8162184f9f284be981e8f9b0f0c719290af46407",
+    "agentImage": "registry.chifor.me/relay/infrastructure-agent@sha256:ba4cdd9cf94362a0ab8f06565460c48dbe2a1262ae87e50a77bd145c8811a4ef"
+  },
+  "derived": {
+    "placement": {
+      "runtimeClassName": "relay-gvisor",
+      "overhead": {"milliCpu": 80, "memoryMiB": 24},
+      "nodeSelector": {"ailab.io/relay-worker-pool": "true", "ailab.io/runtime-gvisor": "true", "kubernetes.io/hostname": "relay-worker-1"},
+      "tolerations": [{"key": "dedicated", "operator": "Equal", "value": "relay-worker", "effect": "NoSchedule"}]
+    },
+    "hostAliases": {"hub": "10.96.0.40", "router": "10.96.0.41", "candidateJournal": "10.96.0.42"},
+    "hubCaPath": "/etc/relay/hub-ca.pem",
+    "routerOrigin": "https://router.chifor.me",
+    "templateEgressDestinations": []
+  },
+  "decisions": {
+    "supervisor": {"milliCpu": 250, "memoryMiB": 256, "ephemeralMiB": 64},
+    "placement": {"tier": "sandboxed-pod", "binding": "relay-gvisor"},
+    "template": {
+      "templateId": "4da6f919-d660-472c-b503-4d8849fa60df",
+      "revision": 1,
+      "name": "researcher",
+      "skills": [],
+      "toolsets": [],
+      "modelPolicy": "relay-researcher"
+    },
+    "releaseApproval": "absent"
+  },
+  "installation": {
+    "installationId": "b380ff7f-0716-478d-8b01-3d39f30e750b",
+    "installationPublicKey": "6D2Cma_Oa4KiaDtOnpmiiztuBhEKObNtEqFNJl-FBas",
+    "publicKeyFingerprint": "25070c63dada58d3"
+  }
+}

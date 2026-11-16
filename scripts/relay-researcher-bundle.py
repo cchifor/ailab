@@ -22,7 +22,8 @@ installation is exactly what was reviewed here, and then copies the only two thi
          31-agent-config.json against the committed agent objects and config, and the generated
          agent policy against the definition it came from (installationPolicy verbatim, podTiers and
          allowedTemplates from the binding, the same policy in values and config, report.json's
-         identity); pins already filled against the definition. With --chart it also renders that checkout's
+         identity; placements on relay-worker-1 with relay-gvisor's overhead, every key of its
+         scheduling.nodeSelector and exactly its tolerations, read from relay-workers.tf); pins already filled against the definition. With --chart it also renders that checkout's
          deploy/infrastructure-agent with 30-agent-values.json (helm template, no cluster) and
          compares every rendered object with the committed mirror. Exit 1 on the first mismatch.
   import <bundle-dir> --chart <relay-checkout>
@@ -57,6 +58,7 @@ EGRESS_STAGES = {"execution-egress.yaml": "enrollment", "qualification-egress.ya
 INTERNAL_TLS_TERMINATORS = ROOT / "kubernetes/apps/relay-internal-tls/terminators.yaml"
 JOURNAL_RENDER = ROOT / "kubernetes/optional/relay-candidate-journal/render.py"
 RUNTIME_CA = ROOT / "docs/relay-workers/researcher-runtime-ca.crt"
+RELAY_WORKERS_TF = ROOT / "kubernetes/infra/agent-nodes/relay-workers.tf"
 HUB_CA_PATH = "/etc/relay/hub-ca.pem"
 ROUTER_ORIGIN = "https://router.chifor.me"
 PLACEHOLDER = "OPERATOR-FILLS"
@@ -170,6 +172,26 @@ def internal_tls_addresses() -> dict:
         fail("kubernetes/optional/relay-candidate-journal/render.py has no single CLUSTER_IP")
     return {"hub": services.get("relay-hub-tls"), "router": services.get("relay-router-tls"),
             "candidateJournal": journal[0]}
+
+
+def runtime_class_scheduling() -> tuple[dict, list[dict]]:
+    """relay-gvisor's scheduling.nodeSelector and tolerations, read from the RuntimeClass manifest
+    (kubernetes/infra/agent-nodes/relay-workers.tf, never a second copy here). RuntimeClass admission
+    merges both into every Pod of the class, and Relay pins the placement's selector exactly (VAP CEL
+    equality and the executor's readback), so a placement must already carry every selector key and
+    exactly the class's tolerations (Relay docs/infrastructure-candidate-policy.md)."""
+    text = RELAY_WORKERS_TF.read_text(encoding="utf-8")
+    block = re.search(r'resource "kubernetes_manifest" "relay_gvisor" \{(.*?)\n\}', text, re.S)
+    scheduling = re.search(r"scheduling = \{\s*nodeSelector = \{(.*?)\}\s*tolerations = \[(.*?)\]",
+                           block.group(1) if block else "", re.S)
+    if not scheduling:
+        fail("relay-workers.tf has no relay-gvisor RuntimeClass scheduling block")
+    selector = dict(re.findall(r'"([^"]+)"\s*=\s*"([^"]*)"', scheduling.group(1)))
+    tolerations = [dict(re.findall(r'(\w+)\s*=\s*"([^"]*)"', body))
+                   for body in re.findall(r"\{(.*?)\}", scheduling.group(2), re.S)]
+    if not selector or not tolerations:
+        fail("relay-workers.tf relay-gvisor scheduling has no nodeSelector or tolerations")
+    return selector, tolerations
 
 
 def check_internal_tls(definition: dict, stage: str) -> None:
@@ -349,6 +371,7 @@ def check_policy(config: dict, values: dict, definition: dict, report: dict) -> 
         fail("policy.podTiers is not the binding's placements")
     if {t["runtimeClassName"] for t in tiers} != {"relay-gvisor"}:
         fail("every researcher placement must use RuntimeClass relay-gvisor")
+    class_selector, class_tolerations = runtime_class_scheduling()
     for p in binding["placements"]:
         if p.get("overhead") != {"milliCpu": 80, "memoryMiB": 24}:
             fail("a placement's overhead is not relay-gvisor's 80m / 24Mi (the slot quota assumes it)")
@@ -356,6 +379,11 @@ def check_policy(config: dict, values: dict, definition: dict, report: dict) -> 
         if selector.get("kubernetes.io/hostname") != "relay-worker-1" or \
                 selector.get("ailab.io/relay-worker-pool") != "true":
             fail("a placement does not pin kubernetes.io/hostname relay-worker-1 on the relay worker pool")
+        if any(selector.get(k) != v for k, v in class_selector.items()):
+            fail(f"a placement's nodeSelector lacks relay-gvisor's scheduling.nodeSelector {class_selector}: "
+                 "RuntimeClass admission would add it and Relay's exact selector pin would refuse the Pod")
+        if p.get("tolerations") != class_tolerations:
+            fail(f"a placement's tolerations are not relay-gvisor's scheduling.tolerations {class_tolerations}")
     templates = [{"templateId": t.get("definition", {}).get("templateId"),
                   "revision": t.get("definition", {}).get("revision"), "digest": t.get("digest")}
                  for t in binding.get("templates", [])]

@@ -559,7 +559,9 @@ class BundleCheck(unittest.TestCase):
         runtime_image = "registry.chifor.me/relay/worker-runtime@sha256:" + "c" * 64
         placement = {"tier": "sandboxed-pod", "binding": "researcher", "runtimeClassName": "relay-gvisor",
                      "overhead": {"milliCpu": 80, "memoryMiB": 24},
-                     "nodeSelector": {"ailab.io/relay-worker-pool": "true", "kubernetes.io/hostname": "relay-worker-1"},
+                     # Every key of relay-gvisor's scheduling.nodeSelector (RuntimeClass admission merges it).
+                     "nodeSelector": {"ailab.io/relay-worker-pool": "true", "ailab.io/runtime-gvisor": "true",
+                                      "kubernetes.io/hostname": "relay-worker-1"},
                      "tolerations": [{"key": "dedicated", "operator": "Equal", "value": "relay-worker", "effect": "NoSchedule"}]}
         d["binding"] = {"installationId": self.IID, "policyDigest": "f" * 64, "runtime": {"image": runtime_image},
                         "placements": [placement],
@@ -802,6 +804,33 @@ class BundleCheck(unittest.TestCase):
                        empty_fill):
             with self.subTest(mutate.__name__):
                 self.assertEqual(self.run_check(self.make_bundle(mutate)), 1)
+
+    def test_placement_carries_the_runtime_class_scheduling(self):
+        # relay-gvisor's scheduling block, read from its manifest: RuntimeClass admission merges it into
+        # every Pod, and Relay pins the placement's selector exactly (VAP CEL equality, executor readback).
+        self.assertEqual(bundle_module().runtime_class_scheduling(), (
+            {"ailab.io/relay-worker-pool": "true", "ailab.io/runtime-gvisor": "true"},
+            [{"key": "dedicated", "operator": "Equal", "value": "relay-worker", "effect": "NoSchedule"}]))
+        def placement(files):
+            return files["00-definition.json"]["binding"]["placements"][0]
+        def without_class_selector(files):
+            del placement(files)["nodeSelector"]["ailab.io/runtime-gvisor"]
+        def other_class_selector_value(files):
+            placement(files)["nodeSelector"]["ailab.io/runtime-gvisor"] = "false"
+        def other_toleration(files):
+            placement(files)["tolerations"][0]["value"] = "agent"
+        def extra_toleration(files):
+            placement(files)["tolerations"].append({"key": "dedicated", "operator": "Equal", "value": "agent",
+                                                    "effect": "NoSchedule"})
+        selector, tolerations = "lacks relay-gvisor's scheduling.nodeSelector", "tolerations are not relay-gvisor's"
+        stage = bundle_module().egress_stage()[0]  # whichever stage the tree includes
+        for mutate, reason in ((without_class_selector, selector), (other_class_selector_value, selector),
+                               (other_toleration, tolerations), (extra_toleration, tolerations)):
+            with self.subTest(mutate.__name__):
+                def staged(files, mutate=mutate):
+                    self.g3(files, stage)
+                    mutate(files)
+                self.run_check(self.make_bundle(staged), stage, reason=reason)
 
     def test_refuses_a_tampered_file(self):
         bundle = self.make_bundle()
