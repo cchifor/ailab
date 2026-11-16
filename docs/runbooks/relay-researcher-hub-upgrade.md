@@ -19,8 +19,8 @@ owner's direct confirmation for the exact reviewed rollout.
 | --- | --- | --- |
 | `relay-restore-fencing` (existing) | `RELAY_RECOVERY_GENERATION_FILE` from the operator's `relay-recovery-generation` ConfigMap | H3 |
 | `relay-infrastructure-installations` (new) | `RELAY_INFRASTRUCTURE_INSTALLATIONS=1` | H3 |
-| `relay-worker-budget-client` (existing) | `RELAY_WORKER_BUDGET_{DSN,CA,WITNESS}_FILE` | H4 |
-| `relay-worker-profiles` (new) | `RELAY_WORKER_PROFILES_FILE` and `_SHA256`, the registry ConfigMap | H4 |
+| `relay-worker-budget-client` (existing) | `RELAY_WORKER_BUDGET_{DSN,CA,WITNESS}_FILE` | H4a |
+| `relay-worker-profiles` (new) | `RELAY_WORKER_PROFILES_FILE` and `_SHA256`, the registry ConfigMap | H4b (after the release approval) |
 | `relay-router-connection` (existing) | `RELAY_ROUTER_CONNECTIONS_FILE`, `NODE_EXTRA_CA_CERTS`, OpenBao egress | H6 |
 | `relay-agent-control-plane` (new) | `RELAY_AGENT_CONTROL_PLANE=1` | H6 |
 | `relay-control-monitoring`, `relay-worker-monitoring` (existing) | control metrics and worker alerts | H6 |
@@ -32,10 +32,12 @@ a restore of the hub needs it with or without installations. `test_relay_researc
 pins each patch, and refuses installations without the recovery generation (one way only), the profile
 registry without the installations and budget client or with a placeholder or wrong SHA, the control
 plane without the Router connection or next to `RELAY_ENVIRONMENTS`, `relay-gitea-authority` or
-`relay-notifications`, and an H3 that runs the fence script. `test-relay-researcher-hub-render.sh`
-proves each component changes only the relay container's env, mounts and volumes, and that the whole
-H3-H6 set combines without collision. It layers every case on the overlay without the hub components,
-and proves that the live overlay renders as exactly that plus the ones it already includes (H3 on).
+`relay-notifications`, and an H3 that runs the fence script. It does not require the registry for the
+control plane, because H6 comes before H4b. `test-relay-researcher-hub-render.sh` proves each step's
+components change only the relay container's env, mounts and volumes, and that the whole set (H3,
+H4a, H6 and H4b) combines without collision. It layers every case on the overlay without the hub
+components, and proves that the live overlay renders as exactly that plus the ones it already
+includes (H3 on).
 
 ## Operator-filled values
 
@@ -45,9 +47,10 @@ and proves that the live overlay renders as exactly that plus the ones it alread
 | Source commit, release name | the `chifor.me/source-commit` and `chifor.me/release` annotations and the two image comments | the same receipt; equals the installation's `sourceCommit` |
 | N, the target schema | readback only | `CURRENT_SCHEMA_VERSION` in `server/schema.ts` and the highest `migrations/NNN_*.sql` at that commit (both 79 on Relay main `2ce7cd7ab`) |
 | Recovery generation UUID | the operator-created ConfigMap `relay/relay-recovery-generation` (never in git, never in a backup) | `uuid.uuid4()` at step H3 |
-| Profile registry, its SHA-256 | `kubernetes/components/relay-worker-profiles/profiles.json` and that component's `RELAY_WORKER_PROFILES_SHA256` | the release's researcher profile package |
+| Profile registry, its SHA-256 | `kubernetes/components/relay-worker-profiles/profiles.json` and that component's `RELAY_WORKER_PROFILES_SHA256` | the release's researcher profile package, with the genuine release approval and the qualified `tokenPolicyDigests` (step H4b) |
 
-None is guessed: until the release is pinned, the image, commit, N and registry stay unknown.
+None is guessed: until the release is pinned, the image, commit and N stay unknown, and the registry
+stays unknown until the release approval exists (H4b).
 
 ## Owner decisions (relay#277 comment 122379, 2026-11-14)
 
@@ -118,7 +121,7 @@ lifetime 8 h. See [relay-researcher-installation.md](relay-researcher-installati
   the route `relay-researcher-luna` and ailab #1763's trust, both merged), per Relay's
   `researcher-budgeted-codex-route.md`.
 - The budget ledger is through its runbook's step 6 (logins, authority row `ready=false`, witness) so
-  H4's Secret exists.
+  H4a's Secret exists.
 - Capacity: `kubectl top node` for the agent node running Relay; the Recreate rollout is an outage
   of Relay for the backup, migration and start (minutes; the backup has a 30-minute bound).
 
@@ -266,24 +269,28 @@ Readback:
   `GET /api/infrastructure/installations` is 200 `[]`;
 - dev-worker connectors are online again and a relay-bus key still answers its inbox.
 
-### H4. Budget client and profile registry
+### H4a. Budget client only
 
-Preconditions: the `relay/relay-worker-budget` ExternalSecret is Ready (budget runbook steps 5-6);
-the profile registry for the pinned release is reviewed (`relay-worker-profiles/kustomization.yaml`
-lists its content: tenant, sealed researcher template digest, runtime digest, `modelPolicy`, the
-complete profile template with `launcher-proxy-v1`, UID 1000, `/workspace`, channel
-`ae9b92bb-0b59-4987-b41f-376bd269db62`, inference `{connectionId
-babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8, protocol codex-responses, selection {kind: model, model:
-relay-researcher-luna}}` with `adaptedResponses {catalogModel gpt-6-luna, maxOutputTokens 8192,
-reasoningEffort none}`, the release approval and the qualified `tokenPolicyDigests`).
+Preconditions: the `relay/relay-worker-budget` ExternalSecret is Ready (budget runbook steps 5-6).
 
-One PR: replace `profiles.json`, set `RELAY_WORKER_PROFILES_SHA256` to its `sha256sum`, include
-`relay-worker-budget-client` and `relay-worker-profiles`, remove `RELAY_WORKER_PROFILES_FILE` and
-`relay-worker-profiles` from the forbidden list. Readback: the mounted file's SHA-256 inside the Pod
-equals the pin; the budget files' SHA-256 equal the Secret's; the log has no
-`worker_budget_authority_unavailable` with reason `profiles-unavailable`. Until H6 adds the Router
-connection the authority itself cannot start; that warning (`ledger-config-invalid`) is expected
-here and must disappear at H6.
+One PR includes `relay-worker-budget-client` and nothing else. The profile registry is **not** part
+of this step: every registry entry carries a genuine release approval, which exists only after
+qualification, so the registry is step H4b, after H7
+([H4b](#h4b-profile-registry-after-the-release-approval) has the evidence). The budget client is not
+on the activation gate's forbidden list, so the gate does not change here.
+
+Readback: the Pod started; the budget files' SHA-256 inside the Pod equal the Secret's; the log has
+no `worker_budget_authority_unavailable`. The budget authority does **not** start here, and is not
+expected to until H7: it needs a profile source (H7's candidate or canary file, later H4b's
+registry) as well as H6's Router connection. With no profile configuration at all Relay skips the
+startup without any warning. The warning comes only from a failing profile load (`profiles-unavailable`)
+or a failing `startWorkerBudgetAuthority`, which validates the ledger settings (`ledger-config-invalid`).
+With no profile file and no candidate or canary authority the load returns nothing without failing
+(Relay `server/workers/runtime-session/profiles.ts:430-433`), and the ledger start runs only
+`if (workerProfiles)` (`server/main.ts:337`), so neither happens
+(`deploy/worker-budget-ledger/README.md:118-121`: "An entirely absent worker-profile configuration
+disables budget startup without that warning, even when ledger settings are present"). Its state
+becomes visible with H6's metrics.
 
 ### H5. Escrow token
 
@@ -314,23 +321,91 @@ Readback, as Router connection runbook step 10, plus:
   `RELAY_NOTIFICATION_DESTINATIONS_FILE`;
 - dev-worker connectors stay online across the rollout, and an existing relay-bus agent key still
   reads its inbox and sends (the control plane changes no key or connector authority);
-- control health 200; the metrics scrape includes the worker and budget series with budget startup
-  `started`; no `worker_budget_authority_unavailable` in the log;
+- control health 200; the metrics scrape includes the worker and budget series; no
+  `worker_budget_authority_unavailable` in the log;
 - `GET /api/router-credentials/connections` lists `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`.
 
-The installation itself can be approved any time after H3 (installation runbook I1-I10); a worker
-session on it needs H6. The first sessions are the qualification scenarios, and those also need the
-qualification stage read back (installation runbook Q1-Q5: the internal TLS terminators, then the
-slot's DNS-less egress stage); the enrollment-stage slot admits no Pod.
+The budget authority is expected **not** to start at H6. Until H7 it has no profile source: no
+candidate or canary file before H7 and no registry before H4b, so `loadWorkerRuntimeProfiles` returns
+nothing and Relay never starts the authority (Relay `server/main.ts:337`). The ledger files of H4a are
+configured, so the startup metric reads `start_failed`, not `started` (`server/main.ts:420`), and
+`RelayWorkerBudgetStartupFailed` (`relay-worker-monitoring`, `for: 2m`) fires once the metric is
+scraped. Both are expected here and stay until H7 (whether to silence that one alert until then is the
+operator's call; the rule does not change). Both must clear at H7, where the budget-started readback
+is.
 
-### H7. Later hub settings, each its own reviewed component and PR
+The installation itself can be approved any time after H3 (installation runbook I1-I10); a worker
+session on it needs H6 and H7's candidate files. The first sessions are the qualification scenarios,
+and those also need the qualification stage read back (installation runbook Q1-Q5: the internal TLS
+terminators, then the slot's DNS-less egress stage); the enrollment-stage slot admits no Pod.
+
+### H7. Candidate, canary and qualification files, each its own reviewed component and PR
+
+Before the candidate files: Q5's readback, the candidate journal at `10.96.0.42`
+([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)), and **budget ledger File
+B**, step 7's reviewed `worker_budget.qualifications` row (the Router `ReviewedTokenPolicy` and its
+canonical `tokenPolicyDigest`; plan in ailab #1753 comment 124071), committed and read back. The signed
+candidate runs pin that digest (the run's `router.tokenPolicyDigests`), so File B comes before any run
+is signed.
 
 | Setting | When | Note |
 | --- | --- | --- |
-| `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE` | the nineteen scenarios (delivery plan step 9) | needs the independent candidate journal and a signed run |
-| `RELAY_WORKER_ORDINARY_CANARY_FILE`, `_SHA256`, `_POLICY_FILE` | the finite canary (step 10) | a configured permit that cannot load stops Relay from starting |
+| `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE` | the nineteen scenarios (delivery plan step 9) | needs the independent candidate journal, File B and a signed run |
+| `RELAY_WORKER_ORDINARY_CANARY_FILE`, `_SHA256`, `_POLICY_FILE` | the finite canary (step 10), after the genuine release approval | a configured permit that cannot load stops Relay from starting |
 | `RELAY_WORKER_QUALIFICATION_FILE`, `_SHA256` | general activation (step 11) | the registry of accepted evidence |
 | `RELAY_WORKER_PROVENANCE_FILE`, `_SHA256` | not for the repository-free researcher | stays unset |
+
+Readback of the candidate files, the budget-started readback that H6 cannot give: the metrics scrape
+shows budget startup `started`; `RelayWorkerBudgetStartupFailed` has cleared; the log has neither
+`worker_budget_authority_unavailable` nor `worker_candidate_unavailable`. The candidate authority is
+the first profile source: `loadWorkerRuntimeProfiles` builds the runtime profiles from it alone, on an
+empty registry (Relay `server/workers/runtime-session/profiles.ts:430-433`, the candidate or canary branch), and Relay then starts the
+budget authority with H6's Router connection.
+
+Then, in this order:
+
+1. the nineteen scenarios, on signed candidate runs;
+2. a **genuine `ReleaseApproval`**, which the operator issues only after the nineteen reports and the
+   other release gates are independently accepted;
+3. the finite canary, whose permit carries that approval. Relay's design removes the candidate
+   authority before the canary (`docs/proposals/worker-candidate-qualification.md`); the permit is
+   then the profile source, so budget startup stays `started`;
+4. H4b, the profile registry, before the bounded general lifecycle trial.
+
+### H4b. Profile registry, after the release approval
+
+This step runs here, after the genuine release approval and before the bounded general lifecycle
+trial. The canary does not need it. Why it cannot come earlier (Relay v0.10.3, `c0fe50f0`):
+
+- **Every entry needs an approval that comes later.** Each registry entry carries a `ReleaseApproval`
+  (`server/workers/runtime-session/profiles.ts:32`) whose `workerTemplates` subject asserts nine
+  passed gates: `workerIsolation` and the eight shared ones (`packages/contracts/release-approval.ts`).
+  Relay's design issues that approval only after the nineteen qualification reports and the other
+  release gates are independently accepted (`docs/proposals/worker-candidate-qualification.md`, lines
+  28 and 310 on Relay main). An empty registry is refused (`.min(1)`, `profiles.ts:40`).
+- **The candidates and the canary do not read it.** A candidate session takes its profile and
+  token-policy digests from the signed run (`profiles.ts:149`), the canary from its permit
+  (`server/workers/ordinary-canary/authority.ts:283`).
+- **The budget authority needs a profile source, but not this one.** With no registry and no candidate
+  or canary file, `loadWorkerRuntimeProfiles` returns nothing (`profiles.ts:430-433`) and Relay never
+  starts the budget authority (`server/main.ts:337`), so the startup metric reads `start_failed`
+  (`server/main.ts:420`, `deploy/worker-budget-ledger/README.md`). H7's candidate file starts it on an
+  empty registry.
+
+Preconditions: the genuine `ReleaseApproval`; the qualified `tokenPolicyDigests`; the registry for the
+pinned release reviewed (`relay-worker-profiles/kustomization.yaml` lists its content: tenant, sealed
+researcher template digest, runtime digest, `modelPolicy`, the complete profile template with
+`launcher-proxy-v1`, UID 1000, `/workspace`, channel `ae9b92bb-0b59-4987-b41f-376bd269db62`,
+inference `{connectionId babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8, protocol codex-responses, selection
+{kind: model, model: relay-researcher-luna}}` with `adaptedResponses {catalogModel gpt-6-luna,
+maxOutputTokens 8192, reasoningEffort none}`, the release approval and the qualified
+`tokenPolicyDigests`).
+
+One PR: replace `profiles.json`, set `RELAY_WORKER_PROFILES_SHA256` to its `sha256sum`, include
+`relay-worker-profiles`, remove `RELAY_WORKER_PROFILES_FILE` and `relay-worker-profiles` from the
+activation gate's forbidden list. Readback: the mounted file's SHA-256 inside the Pod equals the pin;
+the log has no `worker_budget_authority_unavailable` with reason `profiles-unavailable` (the registry
+failed to load or validate); budget startup is still `started`.
 
 ## Enablement order at a glance
 
@@ -339,12 +414,18 @@ slot's DNS-less egress stage); the enrollment-stage slot admits no Pod.
 | H1 | none (backup) | – | verified restore of a fresh generation |
 | H2 | hub image → release | H1 | schema N contiguous, installations 404 |
 | H3 | `recovery:initialize` (receipt `kind: "initial"`), then `RELAY_RECOVERY_GENERATION_FILE` + `RELAY_INFRASTRUCTURE_INSTALLATIONS` | H2, the initializer in the release | one active `initial` row, baseline counts unchanged, `workers: true` |
-| H4 | `RELAY_WORKER_BUDGET_*` + `RELAY_WORKER_PROFILES_FILE`/`_SHA256` | ledger Secret Ready, registry reviewed | file pins equal; no `profiles-unavailable` |
-| H5 | escrow token | H4 | `relay-router-files` Ready |
-| H6 | `RELAY_ROUTER_CONNECTIONS_FILE` + `RELAY_AGENT_CONTROL_PLANE` + monitoring; no environments, Gitea or notifications | ledger `ready=true`, plugin on | `agentControlPlane: true`, `environments: false`, connectors and bus keys working, budget `started`, connection listed |
+| H4a | `RELAY_WORKER_BUDGET_*` only (budget client) | ledger Secret Ready | budget files' SHA-256 equal the Secret's; no `worker_budget_authority_unavailable` |
+| H5 | escrow token | H4a | `relay-router-files` Ready |
+| H6 | `RELAY_ROUTER_CONNECTIONS_FILE` + `RELAY_AGENT_CONTROL_PLANE` + monitoring; no environments, Gitea or notifications | ledger `ready=true`, plugin on | `agentControlPlane: true`, `environments: false`, connectors and bus keys working, connection listed. Budget startup `start_failed` is expected: no profile source until H7 |
 | I1-I10 | the researcher installation (enrollment-stage egress) | H3; worker sessions need H6 | installation `ready`, fence UID pinned |
 | Q1-Q6 | internal TLS terminators (`relay-internal-tls`), then the slot's qualification egress stage (Q6 is the drill configuration) | I10; the release's G3 binding and CA pins | Q5: both Certificates Ready and chaining to the pinned root, Services `10.96.0.40`/`.41`, live policy digest `f6d3187c…282f`. The third alias, the candidate journal's Service at `10.96.0.42`, is not created here: it comes with the journal itself ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) before H7's candidate files |
-| H7 | candidate, canary, qualification files | Q5's readback and the journal at `10.96.0.42` for the scenarios, the evidence for each | per Relay's documents |
+| journal | the independent candidate journal ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) | per that runbook | its Service on exactly `10.96.0.42` (Q2's `pinned` check) |
+| File B | budget ledger step 7's `qualifications` row (ailab #1753 comment 124071) | the final Router rollout read back | the stored policy re-verified, its `tokenPolicyDigest` recorded for the signed runs |
+| H7 | candidate files (the canary file follows the approval; the qualification file is general activation, step 11) | H6, Q5's readback, the journal at `10.96.0.42`, File B | budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
+| scenarios | the nineteen qualification scenarios | H7's candidate files | the nineteen reports, independently accepted |
+| approval | a genuine `ReleaseApproval` | the nineteen reports and the other release gates accepted | its `workerTemplates` subject asserts the nine passed gates |
+| canary | H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
+| H4b | `RELAY_WORKER_PROFILES_FILE`/`_SHA256` (profile registry) | the genuine approval, the qualified `tokenPolicyDigests`, registry reviewed | file pin equal; no `profiles-unavailable`; budget still `started`. Before the bounded general lifecycle trial |
 
 ## Rollback: migrations are forward-only
 
@@ -366,9 +447,11 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
   has its own `recovery:fence` for its schema 56) and keeps `relay-restore-fencing` with that new
   generation. That fence retires the restored database's connectors, keys, sessions and memberships:
   it is the cost of restoring, not of initializing.
-- **H4-H6:** revert the inclusion PR; nothing in the database changes. Before reverting H6 after any
-  issuance, revoke worker credentials through Relay and let escrow cleanup finish (Router connection
-  runbook, "Rollback").
+- **H4a, H6 and H4b:** revert that step's inclusion PR; nothing in the database changes. Before
+  reverting H6 after any issuance, revoke worker credentials through Relay and let escrow cleanup
+  finish (Router connection runbook, "Rollback"). Reverting the last profile source (H4b once H7's
+  candidate and canary files are gone) returns budget startup to `start_failed`, and Relay then has
+  no worker inference authority; H7's files are rolled back as Relay's own documents say.
 - **After installation enrollment:** retire through the installation runbook first; removing hub
   components never revokes issued keys or reconciles workers.
 
@@ -377,8 +460,9 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
 1. **The pinned release does not exist yet.** It must carry the `recovery:initialize` command (G1,
    Relay PR pending) and the Relay part of the internal TLS endpoints (G3), plus the published hub,
    agent and runtime images, the sealed researcher template built from Relay's
-   `ROLE_BASELINES.researcher` (`packages/infrastructure-protocol/baselines.ts`), the
-   `PodRuntimeBinding` and the profile registry.
+   `ROLE_BASELINES.researcher` (`packages/infrastructure-protocol/baselines.ts`) and the
+   `PodRuntimeBinding`. The profile registry is not part of the release: it needs the genuine
+   release approval and comes after qualification (H4b).
 2. **The release's binding must place the researcher with `kubernetes.io/hostname: relay-worker-1`**,
    or Relay's preparation refuses the control placement.
 3. **Model and Router:** paid qualification of `gpt-6-luna` on `openai-2` through
@@ -390,6 +474,7 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
    be in the pinned release, and the candidate journal brings its own Service at `10.96.0.42`. No
    scenario runs before step Q5's readback.
 5. **Qualification 0/19, no canary:** the slot keeps zero Pods and the deny-all gate until the nineteen
-   rows are accepted, the canary passes and the activation compiler's outputs (guards, gate
-   replacement, one-Pod quota, `ordinaryNamespacePins`, `bootstrapSecrets: true`) are reviewed and
-   committed. Only then does the Workers page offer a researcher that can start.
+   rows are accepted, the genuine release approval is issued, the canary passes, H4b's registry is in
+   and the activation compiler's outputs (guards, gate replacement, one-Pod quota,
+   `ordinaryNamespacePins`, `bootstrapSecrets: true`) are reviewed and committed. Only then does the
+   Workers page offer a researcher that can start.
