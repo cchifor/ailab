@@ -218,6 +218,8 @@ variable "runner_nodes" {
     vm_id     = number
     ip        = string
     hostname  = string
+    # Optional per-runner balloon floor (MiB); null = runner_memory_floating_mib.
+    memory_floating_mib = optional(number)
   }))
   default = {
     # ci-runner-1..5: consecutive IPs .14-.18, managed here. The commented 6..10 are out-of-band;
@@ -227,7 +229,16 @@ variable "runner_nodes" {
     "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1" }
     "ci-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "ci-runner-2" }
     "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3" }
-    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4" }
+    # ci-runner-4 and ci-runner-9 (both ai-node1): floor 14 GiB, raised live 2026-11-16 (owner-approved).
+    # ai-node1 sits at pvestatd's ~80% auto-balloon line ALL DAY, so its runners never inflate above
+    # their floor: the floor is their working size (Prometheus 2026-11-15 17Z to 2026-11-16 07Z: 7.4-9.8
+    # GiB, flat), while node2's float to 12-13.5 and node3's to 24. At 10 GiB a heavy job (workbricks'
+    # full profile, ~20 containers) loses its file cache and swap-thrashes: ci-runner-9 hit 43% full
+    # IO pressure and ~85% of node1's single NVMe (80% util), slowing ci-runner-4 and talos-cp1 too;
+    # every workbricks stack-lane failure 2026-11-15 23:16Z onward ran on r4 or r9. 14 GiB matches what
+    # the node2 runners passed the same jobs with. +8 GiB committed on node1 (~25 -> ~17 GB available).
+    # ci-runner-1 (also node1) stays at the default; raise it the same way if it shows the pattern.
+    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336 }
     "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
     "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
     # ci-runner-7 (vm_id 4107, .29, ai-node3) RETIRED 2026-09-16 — removed from this map so the next
@@ -261,7 +272,7 @@ variable "runner_nodes" {
     # .30 returns to the free pool; docs/network-plan.md is the IPAM registry and records it.
     # ci-runner-9 MOVED ai-node2 -> ai-node1 on 2026-09-07 (offline qm migrate) to pull ~10 GiB off
     # ai-node2, which was floor-pinning its dev-workers. Placement here reflects the live estate.
-    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9" }
+    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9", memory_floating_mib = 14336 } # floor: see ci-runner-4
     "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10" }
   }
 }
