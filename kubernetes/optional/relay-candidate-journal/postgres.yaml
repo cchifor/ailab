@@ -18,6 +18,9 @@ metadata:
   namespace: relay-candidate-journal-db
 spec:
   serviceName: relay-candidate-journal-postgres
+  # Reviewable and inactive even if this optional directory is applied. The operator sets one replica
+  # only AFTER the one-time initialization Job succeeded, in the activation overlay's replicas.yaml
+  # (kubernetes/apps/relay-candidate-journal).
   replicas: 0
   updateStrategy:
     type: OnDelete

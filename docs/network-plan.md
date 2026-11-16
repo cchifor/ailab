@@ -189,7 +189,7 @@ again from the pinned manifest.
 | `10.96.0.10` | `kube-system/kube-dns` | Talos | Talos | never |
 | `10.96.0.40` | `relay-internal-tls/relay-hub-tls` (`relay.chifor.me` for workers) | `kubernetes/apps/relay-internal-tls/terminators.yaml` (staged) | ailab operator | the terminators are retired, or `hub` leaves the binding's `hostAliases` |
 | `10.96.0.41` | `relay-internal-tls/relay-router-tls` (`router.chifor.me` for workers) | `kubernetes/apps/relay-internal-tls/terminators.yaml` (staged) | ailab operator | the terminators are retired, or `router` leaves the binding's `hostAliases` |
-| `10.96.0.42` | `relay-candidate-journal/relay-candidate-journal` | `kubernetes/optional/relay-candidate-journal/render.py` (optional) | ailab operator | the candidate journal bundle is retired, or `candidateJournal` leaves the binding's `hostAliases` |
+| `10.96.0.42` | `relay-candidate-journal/relay-candidate-journal` | `kubernetes/apps/relay-candidate-journal/service.yaml` (Flux `relay-candidate-journal`; the same object `kubernetes/optional/relay-candidate-journal/render.py` emits) | ailab operator | the candidate journal bundle is retired, or `candidateJournal` leaves the binding's `hostAliases` |
 
 **Exception record for `10.96.0.40`-`.42`.** These three are an exception to "do not hand out a
 ClusterIP by picking one" above. The owner approved it on 2026-11-15 (relay#277: decision record in

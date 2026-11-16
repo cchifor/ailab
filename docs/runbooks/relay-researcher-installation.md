@@ -495,8 +495,8 @@ built with:
 The binding is the same in both stages (qualification evidence binds the exact binding), so step
 I4's `check` already verified the first three: it refuses a binding without them, or with different
 values, in either stage, so an enrollment that could never reach this stage stops at I4. The candidate journal
-([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) renders its Service at the
-pinned `10.96.0.42`.
+([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) creates its Service at the
+pinned `10.96.0.42` through Flux, the same object its renderer emits.
 
 **Q2. Read-only checks.** Who holds the three reserved addresses (`docs/network-plan.md`): every
 printed line must be that address's own Service (the journal's, once it exists), and `10.96.0.40` and
@@ -629,8 +629,9 @@ Q3 only after that, or once the slot is empty for good: a worker whose terminato
 closed (connection refused), it never falls back to Cloudflare. The namespace
 `relay-internal-tls` is retained (`prune: disabled`) and deleted by hand once empty.
 
-**Not covered by these steps.** The Relay half is the release's (Q1). The candidate journal is still
-the optional bundle, and the agent's own journal egress and candidate runtime values are separate
+**Not covered by these steps.** The Relay half is the release's (Q1). The candidate journal is its own
+Flux Kustomization with its own held PRs ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md),
+"Activation under Flux"), and the agent's own journal egress and candidate runtime values are separate
 changes ("Beyond enrollment", item 3). Rule 2 (the journal) stays in the policy through
 qualification and the ordinary canary, and leaves it at ordinary activation (Q7).
 The control namespace is unchanged: the agent still reaches the hub through Cloudflare

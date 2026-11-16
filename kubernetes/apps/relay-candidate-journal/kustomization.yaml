@@ -1,0 +1,26 @@
+# Activation overlay for the independent Relay candidate journal. Reconciled by the dedicated
+# clusters/ai/relay-candidate-journal.yaml Flux Kustomization, whose dependsOn list encodes the
+# runbook's install-order preconditions (docs/runbooks/relay-worker-candidate-journal.md).
+#
+# The base is used UNCHANGED: storage class, retention, CA, TLS, pg_hba, NetworkPolicies and
+# backup-exclusion labels stay exactly as reviewed there. This overlay adds two things:
+# - replicas.yaml, the database replica count, so the operator's flip to one replica after the
+#   one-time initialization is a one-line reviewed change HERE, never an edit of the reviewed base or
+#   a `kubectl scale` that Flux would revert;
+# - service.yaml, the protocol Service on the pinned 10.96.0.42, so the address exists before any
+#   signed run and every per-run render. It is the exact object render.py emits (same name, labels
+#   and spec), so applying a render leaves it unchanged.
+#
+# NEVER add ../../optional/relay-candidate-journal/initialize, a rendered initialization List or a
+# rendered service List here: the initialization Job is an operator-created, one-time object that
+# must not enter any Flux inventory or be retried by a reconcile, and the journal Deployment, its
+# public ConfigMap and client NetworkPolicy are re-rendered and scaled by the operator per signed run
+# (docs/runbooks/relay-researcher-qualification-campaign.md, 3.2).
+# scripts/tests/test_relay_candidate_journal.py fails if any of these rules is broken.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+- ../../optional/relay-candidate-journal
+- service.yaml
+patches:
+- path: replicas.yaml
