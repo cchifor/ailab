@@ -113,6 +113,25 @@ EXPECTED_LOCAL_PATHS = frozenset(
     }
 )
 
+#: 2026-11-15 — staged Relay trees, reviewed here before they are activated. Each joins the expected
+#: set exactly when its activation PR moves its Flux Kustomization file from the tree's flux/ directory
+#: into kubernetes/apps/clusters/ai, so that PR needs no edit here: the researcher installation (step
+#: I5) and agent (step I7) of docs/runbooks/relay-researcher-installation.md, and the internal TLS
+#: terminators (step Q3). test_relay_researcher_installation.py refuses either researcher move while a
+#: pin is a placeholder; StagedRelayTrees below pins each file's path and keeps exactly one copy.
+STAGED_LOCAL_PATHS = {
+    "relay-researcher-installation.yaml": ("kubernetes/apps/relay-researcher/flux",
+                                           "./kubernetes/apps/relay-researcher/installation"),
+    "relay-researcher-agent.yaml": ("kubernetes/apps/relay-researcher/flux", "./kubernetes/apps/relay-researcher/agent"),
+    "relay-internal-tls.yaml": ("kubernetes/apps/relay-internal-tls/flux", "./kubernetes/apps/relay-internal-tls"),
+}
+
+
+def expected_local_paths() -> set[str]:
+    """EXPECTED_LOCAL_PATHS plus each staged tree whose Flux file is in clusters/ai."""
+    return set(EXPECTED_LOCAL_PATHS) | {path for name, (_staged, path) in STAGED_LOCAL_PATHS.items()
+                                        if (REAL_CLUSTER_AI / name).is_file()}
+
 EXCLUDED_EXTERNAL_PATHS = frozenset({
     "./deploy/gitops/flux/clusters/ailab", "./deploy/kubernetes/overlays/ailab",
     "./deploy/foundation", "./deploy/security", "./deploy/ailab-migration", "./deploy/ailab",
@@ -244,12 +263,30 @@ class _FixtureRepo(unittest.TestCase):
                 self.assertIn(needle, str(cm.exception), f"{label} mode: {cm.exception}")
 
 
+class StagedRelayTrees(unittest.TestCase):
+    """The staged trees STAGED_LOCAL_PATHS reviews: one Flux file each, staged or activated, never both,
+    naming exactly the reviewed path from this repo's own source."""
+
+    def test_each_staged_file_names_its_reviewed_path(self):
+        if mp.yaml is None:
+            self.skipTest("PyYAML is not importable")
+        for name, (staged, path) in STAGED_LOCAL_PATHS.items():
+            with self.subTest(name):
+                copies = [f for f in (REAL_REPO / staged / name, REAL_CLUSTER_AI / name) if f.is_file()]
+                self.assertEqual(len(copies), 1, f"{name}: expected exactly one of {staged}/ or clusters/ai")
+                (kustomization,) = [d for d in mp.yaml.safe_load_all(copies[0].read_text(encoding="utf-8")) if d]
+                self.assertEqual(kustomization["kind"], "Kustomization")
+                self.assertEqual(kustomization["spec"]["path"], path)
+                self.assertEqual(kustomization["spec"]["sourceRef"], {"kind": "GitRepository", "name": "flux-system"})
+                self.assertNotIn(path, EXPECTED_LOCAL_PATHS, "listed twice")
+
+
 class DiscoverPathsAgainstRealRepo(unittest.TestCase):
     """These run against the actual kubernetes/apps/clusters/ai tree, not a fixture: the whole
     point of this discovery step is to describe THIS repo's THIS-moment manifest set."""
 
     def test_matches_the_expected_local_path_set_exactly(self):
-        self.assertEqual(set(mp.discover_paths()), set(EXPECTED_LOCAL_PATHS))
+        self.assertEqual(set(mp.discover_paths()), expected_local_paths())
 
     def test_excludes_externally_sourced_kustomizations(self):
         discovered = set(mp.discover_paths())
@@ -262,7 +299,7 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
             paths = mp.discover_paths()
-        self.assertEqual(set(paths), set(EXPECTED_LOCAL_PATHS))
+        self.assertEqual(set(paths), expected_local_paths())
         stderr = buf.getvalue()
         for _namespace, name in mp.EXPECTED_EXTERNAL_SOURCES:
             self.assertIn(name, stderr)
@@ -308,7 +345,7 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
             regex_paths = set(mp.discover_paths())
             regex_sources = mp.declared_git_repositories()
         self.assertEqual(regex_paths, set(mp.discover_paths()))
-        self.assertEqual(regex_paths, set(EXPECTED_LOCAL_PATHS))
+        self.assertEqual(regex_paths, expected_local_paths())
         self.assertEqual(regex_sources, mp.declared_git_repositories())
 
     def test_output_is_one_path_per_stdout_line_and_exit_zero(self):
@@ -317,7 +354,7 @@ class DiscoverPathsAgainstRealRepo(unittest.TestCase):
             code = mp.main()
         self.assertEqual(code, 0)
         lines = [l for l in buf.getvalue().splitlines() if l]
-        self.assertEqual(set(lines), set(EXPECTED_LOCAL_PATHS))
+        self.assertEqual(set(lines), expected_local_paths())
 
     def test_main_reports_which_parser_ran(self):
         # A CI log must show whether the real parser or the stdlib fallback classified the tree.

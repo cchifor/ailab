@@ -897,14 +897,11 @@ class BundleCheck(unittest.TestCase):
             placement(files)["tolerations"].append({"key": "dedicated", "operator": "Equal", "value": "agent",
                                                     "effect": "NoSchedule"})
         selector, tolerations = "lacks relay-gvisor's scheduling.nodeSelector", "tolerations are not relay-gvisor's"
-        stage = bundle_module().egress_stage()[0]  # whichever stage the tree includes
+        # make_bundle follows the committed pins, config and egress stage, so these hold in every state.
         for mutate, reason in ((without_class_selector, selector), (other_class_selector_value, selector),
                                (other_toleration, tolerations), (extra_toleration, tolerations)):
             with self.subTest(mutate.__name__):
-                def staged(files, mutate=mutate):
-                    self.g3(files, stage)
-                    mutate(files)
-                self.run_check(self.make_bundle(staged), stage, reason=reason)
+                self.run_check(self.make_bundle(mutate), reason=reason)
 
     def test_refuses_a_tampered_file(self):
         bundle = self.make_bundle()
