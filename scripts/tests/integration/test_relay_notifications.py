@@ -54,6 +54,28 @@ def named(docs, kind, name):
     return next(d for d in docs if d and d["kind"] == kind and d["metadata"]["name"] == name)
 
 
+RELAY_OVERLAY = ROOT / "kubernetes/apps/apps/relay/kustomization.yaml"
+
+
+def relay_overlay_without(components, directory):
+    """Docker arguments that mount the live Relay overlay's kustomization, minus the listed components,
+    over the real one under /work. A fixture that layers one of those components itself renders on this,
+    so it layers each exactly once whether or not the live overlay includes it (hub upgrade step H6
+    includes the control-plane collector and the worker alerts; a component layered twice does not
+    build). Components the overlay does not include are left alone, so on an overlay without them the
+    mounted file renders exactly like the real one."""
+    k = yaml.safe_load(RELAY_OVERLAY.read_text())
+    entries = k.get("components", [])
+    kept = [c for c in entries if c.rstrip("/").rsplit("/", 1)[-1] not in components]
+    if kept:
+        k["components"] = kept
+    else:
+        k.pop("components", None)
+    path = Path(directory) / "relay-overlay-kustomization.yaml"
+    path.write_text(yaml.safe_dump(k, sort_keys=False))
+    return ["-v", f"{path}:/work/{RELAY_OVERLAY.relative_to(ROOT)}:ro"]
+
+
 class Notifications(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
