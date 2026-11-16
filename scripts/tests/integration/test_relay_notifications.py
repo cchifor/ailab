@@ -63,15 +63,23 @@ def relay_overlay_without(components, directory):
     so it layers each exactly once whether or not the live overlay includes it (hub upgrade step H6
     includes the control-plane collector and the worker alerts; a component layered twice does not
     build). Components the overlay does not include are left alone, so on an overlay without them the
-    mounted file renders exactly like the real one."""
+    mounted file renders exactly like the real one. Each call writes its own file under `directory`.
+
+    Only the components list is rewritten. An overlay entry that could target what a stripped component
+    supplies (patches, replacements, transformers and the like) would make the stripped render fail for
+    a reason unrelated to the fixture, so any key beyond the ones below fails here, naming this helper."""
     k = yaml.safe_load(RELAY_OVERLAY.read_text())
-    entries = k.get("components", [])
+    extra = set(k) - {"apiVersion", "kind", "resources", "components"}
+    if extra:
+        raise AssertionError(f"relay_overlay_without strips only components, but {RELAY_OVERLAY} also has "
+                             f"{sorted(extra)}: extend this helper to drop what targets a stripped component")
+    entries = k.get("components") or []
     kept = [c for c in entries if c.rstrip("/").rsplit("/", 1)[-1] not in components]
     if kept:
         k["components"] = kept
     else:
         k.pop("components", None)
-    path = Path(directory) / "relay-overlay-kustomization.yaml"
+    path = Path(directory) / f"relay-overlay-kustomization-{uuid.uuid4().hex[:12]}.yaml"
     path.write_text(yaml.safe_dump(k, sort_keys=False))
     return ["-v", f"{path}:/work/{RELAY_OVERLAY.relative_to(ROOT)}:ro"]
 

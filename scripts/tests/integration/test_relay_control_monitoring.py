@@ -15,9 +15,10 @@ from test_relay_notifications import docker, KUSTOMIZE, KUBECONFORM, named, rela
 
 ROOT = Path(__file__).resolve().parents[3]
 COMPONENT = ROOT / 'kubernetes/components/relay-control-monitoring'
-# The monitoring components this fixture layers below. Every render starts from the live Relay overlay
-# without them (test_relay_notifications.relay_overlay_without), so each is layered once even where hub
-# upgrade step H6 includes it live; a component that adds resources cannot be layered twice.
+# The monitoring components this fixture layers below (the wrapper is built from this list). Every
+# render starts from the live Relay overlay without them (test_relay_notifications.relay_overlay_without),
+# so each is layered once even where hub upgrade step H6 includes it live; a component that adds
+# resources cannot be layered twice.
 LAYERED = ['relay-control-monitoring', 'relay-worker-monitoring', 'relay-candidate-monitoring']
 
 
@@ -40,9 +41,7 @@ class Monitoring(unittest.TestCase):
         (wrapper / 'kustomization.yaml').write_text(yaml.safe_dump({
             'apiVersion': 'kustomize.config.k8s.io/v1beta1', 'kind': 'Kustomization',
             'resources': [os.path.relpath(base, wrapper)],
-            'components': [os.path.relpath(COMPONENT, wrapper),
-                           os.path.relpath(ROOT / 'kubernetes/components/relay-worker-monitoring', wrapper),
-                           os.path.relpath(ROOT / 'kubernetes/components/relay-candidate-monitoring', wrapper),
+            'components': [*(os.path.relpath(ROOT / 'kubernetes/components' / name, wrapper) for name in LAYERED),
                            os.path.relpath(ROOT / 'kubernetes/components/relay-notifications/relay', wrapper)],
         }))
         raw = docker('run', '--rm', '-v', f'{ROOT}:/work:ro', *overlay, '-w', '/work', KUSTOMIZE,
