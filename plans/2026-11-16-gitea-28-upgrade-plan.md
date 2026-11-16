@@ -99,8 +99,12 @@ Follows from `plans/2026-11-08-gitea-1-27-upgrade-plan.md`, which dated the 28.x
 ## Change (this PR)
 
 - `kubernetes/apps/apps/gitea/gitea.yaml`: `image.tag` `1.27.3` → `28.4.0`; `[webhook] ALLOWED_HOST_LIST` →
-  `[security] EGRESS_MODE = lax` + `ALLOWED_HOST_LIST = "192.168.0.0/24, 10.96.0.0/12"` (same reach as before);
-  `[actions] RUN_RETENTION_DAYS = 0`.
+  `[security] EGRESS_MODE = lax` + `ALLOWED_HOST_LIST = "192.168.0.0/24, 10.96.0.0/12"`; `[actions]
+  RUN_RETENTION_DAYS = 0`.
+  - Webhooks keep the same reach as before.
+  - The `[security]` list is shared, so OpenID sign-in (off) and OAuth2 avatar fetches can now reach the two
+    private ranges too, on any port. Avatar fetches only run with `[oauth2_client] UPDATE_AVATAR`, which defaults
+    to false and is not set here (codex finding 3).
 - `kubernetes/apps/apps/gitea/actions-run-retention.yaml`: header notes the native setting and why it stays off.
 - `docs/runbooks/gitea-upgrade.md`: the `app.ini` merge and the views as standing facts; rehearsal checks for views,
   teams, smoke boot and render diff; the one-time key removal in step 5; 28.x verification items; the rollback note
@@ -128,4 +132,26 @@ the volumes if needed. A 1.27.3 binary refuses a database at version 358. If the
 
 ## Review
 
-(codex, implementation round: below)
+**Codex, implementation round 1** (gpt-6-astra, read-only, on `24573e7e`): verdict "request changes", four
+findings, all accepted.
+
+1. **Major: the `app.ini` rewrite could destroy the file.** The `cp` was unguarded, and nothing validated the result
+   before it replaced the file. Precisely: `awk` reads the copy, so the live file could only be emptied by a failed
+   `cp`. Fixed: the runbook now backs up and `cmp`s, builds a candidate in `/tmp`, requires exactly one removed line,
+   and only then copies over the file through a redirection. It also gives the restore command. The first hardened
+   version counted `diff`'s normal-format lines; busybox `diff` prints unified format, so it refused every rewrite
+   (safe, but useless). Testing caught it, and a line-count check replaced it. Tested in the 28.4.0 image:
+   - rewrite done, with inode, owner and mode kept;
+   - a re-run on a clean file is a no-op;
+   - a failed backup leaves the file untouched.
+2. **Minor: the `awk` section tracking.** An indented section header did not end `[webhook]`, so a following
+   `[migrations] ALLOWED_HOST_LIST` was deleted too. An indented or CRLF key line was missed. Reproduced in the 28.4.0
+   image. Fixed: matching strips CR and leading blanks, and any header ends the section. Re-tested on both cases;
+   other lines are copied byte for byte.
+3. **Minor: "same reach" overlooked the shared list.** The `[security]` list also governs OpenID and OAuth2 avatar
+   fetches. Fixed in wording (above and in `gitea.yaml`); `UPDATE_AVATAR` is off.
+4. **Nit: the incident wording.** The 2026-09-28 burst was `cron.cleanup_actions` (logs and artifacts), not a run
+   deletion. Fixed in `gitea.yaml` and `actions-run-retention.yaml`.
+
+Codex reported nothing on the egress behaviour for webhooks, mirrors, OIDC or LFS, on rollback, or on the release
+notes.

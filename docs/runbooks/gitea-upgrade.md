@@ -82,22 +82,32 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
      to be `Completed`. Then remove any keys the change deletes from the values (next bullet), and delete the holder
      pod and wait until it is gone.
    - **Keys removed from the values** (see "`app.ini` is merged"). In the holder pod, after the backup, with `<data>`
-     the holder's mount of `gitea-shared-storage`: copy the file, rewrite it in place from the copy without the key,
-     and check the result. The rewrite goes through a redirection, so the file keeps its inode, owner `1000:1000`
-     and mode 660. `sed -i` would replace it with a file owned by the holder's user, which Gitea's init container
-     (uid 1000) cannot rewrite.
+     the holder's mount of `gitea-shared-storage`, run it in three steps:
+     1. Back the file up and check the copy.
+     2. Build a candidate without the key, and check it removes exactly one line.
+     3. Only then copy the candidate over the file through a redirection. That keeps the file's inode, owner
+        `1000:1000` and mode 660. `sed -i` would replace it with a file owned by the holder's user, which Gitea's
+        init container (uid 1000) cannot rewrite.
 
      ```sh
-     f=<data>/gitea/conf/app.ini
-     cp -p "$f" "$f.pre-<version>"
-     # 28.x: [webhook] ALLOWED_HOST_LIST moved to [security]
-     awk '/^\[/{s=$0} !(s=="[webhook]" && /^ALLOWED_HOST_LIST[[:space:]]*=/)' "$f.pre-<version>" > "$f"
-     diff "$f.pre-<version>" "$f"   # exactly the removed line(s), nothing else
-     stat -c '%u:%g %a' "$f"        # 1000:1000 660
+     f=<data>/gitea/conf/app.ini; b="$f.pre-<version>"; c=/tmp/app.ini.candidate
+     cp -p "$f" "$b" && cmp "$f" "$b" || echo "STOP: backup copy failed"
+     # 28.x: [webhook] ALLOWED_HOST_LIST moved to [security]. Matching ignores CR and leading blanks, and every
+     # section header (indented or not) ends the previous section; the other lines are copied byte for byte.
+     awk '{ l=$0; sub(/\r$/,"",l) } l ~ /^[ \t]*\[/ { s=l; gsub(/^[ \t]+|[ \t]+$/,"",s) }
+          !(s=="[webhook]" && l ~ /^[ \t]*ALLOWED_HOST_LIST[ \t]*=/)' "$b" > "$c" || echo "STOP: awk failed"
+     diff "$b" "$c"                               # read it: only the [webhook] ALLOWED_HOST_LIST line goes
+     # awk can only drop lines, so "exactly one line shorter" means exactly that line (any diff output format)
+     [ -s "$c" ] && [ "$(wc -l < "$b")" -eq "$(( $(wc -l < "$c") + 1 ))" ] \
+       && cat "$c" > "$f" && cmp "$c" "$f" && echo REWRITTEN
+     stat -c '%u:%g %a' "$f"                      # 1000:1000 660
      ```
 
-     Skipping this does not break 28.x: the old `[webhook]` key still applies (with `external` dropped as invalid), and
-     it logs two startup errors. Delete `$f.pre-<version>` after step 7; it holds the same secrets as `app.ini`.
+     No `REWRITTEN` means the file was not touched; an empty `diff` means the key is already gone. If the copy over
+     `$f` itself fails, put the original back with
+     `cat "$b" > "$f"` (the Velero backup holds it too). Skipping this step does not break 28.x: the old `[webhook]`
+     key still applies (with `external` dropped as invalid), and it logs two startup errors. Delete `$b` and `$c`
+     after step 7; they hold the same secrets as `app.ini`.
    - Name the kinds in full: `kubectl -n velero get backups.velero.io gitea-pre-<version>`. The short name
      `backup` resolves to CNPG's `Backup` kind first, so a wait on it answers NotFound until it times out
      (2026-11-08: it cost 9 of the 14 minutes of outage).

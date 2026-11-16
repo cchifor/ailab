@@ -180,8 +180,10 @@ spec:
         # the "external" builtin (lax replaces it) and deprecated the [webhook] key for this one.
         # Explicit lax also silences the startup warning an unmoded list raises.
         # Consumers of this list in 28.4.0: webhook delivery (the [webhook] key falls back to it), OpenID
-        # sign-in (off above) and OAuth2 avatar fetches. Push/pull mirrors and migrations use the
-        # separate [migrations] list, which stays empty: our only mirror targets are on github.com.
+        # sign-in (off above) and OAuth2 avatar fetches (only with [oauth2_client] UPDATE_AVATAR, default
+        # off and not set here); those two now reach the private ranges below too. Push/pull mirrors and
+        # migrations use the separate [migrations] list, which stays empty: our only mirror targets are on
+        # github.com.
         # 192.168.0.0/24 = the reviewer VMs' org webhooks (.24/.25:8477). 10.96.0.0/12 = the Talos
         # service subnet, kept from the AgentForge v2 receivers (in-cluster Services; a CIDR is the
         # only form that matches a resolved ClusterIP); no webhook targets it as of 2026-11-16.
@@ -224,8 +226,9 @@ spec:
           # Gitea 28's own run deletion (cron.cleanup_action_runs, @midnight, default 400 days) is OFF:
           # 0 = keep forever (28.0 gave 0 that meaning for all three retention keys). Run history is
           # deleted by the PACED gitea-actions-run-retention CronJob (actions-run-retention.yaml,
-          # 16 days, replication-gated). An unpaced midnight sweep over run history (cron.cleanup_actions,
-          # 3.5 M deletes) pushed infra-pg's replica past its slot budget on 2026-09-28; the CronJob
+          # 16 days, replication-gated). The native task deletes every eligible run in one unpaced
+          # midnight pass. That is the shape of the cron.cleanup_actions log/artifact burst (still on,
+          # 3.5 M deletes) that pushed infra-pg's replica past its slot budget on 2026-09-28. The CronJob
           # stays the only thing that deletes runs.
           RUN_RETENTION_DAYS: 0
         # Actions artifacts + logs on a LOCAL PVC, not versitygw S3 (W1 of the USB failure-domain
