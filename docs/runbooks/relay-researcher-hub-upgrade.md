@@ -24,18 +24,23 @@ owner's direct confirmation for the exact reviewed rollout.
 | `relay-router-connection` (existing) | `RELAY_ROUTER_CONNECTIONS_FILE`, `NODE_EXTRA_CA_CERTS`, OpenBao egress | H6 |
 | `relay-agent-control-plane` (new) | `RELAY_AGENT_CONTROL_PLANE=1` | H6 |
 | `relay-control-monitoring`, `relay-worker-monitoring` (existing) | control metrics and worker alerts | H6 |
+| `relay-worker-candidate` (new) | `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`; the run's document ConfigMap and the key-copy init container; `run/` is generated per signed run ([relay-candidate-run-generator.md](relay-candidate-run-generator.md)) | H7 |
 
-`scripts/tests/test_relay_v060_activation_gate.py` refuses the three new components and their
-settings, and the Router connection and control plane, in the live overlay; each step's PR removes
-exactly its own entries from that list. `relay-restore-fencing` stays includable on its own, because
+`scripts/tests/test_relay_v060_activation_gate.py` refuses the new components and their settings, and
+the Router connection and control plane, in the live overlay; each step's PR removes exactly its own
+entries from that list. `relay-restore-fencing` stays includable on its own, because
 a restore of the hub needs it with or without installations. `test_relay_researcher_hub_upgrade.py`
 pins each patch, and refuses installations without the recovery generation (one way only), the profile
 registry without the installations and budget client or with a placeholder or wrong SHA, the control
 plane without the Router connection or next to `RELAY_ENVIRONMENTS`, `relay-gitea-authority` or
-`relay-notifications`, and an H3 that runs the fence script. It does not require the registry for the
+`relay-notifications`, the candidate files without H6 or next to the profile registry, and an H3 that
+runs the fence script; `test_relay_candidate_run.py` refuses a placeholder `run/` in the overlay and any
+committed `run/` or agent candidate value that is not `scripts/relay-candidate-run.py`'s output for the
+committed run. It does not require the registry for the
 control plane, because H6 comes before H4b. `test-relay-researcher-hub-render.sh` proves each step's
-components change only the relay container's env, mounts and volumes, and that the whole set (H3,
-H4a, H6 and H4b) combines without collision. It layers every case on the overlay without the hub
+components change only the relay container's env, mounts and volumes (H7 also adds its one init
+container, the only one that mounts the session-key Secret), and that the whole set (H3, H4a, H6 and
+H4b) and the H7 set (H3, H4a, H6 and the candidate files) combine without collision. It layers every case on the overlay without the hub
 components, and proves that the live overlay renders as exactly that plus the ones it already
 includes (H3 on).
 
@@ -355,9 +360,37 @@ is signed.
 | `RELAY_WORKER_QUALIFICATION_FILE`, `_SHA256` | general activation (step 11) | the registry of accepted evidence |
 | `RELAY_WORKER_PROVENANCE_FILE`, `_SHA256` | not for the repository-free researcher | stays unset |
 
-Readback of the candidate files, the budget-started readback that H6 cannot give: the metrics scrape
-shows budget startup `started`; `RelayWorkerBudgetStartupFailed` has cleared; the log has neither
-`worker_budget_authority_unavailable` nor `worker_candidate_unavailable`. The candidate authority is
+**The candidate component, `kubernetes/components/relay-worker-candidate` (staged, not included).**
+Reviewed once here; its `run/` directory is generated per signed run by `scripts/relay-candidate-run.py`
+from the run and the document Relay's `scripts/compose-candidate-hub-document.ts` composed for it
+(owner decision O6, S-A; [relay-candidate-run-generator.md](relay-candidate-run-generator.md)):
+
+- `RELAY_WORKER_CANDIDATE_FILE` = `/run/relay-worker-candidate/document.json`, a subPath of the run's
+  immutable ConfigMap `relay-worker-candidate-<runDigest[:16]>` (`defaultMode: 0444`): a regular,
+  single-link, `root:1000 0444` file, as Relay's `readCandidateFile(…, {trustedUid: 0})` requires;
+- `RELAY_WORKER_CANDIDATE_SHA256` = sha256 of that document (canonical compact JSON, about 57 KB of the
+  reader's 65,536 bytes);
+- `RELAY_WORKER_CANDIDATE_SESSION_KEY_FILE` = `/run/relay-worker-candidate-key/session-key.pem`. The
+  reader's `secret` rule (no group or other bit, owner root or UID 1000) cannot be met by any Secret
+  volume under the Pod's `fsGroup`, so the init container `candidate-session-key` (UID 1000, the pinned
+  node image already in the Pod) copies the key from the operator-created Secret
+  `relay-worker-candidate-key-<runDigest[:16]>` with `install -m 0400` into a Memory `emptyDir`, which
+  the relay container mounts read-only. Only that init container mounts the Secret.
+
+**The inclusion PR is the first run's (R1's) per-run PR**: the generator's files for R1, plus
+`- ../../../components/relay-worker-candidate` in `kubernetes/apps/apps/relay/kustomization.yaml` and
+the H7 group removed from the activation gate. Every later run's PR changes only the generated files,
+and CI (`test_relay_candidate_run.py`) fails unless they equal the generator's output for the committed
+run; the operator also runs `scripts/relay-candidate-run.py check --run-digest <digest>`. Create the
+run's session-key Secret before the merge: without it the Pod waits in `ContainerCreating`.
+
+Readback of the candidate files, the budget-started readback that H6 cannot give: the init container
+`candidate-session-key` exited 0 and the Pod's `RELAY_WORKER_CANDIDATE_SHA256` is the run's; the
+metrics scrape shows budget startup `started`; `RelayWorkerBudgetStartupFailed` has cleared; the log has neither
+`worker_budget_authority_unavailable` nor `worker_candidate_unavailable`. A document that does not
+load only logs that warning and Relay starts without candidate authority (`server/main.ts`), so the
+log line is the gate: never grant or create while it is there, and abort the run before the grant if
+this readback is not done by `t_s + 60 min` (owner decision O6). The candidate authority is
 the first profile source: `loadWorkerRuntimeProfiles` builds the runtime profiles from it alone, on an
 empty registry (Relay `server/workers/runtime-session/profiles.ts:430-433`, the candidate or canary branch), and Relay then starts the
 budget authority with H6's Router connection.
@@ -421,7 +454,7 @@ failed to load or validate); budget startup is still `started`.
 | Q1-Q6 | internal TLS terminators (`relay-internal-tls`), then the slot's qualification egress stage (Q6 is the drill configuration) | I10; the release's G3 binding and CA pins | Q5: both Certificates Ready and chaining to the pinned root, Services `10.96.0.40`/`.41`, live policy digest `f6d3187c…282f`. The third alias, the candidate journal's Service at `10.96.0.42`, is not created here: it comes with the journal itself ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) before H7's candidate files |
 | journal | the independent candidate journal ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) | per that runbook | its Service on exactly `10.96.0.42` (Q2's `pinned` check) |
 | File B | budget ledger step 7's `qualifications` row (ailab #1753 comment 124071) | the final Router rollout read back | the stored policy re-verified, its `tokenPolicyDigest` recorded for the signed runs |
-| H7 | candidate files (the canary file follows the approval; the qualification file is general activation, step 11) | H6, Q5's readback, the journal at `10.96.0.42`, File B | budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
+| H7 | candidate files: `relay-worker-candidate`, included by R1's per-run PR, each run's values generated (the canary file follows the approval; the qualification file is general activation, step 11) | H6, Q5's readback, the journal at `10.96.0.42`, File B, the run's session-key Secret | init container exit 0, the run's pin in the Pod, budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
 | scenarios | the nineteen qualification scenarios | H7's candidate files | the nineteen reports, independently accepted |
 | approval | a genuine `ReleaseApproval` | the nineteen reports and the other release gates accepted | its `workerTemplates` subject asserts the nine passed gates |
 | canary | H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
@@ -447,7 +480,10 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
   has its own `recovery:fence` for its schema 56) and keeps `relay-restore-fencing` with that new
   generation. That fence retires the restored database's connectors, keys, sessions and memberships:
   it is the cost of restoring, not of initializing.
-- **H4a, H6 and H4b:** revert that step's inclusion PR; nothing in the database changes. Before
+- **H4a, H6 and H4b:** revert that step's inclusion PR; nothing in the database changes.
+- **H7's candidate files:** the next run's PR replaces a run's values; before the canary one PR drops
+  the component and resets `run/` (`scripts/relay-candidate-run.py reset`). Removing the file stops
+  new candidate admission; Relay keeps the candidate rows it already wrote. Before
   reverting H6 after any issuance, revoke worker credentials through Relay and let escrow cleanup
   finish (Router connection runbook, "Rollback"). Reverting the last profile source (H4b once H7's
   candidate and canary files are gone) returns budget startup to `start_failed`, and Relay then has

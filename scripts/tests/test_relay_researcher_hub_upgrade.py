@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Source gates for the Relay hub upgrade of the first researcher worker.
 
-docs/runbooks/relay-researcher-hub-upgrade.md. The three hub components are staged and inert; these
-tests pin their exact content and refuse an inclusion that breaks the runbook's order or the owner's
-decisions (relay#277 comment 122379). scripts/tests/test_relay_v060_activation_gate.py refuses each
+docs/runbooks/relay-researcher-hub-upgrade.md. The hub components are staged and inert; these tests pin
+their exact content and refuse an inclusion that breaks the runbook's order or the owner's decisions
+(relay#277 comment 122379). H7's candidate component has a generated half (run/), which
+scripts/tests/test_relay_candidate_run.py checks against scripts/relay-candidate-run.py. scripts/tests/test_relay_v060_activation_gate.py refuses each
 component in the live overlay until its step; scripts/tests/test-relay-researcher-hub-render.sh
 renders them onto the live Deployment.
 """
@@ -57,6 +58,77 @@ class Components(unittest.TestCase):
         self.assertEqual(patch_container("relay-agent-control-plane"),
                          {"name": "relay", "env": [{"name": "RELAY_AGENT_CONTROL_PLANE", "value": "1"}]})
 
+    def test_candidate_shape(self):
+        # The reviewed half patches the Deployment; the generated run/ half (a nested Component) carries
+        # the run-bound ConfigMap, Secret name and pin. No standalone resource in either.
+        kust = doc(COMPONENTS / "relay-worker-candidate/kustomization.yaml")
+        self.assertEqual({k: v for k, v in kust.items() if k not in ("apiVersion", "kind")},
+                         {"components": ["run"], "patches": [{"path": "deployment.yaml"}]})
+        self.assertEqual(kust["kind"], "Component")
+        run = doc(COMPONENTS / "relay-worker-candidate/run/kustomization.yaml")
+        self.assertEqual(run["kind"], "Component")
+        self.assertEqual(set(run), {"apiVersion", "kind", "configMapGenerator", "patches"})
+        self.assertEqual(run["patches"], [{"path": "deployment.yaml"}])
+        [generator] = run["configMapGenerator"]
+        self.assertEqual(generator["files"], ["document.json"])
+        self.assertEqual(generator["namespace"], "relay")
+        self.assertIs(generator["options"]["immutable"], True)
+        self.assertIs(generator["options"]["disableNameSuffixHash"], True)
+
+    def test_candidate_patch(self):
+        """The reviewed half, exactly: the document as a root-owned 0444 subPath file, and the session
+        key copied by UID 1000 into a Memory emptyDir as 0400, because no Secret volume can give a
+        non-root reader a file without group or other bits (the component's header)."""
+        patch = doc(COMPONENTS / "relay-worker-candidate/deployment.yaml")
+        self.assertEqual((patch["kind"], patch["metadata"]), ("Deployment", {"name": "relay", "namespace": "relay"}))
+        spec = patch["spec"]["template"]["spec"]
+        self.assertEqual(set(spec), {"initContainers", "containers", "volumes"})
+        relay = next(
+            d for d in yaml.safe_load_all((RELAY / "relay.yaml").read_text(encoding="utf-8"))
+            if d and d["kind"] == "Deployment")
+        node_image = next(c["image"] for c in relay["spec"]["template"]["spec"]["containers"]
+                          if c["name"] == "backup-holder")
+        self.assertEqual(spec["initContainers"], [{
+            "name": "candidate-session-key",
+            "image": node_image,
+            "command": ["install", "-m", "0400", "/run/relay-worker-candidate-key-source/session-key.pem",
+                        "/run/relay-worker-candidate-key/session-key.pem"],
+            "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+                                "capabilities": {"drop": ["ALL"]}},
+            "resources": {"requests": {"cpu": "5m", "memory": "16Mi"}, "limits": {"cpu": "100m", "memory": "64Mi"}},
+            "volumeMounts": [
+                {"name": "worker-candidate-key-source", "mountPath": "/run/relay-worker-candidate-key-source",
+                 "readOnly": True},
+                {"name": "worker-candidate-key", "mountPath": "/run/relay-worker-candidate-key"}],
+        }])
+        self.assertEqual(spec["containers"], [{
+            "name": "relay",
+            "env": [{"name": "RELAY_WORKER_CANDIDATE_FILE", "value": "/run/relay-worker-candidate/document.json"},
+                    {"name": "RELAY_WORKER_CANDIDATE_SESSION_KEY_FILE",
+                     "value": "/run/relay-worker-candidate-key/session-key.pem"}],
+            "volumeMounts": [
+                {"name": "worker-candidate-document", "mountPath": "/run/relay-worker-candidate/document.json",
+                 "subPath": "document.json", "readOnly": True},
+                {"name": "worker-candidate-key", "mountPath": "/run/relay-worker-candidate-key", "readOnly": True}],
+        }])
+        self.assertEqual(spec["volumes"], [
+            {"name": "worker-candidate-document",
+             "configMap": {"defaultMode": 0o444, "items": [{"key": "document.json", "path": "document.json"}]}},
+            {"name": "worker-candidate-key-source",
+             "secret": {"defaultMode": 0o440, "items": [{"key": "session-key.pem", "path": "session-key.pem"}]}},
+            {"name": "worker-candidate-key", "emptyDir": {"medium": "Memory", "sizeLimit": "64Ki"}},
+        ])
+        # The run-bound half sets only the pin and the two names, never a fixed field above.
+        run = doc(COMPONENTS / "relay-worker-candidate/run/deployment.yaml")
+        rspec = run["spec"]["template"]["spec"]
+        self.assertEqual(set(rspec), {"containers", "volumes"})
+        [container] = rspec["containers"]
+        self.assertEqual([e["name"] for e in container["env"]], ["RELAY_WORKER_CANDIDATE_SHA256"])
+        self.assertEqual(set(container), {"name", "env"})
+        self.assertEqual([(v["name"], set(v), set(v.get("configMap", v.get("secret")))) for v in rspec["volumes"]],
+                         [("worker-candidate-document", {"name", "configMap"}, {"name"}),
+                          ("worker-candidate-key-source", {"name", "secret"}, {"secretName"})])
+
     def test_profiles_mount_and_pin(self):
         container = patch_container("relay-worker-profiles")
         env = {e["name"]: e["value"] for e in container["env"]}
@@ -103,6 +175,15 @@ def order_violations(comps: set[str]) -> list[str]:
                    "(step H6 follows H3 and H4a)")
     if "relay-agent-control-plane" in comps and comps & {"relay-gitea-authority", "relay-notifications"}:
         out.append("control plane with Gitea authority or notifications (owner decision G2)")
+    # H7 needs H6 (the budget authority starts on the candidate profile source with the Router
+    # connection) and so everything H6 needs; Relay's design removes the candidate authority before the
+    # canary, and H4b's registry comes after the canary, so the two never share a rollout.
+    if "relay-worker-candidate" in comps and not {"relay-router-connection", "relay-agent-control-plane",
+                                                  "relay-infrastructure-installations", "relay-restore-fencing",
+                                                  "relay-worker-budget-client"} <= comps:
+        out.append("candidate files without H6 (step H7 follows H6)")
+    if "relay-worker-candidate" in comps and "relay-worker-profiles" in comps:
+        out.append("candidate files with the profile registry (H7 is removed before the canary, H4b follows it)")
     return out
 
 
@@ -145,8 +226,10 @@ class InclusionGate(unittest.TestCase):
         h4a = h3 | {"relay-worker-budget-client"}                       # the budget client, no profiles
         h6 = h4a | {"relay-router-connection", "relay-agent-control-plane",
                     "relay-control-monitoring", "relay-worker-monitoring"}  # still no profiles
-        # H7's candidate, canary and qualification files are their own components, none staged yet,
-        # so the H6 state holds through H7 here; H4b adds the registry after the release approval.
+        # H7's candidate files for the nineteen scenarios; the canary and qualification files are their
+        # own components, not staged yet. The candidate files go before the canary, and H4b adds the
+        # registry after the release approval.
+        h7 = h6 | {"relay-worker-candidate"}
         h4b = h6 | {"relay-worker-profiles"}
         ok = [
             set(),
@@ -154,6 +237,7 @@ class InclusionGate(unittest.TestCase):
             h3,
             h4a,
             h6,
+            h7,
             h4b,
         ]
         for comps in ok:
@@ -169,6 +253,12 @@ class InclusionGate(unittest.TestCase):
             h4b - {"relay-worker-budget-client"},
             h4b | {"relay-gitea-authority"},
             h4b | {"relay-notifications"},
+            {"relay-worker-candidate"},
+            h4a | {"relay-worker-candidate"},                          # H7 before H6
+            *(h7 - {missing} for missing in ("relay-router-connection", "relay-agent-control-plane",
+                                             "relay-infrastructure-installations", "relay-restore-fencing",
+                                             "relay-worker-budget-client")),
+            h7 | {"relay-worker-profiles"},
         ]
         for comps in bad:
             self.assertTrue(order_violations(comps), comps)
@@ -176,6 +266,11 @@ class InclusionGate(unittest.TestCase):
     def test_placeholder_registry_is_never_included(self):
         if "relay-worker-profiles" in relay_components():
             self.assertNotIn(b"OPERATOR-FILLS", (COMPONENTS / "relay-worker-profiles/profiles.json").read_bytes())
+
+    def test_placeholder_candidate_is_never_included(self):
+        if "relay-worker-candidate" in relay_components():
+            for name in ("document.json", "deployment.yaml", "kustomization.yaml"):
+                self.assertNotIn(b"OPERATOR-FILLS", (COMPONENTS / "relay-worker-candidate/run" / name).read_bytes())
 
     def test_no_environments_anywhere_in_the_live_relay(self):
         # Owner decision G2: environments stay off with the control plane. Check the overlay AND every

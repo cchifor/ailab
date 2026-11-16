@@ -49,6 +49,12 @@ class ActivationGate(unittest.TestCase):
             # H4b: the profile registry, after the genuine release approval and so long after H6.
             "RELAY_WORKER_PROFILES_FILE",
             "relay-worker-profiles",
+            # H7: the candidate hub files. Their inclusion PR is the first signed run's per-run PR
+            # (docs/runbooks/relay-candidate-run-generator.md), which removes this group.
+            "RELAY_WORKER_CANDIDATE_FILE",
+            "RELAY_WORKER_CANDIDATE_SHA256",
+            "RELAY_WORKER_CANDIDATE_SESSION_KEY_FILE",
+            "relay-worker-candidate",
         )
         for root in active_roots:
             for path in root.rglob("*"):

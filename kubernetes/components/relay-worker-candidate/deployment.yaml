@@ -1,0 +1,95 @@
+# The fixed half of the candidate hub files (H7). The run-bound half (the document ConfigMap's and the
+# session-key Secret's names and RELAY_WORKER_CANDIDATE_SHA256) is run/deployment.yaml, generated per
+# run; no field is set in both, so the merge order of the two patches never matters.
+#
+# Mount contract, as Relay v0.10.4's readCandidateFile checks it inside the relay container
+# (UID 1000, GID 1000, Pod fsGroup 1000, capabilities dropped, read-only root):
+#
+#   /run/relay-worker-candidate/document.json        subPath of the ConfigMap volume: a regular
+#     file (kubelet bind-mounts the resolved ..data target, so O_NOFOLLOW and the /proc/self/fd
+#     realpath both see the mount path), one link, uid 0, gid 1000 (fsGroup), mode 0444
+#     (defaultMode 0444; fsGroup ORs in 0440, no change). trustedUid 0: root owner required; mode &
+#     0o022 == 0. A directory mount would put the ..data symlink at this path and fail O_NOFOLLOW.
+#   /run/relay-worker-candidate-key/session-key.pem   a Memory emptyDir written by the init container
+#     below, as UID 1000, with `install -m 0400`: uid 1000 (the process UID), mode 0400, one link.
+#     secret: true requires mode & 0o077 == 0, which no Secret volume can give a non-root reader
+#     (kubernetes/components/relay-worker-candidate/kustomization.yaml). The relay container mounts
+#     the emptyDir read-only; the Secret itself is mounted only into the init container.
+#
+# A subPath file never changes in place, and each run's document is a new ConfigMap: a new run reaches
+# Relay only through a rollout, which Relay requires anyway (the document is read once, at startup).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: relay
+spec:
+  template:
+    spec:
+      initContainers:
+      # The pinned kustomize merges it in FIRST, before backup-database (the hub render test pins
+      # that order): a missing or unreadable key fails the rollout before the 1800 s backup, and
+      # the backup still gates migrate. Same image as backup-artifacts and backup-holder, already
+      # pinned in relay.yaml; GNU coreutils `install` replaces an existing copy, so a re-run after a
+      # Pod sandbox restart is idempotent.
+      - name: candidate-session-key
+        image: docker.io/library/node:22.23.5-bookworm-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
+        command:
+        - install
+        - -m
+        - '0400'
+        - /run/relay-worker-candidate-key-source/session-key.pem
+        - /run/relay-worker-candidate-key/session-key.pem
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        resources:
+          requests:
+            cpu: 5m
+            memory: 16Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        volumeMounts:
+        - name: worker-candidate-key-source
+          mountPath: /run/relay-worker-candidate-key-source
+          readOnly: true
+        - name: worker-candidate-key
+          mountPath: /run/relay-worker-candidate-key
+      containers:
+      - name: relay
+        env:
+        - name: RELAY_WORKER_CANDIDATE_FILE
+          value: /run/relay-worker-candidate/document.json
+        - name: RELAY_WORKER_CANDIDATE_SESSION_KEY_FILE
+          value: /run/relay-worker-candidate-key/session-key.pem
+        volumeMounts:
+        - name: worker-candidate-document
+          mountPath: /run/relay-worker-candidate/document.json
+          subPath: document.json
+          readOnly: true
+        - name: worker-candidate-key
+          mountPath: /run/relay-worker-candidate-key
+          readOnly: true
+      volumes:
+      - name: worker-candidate-document
+        configMap:
+          defaultMode: 0444
+          items:
+          - key: document.json
+            path: document.json
+      - name: worker-candidate-key-source
+        secret:
+          # What kubelet produces anyway under fsGroup 1000 (root:1000 0440): readable by the init
+          # container's UID 1000 through its group, never by the relay container (not mounted there).
+          defaultMode: 0440
+          items:
+          - key: session-key.pem
+            path: session-key.pem
+      - name: worker-candidate-key
+        emptyDir:
+          medium: Memory
+          sizeLimit: 64Ki
