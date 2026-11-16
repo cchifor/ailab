@@ -3,7 +3,7 @@
 // jobparser.ValidateWorkflowStatic, ReadWorkflow and Parse. A file that fails one of them is dropped by that
 // Gitea version with only a log warning ("ignore invalid workflow"), so its CI silently stops.
 //
-// Usage: wfcheck <dir>, where <dir> holds <owner>/<repo>/<workflow dir>/... as exported from the bare repositories.
+// Usage: wfcheck <dir>, where <dir> holds <owner>/<repo>/<n>-<path> files written by gitea-workflow-check.sh.
 package main
 
 import (
@@ -14,6 +14,9 @@ import (
 
 	"gitea.dev/modules/actions/jobparser"
 )
+
+// contentLimit is what Gitea reads of a workflow blob (actions.GetContentFromEntry, util.ReadWithLimit).
+const contentLimit = 1024 * 1024
 
 func main() {
 	root := os.Args[1]
@@ -28,6 +31,11 @@ func main() {
 			return err
 		}
 		rel, _ := filepath.Rel(root, p)
+		if len(content) > contentLimit {
+			// Gitea parses only the first MiB, so a longer file is checked as Gitea sees it.
+			fmt.Printf("NOTE %s: %d bytes, only the first %d are read\n", filepath.ToSlash(rel), len(content), contentLimit)
+			content = content[:contentLimit]
+		}
 		check := func(name string, err error) bool {
 			if err != nil {
 				fmt.Printf("INVALID %s (%s): %v\n", filepath.ToSlash(rel), name, err)

@@ -74,7 +74,8 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
      - longer than 10 minutes: every job that was running fails as Gitea starts (2026-11-08: 14 minutes, 18 jobs,
        10 s after the start);
      - shorter: a job that is still running reports again and finishes normally. A job that ends on its runner while
-       Gitea is down cannot report its result, and Gitea fails it 10 minutes after its last update (2026-11-16:
+       Gitea is down cannot report its result, and Gitea fails it at the first check, which runs every 5 minutes,
+       once 10 minutes have passed since its last update (2026-11-16:
        4 min 42 s; of 23 running jobs, 8 reported again and 13 short ones failed; newer pushes cancelled the other 2).
 
      Keeping the outage under 10 minutes therefore saves the long jobs. Note the running jobs first, on the primary,
@@ -275,7 +276,8 @@ Tools: `kubectl --context admin@ai`, `helm` 4.x, Docker. Owner-only API steps us
     - SSH: the five Flux `GitRepository`s that fetch over `gitea-ssh` fetched again at 13:40;
     - `/-/ws` answers `101 Switching Protocols` through the edge and in-cluster;
     - the `cnpg_gitea_*` credential metrics and Gitea's own scrape (`up` 1), with no Gitea alert firing;
-    - a branch push mirrored to GitHub within 6 s;
+    - a branch push (this record's branch) mirrored to GitHub within 6 s, and its push CI (`manifests`,
+      `rules-lint`, `script-tests`) went green;
     - `ci-rerun-watchdog` scans with `errors=[]`, and `cloud-power` logged no error.
   - **Regression: two workflows stopped.** 28.x rejects a job-level `if:` that names a context other than `github`,
     `gitea`, `needs`, `vars` or `inputs`, and drops the whole workflow with a warning. 1.27 accepted it.
