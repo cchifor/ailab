@@ -62,6 +62,13 @@ Why not the `strive` realm:
    - bound `https://id.chifor.me/realms/relay|<id>` with `member.js`.
 
    A stranger's sign-up gets a Keycloak account and nothing in Relay.
+
+   **Amendment (2026-11-16): one non-person account.** `relay-operator@ailab.invalid` is the
+   operator automation identity, created by the operator under the owner's decision (not through
+   sign-up). Its `emailVerified=true` asserts no mailbox and no person: Relay requires the claim of
+   every member, and `.invalid` can never be claimed by a sign-up. It holds NO Relay membership at rest;
+   `scripts/relay-operator.py` grants admin only for the length of one allowlisted call and deletes the
+   membership and its sessions afterwards (docs/runbooks/relay.md, "Operator automation identity").
 5. **Abuse posture at launch.** The controls are brute-force detection, the password policy, the
    runbook's recent-registrations watch, and Relay's membership gate. There is no captcha and no
    Cloudflare rate limit yet. Revisit when the Google IdP lands, or as soon as sign-up spam is seen.

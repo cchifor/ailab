@@ -51,8 +51,8 @@ Each is read back; a missing one stops the campaign before any signing.
 | Precondition | Where | In git on 2026-11-16 |
 | --- | --- | --- |
 | H6: Router connection, control plane, monitoring | hub runbook H6 | not in the live overlay |
-| Q1-Q6: internal TLS, qualification egress `f6d3187c…282f`, Q5 policy UID, Q6 drill config | installation runbook | staged; the installation tree is not in Flux and still selects the enrollment egress |
-| Candidate journal on `10.96.0.42`, authority row `ready` | [relay-worker-candidate-journal.md](relay-worker-candidate-journal.md) | optional bundle, in no Flux inventory |
+| Q1-Q6: internal TLS, qualification egress `f6d3187c…282f`, Q5 policy UID, Q6 drill config | installation runbook | Q3 (#1802) and Q4 (#1803) merged: the terminators and the installation tree are in Flux, and the installation selects the qualification egress; Q5's readback and Q6 are the operator's |
+| Candidate journal on `10.96.0.42`, authority row `ready` | [relay-worker-candidate-journal.md](relay-worker-candidate-journal.md) | Flux `relay-candidate-journal` (base at zero replicas, Service on `.42`) and the one-replica flip: held PRs ("Activation under Flux"); the authority row is the operator's ceremony |
 | File B: ledger step 7 `qualifications` row; its `tokenPolicyDigest` goes into every run's `router.tokenPolicyDigests` | h4: "H7", "Enablement order at a glance" | not generated; D is fixed with the owner when it is (O3, §7) |
 | H7 candidate component (hub `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`) and the S-A generator | hub runbook H7; [relay-candidate-run-generator.md](relay-candidate-run-generator.md) | staged, not included: R1's per-run PR includes it |
 | Agent one-time candidate values: candidate volume, `policy.bootstrapSecrets: true`, journal egress | installation runbook, "Beyond enrollment" item 3; the generator's "One-time prerequisites" | not staged |
@@ -77,7 +77,7 @@ the one driver checkout. A change voids every row already measured (`rel:package
 | --- | --- | --- | --- |
 | Sign the run | `main:scripts/sign-candidate-run.ts`, offline (§3.1); `rel:` has no signer (`rel:deploy/worker-candidate-journal/README.md`: "does not implement an operator signing ceremony") | none | no |
 | Journal install, inspect, withdraw | `rel:scripts/candidate-worker-authority.ts` | journal DB | no |
-| Journal service re-render | `kubernetes/optional/relay-candidate-journal/render.py service` + `kubectl` | `relay-candidate-journal` objects (optional bundle, in no Flux inventory) | no; operator-reviewed render |
+| Journal service re-render | `kubernetes/optional/relay-candidate-journal/render.py service` + `kubectl` | `relay-candidate-journal` objects: the public ConfigMap, Deployment and client NetworkPolicy, in no Flux inventory (the protocol Service is Flux's; §3.2 applies the render without it) | no; operator-reviewed render |
 | Budget scope | `rel:scripts/candidate-budget-scopes.ts` | ledger DB | no |
 | **Hub candidate files** | `main:scripts/compose-candidate-hub-document.ts` (the document), then `scripts/relay-candidate-run.py generate` (`run/` of the H7 component `kubernetes/components/relay-worker-candidate`) | relay Deployment env, the run's ConfigMap; the session-key Secret by `kubectl`, never git | **yes, every run**: `_SHA256` and the document pin bytes that exist only after signing |
 | **Agent candidate values** | `scripts/relay-candidate-run.py generate`, into the agent tree: runtime `config.json` `candidateRuntime` (`trustSha256`, `trustConfigMap`, `pinConfigMap`; `bindingSha256` stays byte-identical, the binding is frozen) and `deployment.yaml`'s candidate volume (the run's control ConfigMap) | agent ConfigMap and Deployment | **yes, every run**, applied in place first (the agent must stay disabled through the create, §3.5) and committed in the same per-run PR (S-A) or afterwards (S-B); `relay-researcher-agent` stays suspended until §3.10 step 8 |
@@ -236,7 +236,10 @@ is unchanged. `verify` prints `runDigest` and `expiresAt`; record both with `t_s
 2. `node --import tsx scripts/candidate-worker-authority.ts install /operator/<run>/journal-operator.json <sha>`
    (operator login). It refuses an expired run in the database clock too
    (`rel:deploy/worker-candidate-journal/002-signed-clients.sql:47`).
-3. `kubectl apply -f /operator/<run>/service-rendered.json`; the render has `replicas: 0`, so then
+3. Apply the render without its protocol Service, which only Flux manages
+   (`kubernetes/apps/relay-candidate-journal/service.yaml`; the tests keep it equal to the render's copy):
+   `python3 -c 'import json,sys; d=json.load(sys.stdin); d["items"]=[o for o in d["items"] if (o["kind"], o["metadata"]["name"]) != ("Service", "relay-candidate-journal")]; json.dump(d, sys.stdout)' < /operator/<run>/service-rendered.json | kubectl apply -f -`
+   (an opted-in metrics Service, `relay-candidate-journal-metrics`, is still applied). The render has `replicas: 0`, so then
    `kubectl -n relay-candidate-journal scale deploy/relay-candidate-journal --replicas=1` and wait for
    Ready. This stops the previous run's journal service, which is why §3.0 step 1 comes first. The
    service verifies the run before listening (`rel:scripts/candidate-journal-service.ts:140`).

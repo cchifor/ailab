@@ -18,5 +18,8 @@ components:
 # (initialized once by recovery:initialize) and worker installations, enabled together.
 - ../../../components/relay-restore-fencing
 - ../../../components/relay-infrastructure-installations
+# H4a: the worker budget ledger's client files only (RELAY_WORKER_BUDGET_{DSN,CA,WITNESS}_FILE). The
+# budget authority stays unstarted until H7's candidate file gives it a profile source.
+- ../../../components/relay-worker-budget-client
 # The separate managed router component remains opt-in. This
 # communication component contains no router/OpenBao Secret or trust bridge.

@@ -187,9 +187,9 @@ again from the pinned manifest.
 |---|---|---|---|---|
 | `10.96.0.1` | `default/kubernetes` | apiserver (first address) | Kubernetes | never |
 | `10.96.0.10` | `kube-system/kube-dns` | Talos | Talos | never |
-| `10.96.0.40` | `relay-internal-tls/relay-hub-tls` (`relay.chifor.me` for workers) | `kubernetes/apps/relay-internal-tls/terminators.yaml` (staged) | ailab operator | the terminators are retired, or `hub` leaves the binding's `hostAliases` |
-| `10.96.0.41` | `relay-internal-tls/relay-router-tls` (`router.chifor.me` for workers) | `kubernetes/apps/relay-internal-tls/terminators.yaml` (staged) | ailab operator | the terminators are retired, or `router` leaves the binding's `hostAliases` |
-| `10.96.0.42` | `relay-candidate-journal/relay-candidate-journal` | `kubernetes/optional/relay-candidate-journal/render.py` (optional) | ailab operator | the candidate journal bundle is retired, or `candidateJournal` leaves the binding's `hostAliases` |
+| `10.96.0.40` | `relay-internal-tls/relay-hub-tls` (`relay.chifor.me` for workers) | `kubernetes/apps/relay-internal-tls/terminators.yaml` (Flux `relay-internal-tls`, since installation step Q3) | ailab operator | the terminators are retired, or `hub` leaves the binding's `hostAliases` |
+| `10.96.0.41` | `relay-internal-tls/relay-router-tls` (`router.chifor.me` for workers) | `kubernetes/apps/relay-internal-tls/terminators.yaml` (Flux `relay-internal-tls`, since installation step Q3) | ailab operator | the terminators are retired, or `router` leaves the binding's `hostAliases` |
+| `10.96.0.42` | `relay-candidate-journal/relay-candidate-journal` | `kubernetes/apps/relay-candidate-journal/service.yaml` (Flux `relay-candidate-journal`; the same object `kubernetes/optional/relay-candidate-journal/render.py` emits) | ailab operator | the candidate journal bundle is retired, or `candidateJournal` leaves the binding's `hostAliases` |
 
 **Exception record for `10.96.0.40`-`.42`.** These three are an exception to "do not hand out a
 ClusterIP by picking one" above. The owner approved it on 2026-11-15 (relay#277: decision record in
@@ -198,9 +198,11 @@ comment 123028, approval in comment 123063), word for word: "candidate-only alia
 ClusterIP-pinning exception for 10.96.0.40-42". Owner: the ailab operator, who keeps the three
 addresses free until their Services exist, repeats the collision check at apply time and fails closed
 if a Service gets a different ClusterIP (step Q2 of `docs/runbooks/relay-researcher-installation.md`),
-and releases them. Release, at the trigger in the table: delete the Service, then remove its row here
-in the same PR as its source. Each address goes on its own trigger: releasing `.42` leaves `.40` and
-`.41` in place.
+and releases them. Release, at the trigger in the table: one PR removes the Service's source and its
+row here. All three Services are Flux-owned (`prune: true`), so Flux deletes the Service once that PR
+merges; deleting it by hand earlier releases nothing, because Flux creates it again until its source is
+gone. The address is free once `kubectl get svc` no longer lists it. Each address goes on its own
+trigger: releasing `.42` leaves `.40` and `.41` in place.
 
 ## Dedicated storage fabric — `10.55.0.0/24`
 
