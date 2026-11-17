@@ -302,7 +302,6 @@ class RouterSeatTest(unittest.TestCase):
     def test_unknown_route_does_not_park_the_tier_on_subscription_seats(self):
         m = self.load([self.router_seat(model="x"), {"name": "a", "sudo_user": ""}])
         self._cli_ok(m)
-        self.addCleanup(setattr, m.subprocess, "run", __import__("subprocess").run)
         Router.script = [refusal(403, "ROUTE_NOT_ALLOWED")]
         self.assertEqual(m.run_llm("t", "d", "diff")["summary"], "cli")
         self.assertTrue(m.model_parked("r", "m"))
@@ -435,13 +434,16 @@ class RouterSeatTest(unittest.TestCase):
             calls.append(args)
             return m.subprocess.CompletedProcess(
                 args, 0, json.dumps({"result": json.dumps({"summary": "cli", "findings": []})}), "")
+        # m.subprocess is the process-wide subprocess module: keep the real run BEFORE patching and
+        # restore it after the test, or every later test module in the same discover run gets this
+        # canned CLI output from subprocess.run.
+        self.addCleanup(setattr, m.subprocess, "run", m.subprocess.run)
         m.subprocess.run = run
         return calls
 
     def test_router_refusal_moves_to_the_subscription_seat(self):
         m = self.load([self.router_seat(model="x"), {"name": "a", "sudo_user": ""}])
         calls = self._cli_ok(m)
-        self.addCleanup(setattr, m.subprocess, "run", __import__("subprocess").run)
         Router.script = [refusal(429, "RATE_LIMITED", retry_after=600)]
         self.assertEqual(m.run_llm("t", "d", "diff")["summary"], "cli")
         self.assertEqual(len(calls), 1)

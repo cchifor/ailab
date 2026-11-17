@@ -1,0 +1,146 @@
+"""scripts/talos-cp-plan-check.py: PASS only for exactly the audit-rules change on the targeted CP."""
+import copy
+import importlib.util
+import json
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[2]
+# Bound at import (before any test runs), so a test elsewhere that patches the shared subprocess
+# module cannot turn this module's CLI checks into canned output.
+_RUN = subprocess.run
+spec = importlib.util.spec_from_file_location("plan_check", ROOT / "scripts/talos-cp-plan-check.py")
+plan_check = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(plan_check)
+
+V1 = {"version": "v1alpha1", "machine": {"type": "controlplane", "token": "SECRET-TOKEN"},
+      "cluster": {"apiServer": {"auditPolicy": {"apiVersion": "audit.k8s.io/v1", "kind": "Policy",
+                                                "rules": [{"level": "Metadata"}]}}}}
+EXTRA = {"apiVersion": "v1alpha1", "kind": "HostnameConfig", "name": "", "hostname": "talos-cp1"}
+R7 = [{"level": "Metadata", "resources": [{"group": "", "resources": ["secrets"]}]},
+      {"level": "RequestResponse", "verbs": ["create"], "namespaces": ["relay-researcher-1"]},
+      {"level": "Metadata"}]
+
+
+def config(v1):
+    return yaml.safe_dump_all([v1, EXTRA], sort_keys=False)
+
+
+def plan(before, after, others=()):
+    changes = [{"address": 'talos_machine_configuration_apply.cp["cp1"]',
+                "change": {"actions": ["update"], "before": {"machine_configuration": before},
+                           "after": {"machine_configuration": after}}},
+               {"address": 'talos_machine_configuration_apply.cp["cp2"]',
+                "change": {"actions": ["no-op"], "before": {}, "after": {}}}]
+    changes += [{"address": a, "change": {"actions": ["update"], "before": {}, "after": {}}} for a in others]
+    return {"resource_changes": changes}
+
+
+def live(text):
+    return json.dumps({"node": "192.168.0.41", "metadata": {"id": "v1alpha1"}, "spec": text}) + "\n"
+
+
+class PlanCheck(unittest.TestCase):
+    def setUp(self):
+        self.before = config(V1)
+        v1 = copy.deepcopy(V1)
+        v1["cluster"]["apiServer"]["auditPolicy"]["rules"] = R7
+        self.after = config(v1)
+
+    def run_check(self, p, mc, node="cp1"):
+        return plan_check.check(p, mc, node, plan_check.DEFAULT_EXPECTED)
+
+    def test_exactly_the_rules_passes_and_prints_no_value(self):
+        ok, lines = self.run_check(plan(self.before, self.after), live(self.before))
+        self.assertTrue(ok, lines)
+        self.assertIn("state-before vs planned: ['v1alpha1~/cluster/apiServer/auditPolicy/rules']", lines)
+        self.assertNotIn("SECRET-TOKEN", "\n".join(lines))
+
+    def test_the_removal_is_the_same_path(self):
+        ok, lines = self.run_check(plan(self.after, self.before), live(self.after))
+        self.assertTrue(ok, lines)
+
+    def test_live_drift_stops(self):
+        drifted = copy.deepcopy(V1)
+        drifted["machine"]["token"] = "OTHER"
+        ok, lines = self.run_check(plan(self.before, self.after), live(config(drifted)))
+        self.assertFalse(ok)
+        self.assertIn("live vs state-before: ['v1alpha1~/machine/token']", lines)
+        self.assertNotIn("OTHER", "\n".join(lines))
+
+    def test_any_other_change_stops(self):
+        v1 = copy.deepcopy(V1)
+        v1["cluster"]["apiServer"]["auditPolicy"]["rules"] = R7
+        v1["machine"]["token"] = "ROTATED"
+        ok, _ = self.run_check(plan(self.before, config(v1)), live(self.before))
+        self.assertFalse(ok)
+
+    def test_another_resource_changing_stops(self):
+        ok, lines = self.run_check(plan(self.before, self.after, others=["proxmox_virtual_environment_vm.cp"]),
+                                   live(self.before))
+        self.assertFalse(ok)
+        self.assertIn("other resources changing: ['proxmox_virtual_environment_vm.cp']", lines)
+
+    def test_wrong_node_stops(self):
+        ok, lines = self.run_check(plan(self.before, self.after), live(self.before), node="cp3")
+        self.assertFalse(ok)
+
+    def test_a_replace_stops_even_with_the_right_diff(self):
+        p = plan(self.before, self.after)
+        p["resource_changes"][0]["change"]["actions"] = ["delete", "create"]
+        ok, lines = self.run_check(p, live(self.before))
+        self.assertFalse(ok)
+        self.assertIn("not an in-place update", lines[0])
+
+    def test_an_empty_plan_stops_readably(self):
+        ok, lines = self.run_check({"format_version": "1.2"}, live(self.before))
+        self.assertFalse(ok)
+        self.assertIn("not exactly one resource change", lines[0])
+
+    def test_malformed_configs_stop_without_printing_content(self):
+        bad = "version: v1alpha1\nmachine:\n  token: SECRET-IN-BAD-YAML\n  : [unclosed\n"
+        for name, p, mc in (("planned", plan(self.before, bad), live(self.before)),
+                            ("state", plan(bad, self.after), live(bad)),
+                            ("live", plan(self.before, self.after), live(bad))):
+            ok, lines = self.run_check(p, mc)
+            self.assertFalse(ok, name)
+            self.assertNotIn("SECRET-IN-BAD-YAML", "\n".join(lines))
+        ok, lines = self.run_check(plan(self.before, self.after), "not json SECRET-IN-BAD-YAML")
+        self.assertFalse(ok)
+        self.assertNotIn("SECRET-IN-BAD-YAML", "\n".join(lines))
+
+    def test_cli_never_prints_config_content(self):
+        bad = "version: v1alpha1\nmachine:\n  token: SECRET-IN-BAD-YAML\n  : [unclosed\n"
+        cases = [(plan(self.before, bad), live(self.before)), (plan(self.before, self.after), live(bad)),
+                 (plan(self.before, self.after), "garbage SECRET-IN-BAD-YAML")]
+        for p, mc in cases:
+            with tempfile.TemporaryDirectory() as d:
+                pj, mj = Path(d, "plan.json"), Path(d, "mc.json")
+                pj.write_text(json.dumps(p), encoding="utf-8")
+                mj.write_text(mc, encoding="utf-8")
+                r = _RUN([sys.executable, str(ROOT / "scripts/talos-cp-plan-check.py"), str(pj), str(mj), "cp1"],
+                                   capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("VERDICT: STOP", r.stdout)
+            self.assertNotIn("SECRET-IN-BAD-YAML", r.stdout + r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
+
+    def test_missing_state_config_stops_readably(self):
+        p = plan(self.before, self.after)
+        p["resource_changes"][0]["change"]["before"] = None          # a fresh or tainted resource
+        ok, lines = self.run_check(p, live(self.before))
+        self.assertFalse(ok)
+        self.assertIn("no machine_configuration in its state", lines[0])
+
+    def test_unknown_planned_config_stops(self):
+        ok, _ = self.run_check(plan(self.before, None), live(self.before))
+        self.assertFalse(ok)
+
+
+if __name__ == "__main__":
+    unittest.main()
