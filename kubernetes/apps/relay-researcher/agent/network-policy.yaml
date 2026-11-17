@@ -66,3 +66,38 @@ spec:
     toPorts:
     - ports:
       - {port: "6443", protocol: TCP}
+---
+# Third object, ailab's addition for the candidate journal (owner decision U9, 2026-11-17): the agent
+# reaches the journal service on TCP 8443. Cilium never selects a Cilium-managed Pod with an ipBlock
+# (the same reason as the API-server rule above), so the chart's candidate journal rule
+# (networkPolicy.candidateJournalCidrs ["10.96.0.42/32"], port 8443, set by R1's one-time candidate
+# values) admits nothing by itself; this selector rule is what admits the traffic, exactly the selector
+# the slot's qualification egress (../installation/qualification-egress.yaml, rule 2) uses. Egress only,
+# the agent Pod only, TCP 8443 only. The journal's own per-run ingress policy admits this namespace on
+# 8443 (kubernetes/optional/relay-candidate-journal/render.py). Remove it with the qualification stage
+# (installation runbook Q7: no ordinary worker runs under a policy that still admits the journal).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-infrastructure-agent-journal-egress
+  namespace: relay-infra-control
+  labels:
+    app.kubernetes.io/name: relay-infrastructure-agent
+    app.kubernetes.io/instance: relay-infrastructure-agent
+    app.kubernetes.io/component: infrastructure-agent
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: relay-infrastructure-agent
+      app.kubernetes.io/instance: relay-infrastructure-agent
+  policyTypes: ["Egress"]
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: relay-candidate-journal
+      podSelector:
+        matchLabels:
+          app: relay-candidate-journal
+    ports:
+    - {protocol: TCP, port: 8443}
