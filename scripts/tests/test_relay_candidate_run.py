@@ -768,6 +768,9 @@ class Generator(unittest.TestCase):
             ("config.json", lambda t: canonical({**AGENT_CONFIG, "candidateRuntime": {}}) + "\n", None,
              "agent-one-time-edited:config.json"),
         ]
+        # A rule beyond the chart's three that is not the journal's: the enrollment tree grew, not the structure.
+        other = '  - to:\n    - ipBlock: {cidr: "10.96.0.50/32"}\n    ports:\n    - {protocol: TCP, port: 9443}\n'
+        cases.append(("network-policy.yaml", lambda t: t, other, "agent-enrollment-egress-count"))
         for name, edit, append, code in cases:
             with self.subTest(name=name, code=code):
                 path = self.root / gen.AGENT / name
@@ -788,7 +791,8 @@ class Generator(unittest.TestCase):
                         config.write_text(canonical({**AGENT_CONFIG, "podRuntime": {}}) + "\n")
                         with self.assertRaises(gen.Refusal) as caught:
                             gen.reset_files(self.root)
-                        self.assertEqual(caught.exception.code, "agent-mode-conflict")
+                        self.assertEqual(caught.exception.code, code if code == "agent-enrollment-egress-count"
+                                         else "agent-mode-conflict")
                         config.write_text(texts["config.json"])
                 finally:
                     path.write_text(texts[name])
@@ -830,9 +834,8 @@ class Generator(unittest.TestCase):
         original = kust.read_text()
         kust.write_text(original.replace("- qualification-egress.yaml", "- execution-egress.yaml"))
         commit("R1 with the enrollment stage")
-        with self.assertRaises(gen.Refusal) as caught:
-            gen.check_against_base(self.root, "HEAD~2", first["runDigest"])
-        self.assertEqual(caught.exception.code, "egress-stage-not-qualification")
+        self.assertEqual(gen.check_against_base(self.root, "HEAD~2", first["runDigest"])[1],
+                         ["HEAD's self-check: Refusal: egress-stage-not-qualification"])
         run_git("reset", "-q", "--hard", "HEAD~1")
         # Any other change to the agent files fails the gate, in the structure or beside it, as does a
         # first run's PR without the structure.

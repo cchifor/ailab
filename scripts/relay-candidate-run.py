@@ -37,6 +37,9 @@ hand-edited or partial structure is never completed or repaired. `reset` removes
       network-policy.json) in relay-infra-control, and the slot's trust (config.json) and pin (sha256)
       ConfigMaps in relay-researcher-1. trustSha256 is the SHA-256 of those exact trust bytes, which are
       canonical JSON plus a final newline, as Relay's candidate policy preparation measures them.
+  The structure's text, its comments included, is frozen while a run is committed: change it only on a
+  tree without one (after reset), or every committed tree becomes agent-one-time-edited.
+
   reset [--repo DIR]
       Writes the placeholder run/ back and removes the one-time structure with the run's agent values,
       so the agent tree is the enrollment tree again, byte for byte (R0's reset; the component's
@@ -139,6 +142,9 @@ GENERATED = "relay-candidate-run.py"
 # selector policy admits the traffic.
 JOURNAL_CIDRS = ("10.96.0.42/32",)
 JOURNAL_PORT = 8443
+# The chart's enrollment egress rules in the agent NetworkPolicy, in order: DNS, the API server, the hub.
+# The candidate journal rule follows them; any other rule is not the chart's (agent-enrollment-egress-count).
+ENROLLMENT_EGRESS_RULES = 3
 AGENT_NAME = "relay-infrastructure-agent"
 PINS = Path("kubernetes/apps/relay-researcher/pins/pins.yaml")
 # The agent files the one-time structure touches; the generator owns them while a run is committed.
@@ -146,6 +152,8 @@ ONE_TIME_FILES = ("config.json", "deployment.yaml", "rbac.yaml", "network-policy
 # The config keys of Relay's other runtime modes: never together with candidateRuntime.
 OTHER_MODES = ("podRuntime", "ordinaryCanaryRuntime", "ordinaryNamespacePins", "provenancePreparation",
                "provenanceExecution")
+# The structure's text, these comments included, is compared byte for byte: it is frozen while a run is
+# committed (a change would make that tree agent-one-time-edited). Change it only on a tree without a run.
 ONE_TIME_NOTE = f"# {GENERATED} one-time candidate structure (reset removes it): "
 
 
@@ -638,9 +646,10 @@ def agent_objects(texts: dict, code: str = "agent-one-time-yaml") -> dict:
 def one_time_parts(objects: dict) -> dict:
     """Every trace of the one-time objects in the agent YAML files, wherever it sits: a mount (in any
     container) or volume named candidate, at a candidate path or of a run's control ConfigMap; the two
-    namespaces in the cluster-UID read; a slot NetworkPolicy or Secret rule; an egress rule beyond the
-    chart's three or on the journal's address or port (KeyError/ValueError when a file lacks the object
-    it belongs in)."""
+    namespaces in the cluster-UID read; a slot NetworkPolicy or Secret rule; an egress rule on the
+    journal's address or port, in any position (KeyError/ValueError when a file lacks the object it
+    belongs in; agent-enrollment-egress-count for a rule beyond the chart's three that is not the
+    journal's)."""
     ns, slot = CONTROL_NAMESPACE, EXECUTION_NAMESPACE
     spec = objects["deployment.yaml"][("Deployment", ns, AGENT_NAME)]["spec"]["template"]["spec"]
     containers = [*spec["containers"], *(spec.get("initContainers") or [])]
@@ -651,9 +660,13 @@ def one_time_parts(objects: dict) -> dict:
     [cluster] = objects["rbac.yaml"][("ClusterRole", None, f"{AGENT_NAME}-{ns}-cluster-uid")]["rules"]
     workloads = objects["rbac.yaml"][("Role", slot, f"{AGENT_NAME}-workloads")]["rules"]
     egress = objects["network-policy.yaml"][("NetworkPolicy", ns, AGENT_NAME)]["spec"]["egress"]
-    journal = [r for i, r in enumerate(egress)
-               if i >= 3 or any(port.get("port") == JOURNAL_PORT for port in r.get("ports") or [])
-               or any((peer.get("ipBlock") or {}).get("cidr") in JOURNAL_CIDRS for peer in r.get("to") or [])]
+
+    def on_journal(rule):
+        return (any(port.get("port") == JOURNAL_PORT for port in rule.get("ports") or [])
+                or any((peer.get("ipBlock") or {}).get("cidr") in JOURNAL_CIDRS for peer in rule.get("to") or []))
+    if not all(on_journal(r) for r in egress[ENROLLMENT_EGRESS_RULES:]):
+        refuse("agent-enrollment-egress-count")  # a rule beyond the chart's three that is not the journal's
+    journal = [r for r in egress if on_journal(r)]
     return {"deployment.yaml": (mounts, volumes),
             "rbac.yaml": ([n for n in cluster["resourceNames"] if n in (ns, slot)],
                           [r for r in workloads if set(r["resources"]) & {"networkpolicies", "secrets"}]),
@@ -1106,7 +1119,12 @@ def check_against_base(repo: Path, base: str, expected_digest: str | None = None
         expected, one_time = generated_files(base_tree, v)
         # The first run's PR may change other paths: HEAD's own tree must still agree with its run (an
         # installation, binding or hub image change there would contradict it) and its generated files.
-        own = check(head_tree, expected_digest)[1] if first else []
+        own = []
+        if first:
+            try:
+                own = check(head_tree, expected_digest)[1]
+            except Refusal as refusal:  # labelled like its other results; the gate fails either way
+                own = [f"Refusal: {refusal.code}"]
     if now >= v["payload"]["expiresAt"]:
         refuse("run-expired")  # merging it would only roll the hub to log worker_candidate_unavailable
     diff = [f"not the generator output for the base: {path}" for path, data in expected.items()
@@ -1147,6 +1165,7 @@ def chart_values(texts: dict, agent_image: str) -> dict:
         pod = deployment["spec"]["template"]["spec"]
         [agent] = pod["containers"]
         volumes = {v["name"]: v for v in pod["volumes"]}
+        # The ENROLLMENT_EGRESS_RULES, in the chart's order.
         dns, api, hub = objects["network-policy.yaml"][("NetworkPolicy", CONTROL_NAMESPACE, AGENT_NAME)]["spec"]["egress"]
         identity = config["identity"]
         return {
