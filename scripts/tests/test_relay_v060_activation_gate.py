@@ -2,6 +2,7 @@
 """Keep the retired Relay trust bridge out of every deployment overlay."""
 
 from pathlib import Path
+import re
 import unittest
 
 import yaml
@@ -29,11 +30,13 @@ class ActivationGate(unittest.TestCase):
             ROOT / "kubernetes/apps/apps/relay",
             ROOT / "kubernetes/apps/apps/llm-router",
         ]
+        # The retired trust bridge, for good: the component llm-router-relay-keys itself. Its name is a
+        # prefix of llm-router-relay-keys-trust, the reviewed Relay trust that budget step 8 / Router
+        # connection step 6 includes (docs/runbooks/relay-researcher-remaining-live-steps.md, step 2),
+        # so the retired name is refused only where it is not that component.
+        retired = re.compile(r"llm-router-relay-keys(?!-trust\b)")
         forbidden = (
-            # The retired trust bridge, for good.
             "relay-router-control-plane",
-            "llm-router-relay-keys",
-            "llm-router-relay-keys-trust",
             # The researcher hub upgrade (docs/runbooks/relay-researcher-hub-upgrade.md), split per
             # step: each step's PR removes exactly its own group. Installation stays disabled until
             # step H3, which removed the installation pair deliberately (H3 done); H4a (the budget
@@ -63,6 +66,9 @@ class ActivationGate(unittest.TestCase):
                 text = path.read_text()
                 for value in forbidden:
                     self.assertNotIn(value, text, f"retired bridge material in {path}")
+                self.assertIsNone(retired.search(text), f"the retired llm-router-relay-keys bridge in {path}")
+        # The reviewed trust may be in the Router overlay only, never next to the Relay hub.
+        self.assertNotIn("llm-router-relay-keys-trust", RELAY.read_text())
         self.assertEqual(evidence["version"], 2)
         self.assertIn(evidence["status"], {"pending", "approved"})
         self.assertIn(evidence["accessFlow"]["status"], {"pending", "approved"})

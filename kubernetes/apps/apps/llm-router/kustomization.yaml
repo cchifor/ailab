@@ -14,10 +14,13 @@ resources:
   - edge.yaml
   - podmonitor.yaml # Prometheus scrape of the router's metrics port (rules: infrastructure/monitoring/llm-router-rules.yaml)
   - llm-router-oidc.sops.yaml # SOPS: Keycloak client secret, router_auth DB URL, break-glass token (llm-router#121)
-# The Relay trust bridge remains opt-in. The activation gate test requires
-# operator evidence before a follow-up PR may include it here.
 components:
   # Budget authority runbook step 8 (docs/runbooks/relay-worker-budget-authority.md): the router's
   # reader files for the worker budget ledger. The worker-budget-authority plugin stays DISABLED
   # (step 9 enables it through the admin API, never a manifest).
   - ../../../components/llm-router-worker-budget-reader
+  # Router connection runbook step 6 (remaining-live-steps step 2, docs/runbooks/):
+  # Relay's reviewed trust for the relay-keys plugin, after its OpenBao document was written and read
+  # back (step 1). Included without File B (owner decision, open point 6). Only the two Relay signer
+  # keys can sign, and no running process holds them until hub step H6.
+  - ../../../components/llm-router-relay-keys-trust
