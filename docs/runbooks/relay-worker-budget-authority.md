@@ -1066,6 +1066,17 @@ probe_compare() {
   echo "writer errors, SQL ERROR lines: $sqlerr"; sort "$e" | uniq -c | sort -rn | head -5
   [ "$lost" -eq 0 ] && [ "$other" -eq 0 ] && [ "$miss" -eq 0 ] && [ "$before" -gt 0 ] && [ "$after" -gt 0 ] && [ "$sqlerr" -eq 0 ]
 }
+# node_ok: the vmid is this node's VM, the node has this address, the probe runs on it and the
+# production ledger does not. Tiers (b) and (c) call it first, right before the reset or the cut.
+node_ok() {
+  local prod probe ip
+  prod=$(kubectl --context admin@ai -n relay-budget-authority get pod relay-budget-postgres-0 -o jsonpath='{.spec.nodeName}') &&
+  probe=$(kubectl --context admin@ai -n "$PNS" get pod relay-budget-postgres-0 -o jsonpath='{.spec.nodeName}') &&
+  ip=$(kubectl --context admin@ai get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}') &&
+  python scripts/node-ssh.py "$host" "qm config $vmid | grep -qx 'name: $node'" &&
+  [ "$probe" = "$node" ] && [ -n "$prod" ] && [ "$prod" != "$node" ] && [ "$ip" = "$nodeip" ] &&
+  echo "node $node ($ip, vmid $vmid on $host): the probe is here, the production ledger on $prod"
+}
 cap probe-amcheck psql_probe <<<'CREATE EXTENSION amcheck;'
 cap probe-seed psql_probe < "$ev/probe-seed.sql"                    # ends COMMIT
 cap probe-allocate psql_probe < "$ev/probe-allocate.sql"            # 3 | 3 | 2 | 1
@@ -1146,11 +1157,12 @@ each Pod restarts after the reboot, each `qnap-iscsi` volume there is re-staged 
 crash-recovered by its own workload, and a singleton on the node is down until then.
 
 ```sh
+cap probe-b-node-ok node_ok &&
 cap probe-b-collateral kubectl --context admin@ai get pods -A -o wide --field-selector spec.nodeName="$node" &&
 probe_tier b 600 && sleep 20 && ti=$(date -u +%FT%TZ) &&
 cap probe-b-reset python scripts/node-ssh.py "$host" "qm reset $vmid && date -u +%FT%TZ" &&
 probe_after b
-cap probe-b-node kubectl --context admin@ai get node "$node"
+cap probe-b-node-after kubectl --context admin@ai get node "$node"
 cap probe-b-collateral-after kubectl --context admin@ai get pods -A -o wide --field-selector spec.nodeName="$node"
 ```
 
@@ -1242,6 +1254,7 @@ rule="FORWARD -s $nodeip/32 -d 10.55.0.254/32 -p tcp --dport 3260 -j DROP"
 cut="iptables -w 5 -I $rule || exit 1; sleep 60; while :; do iptables -w 5 -D $rule 2>/dev/null; iptables -w 5 -C $rule 2>/dev/null; [ \$? -eq 1 ] && break; sleep 1; done"
 check="iptables -w 5 -C $rule 2>/dev/null; rc=\$?; case \$rc in 0) echo STILL-PRESENT; exit 2;; 1) echo removed;; *) echo CHECK-FAILED rc=\$rc; exit 3;; esac"
 tok="probe-cut-$(date -u +%Y%m%dT%H%M%SZ)"
+cap probe-c-node-ok node_ok &&
 cap probe-c-sessions-before sessions_ok &&
 probe_tier c 300 && sleep 20 && ti=$(date -u +%FT%TZ) &&
 cap probe-c-cut python scripts/node-ssh.py "$host" "nohup sh -c ': $tok; $cut' </dev/null >/dev/null 2>&1 &
