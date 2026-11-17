@@ -88,7 +88,7 @@ this file):
 | 2 | point 6 |
 | 3 | points 1 and 2 |
 | 5 | points 3 and 4 |
-| 6 | point 8 |
+| 6 | points 7 and 8 |
 | 7 | point 7 |
 | 8 | point 5 |
 
@@ -102,7 +102,7 @@ Each of those steps repeats the requirement as a pre-check.
 | 3 | Control-metrics collector Secrets | control monitoring, activation step 2 | **OpenBao**: 1 document (NEW path); **Kubernetes**: 2 Secrets | none |
 | 4 | Budget step 8 proofs | budget step 8 | **Kubernetes**: one temporary client Pod | none |
 | 5 | Witness drills A-D | budget, "Drills before production `ready=true`" | **OpenBao**: witness versions; **ledger**: the rotation to B and the `ready` flips; **Router admin API**: plugin on and off; **Kubernetes**: ExternalSecret annotations, Deployment restarts, the client Pod's deletion | **Router**, 8 times |
-| 6 | Independent review | budget step 8 | none | none |
+| 6 | Durability evidence (6a), then the independent review (6b) | budget step 8; budget, "Durability evidence for the first `ready=true`" | **Kubernetes**: the disposable probe namespace and its objects, created and deleted; the ledger Pod's deletion. With the owner's OK only: a `qm reset` of the probe's node (tier b), a 60 s host firewall rule (tier c) | **the ledger Pod**, once (`OnDelete`); the probe's node VM if tier (b) runs |
 | 7 | `worker_budget.authority.ready=true` | budget step 8 | **ledger** | none |
 | 8 | Router plugin enabled (after the bootstrap gates) | budget step 9 | **Router admin API** | none |
 | 9 | Escrow token (H5, second half); `relay-router-openbao-tls` | Router connection step 9 | **OpenBao**: 1 document and 1 token; **Kubernetes**: 1 ExternalSecret annotation | none |
@@ -993,13 +993,32 @@ Router qualifies a row is H6's preflight after File B (124071 §5).
 - **B cannot be restored and verified.** Stop and escalate to the owner. Authority stays withdrawn.
 - **Never rewrite the authority row to match a witness** (`relay-worker-budget-authority.md:398-399`).
 
-## Step 6. Independent review
+## Step 6. Durability evidence, then the independent review
 
 **Purpose.** "After independent review, set `worker_budget.authority.ready=true`"
 (`relay-worker-budget-authority.md:236`). "The production `ready=true` (step 8) waits for all four
-drills to be reviewed" (`:481`).
+drills to be reviewed" (`:481`). The owner decided (open point 7) that it also waits for the durability
+evidence, which 6a produces and 6b reviews.
 
-**Writes:** none (two comments on #1753). **Restarts:** none.
+**Writes:** 6a: **Kubernetes**: the disposable probe (namespace `relay-budget-durability-probe` and its
+objects, its PV's reclaim policy and label), deleted again the same day; the production ledger Pod's
+deletion for (iii). With the owner's explicit OK on #1753 only: tier (b)'s `qm reset` of the probe's
+node VM, tier (c)'s 60 s host firewall rule. 6b: two comments on #1753.
+
+**Restarts:** **the production ledger Pod**, once ((iii), `OnDelete`, authority withdrawn and plugin
+disabled); every Pod on the probe's node if tier (b) runs.
+
+### 6a. Durability evidence
+
+Run the budget runbook's "Durability evidence for the first `ready=true`" in this session (its
+commands use step 0's and step 5's helpers): (i); (ii) with tier (a), and tiers (b) and (c) only with
+the owner's explicit OK on #1753; the NAS-side record of its "Limit"; then (iii). (iii) runs here,
+after step 5: the drills leave `ready=f` with B's IDs and the plugin disabled, the state it asserts
+before it restarts the ledger Pod. Post each part on #1753 as that section says.
+
+**Stop.** A chain or comparison that fails keeps `ready=false`; the result goes to the owner.
+
+### 6b. The independent review
 
 **The reviewer (owner decision 2026-11-17, open point 8).** Two parts, both on #1753:
 

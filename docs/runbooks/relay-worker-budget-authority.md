@@ -244,9 +244,10 @@ Do not enable application consumers until every gate below is satisfied.
      `ready=true`" below); `worker_budget.authority.ready=true` read back.
    - **Router-side readbacks:** the Relay trust included (Router connection step 6:
      `relay-keys` active, the mounted trust equal to the rendered one);
-     `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` equal to the `readers` row,
-     `547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad`; and the
-     `clients` and `readers` rows of step 7 (File A) unchanged.
+     `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` equal to the `readers` row's
+     `deployment_digest` (today
+     `547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad`, Consumer
+     wiring); and the `clients` and `readers` rows of step 7 (File A) unchanged.
 
    **File B, the `qualifications` rows, is not one of these gates.** The ledger
    refuses every allocation that lacks a `qualifications` row, covering the
@@ -794,7 +795,8 @@ SELECT count(*) AS allocations, (SELECT count(*) FROM worker_budget.outbox) AS o
        count(*) FILTER (WHERE request_limit IS NOT NULL) AS scoped
   FROM worker_budget.allocations;
 SQL
-# Probe only. One fresh ordinary allocation; each line is printed only after its commit returned.
+# Probe only. One fresh ordinary allocation; each line is printed only after its commit returned,
+# with the server's UTC time of that line.
 cat > "$ev/probe-write.sql" <<'SQL'
 \set ON_ERROR_STOP on
 \set QUIET on
@@ -811,9 +813,10 @@ SELECT worker_budget.prepare(:'i', :'e', :'w', jsonb_build_object(
   'grantId', gen_random_uuid(), 'grantRevision', 1,
   'grantDigest', encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex'),
   'tokenPolicyDigests', jsonb_build_array(:'q'))) AS r \gset
-SELECT 'PREPARED ' || (:'r'::jsonb #>> '{authorization,allocationId}') || ' ' || (:'r'::jsonb ->> 'operationId');
+SELECT 'PREPARED ' || (:'r'::jsonb #>> '{authorization,allocationId}') || ' ' || (:'r'::jsonb ->> 'operationId')
+       || ' ' || to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"');
 SELECT worker_budget.acknowledge(:'i', :'e', :'w', (:'r'::jsonb ->> 'operationId')::uuid);
-SELECT 'ACKED ' || (:'r'::jsonb ->> 'operationId');
+SELECT 'ACKED ' || (:'r'::jsonb ->> 'operationId') || ' ' || to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"');
 SQL
 # Probe only. Needs the contrib amcheck extension, which the probe adds and production never gets.
 cat > "$ev/probe-integrity.sql" <<'SQL'
@@ -1027,31 +1030,41 @@ psql_probe() {
 # probe_rows <label>: every row, sorted bytewise for comm.
 probe_rows() { local -; set -o pipefail; psql_probe < "$ev/ledger-rows.sql" | LC_ALL=C sort > "$ev/probe/rows-$1.tsv"; }
 # probe_writer <tier> <seconds>: fresh allocations one after another, each prepared then acknowledged.
-# Each call is bounded (timeout 120), so a call stuck on a reset node cannot hold the loop.
+# Each call is bounded (timeout 120), so a call stuck on a reset node cannot hold the loop, and a
+# short pause keeps a failing call (Pod down) from flooding the API server.
 probe_writer() {
   local end=$(( $(date +%s) + $2 ))
+  touch "$ev/probe/writer-$1.log" "$ev/probe/writer-$1.err"
   while [ "$(date +%s)" -lt "$end" ]; do
     timeout 120 kubectl --context admin@ai -n "$PNS" exec -i relay-budget-postgres-0 -- \
       env PSQL_HISTORY=/dev/null psql -X -v ON_ERROR_STOP=1 -h /var/run/postgresql -U postgres -d relay_budget -f - \
       < "$ev/probe-write.sql" 2>> "$ev/probe/writer-$1.err" | grep -E '^(PREPARED|ACKED) ' >> "$ev/probe/writer-$1.log"
+    sleep 0.2
   done
 }
 # has <table> <key> <rows file>
 has() { awk -F'\t' -v t="$1" -v k="$2" '$1 == t && $2 == k { f = 1 } END { exit !f }' "$3"; }
-# probe_compare <tier>: every row from before survives unchanged; every write psql reported is present.
+# probe_compare <tier>: every row from before survives unchanged; every write psql reported is present;
+# writes were acknowledged both before and after the interruption ($ti, set just before it); and the
+# writer met no SQL error (connection loss and recovery refusals are FATAL or psql errors, never ERROR:).
 probe_compare() {
-  local b="$ev/probe/rows-$1-before.tsv" a="$ev/probe/rows-$1-after.tsv" w="$ev/probe/writer-$1.log" miss=0 x y lost other
+  local b="$ev/probe/rows-$1-before.tsv" a="$ev/probe/rows-$1-after.tsv" w="$ev/probe/writer-$1.log" e="$ev/probe/writer-$1.err"
+  local miss=0 x y lost other before after sqlerr
   lost=$(LC_ALL=C comm -23 "$b" "$a" | wc -l)
   other=$(LC_ALL=C comm -13 "$b" "$a" | cut -f1 | grep -cvxE 'allocations|outbox|receipts')
+  before=$(awk -v t="$ti" '$1 == "ACKED" && $3 < t' "$w" | wc -l)
+  after=$(awk -v t="$ti" '$1 == "ACKED" && $3 > t' "$w" | wc -l)
+  sqlerr=$(grep -c 'ERROR:' "$e")
   echo "lost or changed: $lost"
   echo "new rows by table (other tables: $other):"; LC_ALL=C comm -13 "$b" "$a" | cut -f1 | sort | uniq -c
-  while read -r _ x y; do
+  while read -r _ x y _; do
     { has allocations "$x" "$a" && has outbox "$x/1" "$a" && grep -qF "\"operation_id\": \"$y\"" "$a"; } \
       || { echo "MISSING prepared $x $y"; miss=$((miss + 1)); }
   done < <(grep '^PREPARED ' "$w")
-  while read -r _ y; do has receipts "$y" "$a" || { echo "MISSING acknowledged $y"; miss=$((miss + 1)); }; done < <(grep '^ACKED ' "$w")
-  echo "prepared $(grep -c '^PREPARED ' "$w"), acknowledged $(grep -c '^ACKED ' "$w"), missing $miss"
-  [ "$lost" -eq 0 ] && [ "$other" -eq 0 ] && [ "$miss" -eq 0 ]
+  while read -r _ y _; do has receipts "$y" "$a" || { echo "MISSING acknowledged $y"; miss=$((miss + 1)); }; done < <(grep '^ACKED ' "$w")
+  echo "prepared $(grep -c '^PREPARED ' "$w"), acknowledged $(grep -c '^ACKED ' "$w") ($before before $ti, $after after it), missing $miss"
+  echo "writer errors, SQL ERROR lines: $sqlerr"; sort "$e" | uniq -c | sort -rn | head -5
+  [ "$lost" -eq 0 ] && [ "$other" -eq 0 ] && [ "$miss" -eq 0 ] && [ "$before" -gt 0 ] && [ "$after" -gt 0 ] && [ "$sqlerr" -eq 0 ]
 }
 cap probe-amcheck psql_probe <<<'CREATE EXTENSION amcheck;'
 cap probe-seed psql_probe < "$ev/probe-seed.sql"                    # ends COMMIT
@@ -1088,7 +1101,8 @@ probe_after() {  # probe_after <tier>: fails at the first failed capture or comp
 ```
 
 **Expected after every tier.** `lost or changed: 0`. New rows only in
-`allocations`, `outbox` and `receipts`. `missing 0`. A write in flight at the
+`allocations`, `outbox` and `receipts`. `missing 0`. Acknowledged writes both before
+and after the interruption, and no SQL `ERROR` in the writer's errors. A write in flight at the
 interruption may exist or not, never in part: `allocations_without_outbox`,
 `outbox_inconsistent` and `orphan_receipts` are 0, and every `worker_budget` index
 passes `bt_index_check`. `in_recovery` `f`. **Stop** on any other result, on
@@ -1103,7 +1117,7 @@ checkpointer makes the postmaster end every process and run crash recovery from 
 WAL, which is the path a killed postmaster takes on its next start:
 
 ```sh
-probe_tier a 120 && sleep 20 &&
+probe_tier a 120 && sleep 20 && ti=$(date -u +%FT%TZ) &&
 cap probe-a-kill kubectl --context admin@ai -n "$PNS" exec relay-budget-postgres-0 -- \
   sh -c 'pgrep -f "^postgres: checkpointer"; kill -9 "$(pgrep -f "^postgres: checkpointer")"' &&
 probe_after a
@@ -1114,9 +1128,10 @@ Killed`, `terminating any other active server processes`, `all server processes
 terminated; reinitializing`, `database system was interrupted`, `database system was
 not properly shut down; automatic recovery in progress`, `redo starts at`, `redo
 done at`, `database system is ready to accept connections`. A local run of these
-blocks (Docker, the pinned image and bundle, `kubectl` replaced by `docker`) gave 1047
-writes prepared and 1046 acknowledged across the kill, `lost or changed: 0` and
-`missing 0`; the one write without its acknowledgement was the one in flight.
+blocks (Docker, the pinned image and bundle, `kubectl` replaced by `docker`) gave 297
+writes prepared and acknowledged across the kill (67 before it, 227 after),
+`lost or changed: 0` and `missing 0`. An earlier run also had one write prepared and
+never acknowledged, the one in flight: present, with its outbox row.
 
 **Tier (b): hard reset of the probe's node. Runs only with the owner's explicit OK
 on #1753 naming the node, its vmid and the window.** It is a `qm reset` of the
@@ -1132,7 +1147,7 @@ crash-recovered by its own workload, and a singleton on the node is down until t
 
 ```sh
 cap probe-b-collateral kubectl --context admin@ai get pods -A -o wide --field-selector spec.nodeName="$node" &&
-probe_tier b 600 && sleep 20 &&
+probe_tier b 600 && sleep 20 && ti=$(date -u +%FT%TZ) &&
 cap probe-b-reset python scripts/node-ssh.py "$host" "qm reset $vmid && date -u +%FT%TZ" &&
 probe_after b
 cap probe-b-node kubectl --context admin@ai get node "$node"
@@ -1188,11 +1203,24 @@ sessions() { kubectl --context admin@ai -n trident exec "$tmo" -- sh -c '
   for s in /host/sys/class/iscsi_session/session*; do
     echo "$(basename "$s") $(cat "$s/targetname") $(cat "$s/state") recovery_tmo=$(cat "$s/recovery_tmo")"; done
   cat /host/sys/class/scsi_device/*/device/state | sort | uniq -c'; }
-cap probe-c-sessions-before sessions
+# sessions_ok: prints them; fails unless every session is LOGGED_IN at recovery_tmo=120 and every device running.
+sessions_ok() {
+  local out; out=$(sessions) || return 1; printf '%s\n' "$out"
+  printf '%s\n' "$out" | grep -q '^session' &&
+  ! printf '%s\n' "$out" | grep '^session' | grep -qv ' LOGGED_IN recovery_tmo=120$' &&
+  ! printf '%s\n' "$out" | grep -v '^session' | grep -qvE '^ *[0-9]+ running$'
+}
+# sessions_cut [<target IQN>]: prints them; fails while that target's session (default: any) is LOGGED_IN.
+sessions_cut() {
+  local out; out=$(sessions) || return 1; printf '%s\n' "$out"
+  printf '%s\n' "$out" | grep -q "^session[0-9]* ${1:-}" &&
+  ! printf '%s\n' "$out" | grep "^session[0-9]* ${1:-}" | grep -q ' LOGGED_IN '
+}
 ```
 
-Go only if every session is `LOGGED_IN` with `recovery_tmo=120` and every device
-`running`. The NAS's target and LUN lists map each session's `targetname` to its
+Both forms start only when `sessions_ok` passes, and are judged with
+`sessions_cut` during the cut (with the probe's target IQN for the per-target form).
+The NAS's target and LUN lists map each session's `targetname` to its
 LUNs (`<operator fills: the read-only qcli target and LUN listing, as
 qnap-storage-setup.md §9 reads the LUN list>`); keep that mapping in the evidence.
 
@@ -1203,31 +1231,35 @@ target.
 
 The node-wide form, TCP 3260 only, on the host that routes the node, 60 s (half the
 corrected timeout). The host removes the rule itself even if the session to it
-breaks: a process marked `probe-cut-undo` retries the deletion until `iptables -C`
-reports the rule absent (exit 1). The command refuses to leave the rule in place
-unless that process is running.
+breaks. The removal is armed **before** the rule exists: a detached process marked
+with this cut's own token waits 60 s, then retries the deletion until `iptables -C`
+reports the rule absent (exit 1). The rule is inserted only once that process is
+seen running. If the insertion fails, the process finds no rule and ends.
 
 ```sh
 rule="FORWARD -s $nodeip/32 -d 10.55.0.254/32 -p tcp --dport 3260 -j DROP"
 undo="sleep 60; while :; do iptables -w 5 -D $rule 2>/dev/null; iptables -w 5 -C $rule 2>/dev/null; [ \$? -eq 1 ] && break; sleep 1; done"
 check="iptables -w 5 -C $rule 2>/dev/null; rc=\$?; case \$rc in 0) echo STILL-PRESENT; exit 2;; 1) echo removed;; *) echo CHECK-FAILED rc=\$rc; exit 3;; esac"
-probe_tier c 300 && sleep 20 &&
-cap probe-c-cut python scripts/node-ssh.py "$host" "iptables -w 5 -I $rule || exit 1
-  nohup sh -c ': probe-cut-undo; $undo' </dev/null >/dev/null 2>&1 &
-  sleep 1; pgrep -f '^sh -c : probe-cut-undo' >/dev/null || { iptables -w 5 -D $rule; echo NOT-ARMED; exit 1; }
-  echo armed; date -u +%FT%TZ" &&
-sleep 30 && cap probe-c-sessions-during sessions &&          # the node's sessions are no longer LOGGED_IN
-sleep 60 && cap probe-c-rule python scripts/node-ssh.py "$host" "$check" &&
-probe_after c
-cap probe-c-sessions-after sessions
+tok="probe-cut-undo-$(date -u +%Y%m%dT%H%M%SZ)"
+cap probe-c-sessions-before sessions_ok &&
+probe_tier c 300 && sleep 20 && ti=$(date -u +%FT%TZ) &&
+cap probe-c-cut python scripts/node-ssh.py "$host" "nohup sh -c ': $tok; $undo' </dev/null >/dev/null 2>&1 &
+  sleep 1; pgrep -f '^sh -c : $tok' >/dev/null || { echo NOT-ARMED; exit 1; }
+  iptables -w 5 -I $rule || { echo INSERT-FAILED; exit 1; }
+  echo armed-and-cut; date -u +%FT%TZ" &&
+{ sleep 30; cap probe-c-sessions-during sessions_cut; held=$?             # the rule check runs either way
+  sleep 60; cap probe-c-rule python scripts/node-ssh.py "$host" "$check" && [ "$held" -eq 0 ]; } &&
+probe_after c &&
+cap probe-c-sessions-after sessions_ok
 ```
 
 Also expected: during the cut the node's sessions are not `LOGGED_IN` (the cut
-holds; if they are, it did not, and the tier proves nothing); the writer stalls and
-resumes; PostgreSQL does not restart (`postmaster_started` equal to the previous
+holds; `sessions_cut` fails the chain otherwise, since the tier then proves nothing);
+the writer stalls and resumes; PostgreSQL does not restart (`postmaster_started` equal to the previous
 tier's after-identity, and no recovery lines); afterwards every
-session is `LOGGED_IN` and every device `running`. **Stop** also on `NOT-ARMED`,
-`STILL-PRESENT` or `CHECK-FAILED` (remove the rule at once with `iptables -w 5 -D
+session is `LOGGED_IN` and every device `running`. **Stop** also on `NOT-ARMED` or
+`INSERT-FAILED` (no cut happened; the tier proves nothing), and on `STILL-PRESENT`
+or `CHECK-FAILED` (remove the rule at once with `iptables -w 5 -D
 $rule` on the host and read `$check` again until it says `removed`), or on any
 session or device in another state: escalate to the owner with the list of volumes
 on the node.
@@ -1260,7 +1292,7 @@ ledger probe", no secret (the probe has none):
 #### (iii) One planned restart of the production ledger
 
 The maintenance procedure above, once, with the committed rows compared across it.
-Run it after the drills (checklist step 5) and before the review (checklist step 6),
+Run it after the drills (checklist step 5), in checklist step 6a before 6b's review,
 in the state the drills leave: `ready=f` with B's IDs, the plugin disabled, no Relay
 router connection.
 
@@ -1276,9 +1308,9 @@ ledger_capture() {   # ledger_capture <label>
   kubectl --context admin@ai -n relay-budget-authority get pod relay-budget-postgres-0 -o json \
     | jq -c '{uid: .metadata.uid, node: .spec.nodeName}' > "$ev/prod-pod-$1.json"
 }
-plugins                                                      # worker-budget-authority disabled
-lsql <<<'SELECT ready FROM worker_budget.authority;'         # f
-cap prod-restart-rlog rlog                                   # no budget activity since the withdrawal, at least 20 s ago
+# The maintenance procedure's preconditions, asserted: one authority row, withdrawn; the plugin disabled.
+withdrawn() { lsql <<<"SELECT 'WITHDRAWN' FROM worker_budget.authority HAVING count(*) = 1 AND bool_and(NOT ready);" | grep -q WITHDRAWN; }
+plugin_off() { plugins | jq -e 'select(.id == "worker-budget-authority") | .state == "disabled"' >/dev/null; }
 prod_compare() {    # prod_compare <before> <after>: fails unless everything but the start time is identical
   cmp "$ev/prod-rows-$1.tsv" "$ev/prod-rows-$2.tsv" && echo "rows identical" &&
   cmp "$ev/prod-markers-$1.txt" "$ev/prod-markers-$2.txt" && echo "markers identical" &&
@@ -1287,6 +1319,8 @@ prod_compare() {    # prod_compare <before> <after>: fails unless everything but
   grep -h '^postmaster_started|' "$ev/prod-identity-$1.txt" "$ev/prod-identity-$2.txt" &&
   cat "$ev/prod-pod-$1.json" "$ev/prod-pod-$2.json"
 }
+withdrawn && plugin_off && sleep 20 &&
+cap prod-restart-rlog rlog &&                                # no budget activity since the withdrawal
 ledger_capture before &&
 cap prod-restart-delete kubectl --context admin@ai -n relay-budget-authority delete pod relay-budget-postgres-0 --timeout=5m &&
 { until kubectl --context admin@ai -n relay-budget-authority get pod relay-budget-postgres-0 >/dev/null 2>&1; do sleep 2; done; } &&
@@ -1318,9 +1352,10 @@ as "Durability evidence (iii): production restart".
 R1 makes the first real allocation. After R1 has settled (campaign §3.10: worker
 removed, journal slot settled, run withdrawn) and before R2 is signed, repeat (iii)
 by the same maintenance procedure: `lwrite withdraw`, `plugin false`, Relay
-allocating nothing (no active worker, no next run signed), at least 20 s, drained;
-then `ledger_capture r1-before`, the same Pod restart, `ledger_capture r1-after` and
-`prod_compare r1-before r1-after`. The rows now hold R1's `allocations`, `outbox`
+allocating nothing (no active worker, no next run signed); then the chain of (iii)
+with the labels `r1-before` and `r1-after`: `withdrawn && plugin_off && sleep 20`,
+`rlog`, `ledger_capture r1-before`, the same Pod restart, `ledger_capture r1-after`
+and `prod_compare r1-before r1-after`. The rows now hold R1's `allocations`, `outbox`
 sequences, `receipts`, `scope_runs` and `allocation_scopes`, and must be
 byte-identical across the restart, with the same markers, identity and log
 expectations as (iii). Reopening is separately reviewed. Post it on #1753 as
