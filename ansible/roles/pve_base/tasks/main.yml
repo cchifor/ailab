@@ -94,3 +94,17 @@
   when:
     - pve_pin_kernel | bool
     - pve_pinned_kernel | length > 0
+
+# ---- LVM thin-pool zeroing (pve_thin_pool_zero; see defaults/main.yml for the trade-off) ----
+# `just thinpool` (tags: thinpool) converges only this. `lvs --binary` prints 1/0, not "zero"/"".
+- name: Read the thin pool's zeroing flag
+  ansible.builtin.command: "lvs --noheadings --binary -o zero {{ pve_thin_pool }}"
+  register: pve_thin_pool_zero_state
+  changed_when: false
+  check_mode: false
+  tags: [thinpool]
+
+- name: Set the thin pool's zeroing flag (online; persists in the VG metadata)
+  ansible.builtin.command: "lvchange --zero {{ 'y' if (pve_thin_pool_zero | bool) else 'n' }} {{ pve_thin_pool }}"
+  when: (pve_thin_pool_zero_state.stdout | trim == '1') != (pve_thin_pool_zero | bool)
+  tags: [thinpool]
