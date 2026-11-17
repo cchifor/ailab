@@ -65,20 +65,49 @@ case "\$1 \$2" in
     if [ "\${MOCK_IMAGES:-0}" != 0 ]; then printf 'Images|%sGB\n' "\$MOCK_IMAGES"; fi ;;
   "ps") : ;;          # 'docker ps -q' -> no containers
   # buildx builders (section 2b), from the fixture tree MOCK_BX (case [U]):
-  #   containers/<cid>  the line the script's inspect format renders (name|created|path|volumes)
+  #   containers/<cid>  the line the script's inspect format renders (name|created|path|volumes); running
+  #   images/<cid>      its image as docker ps shows it (default moby/buildkit:buildx-stable-1)
   #   volumes/<name>    the volume's CreatedAt;  refs/<name>  the cid of the container using it
+  #   jobs              other running containers, one id|image|name line each
   #   inflight/<cid>    a build session is open (docker top lists buildctl dial-stdio)
   #   topfail/<cid>     docker top fails
-  # Like a careless daemon, the listings IGNORE the name filter: the script's own name checks must hold.
-  # The volume listing honours dangling=true (no container uses it), and "volume rm" refuses a volume a
-  # container still uses, as docker does. (No backticks in this heredoc: it is unquoted.)
+  #   ctl/<knob>        interleavings and failures; each is described where a [U] case sets it
+  # Like a careless daemon, the name-filtered listings IGNORE the filter: the script's own checks must hold.
+  # dangling=true is honoured, and "volume rm" refuses a volume a container uses, as docker does.
+  # (No backticks in this heredoc: it is unquoted.)
   "ps -aq")
-    [ -n "\${MOCK_BX:-}" ] && ls "\$MOCK_BX/containers" 2>/dev/null
+    [ -n "\${MOCK_BX:-}" ] || exit 0
+    case "\${4:-}" in
+      volume=*)
+        v="\${4#volume=}"; [ -f "\$MOCK_BX/refs/\$v" ] && cat "\$MOCK_BX/refs/\$v"
+        n=\$(( \$(cat "\$MOCK_BX/cnt.\$v" 2>/dev/null || echo 0) + 1 )); echo "\$n" > "\$MOCK_BX/cnt.\$v"
+        # ctl/reattach "<volume> <n>": a container attaches to it right after the n-th users read.
+        if [ -f "\$MOCK_BX/ctl/reattach" ] && [ "\$(cat "\$MOCK_BX/ctl/reattach")" = "\$v \$n" ]; then
+          echo creattach > "\$MOCK_BX/refs/\$v"
+        fi ;;
+      *) ls "\$MOCK_BX/containers" 2>/dev/null ;;
+    esac
+    exit 0 ;;
+  "ps --format")
+    [ -n "\${MOCK_BX:-}" ] || exit 0
+    [ -f "\$MOCK_BX/ctl/psfail" ] && exit 1
+    for f in "\$MOCK_BX"/containers/*; do
+      [ -f "\$f" ] || continue
+      c="\${f##*/}"; nm="\$(cut -d'|' -f1 "\$f")"
+      img=moby/buildkit:buildx-stable-1; [ -f "\$MOCK_BX/images/\$c" ] && img="\$(cat "\$MOCK_BX/images/\$c")"
+      echo "\$c|\$img|\${nm#/}"
+    done
+    cat "\$MOCK_BX/jobs" 2>/dev/null
+    # ctl/jobfrom "<phase>": a docker-executor job container is up once the script reaches that phase.
+    if [ -f "\$MOCK_BX/ctl/jobfrom" ] && [ -f "$WORK/phase.\$(cat "\$MOCK_BX/ctl/jobfrom")" ]; then
+      echo "jjj9|gitea/runner-images:ubuntu-latest|GITEA-ACTIONS-TASK-9_WORKFLOW-ci_JOB-build"
+    fi
     exit 0 ;;
   "inspect -f")
     if [ -n "\${MOCK_BX:-}" ] && [ -f "\$MOCK_BX/containers/\$4" ]; then cat "\$MOCK_BX/containers/\$4"; exit 0; fi
     exit 1 ;;
   "top "*)
+    : > "$WORK/phase.top"
     [ -n "\${MOCK_BX:-}" ] && [ -f "\$MOCK_BX/containers/\$2" ] || exit 1
     [ -f "\$MOCK_BX/topfail/\$2" ] && exit 1
     echo "PID COMMAND"; echo "101 /usr/bin/buildkitd --config /etc/buildkit/buildkitd.toml"
@@ -86,11 +115,23 @@ case "\$1 \$2" in
     exit 0 ;;
   "rm -f")
     : > "$WORK/phase.bxrm"
-    if [ -n "\${MOCK_BX:-}" ] && [ -f "\$MOCK_BX/containers/\$3" ]; then
+    [ -n "\${MOCK_BX:-}" ] || exit 0
+    # ctl/hang "<cid>": the removal takes 3s (the script is SIGTERMed meanwhile, case U15).
+    if [ -f "\$MOCK_BX/ctl/hang" ] && [ "\$(cat "\$MOCK_BX/ctl/hang")" = "\$3" ]; then : > "$WORK/phase.hang"; sleep 3; fi
+    # ctl/restart_at_rm: someone starts the runner during the pass.
+    [ -f "\$MOCK_BX/ctl/restart_at_rm" ] && echo active > "$WORK/runner.state"
+    # ctl/rmfail "<cid> <rc> [removed]": the removal exits rc; with "removed", docker had already done it
+    # (a CLI timeout does not undo an accepted removal).
+    rc=0; rmd=1
+    if [ -f "\$MOCK_BX/ctl/rmfail" ]; then
+      read -r fc frc fwhat < "\$MOCK_BX/ctl/rmfail"
+      if [ "\$fc" = "\$3" ]; then rc="\$frc"; [ "\${fwhat:-}" = removed ] || rmd=0; fi
+    fi
+    if [ "\$rmd" = 1 ] && [ -f "\$MOCK_BX/containers/\$3" ]; then
       rm -f "\$MOCK_BX/containers/\$3"
       for r in "\$MOCK_BX"/refs/*; do [ -f "\$r" ] && [ "\$(cat "\$r")" = "\$3" ] && rm -f "\$r"; done
     fi
-    exit 0 ;;
+    exit "\$rc" ;;
   "volume ls")
     if [ -n "\${MOCK_BX:-}" ]; then
       for f in "\$MOCK_BX"/volumes/*; do [ -f "\$f" ] || continue; v="\${f##*/}"; [ -f "\$MOCK_BX/refs/\$v" ] || echo "\$v"; done
@@ -102,6 +143,8 @@ case "\$1 \$2" in
   "volume rm")
     v="\${!#}"
     [ -n "\${MOCK_BX:-}" ] && [ -f "\$MOCK_BX/volumes/\$v" ] || exit 1
+    # ctl/vrmfail "<volume> <rc>": the removal exits rc (124 = timed out) and the volume stays.
+    if [ -f "\$MOCK_BX/ctl/vrmfail" ]; then read -r fv frc < "\$MOCK_BX/ctl/vrmfail"; [ "\$fv" = "\$v" ] && exit "\$frc"; fi
     [ -f "\$MOCK_BX/refs/\$v" ] && { echo "Error response from daemon: volume is in use" >&2; exit 1; }
     rm -f "\$MOCK_BX/volumes/\$v"; exit 0 ;;
   *) : ;;
@@ -183,6 +226,16 @@ EOF
 cat >"$BIN/pgrep" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
+  # pgrep -u <user>: processes of the runner user (section 2b's drain window). MOCK_BX/ctl/procs: "1" = one
+  # is alive, "from:<phase>" = alive once the script reaches that phase, "rc:<n>" = pgrep fails with n.
+  "-u "*)
+    c="\$(cat "\${MOCK_BX:-/nonexistent}/ctl/procs" 2>/dev/null)"
+    case "\$c" in
+      1) echo 777; exit 0 ;;
+      rc:*) exit "\${c#rc:}" ;;
+      from:*) [ -f "$WORK/phase.\${c#from:}" ] && { echo 777; exit 0; }; exit 1 ;;
+    esac
+    exit 1 ;;
   *-f*)
     # rc 2 models a pgrep ERROR (bad regex, /proc failure) — distinct from rc 1 "no match".
     [ "\${MOCK_PEER_PROBE_RC:-}" = 2 ] && exit 2
@@ -278,6 +331,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
     GITEA_CLEANUP_IDLE_WAIT_SEC="${IDLEWAIT:-2}" GITEA_CLEANUP_IDLE_POLL_SEC=1 \
     GITEA_CLEANUP_CACHE_MAX_BYTES="${CACHECAP:-}" \
+    GITEA_CLEANUP_INFRA_EXCLUDE_RE="${INFRAEX:-}" \
     MOCK_BX="${MOCK_BX:-}" GITEA_CLEANUP_REAP_BUILDERS="${BXON:-}" \
     GITEA_CLEANUP_BUILDER_MAX_AGE_SEC="${BXAGE:-}" GITEA_CLEANUP_BUILDER_KEEP_RE="${BXKEEP:-}" \
     GITEA_CLEANUP_CRITICAL_UNTIL="${CRITUNTIL:-4h}" \
@@ -1315,14 +1369,20 @@ rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; BEACON=1 TEXTDIR="$BEACONDIR" run_
 [ "$(beacon_field buildkit_db_bytes)" = 0 ] && ok "T18: no cache.db -> 0, not a missing line" || bad "T18: no cache.db (got '$(beacon_field buildkit_db_bytes)')"
 rm -f "$BKF"
 
-echo "[U] leaked buildx builders (section 2b): container + state volume, only when no job can be using one"
+echo "[U] leaked buildx builders (section 2b): only inside a drain window this run owns, every condition at once"
 # 2026-11-17: builders that cancelled jobs left behind held 20.1 GB on ci-runner-9 and 20.5 GB on
-# ci-runner-10, and two had run for 14h on ci-runner-5. Nothing reclaimed them: section 2 excludes every
-# builder, and the per-builder prunes list builders as root, which sees none of the jobs'. A builder goes in
-# a confirmed idle gap off the mid-job path, or once past the age bound (12h); never with a build session
-# open in it. Fixtures live under MOCK_BX (see the docker mock); the default bound is the script's own.
-BX="$WORK/bx"; MOCK_BX="$BX"
-bx_reset() { rm -rf "$BX"; mkdir -p "$BX/containers" "$BX/volumes" "$BX/refs" "$BX/inflight" "$BX/topfail"; }
+# ci-runner-10, and two had run for 14h on ci-runner-5. Nothing reclaimed them. Removing one kills its
+# buildkitd, and no observation can rule out a job attaching between a check and the removal (codex review
+# of #1832), so 2b removes only while THIS run holds the runner stopped (a graceful drain), re-checks the
+# window before every removal, and requires every condition at once: age known and past the bound, no
+# session, not kept, exact names. OFF by default; these cases turn it on (BXON=1) with no co-located
+# runner configured (PEER_SERVICES none), except where a case says otherwise.
+BX="$WORK/bx"; MOCK_BX="$BX"; BXON=1; PEER_SERVICES_OVERRIDE=none
+bx_reset() {
+  rm -rf "$BX" "$WORK/heal.state"
+  mkdir -p "$BX/containers" "$BX/images" "$BX/volumes" "$BX/refs" "$BX/inflight" "$BX/topfail" "$BX/ctl"
+  : > "$BX/jobs"
+}
 bx_ts() { date -u -d "@$(( $(date +%s) - $1 ))" +%Y-%m-%dT%H:%M:%S.123456789Z; } # docker's .Created, <s> ago
 bx_volume() { # <name> <age s> [<cid of the container using it>]
   date -u -d "@$(( $(date +%s) - $2 ))" +%Y-%m-%dT%H:%M:%S+00:00 > "$BX/volumes/$1"
@@ -1333,122 +1393,214 @@ bx_builder() { # <cid> <builder name> <age s> [<process path>] [<another volume 
   bx_volume "buildx_buildkit_${2}_state" "$3" "$1"
   [ -z "${5:-}" ] || bx_volume "$5" "$3" "$1"
 }
-bx_gone() { [ ! -e "$BX/containers/$1" ] && calls_has "docker rm -f $1"; }
-bx_vol_gone() { [ ! -e "$BX/volumes/$1" ] && calls_has "docker volume rm $1"; }
-bx_kept() { [ -e "$BX/containers/$1" ] && ! calls_has "docker rm -f $1"; }
-D2=$(( 2 * 86400 ))
+calls_line() { grep -qxF -- "$1" "$CALLS"; } # the whole call: "docker rm -f cold" is not "... cold2"
+bx_gone() { [ ! -e "$BX/containers/$1" ] && calls_line "docker rm -f $1"; }
+bx_vol_gone() { [ ! -e "$BX/volumes/$1" ] && calls_line "docker volume rm $1"; }
+bx_kept() { [ -e "$BX/containers/$1" ] && ! calls_line "docker rm -f $1"; }
+bx_vol_kept() { [ -e "$BX/volumes/$1" ] && ! calls_line "docker volume rm $1"; }
+bx_none() { ! grep -qE '^docker (rm -f|volume rm) ' "$CALLS"; }
+held() { calls_has "systemctl stop gitea-act-runner"; }
+restored() { [ "$(cat "$WORK/runner.state")" = active ] && [ "$(state_val runner_held)" = 0 ]; }
+D2=$(( 2 * 86400 )); H13=46800
+BV() { printf 'buildx_buildkit_%s_state' "$1"; } # the state volume of builder <name>
 
-# U1: idle: young and old leaked builders go (container, then its volume), and an orphaned state volume.
-# The mock's listings ignore the name filter, so the decoys reach the script and its own checks must hold.
+# U0: OFF unless enabled.
+bx_reset; bx_builder cold builder-bbbb0 "$D2"
+BXON= run_case 0 50
+check "U0: the reap is off by default: nothing removed, the runner not stopped" 'bx_none && ! held'
+
+# U1: in a held window, old builders go with their state volumes, and an old orphaned state volume.
+# Young ones stay (every condition, not any). The listings ignore the name filter, so the decoys reach the
+# script: a pinned infra container (excluded as on ci-runner-1), a buildkitd container whose name is not a
+# builder's, a builder-named container that is not buildkitd, a job volume, and a second volume a builder
+# mounts.
 bx_reset
-bx_builder cyoung builder-aaaa0 3600; bx_builder cold builder-bbbb0 "$D2" "" ci_shared_cache
-bx_volume buildx_buildkit_builder-cccc0_state 3600
-printf '/dsh-conductor-image-pin|%s|sleep|\n' "$(bx_ts 777600)" > "$BX/containers/cdsh"
-printf '/ci-buildkitd|%s|/usr/bin/buildkitd|\n' "$(bx_ts "$D2")" > "$BX/containers/cbkd" # buildkitd, not a builder's name
-printf '/buildx_buildkit_fake0|%s|/usr/local/bin/postgres|buildx_buildkit_fake0_state \n' "$(bx_ts "$D2")" > "$BX/containers/cfake"
-bx_volume buildx_buildkit_fake0_state "$D2" cfake
+bx_builder cold builder-bbbb0 "$D2" "" ci_shared_cache; bx_builder cold2 builder-dddd0 "$H13"
+bx_builder cyoung builder-aaaa0 3600
+bx_volume "$(BV builder-cccc0)" "$D2"; bx_volume "$(BV builder-eeee0)" 3600
+printf '/dsh-conductor-image-pin|%s|sleep|\n' "$(bx_ts 777600)" > "$BX/containers/cdsh"; echo 318b8ae52ecf > "$BX/images/cdsh"
+printf '/ci-buildkitd|%s|/usr/bin/buildkitd|\n' "$(bx_ts "$D2")" > "$BX/containers/cbkd"
+printf '/buildx_buildkit_fake0|%s|/usr/local/bin/postgres|%s \n' "$(bx_ts "$D2")" "$(BV fake0)" > "$BX/containers/cfake"
+echo postgres:16 > "$BX/images/cfake"; bx_volume "$(BV fake0)" "$D2" cfake
 bx_volume platform_pgdata "$D2"
-run_beacon 0 50
-check "U1: idle -> a young and an old leaked builder go, each with its state volume" \
-  'bx_gone cyoung && bx_vol_gone buildx_buildkit_builder-aaaa0_state && bx_gone cold && bx_vol_gone buildx_buildkit_builder-bbbb0_state'
-in_order "U1: ...the container before its volume" "docker rm -f cyoung" "docker volume rm buildx_buildkit_builder-aaaa0_state"
-check "U1: an orphaned state volume goes too" 'bx_vol_gone buildx_buildkit_builder-cccc0_state'
-check "U1: a non-builder container and a job's volume are never touched" \
-  'bx_kept cdsh && [ -e "$BX/volumes/platform_pgdata" ] && ! calls_has "volume rm platform_pgdata"'
-check "U1: a buildkitd container whose name is not a builder's is never touched" 'bx_kept cbkd'
-check "U1: a removed builder takes only its own state volume, not another volume it mounted" \
-  '[ -e "$BX/volumes/ci_shared_cache" ] && ! calls_has "volume rm ci_shared_cache"'
-check "U1: a container named like a builder that does not run buildkitd is never touched" \
-  'bx_kept cfake && ! calls_has "volume rm buildx_buildkit_fake0_state"'
-check "U1: the runner is neither stopped nor started" \
-  '! calls_has "systemctl stop" && ! calls_has "systemctl start" && ! calls_has "systemctl restart"'
+bx_volume buildx_buildkit__state "$D2" # an empty builder name: not the shape
+# A builder container re-created recently on an OLD state volume (buildx boots a removed builder against
+# its existing volume): the container's own age keeps it.
+printf '/buildx_buildkit_builder-kkkk0|%s|/usr/bin/buildkitd-entrypoint|%s \n' "$(bx_ts 3600)" "$(BV builder-kkkk0)" > "$BX/containers/cnew"
+bx_volume "$(BV builder-kkkk0)" "$D2" cnew
+INFRAEX='buildkit|buildx| /dsh-conductor-image-pin$' run_beacon 0 50
+check "U1: old builders go, each with its own state volume" \
+  'bx_gone cold && bx_vol_gone "$(BV builder-bbbb0)" && bx_gone cold2 && bx_vol_gone "$(BV builder-dddd0)"'
+in_order "U1: the runner is stopped first and started last" "systemctl stop gitea-act-runner.service" \
+  "docker rm -f cold" "docker volume rm $(BV builder-bbbb0)" "systemctl start --no-block gitea-act-runner.service"
+check "U1: an old orphaned state volume goes" 'bx_vol_gone "$(BV builder-cccc0)"'
+check "U1: a young builder and a young orphaned volume stay (age AND window, not OR)" \
+  'bx_kept cyoung && bx_vol_kept "$(BV builder-aaaa0)" && bx_vol_kept "$(BV builder-eeee0)"'
+check "U1: a young container on an old state volume stays, with its volume" 'bx_kept cnew && bx_vol_kept "$(BV builder-kkkk0)"'
+check "U1: decoys are never touched" \
+  'bx_kept cdsh && bx_kept cbkd && bx_kept cfake && bx_vol_kept "$(BV fake0)" && bx_vol_kept platform_pgdata && bx_vol_kept ci_shared_cache && bx_vol_kept buildx_buildkit__state'
+check "U1: the runner is running again and runner_held is released" restored
 check "U1: beacon builders_reaped=2, builder_volumes_reaped=3" \
   '[ "$(beacon_field builders_reaped)" = 2 ] && [ "$(beacon_field builder_volumes_reaped)" = 3 ]'
 
-# U2: A BUILDER IN USE BY A RUNNING JOB IS NEVER REMOVED. Idle at the busy gate, then a job starts before
-# the builder pass: its builder (10 min old) and a young orphaned volume stay; a 2-day-old one still goes.
-bx_reset; bx_builder cjob builder-job0 600; bx_builder cold builder-bbbb0 "$D2"
-bx_volume buildx_buildkit_builder-cccc0_state 600
+# U2: a job starts before the builder pass (the confirmed-idle read fails): the runner is not held.
+bx_reset; bx_builder cold builder-bbbb0 "$D2"
 MOCK_BUSY_FROM=container run_case 0 50
-check "U2: a job running at the builder pass -> its young builder is kept, container and volume" \
-  'bx_kept cjob && [ -e "$BX/volumes/buildx_buildkit_builder-job0_state" ]'
-check "U2: ...and a young orphaned state volume is kept" \
-  '[ -e "$BX/volumes/buildx_buildkit_builder-cccc0_state" ] && ! calls_has "volume rm buildx_buildkit_builder-cccc0_state"'
-check "U2: ...while a builder past the age bound still goes (the age path)" \
-  'bx_gone cold && bx_vol_gone buildx_buildkit_builder-bbbb0_state'
+check "U2: a job running at the builder pass -> no hold, nothing removed" 'bx_none && ! held'
 unset MOCK_BUSY_FROM
 
-# U3: the mid-job GATE itself (as H9 is for the cache cap): busy at the gate and critical, so the sweep runs
-# with midjob=1; idle from the container prune on, so a re-read would say "go". Only the gate keeps it.
-bx_reset; bx_builder cjob builder-job0 600; bx_builder cold builder-bbbb0 "$D2"
+# U3: the mid-job path (busy+critical, no gap; idle from the container prune on, so a re-read would pass):
+# nothing is removed, however old.
+bx_reset; bx_builder cold builder-bbbb0 "$D2"
 MOCK_BUSY_UNTIL=container run_case 1 95
-check "U3: mid-job path -> a young builder is kept even when the idle re-read would pass" 'bx_kept cjob'
-check "U3: ...and a builder past the age bound still goes" 'bx_gone cold'
+check "U3: the mid-job path never holds or reaps, even an old builder" 'bx_none && ! held && bx_kept cold'
 unset MOCK_BUSY_UNTIL
 
-# U4: a builder a later job reuses by name is old by its creation time. A build session open in it
-# (buildctl dial-stdio) keeps it, idle or not; a process list that cannot be read counts as one.
+# U4: FALSE IDLE during an active job. The child-process probe reads idle throughout, but a job is still
+# running somewhere it cannot see. The runner is held (the drain), and the window check before the
+# removal finds what is left: nothing is removed, and the runner is started again.
+bx_reset; bx_builder cold builder-bbbb0 "$D2"
+echo 'jjj1|gitea/runner-images:ubuntu-latest|GITEA-ACTIONS-TASK-4242_WORKFLOW-ci_JOB-build' > "$BX/jobs"
+run_case 0 50
+check "U4: a docker-executor job container left after the stop -> nothing removed, runner restored" 'held && bx_none && restored'
+bx_reset; bx_builder cold builder-bbbb0 "$D2"; echo 1 > "$BX/ctl/procs"
+run_case 0 50
+check "U4: a runner-user process alive after the stop -> nothing removed, runner restored" 'held && bx_none && restored'
+bx_reset; bx_builder cold builder-bbbb0 "$D2"; echo rc:2 > "$BX/ctl/procs"
+run_case 0 50
+check "U4: the process check failing counts as a live process -> nothing removed" 'bx_none && restored'
+bx_reset; bx_builder cold builder-bbbb0 "$D2"; : > "$BX/ctl/psfail"
+run_case 0 50
+check "U4: a container list that cannot be read counts as a job -> nothing removed, runner restored" 'held && bx_none && restored'
+bx_reset; bx_volume "$(BV builder-cccc0)" "$D2"; echo 1 > "$BX/ctl/procs"
+run_case 0 50
+check "U4: an orphaned volume alone gets the same window check -> kept" 'held && bx_none && restored'
+bx_reset; bx_builder cold builder-bbbb0 "$D2"
+MOCK_STOP_FAIL=1 run_case 0 50
+check "U4: a runner that does not stop -> nothing removed" 'held && bx_none && [ "$(cat "$WORK/runner.state")" = active ]'
+
+# U5: a SESSION STARTS AFTER the process-list read. Its client appears after docker top; the window
+# re-check that comes after top and before the removal sees it.
+bx_reset; bx_builder cold builder-bbbb0 "$D2"; echo from:top > "$BX/ctl/procs"
+run_case 0 50
+check "U5: a client that appears after docker top stops the removal" 'calls_has "docker top cold" && bx_none && restored'
+in_order "U5: ...docker top is read before the window re-check that precedes the removal" "docker top cold" "docker ps --format"
 bx_reset; bx_builder creused ci-builder "$D2"; : > "$BX/inflight/creused"
 bx_builder ctopfail builder-dddd0 "$D2"; : > "$BX/topfail/ctopfail"
 run_case 0 50
-check "U4: a builder with a build session open is never removed, however old" \
-  'bx_kept creused && [ -e "$BX/volumes/buildx_buildkit_ci-builder_state" ]'
-check "U4: ...nor one whose processes cannot be read" 'bx_kept ctopfail'
+check "U5: a session already open, or a process list that cannot be read -> kept" \
+  'bx_kept creused && bx_kept ctopfail && bx_vol_kept "$(BV ci-builder)"'
 
-# U5: the idle read is repeated before EACH builder: a job that starts right after the first removal keeps
-# the second.
-bx_reset; bx_builder cb1 builder-e1 600; bx_builder cb2 builder-e2 600
-MOCK_BUSY_FROM=bxrm run_case 0 50
-check "U5: a job arriving after the first removal keeps the second builder" 'bx_gone cb1 && bx_kept cb2'
-unset MOCK_BUSY_FROM
+# U6: the window is re-checked before EACH removal, the volume's included. A runner-user process appears
+# right after the first container goes: its volume and the second builder stay.
+bx_reset; bx_builder cb1 builder-e1 "$D2"; bx_builder cb2 builder-e2 "$D2"; echo from:bxrm > "$BX/ctl/procs"
+run_case 0 50
+check "U6: activity after the first removal keeps its volume and the second builder" \
+  'bx_gone cb1 && bx_vol_kept "$(BV builder-e1)" && bx_kept cb2 && restored'
+bx_reset; bx_builder cb1 builder-e1 "$D2"; bx_builder cb2 builder-e2 "$D2"; : > "$BX/ctl/restart_at_rm"
+run_case 0 50
+check "U6: someone starting the runner during the pass ends it" 'bx_gone cb1 && bx_kept cb2 && bx_vol_kept "$(BV builder-e1)"'
+bx_reset; bx_builder cb1 builder-e1 "$D2"; echo bxrm > "$BX/ctl/jobfrom"
+run_case 0 50
+check "U6: a job container appearing after the first removal ends the pass" 'bx_gone cb1 && bx_vol_kept "$(BV builder-e1)"'
 
-# U6: A STOPPED (QUARANTINED) RUNNER IS NOT STARTED. It has no job (MainPID 0), so its leaked builder goes;
-# the reap neither starts nor stops it.
-bx_reset; bx_builder cyoung builder-aaaa0 600
-MOCK_RUNNER_STATE=inactive run_case 0 50
-check "U6: a stopped runner's leaked builder goes" 'bx_gone cyoung'
-check "U6: ...and the runner is not started, stopped or restarted" \
-  '! calls_has "systemctl start" && ! calls_has "systemctl restart" && ! calls_has "systemctl stop" && [ "$(cat "$WORK/runner.state")" = inactive ]'
+# U7: PEERS. This script does not stop a co-located runner, so with one configured it never reaps, whether
+# the peer reads stopped or starts a job during the pass.
+bx_reset; bx_builder cold builder-bbbb0 "$D2"
+PEER_SERVICES_OVERRIDE=actions.runner.cchifor-platform.service MOCK_PEER_STATE=inactive run_case 0 50
+check "U7: a co-located runner configured (even stopped) -> no hold, nothing removed" 'bx_none && ! held'
+bx_reset; bx_builder cold builder-bbbb0 "$D2"
+PEER_SERVICES_OVERRIDE=actions.runner.cchifor-platform.service MOCK_PEER_BUSY_FROM=container run_case 0 50
+check "U7: peer activity during the pass -> nothing removed" 'bx_none && ! held'
 
-# U7: BUILDER_KEEP_RE exempts by name; one grep cannot compile stops the whole pass.
-bx_reset; bx_builder ckeep keep-me "$D2"; bx_volume buildx_buildkit_keep-orphan_state "$D2"; bx_builder cother builder-ffff0 "$D2"
-BXKEEP='^keep-' run_case 0 50
-check "U7: BUILDER_KEEP_RE exempts a builder and an orphaned state volume" \
-  'bx_kept ckeep && [ -e "$BX/volumes/buildx_buildkit_keep-orphan_state" ] && ! calls_has "volume rm buildx_buildkit_keep-orphan_state"'
-check "U7: ...and only those" 'bx_gone cother'
-bx_reset; bx_builder cother builder-ffff0 "$D2"; bx_volume buildx_buildkit_builder-cccc0_state "$D2"
-BXKEEP='keep-(' run_case 0 50
-check "U7: an invalid BUILDER_KEEP_RE reaps nothing" '! calls_has "docker rm -f" && ! calls_has "docker volume rm"'
-
-# U8: the switch.
-bx_reset; bx_builder cold builder-bbbb0 "$D2"; bx_volume buildx_buildkit_builder-cccc0_state "$D2"
-BXON=0 run_case 0 50
-check "U8: REAP_BUILDERS=0 turns the reap off" '! calls_has "docker rm -f" && ! calls_has "docker volume rm"'
-
-# U9: the age bound while a job runs (so only the age path can act). Default 12h; a value below the 4h
-# job-timeout floor is clamped up to it; 0 or a non-number turns the age path off.
-bx_reset; bx_builder c2h builder-g2 7200; bx_builder c6h builder-g6 21600; bx_builder c13h builder-g13 46800
-MOCK_BUSY_FROM=container run_case 0 50
-check "U9: default bound: 2h and 6h builders kept, a 13h one goes" 'bx_kept c2h && bx_kept c6h && bx_gone c13h'
-bx_reset; bx_builder c2h builder-g2 7200; bx_builder c5h builder-g5 18000
-MOCK_BUSY_FROM=container BXAGE=60 run_case 0 50
-check "U9: a bound of 60s is clamped up to the 4h floor: a 2h builder is kept, a 5h one goes" 'bx_kept c2h && bx_gone c5h'
-for bxv in 0 junk; do
+# U8: A STOPPED (QUARANTINED) RUNNER IS NOT STARTED. This run did not stop it, so it does not own the window.
+for st in inactive failed; do
   bx_reset; bx_builder cold builder-bbbb0 "$D2"
-  MOCK_BUSY_FROM=container BXAGE="$bxv" run_case 0 50
-  check "U9: BUILDER_MAX_AGE_SEC=$bxv turns the age path off: a 2-day builder is kept while a job runs" 'bx_kept cold'
+  MOCK_RUNNER_STATE="$st" run_case 0 50
+  check "U8: a runner already '$st' -> nothing removed; not started, stopped or restarted" \
+    'bx_none && ! calls_has "systemctl start" && ! calls_has "systemctl stop" && ! calls_has "systemctl restart" && [ "$(cat "$WORK/runner.state")" = "$st" ]'
 done
 
-# U10: a creation time that cannot be read is never "old". Empty is the sharp case: GNU `date -d ''` returns
-# today's midnight, which would make any volume look up to 24h old.
+# U9: a VOLUME REATTACHED between the checks. After the read-only listing: the in-window read sees it and
+# nothing is removed. After the in-window read: docker refuses the removal and the volume stays.
+bx_reset; bx_volume "$(BV builder-cccc0)" "$D2"; echo "$(BV builder-cccc0) 1" > "$BX/ctl/reattach"
+run_case 0 50
+check "U9: reattached after the listing -> no removal is even attempted" 'bx_vol_kept "$(BV builder-cccc0)" && restored'
+bx_reset; bx_volume "$(BV builder-cccc0)" "$D2"; echo "$(BV builder-cccc0) 2" > "$BX/ctl/reattach"
+run_case 0 50
+check "U9: reattached after the last read -> docker refuses, the volume stays, runner restored" \
+  '[ -e "$BX/volumes/$(BV builder-cccc0)" ] && restored'
+bx_reset; bx_builder cold builder-bbbb0 "$D2"; echo "$(BV builder-bbbb0) 1" > "$BX/ctl/reattach"
+run_case 0 50
+check "U9: a builder's volume reattached after its container went -> refused, the volume stays" \
+  'bx_gone cold && [ -e "$BX/volumes/$(BV builder-bbbb0)" ] && restored'
+
+# U10: REMOVAL FAILURES AND TIMEOUTS. A container that fails to go keeps its volume; one whose removal timed
+# out after docker accepted it keeps its volume this tick too; a failed volume removal is not counted.
+bx_reset; bx_builder cold builder-bbbb0 "$D2"; bx_builder cold2 builder-dddd0 "$D2"; echo "cold 1" > "$BX/ctl/rmfail"
+run_beacon 0 50
+check "U10: docker rm failing -> its volume is not touched, the next builder still goes, runner restored" \
+  '[ -e "$BX/containers/cold" ] && bx_vol_kept "$(BV builder-bbbb0)" && bx_gone cold2 && restored && [ "$(beacon_field builders_reaped)" = 1 ]'
+bx_reset; bx_builder cold builder-bbbb0 "$D2"; echo "cold 124 removed" > "$BX/ctl/rmfail"
+run_case 0 50
+check "U10: docker rm timing out (already removed) -> its volume waits for a later tick" \
+  '[ ! -e "$BX/containers/cold" ] && bx_vol_kept "$(BV builder-bbbb0)" && restored'
+bx_reset; bx_volume "$(BV builder-cccc0)" "$D2"; echo "$(BV builder-cccc0) 124" > "$BX/ctl/vrmfail"
+run_beacon 0 50
+check "U10: docker volume rm timing out -> not counted, runner restored" \
+  '[ -e "$BX/volumes/$(BV builder-cccc0)" ] && [ "$(beacon_field builder_volumes_reaped)" = 0 ] && restored'
+
+# U11: UNKNOWN creation times are never old, idle or not: a container's, its volume's, an orphan's. Empty is
+# the sharp case: GNU `date -d ''` is today's midnight.
 bx_reset
-printf '/buildx_buildkit_builder-h0|garbage|/usr/bin/buildkitd-entrypoint|buildx_buildkit_builder-h0_state \n' > "$BX/containers/cbad"
-bx_volume buildx_buildkit_builder-h0_state 0 cbad
-: > "$BX/volumes/buildx_buildkit_builder-i0_state" # docker volume inspect prints nothing
-MOCK_BUSY_FROM=container run_case 0 50
-check "U10: unreadable creation times while a job runs -> builder and orphaned volume kept" \
-  'bx_kept cbad && [ -e "$BX/volumes/buildx_buildkit_builder-i0_state" ]'
-unset MOCK_BUSY_FROM MOCK_BX
+printf '/buildx_buildkit_builder-h0|garbage|/usr/bin/buildkitd-entrypoint|%s \n' "$(BV builder-h0)" > "$BX/containers/cbad"
+bx_volume "$(BV builder-h0)" "$D2" cbad
+bx_builder cnovol builder-j0 "$D2"; : > "$BX/volumes/$(BV builder-j0)"
+: > "$BX/volumes/$(BV builder-i0)"
+run_case 0 50
+check "U11: unknown times while idle -> builder, a builder whose volume time is unknown, and the orphan all stay" \
+  'bx_kept cbad && bx_kept cnovol && bx_vol_kept "$(BV builder-j0)" && bx_vol_kept "$(BV builder-i0)"'
+check "U11: ...and with nothing that qualifies, the runner is not held" '! held'
+
+# U12: the age bound. 0 or a non-number turns the reap OFF, idle or not; below the 4h floor it is clamped.
+for v in 0 junk; do
+  bx_reset; bx_builder cold builder-bbbb0 "$D2"
+  BXAGE="$v" run_case 0 50
+  check "U12: BUILDER_MAX_AGE_SEC=$v while idle -> nothing removed, no hold" 'bx_none && ! held'
+done
+bx_reset; bx_builder c6h builder-g6 21600; bx_builder c13h builder-g13 "$H13"
+run_case 0 50
+check "U12: default 12h: a 6h builder stays, a 13h one goes" 'bx_kept c6h && bx_gone c13h'
+bx_reset; bx_builder c2h builder-g2 7200; bx_builder c5h builder-g5 18000
+BXAGE=60 run_case 0 50
+check "U12: 60s is clamped up to the 4h floor: a 2h builder stays, a 5h one goes" 'bx_kept c2h && bx_gone c5h'
+
+# U13: BUILDER_KEEP_RE exempts by name; a regex grep cannot compile reaps nothing (and holds nothing).
+bx_reset; bx_builder ckeep keep-me "$D2"; bx_volume "$(BV keep-orphan)" "$D2"; bx_builder cother builder-ffff0 "$D2"
+printf '/buildx_buildkit_keep-novol|%s|/usr/bin/buildkitd-entrypoint|\n' "$(bx_ts "$D2")" > "$BX/containers/ckeep2" # no state volume
+BXKEEP='^keep-' run_case 0 50
+check "U13: BUILDER_KEEP_RE exempts a builder, one with no state volume, and an orphaned state volume, and only those" \
+  'bx_kept ckeep && bx_kept ckeep2 && bx_vol_kept "$(BV keep-orphan)" && bx_gone cother'
+bx_reset; bx_builder cother builder-ffff0 "$D2"
+BXKEEP='keep-(' run_case 0 50
+check "U13: an invalid BUILDER_KEEP_RE -> nothing removed, no hold" 'bx_none && ! held'
+
+# U14: one drain per run: when the builder reap held the runner, the Cargo target sweep waits a tick.
+mk_targets; bx_reset; bx_builder cold builder-bbbb0 "$D2"
+TROOTS="$TR" TMINFREE=1 run_case 0 85
+check "U14: builder reap and target sweep due together -> one stop, the builder goes, the targets wait" \
+  '[ "$(grep -c "systemctl stop gitea-act-runner" "$CALLS")" = 1 ] && bx_gone cold && [ -e "$TR/repo-ci/pull_request/target/debug/deps/libold-1.rlib" ]'
+rm -rf "$TR"
+
+# U15: SIGTERM mid-pass (the unit's TimeoutStartSec): the trap queues the start, and runner_held makes the
+# next tick release it.
+bx_reset; bx_builder cold builder-bbbb0 "$D2"; echo cold > "$BX/ctl/hang"
+TERM_AT_HANG=1 run_case 0 50
+check "U15: SIGTERM during a removal still queues the runner's start; runner_held stays set" \
+  'calls_has "systemctl start --no-block gitea-act-runner.service" && [ "$(state_val runner_held)" = 1 ]'
+BXON=0 KEEP_RUNNER_STATE=1 run_case 0 50
+check "U15: the next tick releases runner_held" '[ "$(state_val runner_held)" = 0 ]'
+unset MOCK_BX BXON PEER_SERVICES_OVERRIDE
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi

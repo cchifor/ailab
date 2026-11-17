@@ -179,25 +179,58 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   whole build cache. The action removes both in its post step, so a cancelled or killed job leaves them
   behind. Nothing reclaimed them: on 2026-11-17 they held 20.1 GB on ci-runner-9, 20.5 GB on ci-runner-10
   and 5.7 GB on ci-runner-6, and ci-runner-5 had two running for 14h.
-  - **What goes.** A builder container with its state volume, and any `buildx_buildkit_*_state` volume
-    that no container uses. Only those exact name shapes, and only a container whose process is buildkitd.
-  - **When.** Only when no job can be using it:
-    - **idle:** off the mid-job path, and a CONFIRMED idle gap re-read right before each removal. A stopped
-      runner has no job, so its builders go too; the cleanup never starts or stops the runner for this.
-    - **age:** created at least `gitea_runner_cleanup_builder_max_age_sec` ago (12h; the job timeout is 3h
-      plus a 10min drain). This works while a job runs.
-  - **Never** a builder with a build session open in it (`buildctl dial-stdio` in `docker top`; an
-    unreadable `docker top` counts as open), and never one named by `gitea_runner_cleanup_builder_keep_re`
-    (`none` by default; for a builder a workflow keeps on purpose).
-  - **Residual risk.** A job between two steps can read idle for the confirm window. If its builder goes
-    then, the next buildx call boots a new one: that build is cold, not failed.
+  - **Off by default** (`gitea_runner_cleanup_reap_builders: false`). It is enabled per host in host_vars;
+    the canary is ci-runner-10 (`ansible/host_vars/ci-runner-10.yml`).
+  - **What goes.** A builder container with its own state volume, and any `buildx_buildkit_*_state`
+    volume that no container uses. Only those exact name shapes, and only a container whose process is
+    buildkitd.
+  - **When: only inside a drain window that run owns.** Removing a builder kills its buildkitd, and no check
+    can rule out a job attaching between the check and the removal. So the sweep:
+    1. finds candidates read-only, and holds the runner only when there is one;
+    2. needs no co-located runner configured (`gitea_runner_cleanup_peer_services` `none`; the script does
+       not stop one), a confirmed idle gap, and the runner `active`. A runner that is already stopped
+       (quarantined, crashed) is left alone and never started;
+    3. persists `runner_held`, stops `gitea-act-runner` gracefully (the job in flight finishes, no new
+       job is admitted, and leftovers in the unit's cgroup are killed), and checks that it stopped;
+    4. before EVERY removal, re-checks that the runner is still stopped, no container other than builders
+       and `gitea_runner_cleanup_infra_exclude_re` infra is running, and no process of the runner user is
+       alive. Any failure ends the pass;
+    5. starts the runner again. If the run dies first, `runner_held` makes every later tick (and the
+       unit's `ExecStopPost`) start it.
+    At most one such hold per run: the Cargo target sweep waits a tick if this one held the runner.
+  - **Every condition, for every removal.** Created at least `gitea_runner_cleanup_builder_max_age_sec`
+    ago (12h; the job timeout is 3h plus a 10min drain), with a creation time that parses: the
+    container's and its volume's. A builder whose volume fails a check keeps its container too. No build
+    session open in it (`buildctl dial-stdio` in `docker top`; an unreadable `docker top` counts as open).
+    Not named by `gitea_runner_cleanup_builder_keep_re` (`none` by default). A volume: no container uses it,
+    read right before its removal. `0` for the age turns the reap off.
+  - **What stays open.** A process that is not the runner user's (an operator's docker CLI) can open a
+    session after the last check. No job can: none runs in the window.
   - **Read it:** `journalctl -t gitea-runner-cleanup | grep -E 'builder|buildx'`, and the beacon fields
     `gitea_runner_cleanup_builders_reaped` / `_builder_volumes_reaped`. List leftovers with
     `sudo docker ps -a --filter name=buildx_buildkit_` and `sudo docker volume ls --filter name=buildx_buildkit_`.
   - **NB** `sudo docker buildx ls` shows only root's builders. The jobs' builders are registered under
     `/home/runner/.docker/buildx` (`sudo -u runner docker buildx ls`), so the cleanup's per-builder
     `buildx prune` never reaches them.
-  - **Off switch:** `gitea_runner_cleanup_reap_builders: false` in host_vars.
+  - **Promotion.**
+    1. **Canary, ci-runner-10, for 24-48h.** Deploy the role to that host only. `just gitea-runners`
+       takes no limit, so run its command with one: from `ansible/`, `ANSIBLE_CONFIG="$(pwd)/ansible.cfg"
+       SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey ansible-playbook gitea-runners.yml -l
+       ci-runner-10`. Or use the hand install below. Then check:
+       - the journal shows `runner held, reaping` and `reap leaked buildx builder` lines;
+       - `CIRunnerBuildkitHealRunnerHeld` never fires;
+       - no job on the host went red with a buildx connection error;
+       - `gitea_runner_cleanup_builders_reaped` and `_builder_volumes_reaped` match what disappeared.
+    2. **On-prem.** Set the variable in `group_vars/gitea_runners.yml` (on-prem only) and deploy the
+       on-prem runners.
+    3. **Cloud.** Set it in `group_vars/cloud_gitea_runners.yml`, then deploy with `just cloud-runners`,
+       one host first (`-l cloud-ci-N`).
+    4. Once the whole fleet runs it, the default can turn on and the overrides go.
+  - **Rollback.** Set `gitea_runner_cleanup_reap_builders: false` for the host or group and deploy, or on
+    the host set `GITEA_CLEANUP_REAP_BUILDERS=0` in `/etc/gitea-runner-cleanup.env`. The env file is read
+    at the start of each run, so a run already under way finishes its pass. If a run left the runner
+    stopped, the next tick starts it (`runner_held`); by hand: `sudo systemctl start gitea-act-runner`.
+    Nothing a reap removed comes back: the next build on that builder name is cold.
 - **Cargo target sweep** (section 6 of the same script, 2026-11-08). workbricks CI keeps
   `CARGO_TARGET_DIR` in the runner's home (`~/.cache/workbricks-ci/<event>/target` and `target-verify`) and
   nothing pruned it. By 2026-11-08 that was 61-84 GB on every runner, over half of it unread for 3 days,

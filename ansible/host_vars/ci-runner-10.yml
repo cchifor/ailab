@@ -1,0 +1,6 @@
+---
+# CANARY for the leaked-buildx-builder reap (section 2b of gitea-runner-cleanup.sh, 2026-11-17). The role
+# default is off; this host runs it first because it held 20.5 GB of orphaned builder volumes. Promotion
+# (24-48h here, then the on-prem runners, then the cloud runners) and rollback: docs/runbooks/ci-runners.md,
+# "Leaked buildx builders".
+gitea_runner_cleanup_reap_builders: true

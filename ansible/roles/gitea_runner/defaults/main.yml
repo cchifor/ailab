@@ -346,11 +346,17 @@ gitea_runner_cleanup_infra_exclude_re: "buildkit|buildx"
 # buildx_buildkit_<name>_state holding its build cache; a cancelled or killed job leaves both, and nothing
 # else reclaimed them (20.1 GB on ci-runner-9, 20.5 GB on ci-runner-10, two builders running 14h on
 # ci-runner-5). The sweep removes a builder (container + state volume) and any state volume no container
-# uses, only when no job can be using it: in a confirmed idle gap off the mid-job path, or once older than
-# *_builder_max_age_sec; never with a build session open in it. Never starts or stops the runner.
-gitea_runner_cleanup_reap_builders: true
-# The age path: seconds. MUST exceed gitea_runner_job_timeout (3h) + gitea_runner_shutdown_timeout_min
-# (10min); the script clamps it up to *_min_until_sec. 0 turns the age path off (the idle path still runs).
+# uses, only inside a drain window it owns: in a confirmed idle gap it stops the runner gracefully (the
+# job in flight finishes, no new one is admitted), checks it stopped, and before EACH removal re-checks
+# that the runner is still stopped and no job container or runner-user process is left; then it starts
+# the runner again. A runner that was already stopped (quarantined) is never reaped or started. Not with
+# a co-located runner (*_peer_services), and never a builder with a build session open in it.
+# OFF by default: a fleet-wide default is a fleet rollout. Enable per host in host_vars (canary:
+# ci-runner-10), then promote as docs/runbooks/ci-runners.md describes.
+gitea_runner_cleanup_reap_builders: false
+# Only builders (and volumes) created at least this many seconds ago, AND only in the window above. MUST
+# exceed gitea_runner_job_timeout (3h) + gitea_runner_shutdown_timeout_min (10min); the script clamps it up
+# to *_min_until_sec. 0 turns the whole reap off.
 gitea_runner_cleanup_builder_max_age_sec: 43200
 # Builder names (the <name> in buildx_buildkit_<name>) never reaped, as an extended regex, for a builder a
 # workflow deliberately keeps between jobs. "none" = no exemption (an empty string is NOT that: the script

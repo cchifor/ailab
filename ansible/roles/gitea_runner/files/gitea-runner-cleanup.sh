@@ -15,10 +15,10 @@
 #   * containers: only `container prune` (stopped) + reap RUNNING ones OLDER than a job's max wall-clock
 #     (REAP_AGE, default 4h > the 3h job timeout), EXCLUDING every buildx/buildkit builder. A live job's
 #     containers are younger than its timeout, so they are never touched.
-#   * buildx builders (buildx_buildkit_<name> containers and their <name>_state volumes): section 2b, under
-#     its own proof that no job is using one. Off the mid-job path, a builder goes in a CONFIRMED idle gap;
-#     on any path, once it is older than BUILDER_MAX_AGE_SEC (12h, against a 3h job timeout). Never one with
-#     a build session open in it, and never one named by BUILDER_KEEP_RE.
+#   * buildx builders (buildx_buildkit_<name> containers and their <name>_state volumes): section 2b, OFF
+#     by default. Only inside a drain window this run owns: the runner stopped by THIS run (verified), no
+#     co-located runner configured, no job container or runner-user process left, re-checked before every
+#     removal; and only builders older than BUILDER_MAX_AGE_SEC (12h) with no build session open.
 #   * images / build-cache / networks: pruned only with a retention WINDOW (`--filter until=`), so
 #     in-use and recently-used entries are always kept (a fresh build reuses recent cache/images).
 #     NB the window bounds WHAT IS DELETED — it does NOT make a prune safe to run alongside a job.
@@ -80,12 +80,15 @@ REAP_AGE_SEC="${GITEA_CLEANUP_REAP_AGE_SEC:-14400}"     # remove RUNNING contain
 # timeout"); the prune windows simply never had it applied.
 MIN_UNTIL_SEC="${GITEA_CLEANUP_MIN_UNTIL_SEC:-14400}"   # 4h > 3h job timeout
 INFRA_EXCLUDE_RE="${GITEA_CLEANUP_INFRA_EXCLUDE_RE:-buildkit|buildx}" # section 2 never reaps a builder (2b does)
-# Leaked buildx builders (section 2b). 1 enables the reap.
-REAP_BUILDERS="${GITEA_CLEANUP_REAP_BUILDERS:-1}"
-# A builder container, or a state volume no container uses, at least this many seconds old is reaped even
-# while a job runs. It must exceed the longest a job can hold one: the 3h job timeout plus the 10min drain.
-# Clamped up to MIN_UNTIL_SEC; 0 or a non-number turns this age path off (the idle path still runs).
+# Leaked buildx builders (section 2b). 1 enables the reap; OFF unless a host enables it (canary first).
+REAP_BUILDERS="${GITEA_CLEANUP_REAP_BUILDERS:-0}"
+# Only a builder container AND its state volume, or a state volume no container uses, created at least this
+# many seconds ago is a candidate (and only inside the drain window, see 2b). Well past the longest a job can
+# hold one: the 3h job timeout plus the 10min drain. Clamped up to MIN_UNTIL_SEC. 0 or a non-number turns
+# the whole reap off.
 BUILDER_MAX_AGE_SEC="${GITEA_CLEANUP_BUILDER_MAX_AGE_SEC:-43200}"
+# The user act_runner and its jobs run as. Inside 2b's drain window no process of it may be alive.
+RUNNER_USER="${GITEA_RUNNER_USER:-runner}"
 # Builder names (the <name> in buildx_buildkit_<name>) that are never reaped, an extended regex. The literal
 # `none` means no exemption: an EMPTY value cannot mean that, because `${VAR:-default}` reads empty as unset.
 BUILDER_KEEP_RE="${GITEA_CLEANUP_BUILDER_KEEP_RE:-none}"
@@ -856,24 +859,35 @@ timeout 120 docker container prune -f >/dev/null 2>&1 || true
 #     /home/runner/.docker). Measured 2026-11-17: 20.1 GB of such volumes on ci-runner-9, 20.5 GB on
 #     ci-runner-10, two builders running for 14h on ci-runner-5. That pushes runners into the full wipes in
 #     3b/3c, which re-pull and rebuild everything (the NVMe write budget, 2026-11-17).
-#     A builder is removed with its state volume only when no job can be using it:
-#       * idle: off the mid-job path, and the busy signal re-read as a CONFIRMED gap immediately before this
-#         builder's removal. A stopped runner (MainPID 0) reads idle, and is never started here; or
-#       * age: created at least BUILDER_MAX_AGE_SEC ago (12h), far past the 3h job timeout plus the 10min
-#         drain, so the job that made it is over. A builder a LATER job reuses by name is still protected by
-#         the next check.
-#     And never with a build session open in it: buildx drives a docker-container builder through
-#     `buildctl dial-stdio` exec'd inside it for the whole of a build, so such a process (or a `docker top`
-#     that fails) means "in use", whatever the proofs above say.
-#     The residual case, stated plainly: a job between two steps can read idle for the confirm window (the
-#     same false idle 3b documents). If its builder goes then, the job's next buildx call finds no container
-#     and buildx boots a new one: that build is cold, not failed. A build in flight is never hit.
-#     State volumes no container uses (the builder container was pruned while stopped, or removed with
-#     --keep-state) go under the same idle-or-age rule. `docker volume rm` without -f refuses a volume any
-#     container still uses, so a builder created between the listing and the removal keeps its volume.
-#     Only names of exactly these two shapes are touched; BUILDER_KEEP_RE exempts a builder that is meant to
-#     persist.
-bx_reaped=0; bx_vols=0
+#
+#     OFF by default (REAP_BUILDERS); a canary host enables it. Removing a builder kills its buildkitd, so
+#     no observation can make it safe while a job could attach: a build can open a session between any
+#     check and the removal, and the child-process idle probe cannot see a docker-executor job or a
+#     detached compose stack. So every removal happens inside a DRAIN WINDOW this run owns, the same one
+#     sections 0 and 6 use:
+#       * no co-located runner may be configured (PEER_SERVICES): this script does not stop one, so it
+#         cannot exclude its jobs;
+#       * a confirmed idle gap, then runner_held persisted, then a graceful `systemctl stop` of OUR runner
+#         (KillMode=mixed + shutdown_timeout: an in-flight job finishes, no new job is admitted, and what is
+#         left in the unit's cgroup is killed), seen stopped. Only a runner THIS run stopped: one that is
+#         already stopped (quarantined, crashed) is left alone and never started;
+#       * immediately before EVERY removal: the runner still stopped, no running container other than
+#         builders and INFRA_EXCLUDE_RE infra, and no process of RUNNER_USER alive. Any failure ends the pass;
+#       * then the runner is started again (heal_release_runner), and runner_held makes every later tick and
+#         ExecStopPost recover it if this run dies first.
+#     And every one of these holds for each thing removed (all of them, never one OR another):
+#       * the exact name shapes, and for a container, a buildkitd process;
+#       * not named by BUILDER_KEEP_RE;
+#       * a creation time that parses and is at least BUILDER_MAX_AGE_SEC old: the container's, and its
+#         state volume's too (an unknown time is never "old");
+#       * a container: no build session open in it (`buildctl dial-stdio` in `docker top`; a `docker top`
+#         that fails counts as one), read before the window re-check that precedes its removal;
+#       * a volume: no container uses it, read right before its removal; and `docker volume rm` without -f
+#         refuses one that a container attached since.
+#     A builder whose state volume fails a check keeps its container too: the volume is what holds the bytes.
+#     What stays open: a process that is not the runner user's (an operator's docker CLI, say) can open a
+#     session after the last check. No job can, because no job runs in the window.
+bx_reaped=0; bx_vols=0; held_this_run=0
 # Seconds since a docker timestamp; non-zero when it is empty, does not parse, or lies in the future. Empty
 # must be refused here: GNU `date -d ''` succeeds with today's midnight, an age the timestamp never had.
 docker_age() {
@@ -883,12 +897,13 @@ docker_age() {
   a=$(( $(date +%s) - t )); [ "$a" -ge 0 ] || return 1
   printf '%s' "$a"
 }
-# Why a builder created <age> seconds ago (empty = unknown) may go: prints "age" or "idle", or returns 1.
-# The idle read comes LAST, so it is the freshest thing before the removal it authorises.
-builder_proof() {
-  if [ "$bx_age_max" -gt 0 ] && is_num "${1:-}" && [ "$1" -ge "$bx_age_max" ]; then printf 'age'; return 0; fi
-  if [ "$midjob" -eq 0 ] && idle_confirmed; then printf 'idle'; return 0; fi
-  return 1
+# 0 = the builder <name> is exempt by BUILDER_KEEP_RE (or the regex fails to run), 1 = not exempt.
+builder_kept() {
+  local rc=0
+  [ -n "$bx_keep_re" ] || return 1
+  grep -qE -- "$bx_keep_re" <<< "$1" 2>/dev/null || rc=$?
+  [ "$rc" -eq 1 ] && return 1
+  return 0
 }
 # 0 = a build session is open in the builder <cid>, or its process list cannot be read; 1 = none.
 builder_in_session() {
@@ -897,67 +912,168 @@ builder_in_session() {
   grep -q 'dial-stdio' <<< "$top" && return 0
   return 1
 }
-# 0 = the builder <name> is exempt by BUILDER_KEEP_RE (or the regex is broken), 1 = not exempt.
-builder_kept() {
-  [ -n "$bx_keep_re" ] || return 1
-  grep -qE -- "$bx_keep_re" <<< "$1"; [ $? -eq 1 ] && return 1
+# 0 = a running container other than a builder or INFRA_EXCLUDE_RE infra is up, or the list cannot be read.
+job_containers_up() {
+  local out id img nm rc
+  out="$(timeout 30 docker ps --format '{{.ID}}|{{.Image}}|{{.Names}}' 2>/dev/null)" || return 0
+  while IFS='|' read -r id img nm; do
+    [ -n "$id" ] || continue
+    case "$nm" in buildx_buildkit_*) continue ;; esac
+    rc=0; grep -qiE -- "$INFRA_EXCLUDE_RE" <<< "$img /$nm" 2>/dev/null || rc=$?
+    [ "$rc" -eq 0 ] && continue
+    log "builders: container $nm ($img) is running"
+    return 0
+  done <<< "$out"
+  return 1
+}
+# 0 = a process of RUNNER_USER is alive, or pgrep failed; 1 = none.
+runner_procs_up() {
+  local rc=0
+  pgrep -u "$RUNNER_USER" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] && return 1
+  return 0
+}
+# The drain window still holds. 0 = yes.
+bx_window_ok() {
+  local st
+  st="$(systemctl is-active "$SERVICE" 2>/dev/null)"
+  case "$st" in
+    inactive | failed) : ;;
+    *) log "builders: $SERVICE is '${st:-unreadable}' -> the drain window is gone"; return 1 ;;
+  esac
+  if job_containers_up; then log "builders: a job container is up -> nothing more removed"; return 1; fi
+  if runner_procs_up; then log "builders: a $RUNNER_USER process is alive -> nothing more removed"; return 1; fi
+  return 0
+}
+# 0 = no container (running or not) uses volume <v>; 1 = one does, or the answer cannot be read.
+vol_unused() {
+  local users
+  users="$(timeout 30 docker ps -aq --filter "volume=$1" 2>/dev/null)" || return 1
+  [ -z "$users" ]
+}
+# 0 = the state volume <v> of builder <name> may go: name, keep, a known creation time past the bound.
+bx_volume_ok() {
+  local v="$1" n="$2" a
+  [ "$v" = "buildx_buildkit_${n}_state" ] || return 1
+  builder_kept "$n" && return 1
+  a="$(docker_age "$(timeout 30 docker volume inspect -f '{{.CreatedAt}}' "$v" 2>/dev/null)")" || {
+    log "builders: $v has no readable creation time -> kept"; return 1; }
+  [ "$a" -ge "$bx_age_max" ] || return 1
+  return 0
+}
+# 0 = the builder container <cid> and its state volume may go. Sets bx_node and bx_vol ("" when it
+# mounts no state volume of its own name).
+bx_container_ok() {
+  local meta bname bcreated bpath bmounts a v
+  bx_node=""; bx_vol=""
+  meta="$(timeout 30 docker inspect -f '{{.Name}}|{{.Created}}|{{.Path}}|{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$1" 2>/dev/null)" || return 1
+  IFS='|' read -r bname bcreated bpath bmounts <<< "$meta"
+  # The name filter is a substring match; this is the exact shape, and the process must be buildkitd.
+  grep -qE '^/buildx_buildkit_[A-Za-z0-9][A-Za-z0-9_.-]*$' <<< "$bname" || return 1
+  case "$bpath" in *buildkitd*) ;; *) log "builders: $bname does not run buildkitd ('$bpath') -> not touched"; return 1 ;; esac
+  bx_node="${bname#/buildx_buildkit_}"
+  builder_kept "$bx_node" && return 1
+  a="$(docker_age "$bcreated")" || { log "builders: $bx_node has no readable creation time -> kept"; return 1; }
+  [ "$a" -ge "$bx_age_max" ] || return 1
+  for v in $bmounts; do
+    [ "$v" = "buildx_buildkit_${bx_node}_state" ] || continue
+    bx_volume_ok "$v" "$bx_node" || { log "builders: $bx_node's state volume does not qualify -> kept whole"; return 1; }
+    bx_vol="$v"
+  done
   return 0
 }
 if [ "$REAP_BUILDERS" = 1 ]; then
+  bx_ok=1
   bx_age_max="$BUILDER_MAX_AGE_SEC"
-  if ! is_num "$bx_age_max"; then
-    log "builders: BUILDER_MAX_AGE_SEC='$BUILDER_MAX_AGE_SEC' is not a number -> the age path is off"; bx_age_max=0
-  elif [ "$bx_age_max" -gt 0 ]; then
+  if ! is_num "$bx_age_max" || [ "$bx_age_max" -le 0 ]; then
+    log "builders: BUILDER_MAX_AGE_SEC='$BUILDER_MAX_AGE_SEC' -> the reap is off"; bx_ok=0
+  else
     bx_floor="$MIN_UNTIL_SEC"; { is_num "$bx_floor" && [ "$bx_floor" -gt 0 ]; } || bx_floor=14400
     if [ "$bx_age_max" -lt "$bx_floor" ]; then
       log "builders: BUILDER_MAX_AGE_SEC ${bx_age_max}s is below the ${bx_floor}s job-timeout floor -> clamped"; bx_age_max="$bx_floor"
     fi
   fi
   bx_keep_re="$BUILDER_KEEP_RE"; [ "$bx_keep_re" = none ] && bx_keep_re=""
-  # A keep regex grep cannot compile would exempt nothing (grep -q fails the same way on no match), so a
-  # broken one stops the whole pass: removing less is the safe failure.
-  bx_ok=1
-  if [ -n "$bx_keep_re" ]; then
-    grep -qE -- "$bx_keep_re" < /dev/null; [ $? -le 1 ] || { log "builders: BUILDER_KEEP_RE '$bx_keep_re' is not a valid regex -> no builder reaped"; bx_ok=0; }
+  # A keep regex grep cannot compile must stop the pass (removing less is the safe failure). Status
+  # captured with `|| rc=$?`, so this stays correct under errexit too.
+  if [ "$bx_ok" -eq 1 ] && [ -n "$bx_keep_re" ]; then
+    bx_rc=0; grep -qE -- "$bx_keep_re" < /dev/null 2>/dev/null || bx_rc=$?
+    [ "$bx_rc" -le 1 ] || { log "builders: BUILDER_KEEP_RE '$bx_keep_re' is not a valid regex -> no builder reaped"; bx_ok=0; }
   fi
+  bx_cands=(); bx_vcands=()
   if [ "$bx_ok" -eq 1 ]; then
+    # Read-only first: the runner is held only when there is something to remove.
     for cid in $(timeout 60 docker ps -aq --filter name=buildx_buildkit_ 2>/dev/null || true); do
-      meta="$(timeout 30 docker inspect -f '{{.Name}}|{{.Created}}|{{.Path}}|{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$cid" 2>/dev/null)" || continue
-      IFS='|' read -r bname bcreated bpath bmounts <<< "$meta"
-      # The name filter above is a substring match; this is the exact shape, and the process must be buildkitd.
-      grep -qE '^/buildx_buildkit_[A-Za-z0-9][A-Za-z0-9_.-]*$' <<< "$bname" || continue
-      case "$bpath" in *buildkitd*) ;; *) log "builders: $bname does not run buildkitd ('$bpath') -> not touched"; continue ;; esac
-      bnode="${bname#/buildx_buildkit_}"
-      builder_kept "$bnode" && continue
-      bage="$(docker_age "$bcreated")" || bage=""
-      if ! proof="$(builder_proof "$bage")"; then
-        log "builders: $bnode (created ${bage:-?}s ago) kept: no confirmed job gap, and not past the ${bx_age_max}s age bound (0 = off)"
-        continue
-      fi
-      if builder_in_session "$cid"; then
-        log "builders: $bnode kept: a build session is open in it (or its processes cannot be read)"
-        continue
-      fi
-      log "reap leaked buildx builder $bnode (${proof}, created ${bage:-?}s ago): container + state volume"
-      timeout 120 docker rm -f "$cid" >/dev/null 2>&1 || { log "builders: removing $bnode's container FAILED"; continue; }
-      bx_reaped=$(( bx_reaped + 1 ))
-      for v in $bmounts; do
-        [ "$v" = "buildx_buildkit_${bnode}_state" ] || continue
-        timeout 300 docker volume rm "$v" >/dev/null 2>&1 && bx_vols=$(( bx_vols + 1 ))
-      done
+      bx_container_ok "$cid" && bx_cands+=("$cid")
     done
     for v in $(timeout 60 docker volume ls -q --filter dangling=true --filter name=buildx_buildkit_ 2>/dev/null || true); do
       grep -qE '^buildx_buildkit_[A-Za-z0-9][A-Za-z0-9_.-]*_state$' <<< "$v" || continue
-      bnode="${v#buildx_buildkit_}"; bnode="${bnode%_state}"
-      builder_kept "$bnode" && continue
-      vage="$(docker_age "$(timeout 30 docker volume inspect -f '{{.CreatedAt}}' "$v" 2>/dev/null)")" || vage=""
-      if ! proof="$(builder_proof "$vage")"; then
-        log "builders: orphaned state volume $v (created ${vage:-?}s ago) kept: no confirmed job gap, and not past the ${bx_age_max}s age bound (0 = off)"
-        continue
-      fi
-      log "remove orphaned buildx state volume $v (${proof}, created ${vage:-?}s ago)"
-      timeout 300 docker volume rm "$v" >/dev/null 2>&1 && bx_vols=$(( bx_vols + 1 ))
+      n="${v#buildx_buildkit_}"; n="${n%_state}"
+      bx_volume_ok "$v" "$n" && vol_unused "$v" && bx_vcands+=("$v")
     done
+  fi
+  if [ $(( ${#bx_cands[@]} + ${#bx_vcands[@]} )) -eq 0 ]; then
+    :
+  elif [ -n "$PEER_SERVICES" ]; then
+    log "builders: ${#bx_cands[@]} builder(s), ${#bx_vcands[@]} orphaned volume(s) to reap, but a co-located runner ($PEER_SERVICES) shares this daemon and this script does not hold it -> not reaped"
+  elif [ "$midjob" -eq 1 ]; then
+    log "builders: the mid-job path -> not reaped this tick"
+  elif [ "$(state_get runner_held)" = 1 ]; then
+    log "builders: an earlier runner recovery is still pending -> not this tick"
+  elif ! idle_confirmed; then
+    log "builders: a job is running -> not holding the runner for the reap; next tick"
+  elif bx_st="$(systemctl is-active "$SERVICE" 2>/dev/null)"; [ "$bx_st" != active ]; then
+    # Stopped by someone else (a quarantine, a crash): this run did not stop it, so it does not own the
+    # window, and it never starts it.
+    log "builders: $SERVICE is '${bx_st:-unreadable}', not stopped by this run -> not reaped, and not started"
+  elif ! state_set runner_held 1; then
+    log "builders: cannot persist runner_held to $HEAL_STATE -> not holding the runner"
+  else
+    heal_owned=1; held_this_run=1
+    trap heal_start_runner EXIT
+    trap 'exit 143' TERM INT
+    # The same drain as the heal's: a job that slipped in after the idle read finishes first.
+    timeout -k 10 700 systemctl stop "$SERVICE" >/dev/null 2>&1
+    bx_st="$(systemctl is-active "$SERVICE" 2>/dev/null)"
+    case "$bx_st" in
+      inactive | failed)
+        log "builders: runner held, reaping ${#bx_cands[@]} builder(s) and ${#bx_vcands[@]} orphaned state volume(s) older than ${bx_age_max}s"
+        bx_go=1
+        for cid in "${bx_cands[@]}"; do
+          [ "$bx_go" -eq 1 ] || break
+          bx_container_ok "$cid" || continue # re-read: it may have changed since the listing
+          if builder_in_session "$cid"; then log "builders: $bx_node has a build session open -> kept"; continue; fi
+          bx_window_ok || { bx_go=0; break; }
+          if ! timeout 120 docker rm -f "$cid" >/dev/null 2>&1; then
+            # A timeout may still have removed it; its volume waits for a later tick either way.
+            log "builders: removing $bx_node's container FAILED or timed out -> its volume is kept"; continue
+          fi
+          bx_reaped=$(( bx_reaped + 1 ))
+          log "reap leaked buildx builder $bx_node (container)"
+          [ -n "$bx_vol" ] || continue
+          if ! vol_unused "$bx_vol"; then log "builders: $bx_vol is in use (or unreadable) -> kept"; continue; fi
+          bx_window_ok || { bx_go=0; break; }
+          if timeout 300 docker volume rm "$bx_vol" >/dev/null 2>&1; then
+            bx_vols=$(( bx_vols + 1 )); log "reap leaked buildx builder $bx_node (state volume $bx_vol)"
+          else
+            log "builders: removing $bx_vol FAILED or timed out"
+          fi
+        done
+        for v in "${bx_vcands[@]}"; do
+          [ "$bx_go" -eq 1 ] || break
+          n="${v#buildx_buildkit_}"; n="${n%_state}"
+          bx_volume_ok "$v" "$n" || continue
+          if ! vol_unused "$v"; then log "builders: $v is in use now (or unreadable) -> kept"; continue; fi
+          bx_window_ok || { bx_go=0; break; }
+          if timeout 300 docker volume rm "$v" >/dev/null 2>&1; then
+            bx_vols=$(( bx_vols + 1 )); log "remove orphaned buildx state volume $v"
+          else
+            log "builders: removing $v FAILED or timed out"
+          fi
+        done ;;
+      *) log "builders: $SERVICE is '${bx_st:-unreadable}' after the stop -> nothing removed" ;;
+    esac
+    heal_release_runner
   fi
 fi
 
@@ -1256,6 +1372,10 @@ if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] 
         log "target sweep: ${tg_dirs} Cargo target dir(s), ${stale}B unread for ${keep_h}h < ${TARGET_MIN_FREE_MB}MB -> runner not held"
       elif [ "$(state_get runner_held)" = 1 ]; then
         log "target sweep: an earlier runner recovery is still pending -> not this tick"
+      elif [ "$held_this_run" -eq 1 ]; then
+        # One drain per run: a second 700s stop would stretch the run past what the unit's
+        # TimeoutStartSec is sized for.
+        log "target sweep: the builder reap already held the runner this run -> next tick"
       elif ! idle_confirmed; then
         log "target sweep: ${stale}B to free but a job is running -> next tick"
       else
