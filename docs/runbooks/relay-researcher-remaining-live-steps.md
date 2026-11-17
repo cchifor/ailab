@@ -360,8 +360,10 @@ placeholder". That is out of date: since ailab #1778 the template carries 744153
   - the hub runbook's order (File B after H6, before H7, `relay-researcher-hub-upgrade.md:473`) and
     the step-7 plan (File B after the final Router rollout, 124071 §5) put them later.
 
-  This checklist follows the second order. **Decided 2026-11-17** (open point 6): the trust is included
-  without File B; File B comes after H6.
+  This checklist follows the second order: File B later, after H6 and before H7 (the hub runbook's
+  enablement order; the step-7 plan's "after the final Router rollout" is the same point, because H6 is
+  the last Router-facing rollout before File B). **Decided 2026-11-17** (open point 6): the trust is
+  included without File B, and File B comes after H6, before H7.
 
 **The PR.** Add `- ../../../components/llm-router-relay-keys-trust` under `components:` in
 `kubernetes/apps/apps/llm-router/kustomization.yaml`. Amend `scripts/tests/test_relay_v060_activation_gate.py`

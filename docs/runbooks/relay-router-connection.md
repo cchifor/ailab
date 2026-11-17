@@ -284,9 +284,11 @@ Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authorit
    open point 6) to include the trust without the `qualifications` rows (File B, keyed on this
    digest). File B follows H6, before H7 (`relay-researcher-hub-upgrade.md`, enablement order).
    Before this step the route precondition is resolved, I is accepted (comment 120818 A/B), and
-   the `clients` row exists for `relay_budget_allocator` (issuer `relay.chifor.me`, connection
+   the `clients` row exists for `relay_budget_allocator`. It is written with File A at budget step 7
+   (`relay-worker-budget-authority.md`, step 7; the step-7 plan, ailab #1753 comment 124071), not here.
+   The row carries issuer `relay.chifor.me`, connection
    `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`, this digest, tenant `00000000-0000-4000-8000-000000000001`,
-   `max_tokens` 8 × (I + 8192), `max_requests` 8, `max_authority_ms` 120000). The ledger's
+   `max_tokens` 8 × (I + 8192), `max_requests` 8, `max_authority_ms` 120000. The ledger's
    `max_requests` applies only to scoped allocations (candidate runs); the canary's unscoped
    allocation is capped at 8 requests by the Router from the `requestLimit` Relay v0.10.3 sends
    (owner decision U10, relay#277 comment 124122). The trust `maxTokens` is already
