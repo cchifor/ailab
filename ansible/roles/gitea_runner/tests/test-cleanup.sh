@@ -1426,6 +1426,16 @@ printf 'garbage line\n%s none notanumber 5\n' "$ORPHV" > "$SIZEC"
 run_beacon 0 50
 check "V7: a corrupt cache is ignored and rebuilt" \
   'walked "$IDLEV" && walked "$ORPHV" && [ "$(leak bytes)" = "$want" ] && [ "$(grep -c . "$SIZEC")" = 2 ]'
+# Digit-only but not a canonical bounded decimal, in an entry whose volume and activity both match: bash
+# arithmetic reads 08 as a bad octal number (and aborts), and 2^63 wraps negative. Each must be a miss.
+for bad in 08 9223372036854775808; do
+  bx_reset; bx_volume "$ORPHV" 4 3600; run_beacon 0 50
+  sed -i "s/^\($ORPHV [^ ]* [0-9]*\) [0-9]*\$/\1 $bad/" "$SIZEC"
+  planted="$(grep -c "^$ORPHV [^ ]* [0-9]* $bad\$" "$SIZEC")"
+  run_beacon 0 50
+  check "V7: a cached size of $bad with matching volume and activity is a miss: re-walked, counted right" \
+    '[ "$planted" = 1 ] && walked "$ORPHV" && [ "$(leak bytes)" = "$(bx_du "$ORPHV")" ] && [ "$(leak builders)" = 1 ]'
+done
 bx_reset; bx_volume "$ORPHV" 4 3600; run_beacon 0 50
 rm -rf "$BX/volumes/$ORPHV" "$BX/data/$ORPHV"; run_beacon 0 50
 check "V7: a volume gone since the last tick drops out of the cache" '[ ! -s "$SIZEC" ] && [ "$(leak builders)" = 0 ]'

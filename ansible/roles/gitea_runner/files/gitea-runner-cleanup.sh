@@ -402,16 +402,21 @@ buildx_last_write() {
 # The size is left in bx_bytes (not printed: a $(...) subshell would lose the queued entry). Non-zero when
 # the volume cannot be sized.
 bx_size_cache_next=""; bx_bytes=0
+# A canonical, bounded decimal: what a number must be before $(( )) sees it. is_num is not enough here:
+# bash arithmetic reads 08 as a bad octal number (and aborts), and 2^63 wraps negative. 15 digits is
+# 999 TB, far past any disk.
+is_canon_num() { [[ "${1:-}" =~ ^(0|[1-9][0-9]{0,14})$ ]]; }
 buildx_volume_bytes() {
   local v="$1" d="$2" act="$3" now ttl line cv ca cat cb b
   now="$(date +%s)"; ttl="$BUILDX_SIZE_TTL_SEC"; is_num "$ttl" || ttl=3600
   line="$(awk -v v="$v" '$1 == v { print; exit }' "$BUILDX_SIZE_CACHE" 2>/dev/null)"
   read -r cv ca cat cb <<< "$line"
-  if [ "${cv:-}" = "$v" ] && [ "${ca:-}" = "$act" ] && is_num "${cat:-}" && is_num "${cb:-}" \
+  # Anything in the cache that is not a canonical bounded decimal is a miss, not a number.
+  if [ "${cv:-}" = "$v" ] && [ "${ca:-}" = "$act" ] && is_canon_num "${cat:-}" && is_canon_num "${cb:-}" \
      && [ "$cat" -le "$now" ] && [ $(( now - cat )) -lt "$ttl" ]; then
     b="$cb"
   else
-    b="$(timeout 120 du -sxB1 "$d" 2>/dev/null | cut -f1)" && is_num "$b" || return 1
+    b="$(timeout 120 du -sxB1 "$d" 2>/dev/null | cut -f1)" && is_canon_num "$b" || return 1
     cat="$now"
   fi
   bx_size_cache_next="${bx_size_cache_next}${v} ${act} ${cat} ${b}
