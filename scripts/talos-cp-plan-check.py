@@ -55,7 +55,10 @@ def diff(a, b, p=""):
 
 
 def cmp(x, y):
-    dx, dy = docs(x), docs(y)
+    return cmp_docs(docs(x), docs(y))
+
+
+def cmp_docs(dx, dy):
     out = []
     for k in sorted(set(dx) | set(dy), key=str):
         if k not in dx:
@@ -69,19 +72,36 @@ def cmp(x, y):
 
 def check(plan, mc_text, node, expected):
     address = f'talos_machine_configuration_apply.cp["{node}"]'
-    rc = [r for r in plan["resource_changes"] if r["address"] == address]
-    others = [r["address"] for r in plan["resource_changes"]
+    changes = plan.get("resource_changes") or []
+    rc = [r for r in changes if r["address"] == address]
+    others = [r["address"] for r in changes
               if r["change"]["actions"] != ["no-op"] and r["address"] != address]
     if len(rc) != 1:
         return False, [f"STOP: {address} is not exactly one resource change in the plan"]
-    live = json.JSONDecoder().raw_decode(mc_text.lstrip())[0]["spec"]
+    actions = rc[0]["change"]["actions"]
+    if actions != ["update"]:
+        # A replace (delete+create) would destroy the apply resource first, whatever its content diff.
+        return False, [f"STOP: {address} is not an in-place update: actions {actions}"]
+    try:
+        live = json.JSONDecoder().raw_decode(mc_text.lstrip())[0]["spec"]
+    except (ValueError, KeyError, TypeError, IndexError):
+        return False, ["STOP: could not read the live MachineConfig JSON"]
     before = (rc[0]["change"].get("before") or {}).get("machine_configuration")
     after = (rc[0]["change"].get("after") or {}).get("machine_configuration")
     if not isinstance(before, str):
         return False, [f"STOP: {address} has no machine_configuration in its state (fresh or tainted)"]
     if not isinstance(after, str):
         return False, [f"STOP: the planned machine_configuration of {address} is unknown"]
-    a, b = cmp(live, before), cmp(before, after)
+    if not isinstance(live, str):
+        return False, ["STOP: the live MachineConfig spec is not a config document string"]
+    # PyYAML's errors quote the offending line, which may hold a secret: report only which one failed.
+    parsed = {}
+    for name, text in (("live", live), ("state", before), ("planned", after)):
+        try:
+            parsed[name] = docs(text)
+        except yaml.YAMLError:
+            return False, [f"STOP: could not parse the {name} config"]
+    a, b = cmp_docs(parsed["live"], parsed["state"]), cmp_docs(parsed["state"], parsed["planned"])
     lines = [f"other resources changing: {others or 'none'}",
              f"live vs state-before: {a or 'IDENTICAL'}",
              f"state-before vs planned: {b}"]
@@ -93,9 +113,20 @@ def main(argv):
         print(__doc__.strip().splitlines()[0], file=sys.stderr)
         print("usage: talos-cp-plan-check.py PLANJSON MCJSON NODEKEY [EXPECTED_PATH ...]", file=sys.stderr)
         return 2
-    plan = json.load(open(argv[1], encoding="utf-8"))
-    mc_text = open(argv[2], encoding="utf-8").read()
-    ok, lines = check(plan, mc_text, argv[3], argv[4:] or DEFAULT_EXPECTED)
+    try:
+        plan = json.load(open(argv[1], encoding="utf-8"))
+        mc_text = open(argv[2], encoding="utf-8").read()
+    except (OSError, ValueError):
+        # The JSON decoder's message quotes no input, but keep the boundary value-free regardless.
+        print("STOP: could not read the plan JSON or the MachineConfig file")
+        print("VERDICT: STOP")
+        return 1
+    try:
+        ok, lines = check(plan, mc_text, argv[3], argv[4:] or DEFAULT_EXPECTED)
+    except Exception as error:  # never let a traceback print config content
+        print(f"STOP: unexpected {type(error).__name__} while checking (no details printed)")
+        print("VERDICT: STOP")
+        return 1
     for line in lines:
         print(line)
     print("VERDICT:", "PASS" if ok else "STOP")

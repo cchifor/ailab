@@ -329,7 +329,7 @@ create, and which control plane serves it.
 
   ```bash
   printf 'cluster:\n  apiServer:\n    auditPolicy:\n      apiVersion: audit.k8s.io/v1\n      kind: Policy\n      rules:\n        - level: Metadata\n' > "$W/audit-default.yaml"
-  T -n $cp patch mc --patch @"$(cygpath -m "$W")/audit-default.yaml" --mode=no-reboot
+  T -n $cp patch mc --patch @"$WW/audit-default.yaml" --mode=no-reboot
   ```
 
   Then wait for `readyz` and check `etcd status` and `rules`. Read the failed container's log through another

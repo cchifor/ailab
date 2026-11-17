@@ -2,6 +2,9 @@
 import copy
 import importlib.util
 import json
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -83,6 +86,46 @@ class PlanCheck(unittest.TestCase):
     def test_wrong_node_stops(self):
         ok, lines = self.run_check(plan(self.before, self.after), live(self.before), node="cp3")
         self.assertFalse(ok)
+
+    def test_a_replace_stops_even_with_the_right_diff(self):
+        p = plan(self.before, self.after)
+        p["resource_changes"][0]["change"]["actions"] = ["delete", "create"]
+        ok, lines = self.run_check(p, live(self.before))
+        self.assertFalse(ok)
+        self.assertIn("not an in-place update", lines[0])
+
+    def test_an_empty_plan_stops_readably(self):
+        ok, lines = self.run_check({"format_version": "1.2"}, live(self.before))
+        self.assertFalse(ok)
+        self.assertIn("not exactly one resource change", lines[0])
+
+    def test_malformed_configs_stop_without_printing_content(self):
+        bad = "version: v1alpha1\nmachine:\n  token: SECRET-IN-BAD-YAML\n  : [unclosed\n"
+        for name, p, mc in (("planned", plan(self.before, bad), live(self.before)),
+                            ("state", plan(bad, self.after), live(bad)),
+                            ("live", plan(self.before, self.after), live(bad))):
+            ok, lines = self.run_check(p, mc)
+            self.assertFalse(ok, name)
+            self.assertNotIn("SECRET-IN-BAD-YAML", "\n".join(lines))
+        ok, lines = self.run_check(plan(self.before, self.after), "not json SECRET-IN-BAD-YAML")
+        self.assertFalse(ok)
+        self.assertNotIn("SECRET-IN-BAD-YAML", "\n".join(lines))
+
+    def test_cli_never_prints_config_content(self):
+        bad = "version: v1alpha1\nmachine:\n  token: SECRET-IN-BAD-YAML\n  : [unclosed\n"
+        cases = [(plan(self.before, bad), live(self.before)), (plan(self.before, self.after), live(bad)),
+                 (plan(self.before, self.after), "garbage SECRET-IN-BAD-YAML")]
+        for p, mc in cases:
+            with tempfile.TemporaryDirectory() as d:
+                pj, mj = Path(d, "plan.json"), Path(d, "mc.json")
+                pj.write_text(json.dumps(p), encoding="utf-8")
+                mj.write_text(mc, encoding="utf-8")
+                r = subprocess.run([sys.executable, str(ROOT / "scripts/talos-cp-plan-check.py"), str(pj), str(mj), "cp1"],
+                                   capture_output=True, text=True)
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("VERDICT: STOP", r.stdout)
+            self.assertNotIn("SECRET-IN-BAD-YAML", r.stdout + r.stderr)
+            self.assertNotIn("Traceback", r.stderr)
 
     def test_missing_state_config_stops_readably(self):
         p = plan(self.before, self.after)
