@@ -92,6 +92,10 @@ EXPECTED_LOCAL_PATHS = frozenset(
         # Relay, trust mapping for the Router; docs/runbooks/relay-router-connection.md). Added
         # deliberately; the two consuming components stay outside every Flux path.
         "./kubernetes/apps/relay-router-connection/credentials",
+        # 2026-11-16 — the independent Relay candidate journal (activation overlay over
+        # kubernetes/optional/relay-candidate-journal: the base at zero replicas plus the protocol
+        # Service on 10.96.0.42; docs/runbooks/relay-worker-candidate-journal.md). Added deliberately.
+        "./kubernetes/apps/relay-candidate-journal",
         "./kubernetes/apps/platform-bootstrap",
         "./kubernetes/apps/muse-stream-bootstrap",
         "./kubernetes/apps/cloudlab-bootstrap",

@@ -243,6 +243,12 @@ Signing up at `id.chifor.me` grants nothing in Relay. To admit a person:
 To remove someone, delete or disable the Keycloak user AND remove the Relay membership. A Relay
 session lasts up to 8 h and is not revoked by Keycloak.
 
+**The automation account `relay-operator@ailab.invalid`** (id `72e99c0a-fce0-42f1-8e2a-af1363b5aa4f`) is
+not a person and is not admitted by these steps. `scripts/relay-operator.py provision` created it
+(first and last name set, no required actions, so the scripted login never meets a profile page), and
+its password lives only in OpenBao `af/relay/operator-oidc`. It holds no Relay membership at rest.
+Never delete it as junk; see docs/runbooks/relay.md, "Operator automation identity".
+
 **Password reset.** There is no SMTP, so this is operator-only:
 
 1. Write `{"type":"password","value":"<temporary>","temporary":true}` to a private file.
@@ -260,8 +266,12 @@ kc get users -r relay --fields id,username,createdTimestamp,emailVerified -q bri
 kc get attack-detection/brute-force/users/<id> -r relay                                                 # lockout state
 ```
 
+Sign-ins are recorded since 2026-11-16 (realm events `LOGIN`, `LOGIN_ERROR`, `LOGOUT`,
+`CODE_TO_TOKEN`, `CODE_TO_TOKEN_ERROR`, kept 90 days):
+`kc get events -r relay -q max=20` (add `-q user=<id>` for one account).
+
 A burst of sign-ups is the trigger to revisit decision 5 (captcha or a Cloudflare rate limit on
-`/realms/relay/login-actions/registration`). Delete junk accounts with `kc delete users/<id> -r relay`.
+`/realms/relay/login-actions/registration`). Delete junk accounts with `kc delete users/<id> -r relay`, but never `relay-operator@ailab.invalid`.
 
 ## Upgrades, backup and restore
 

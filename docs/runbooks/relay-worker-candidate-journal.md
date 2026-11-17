@@ -3,10 +3,12 @@
 This optional bundle supplies the retained launch journal required by finite
 candidate worker runs. It is separate from Relay, the router, their restore sets,
 and the independent inference-budget database. It creates no candidate authority,
-run, witness, qualification, worker or provider budget. No live Flux inventory
-references `kubernetes/optional/relay-candidate-journal`; both runtime workloads
-are off by default, and the initialization Job is suspended and never included
-in a continuously reconciled resource list.
+run, witness, qualification, worker or provider budget. Live Flux reaches
+`kubernetes/optional/relay-candidate-journal` only through its activation overlay
+([Activation under Flux](#activation-under-flux)): the database starts at zero
+replicas, the journal Deployment exists only in the operator's per-run render,
+and the initialization Job is suspended and never included in a continuously
+reconciled resource list.
 
 The generic Relay installation skill remains infrastructure-neutral. This is an
 ailab deployment prerequisite for its first finite qualification run, not a
@@ -54,11 +56,65 @@ Caller-side journal egress must be included in the separately reviewed
 agent/candidate policies and the run's policy digest; this bundle does not
 silently alter those policies.
 
+## Activation under Flux
+
+The base goes live through one Flux Kustomization, `relay-candidate-journal`
+(`kubernetes/apps/clusters/ai/relay-candidate-journal.yaml`), over the overlay
+`kubernetes/apps/relay-candidate-journal`. The overlay uses the reviewed base
+unchanged and adds two files:
+
+- `replicas.yaml`, the database StatefulSet's replica count: `0` at activation and
+  `1` after the one-time initialization, each its own reviewed PR, never more;
+- `service.yaml`, the protocol Service `relay-candidate-journal/relay-candidate-journal`
+  on the pinned `10.96.0.42`, exactly the object `render.py service` emits, so the
+  address exists before any signed run. Flux is its only manager: the operator
+  applies each render without it (qualification campaign runbook, 3.2).
+
+`dependsOn` encodes the install order: `qnap-storage` (the retained StorageClass)
+and `cert-manager-config` (the `ailab-ca` ClusterIssuer). `wait: true` keeps the
+Kustomization not-Ready until the PVC is Bound and both Certificates are Ready, and,
+after the flip to one replica, until the database Pod is Ready. The claim binds at
+zero replicas because `qnap-iscsi` binds Immediately (it sets no
+`volumeBindingMode`; the test refuses `WaitForFirstConsumer`). `prune: true` is safe
+for the data: both Namespaces and the PVC carry `prune: disabled`, so removing the
+Flux file stops the database and releases `10.96.0.42` but keeps the claim.
+
+Never in any Flux inventory: `initialize/`, the initialization List, and every
+per-run service render (its public ConfigMap, Deployment and client NetworkPolicy).
+The operator creates the initialization once and applies and scales each run's
+render (qualification campaign runbook, 3.2).
+
+The rollout is two held PRs (label `no-automerge`); the authority ceremony and
+every Secret stay operator actions with no manifest change:
+
+1. **Activation (replicas 0).** Before lifting the hold: step 1's observations,
+   then the network plan's read-only check, which must print nothing for
+   `10.96.0.42` (`.40` and `.41` print their own Services). After the merge:
+   Kustomization Ready, PVC Bound, both Certificates Ready, no database Pod, and
+   step Q2's `pinned relay-candidate-journal/relay-candidate-journal 10.96.0.42`;
+   record the bound PV (`Retain`) and label it out of ordinary backup and restore
+   selections ([Isolation and retained state](#isolation-and-retained-state)).
+2. **One database replica.** Only after steps 2-3: the initialization Job is
+   terminal, succeeded, and its Pod is gone. After the merge: the database Pod is
+   Ready (`start.sh` refuses to serve without PG 17 and schema marker 2), the
+   Kustomization Ready, `pinned` still passes. Then the
+   [authority ceremony](#independent-authority-ceremony).
+
+The activation PR replaced the base test's "no kustomization outside the bundle
+references it" with "exactly the activation overlay does" and added the
+`Activation` gates in `scripts/tests/test_relay_candidate_journal.py` (the Flux
+path and `dependsOn`; no other Flux path or kustomization reaching the bundle, its
+`initialize/` or the overlay; the exact inventory Flux can create, with no Job,
+Deployment or Secret; the overlay's exact content; replicas 0 or 1; the Service
+equal to the render's and named as the network plan's source);
+`scripts/tests/test_manifest_paths.py` lists the overlay path.
+
 ## Reviewed inputs and initialization
 
 1. Observe cluster identity, storage class/PV retention, ordinary backup/restore
    exclusions, node placement and DNS/certificate prerequisites. Capture the
-   operator evidence. Apply the optional base only after review; its database
+   operator evidence. Apply the optional base only after review, through the held
+   activation PR ([Activation under Flux](#activation-under-flux)); its database
    StatefulSet remains at zero replicas. The base requests independent PostgreSQL
    and HTTPS certificates from the existing `ailab-ca` ClusterIssuer.
 2. Select an exact reviewed Relay source commit. Obtain its
@@ -113,7 +169,9 @@ The 600-second deadline is for an empty database ceremony, not a retained-state
 upgrade. No retained-state upgrade or stale-PID repair is automated here.
 
 After successful initialization, require the Job to be terminal and its Pod to
-be gone before explicitly starting one database replica. ReadWriteOnce does not
+be gone before explicitly starting one database replica (the overlay's
+`replicas.yaml`, 0 to 1, in its own held PR; never `kubectl scale`, which Flux
+reverts). ReadWriteOnce does not
 fence two Pods using the same volume on one node. Do not overlap initialization
 and runtime, and do not assume ReadWriteOncePod support without validating the
 qnap CSI driver. `start.sh` bypasses the image's normal auto-initializing entrypoint and
@@ -234,7 +292,12 @@ The signed run's hub image must equal the supplied candidate-capable Relay image
 This equality is deliberate deployment policy: every hub image change requires
 a new signed run and reviewed re-render of the journal inputs.
 The renderer outputs an immutable ConfigMap containing only these public files,
-a ClusterIP Service, network policy and a Deployment with zero replicas.
+a ClusterIP Service, network policy and a Deployment with zero replicas. The
+Service is also the activation overlay's `service.yaml`, which Flux creates at
+activation so the address exists before any signed run; the tests keep the two
+objects equal. The other three objects stay outside Flux: the operator applies them
+per signed run without the protocol Service, which only Flux manages, and scales
+the Deployment (qualification campaign runbook, 3.2).
 
 The protocol Service's ClusterIP is pinned to `10.96.0.42` (`render.py`
 `CLUSTER_IP`; reserved in `docs/network-plan.md`). Relay's candidate supervisor
@@ -242,7 +305,8 @@ dials the journal origin from the worker Pod, and a DNS-less researcher slot
 (owner decision G3) resolves that host only through the Pod's measured
 `hostAliases` entry (`PodRuntimeBinding.hostAliases.candidateJournal`), so the
 address must exist before the Service does. Confirm it is free with the
-read-only check in the network plan just before creating the Service; the apiserver
+read-only check in the network plan just before creating the Service (just before
+the activation PR merges: Flux creates it); the apiserver
 refuses a colliding address and leaves the Service uncreated. Then read back that
 the Service is on exactly `10.96.0.42` before any candidate run (the `pinned`
 check in step Q2 of [relay-researcher-installation.md](relay-researcher-installation.md));
@@ -250,10 +314,12 @@ any other address fails closed.
 
 `spec.clusterIP` is immutable. The pin applies when the Service is created: if
 `kubectl -n relay-candidate-journal get svc relay-candidate-journal` already
-shows another address (a Service created from an earlier render), applying the
-new render is rejected rather than moving it. Then, with the journal Deployment
-at zero replicas and no run in flight, delete that Service and create it again
-from the new render, and read back `10.96.0.42`. No Relay binding can have used
+shows another address (a Service created from an earlier render), Flux's apply
+is rejected rather than moving it. Then, with the journal
+Deployment at zero replicas and no run in flight, delete that Service, let Flux
+create it again from `kubernetes/apps/relay-candidate-journal/service.yaml`
+(`flux reconcile kustomization relay-candidate-journal`), and read back
+`10.96.0.42`. No Relay binding can have used
 the old address: the alias is only ever `10.96.0.42`, so a binding naming
 anything else is refused by the researcher installation's bundle check
 (ailab #1769) before it reaches a worker.
@@ -426,6 +492,7 @@ Run renderer contract tests without Kubernetes:
 ```sh
 python3 -B -m unittest discover -s scripts/tests -p test_relay_candidate_journal.py
 kubectl kustomize kubernetes/optional/relay-candidate-journal
+kubectl kustomize kubernetes/apps/relay-candidate-journal
 ```
 
 The explicit isolated PostgreSQL smoke uses an already-local pinned PG17 image,

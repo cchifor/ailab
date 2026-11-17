@@ -431,6 +431,12 @@ curl -sS --fail -b "$COOKIES" -H 'Origin: https://relay.chifor.me' -H 'Content-T
 The kubelet retries the mount and the agent enrolls. If the token expires first, reissue (allowed
 only while `approved`); never create a second installation.
 
+Without a browser session, use the just-in-time operator identity for the second Secret
+(docs/runbooks/relay.md, "Operator automation identity"): `python scripts/relay-operator.py call
+enrollment-token <id> --ttl 900` writes only the raw token to stdout. It holds Relay admin only for that
+one call. The reissue answers HTTP 200; a replayed operationId returns no token. Done this way on
+2026-11-16 (reissue revision 3; the agent enrolled 14:34:02Z, epoch 1).
+
 **I9. Enrollment readback.** `GET /api/infrastructure/installations/<id>` is `ready` with a pinned
 fence UID and the hub epoch acknowledged; `kubectl -n relay-infra-control get configmap
 relay-installation-fence -o jsonpath='{.metadata.uid}'` equals it; the Lease
@@ -495,8 +501,8 @@ built with:
 The binding is the same in both stages (qualification evidence binds the exact binding), so step
 I4's `check` already verified the first three: it refuses a binding without them, or with different
 values, in either stage, so an enrollment that could never reach this stage stops at I4. The candidate journal
-([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) renders its Service at the
-pinned `10.96.0.42`.
+([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) creates its Service at the
+pinned `10.96.0.42` through Flux, the same object its renderer emits.
 
 **Q2. Read-only checks.** Who holds the three reserved addresses (`docs/network-plan.md`): every
 printed line must be that address's own Service (the journal's, once it exists), and `10.96.0.40` and
@@ -629,8 +635,9 @@ Q3 only after that, or once the slot is empty for good: a worker whose terminato
 closed (connection refused), it never falls back to Cloudflare. The namespace
 `relay-internal-tls` is retained (`prune: disabled`) and deleted by hand once empty.
 
-**Not covered by these steps.** The Relay half is the release's (Q1). The candidate journal is still
-the optional bundle, and the agent's own journal egress and candidate runtime values are separate
+**Not covered by these steps.** The Relay half is the release's (Q1). The candidate journal is its own
+Flux Kustomization with its own held PRs ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md),
+"Activation under Flux"), and the agent's own journal egress and candidate runtime values are separate
 changes ("Beyond enrollment", item 3). Rule 2 (the journal) stays in the policy through
 qualification and the ordinary canary, and leaves it at ordinary activation (Q7).
 The control namespace is unchanged: the agent still reaches the hub through Cloudflare

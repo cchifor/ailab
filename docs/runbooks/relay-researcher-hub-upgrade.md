@@ -1,17 +1,27 @@
-# Relay hub upgrade for the first researcher worker (plan, inactive)
+# Relay hub upgrade for the first researcher worker (in progress)
 
-Status: **plan and staged components only. Nothing here is applied, and merging changes no cluster
-object.** It expands step 2 and 3 of the gated order in
+Status: **in progress. H1-H3 and H4a are applied; H5, H6, H7 and H4b are not.** Each step's PR changes
+the live hub when it merges (Flux), so each is held until the owner approves its rollout. This runbook
+expands step 2 and 3 of the gated order in
 [relay-worker-capacity.md](relay-worker-capacity.md#next-stage-first-researcher-runtime) and step 8
 ("Researcher release deployed") of [relay-router-connection.md](relay-router-connection.md), into the
 exact settings, their order, the readbacks and what rollback means. The installation that follows is
 [relay-researcher-installation.md](relay-researcher-installation.md), staged with its manifests in
 ailab #1766 (a separate PR; either can merge first).
 
-Live today (operator readback, recheck before acting): Relay v0.9.1, source `a53a3ee8`, image
-`registry.chifor.me/relay/control-plane@sha256:b2c269e7…`, schema 56, no installation, no recovery
-generation, no Router connection, no worker identity. Every write below is an operator action with the
-owner's direct confirmation for the exact reviewed rollout.
+Live (operator readback on 2026-11-16 after the H4a roll, 17:33Z; recheck before acting):
+- Relay v0.10.4, source `e77bd09a`, image `registry.chifor.me/relay/control-plane@sha256:d1482bc1…57a7`
+  (ailab #1789), schema 79;
+- the first recovery generation is initialized, and installations are enabled (H3);
+- installation `b380ff7f-0716-478d-8b01-3d39f30e750b` is `ready`, epoch 2, with its fence UID pinned
+  (installation runbook I1-I10), and the slot is on its qualification egress stage (Q1-Q5);
+- the budget client files are mounted (H4a, ailab #1805);
+- no Router connection, no agent control plane, no control monitoring, no candidate files and no profile
+  registry yet. H6 is ailab #1811, held while its preconditions are open.
+
+Before this work the hub was Relay v0.9.1 (`a53a3ee8`, schema 56, no installation and no recovery
+generation). Every write below is an operator action with the owner's direct confirmation for the exact
+reviewed rollout.
 
 The per-run ceremony for H7's signed candidate runs is [relay-researcher-qualification-campaign.md](relay-researcher-qualification-campaign.md).
 
