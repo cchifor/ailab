@@ -64,6 +64,21 @@ resource "proxmox_virtual_environment_vm" "runner" {
     size         = var.runner_rootfs_gb # cloud-init growpart expands the root fs to fill this
     iothread     = true
     discard      = "on"
+
+    # Optional write cap (runner_nodes[*].disk_write_mibps / disk_write_iops; D1 2026-11-17, see
+    # variables.tf). Rendered only when a cap is set, so uncapped runners keep a bare drive line.
+    # bpg -> Proxmox: write -> mbps_wr, write_burstable -> mbps_wr_max, iops_write -> iops_wr,
+    # iops_write_burstable -> iops_wr_max. Burstable = cap, so there is no burst above it (bpg does
+    # not expose *_max_length; the burst pool is 1 s). Changes apply live, with no restart.
+    dynamic "speed" {
+      for_each = each.value.disk_write_mibps != null || each.value.disk_write_iops != null ? [1] : []
+      content {
+        write                = each.value.disk_write_mibps
+        write_burstable      = each.value.disk_write_mibps
+        iops_write           = each.value.disk_write_iops
+        iops_write_burstable = each.value.disk_write_iops
+      }
+    }
   }
 
   network_device {
