@@ -22,6 +22,7 @@ import json
 import pathlib
 
 DS = "${DS_PROMETHEUS}"
+DASH_UID = "ailab-reporting"           # the dashboard's uid; panel links into this dashboard use it too
 DS_LOKI = "${DS_LOKI}"
 _pid = 0
 HOSTS = 'job="proxmox-node"'           # the 3 Proxmox hosts' node_exporter
@@ -559,7 +560,9 @@ panels += [
 for _p in panels:
     if _p.get("title", "").startswith("NVMe Wear ("):
         _p["links"] = [{"title": "Open the last 14 days (this panel alone)", "targetBlank": False,
-                        "url": f"/d/ailab-reporting/?from=now-14d&to=now&viewPanel=panel-{_p['id']}"}]
+                        # viewPanel=panel-<id>: the scenes form (Grafana 11+; the cluster runs 13.0.2, dashboard-preview.py
+                        # pins the same). ids come from _nid() when ts() builds the panel, before this loop.
+                        "url": f"/d/{DASH_UID}/?from=now-14d&to=now&viewPanel=panel-{_p['id']}"}]
 HV_EXTRA_H = NVME_ROW_H  # the thermal/NVMe line above; every later row shifts by this (as HEALTH_H does below)
 _hv_end = len(panels)
 
@@ -972,7 +975,7 @@ panels = health + panels
 
 dashboard = {
     "title": "AI Lab Fleet",
-    "uid": "ailab-reporting",
+    "uid": DASH_UID,
     "tags": ["reporting", "infrastructure", "ailab", "fleet"],
     "timezone": "browser",
     "schemaVersion": 39,
