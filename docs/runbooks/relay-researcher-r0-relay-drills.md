@@ -95,8 +95,8 @@ check "cannot distinguish refusal from database failure". So R0 pairs every obse
 ledger-side controls as the same login, in the same window (§7).
 
 **F3. A drill witness does not stop the hub from starting.** The ledger and observer read the witness
-lazily, on each query (`rel4:server/workers/inference/budget-ledger.ts:68-93`); startup reads only the
-DSN and the CA (`budget-ledger.ts:124-145`, `budget-startup.ts:27-43`). With an empty or malformed
+lazily, on each query (`rel4:server/workers/inference/budget-ledger.ts:245-272`); startup reads only
+the DSN and the CA (`budget-ledger.ts:276-324`, `budget-startup.ts:27-43`). With an empty or malformed
 witness the hub still reports `authority_started` 1 and `observer_started` 1, and every check fails at
 the witness parse (`budget-observer.ts:59`). With the stale A, the parse succeeds and `current_epoch`
 raises 42501.
@@ -206,13 +206,14 @@ blocks and the offline record; `sha256sum "$ev/witness-B.json"` must equal B's h
 
 ```sh
 # The Prometheus API on 127.0.0.1:9090 (the form of dsh.md's port-forward), for the whole session.
+# Its own variable: step 5's plugin() sets the global `pf`.
 kubectl --context admin@ai -n monitoring port-forward svc/kube-prometheus-stack-prometheus 9090:9090 >"$ev/pf.log" 2>&1 &
-pf=$!
+r0_prom_pid=$!
 # rcheck: one JSON object, the hub's budget series as Prometheus last scraped them. It fails unless
 # exactly one relay-control-plane target answers.
 rcheck() {
   local -; set -o pipefail
-  curl -sS --fail -G http://127.0.0.1:9090/api/v1/query \
+  curl -sS --fail --connect-timeout 5 --max-time 10 -G http://127.0.0.1:9090/api/v1/query \
     --data-urlencode 'query={__name__=~"up|relay_control_worker_budget_(authority_started|authority_start_failed|observer_started|check_succeeded|check_timestamp_seconds)",job="relay-control-plane"}' \
   | jq -ec 'if .status != "success" then error("query failed") else
       (.data.result | group_by(.metric.instance)
@@ -220,19 +221,21 @@ rcheck() {
            (.[0] as $r | ($r | map({(.metric.__name__ | sub("^relay_control_worker_budget_"; "")): (.value[1] | tonumber)}) | add)
             + {instance: $r[0].metric.instance, at: $r[0].value[0]}) end) end'
 }
-# relay_check <0|1> <epoch seconds>: bounded wait (3 minutes) for two successive observer checks, both
-# attempted after the given time, with `up`, `authority_started` and `observer_started` 1 and
-# `check_succeeded` equal to the first argument. Returns 0 when seen, 2 at once if a fresh check shows
-# anything else, 1 if no two fresh checks arrive. Each check is one 30 s scrape.
+# relay_check <0|1> <epoch seconds>: bounded wait (3 minutes by the clock, each query at most 10 s) for
+# two successive observer checks, both attempted after the given time, with `up`, `authority_started`
+# and `observer_started` 1 and `check_succeeded` equal to the first argument. Returns 0 when seen and
+# captured, 2 at once if a fresh check shows anything else, 1 if no two fresh checks arrive or a capture
+# fails. Each check is one 30 s scrape.
 relay_check() {
   local -; set -o pipefail
-  local want="$1" since="$2" last= n=0 i j t
-  for i in $(seq 1 36); do
+  local want="$1" since="$2" last= n=0 end=$((SECONDS + 180)) j t
+  while [ "$SECONDS" -lt "$end" ]; do
     if j="$(rcheck)" && t="$(jq -er '.check_timestamp_seconds' <<<"$j")" &&
        jq -e --argjson s "$since" '.check_timestamp_seconds > $s' <<<"$j" >/dev/null && [ "$t" != "$last" ]; then
       last="$t"
       if jq -e --argjson w "$want" '.up == 1 and .authority_started == 1 and .observer_started == 1 and .check_succeeded == $w' <<<"$j" >/dev/null; then
-        cap relay-check echo "$j"; n=$((n + 1)); [ "$n" -ge 2 ] && return 0
+        cap relay-check echo "$j" || return 1
+        n=$((n + 1)); [ "$n" -ge 2 ] && return 0
       else
         cap relay-check-unexpected echo "$j"; return 2
       fi
@@ -241,7 +244,7 @@ relay_check() {
   done
   cap relay-check-not-observed echo "want=$want since=$since last=${j:-none}"; return 1
 }
-ralerts() { curl -sS --fail -G http://127.0.0.1:9090/api/v1/query --data-urlencode 'query=ALERTS{alertname=~"RelayWorkerBudget.*"}' \
+ralerts() { curl -sS --fail --connect-timeout 5 --max-time 10 -G http://127.0.0.1:9090/api/v1/query --data-urlencode 'query=ALERTS{alertname=~"RelayWorkerBudget.*"}' \
               | jq -c '[.data.result[] | {alert: .metric.alertname, state: .metric.alertstate}]'; }
 # The hub Pod: one Running Pod, its init containers' exit codes, the candidate pin and document ConfigMap.
 hpod() {
@@ -537,10 +540,16 @@ generator runbook describes. All of this section is NEW, except where a line say
    `flux resume kustomization relay-researcher-agent -n flux-system`. Then `cap agent-after …` with
    §6.1's command: the same generation as `agent-before`, and Ready. The agent never ran R0's values.
 5. **The client Pod.** `kubectl --context admin@ai -n relay-budget-authority delete pod relay-budget-operator-client`
-   (checklist step 5). Stop the port-forward: `kill "$pf"`.
-6. **End readback.** `cap ledger-end ledger_state` (B, `ready = t`, every history count 0),
-   `cap hub-counts-final hub_counts` (equal to §6.1's), and the five witness hashes (B). R0 leaves no
-   grant, worker, environment, allocation, budget scope, journal row, Router key or session key.
+   (checklist step 5). Stop the port-forward: `kill "$r0_prom_pid"`.
+6. **End readback.** `cap ledger-end ledger_state`, `cap plugins-final plugins`,
+   `cap hub-counts-final hub_counts` (equal to §6.1's) and the five witness hashes (B). The ledger row
+   has B's IDs and every history count 0. The gate is as R0 left it:
+   - after §8's production re-open, or an abort that ran no drill: `ready = t` and the plugin `active`;
+   - after F_R, or a restore left to the reset's rollout (§9): `ready = f` and the plugin `disabled`,
+     until the owner has reviewed the failure and re-opened with §8's commands.
+
+   R0 leaves no grant, worker, environment, allocation, budget scope, journal row, Router key or session
+   key.
 
 ## 11. Evidence
 
