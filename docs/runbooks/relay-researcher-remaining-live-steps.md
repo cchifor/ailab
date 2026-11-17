@@ -696,7 +696,8 @@ does not start before H7, because it has no profile source (hub runbook H4a,
 `relay-researcher-hub-upgrade.md:299-310`). The runbook's Relay half of drills A-C therefore cannot be
 observed yet (`relay-worker-budget-authority.md:418-419`). Relay's ExternalSecret is still
 force-synced with the Router's, as the procedure says, so its Secret follows. Its Pod mounts B at the
-H6 rollout.
+H6 rollout. Relay's half runs in drill run R0, after File B and before R1
+([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
 
 **Pre-checks.**
 
@@ -1252,8 +1253,8 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
    Router change.
 4. **The E6 rehearsal**
    ([relay-researcher-qualification-campaign.md](relay-researcher-qualification-campaign.md) §4).
-5. **R1.** Its per-run PR includes H7's candidate component. Relay's half of drills A-C runs before
-   its first grant (see the open points).
+5. **R1.** Its per-run PR includes H7's candidate component. Before it, drill run R0 runs Relay's half
+   of drills A-C ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
 
 ## Open points for the owner
 

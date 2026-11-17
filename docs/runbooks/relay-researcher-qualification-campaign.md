@@ -42,7 +42,9 @@ The `main:` line references below are unchanged between `1ea5ecc9` and `9e09962f
 **Order:** R1 → R2 → R5 → R3 → reserve retries (R4 if needed) → R7 → O8 reconciliation → R6. Hold one
 reserve for an R6 retry. **Count:** 6 runs + 2 reserves (O1): E3 merged as Relay #527, so R3 gives both
 #10 and #18. R7 leaves the pool's only slot blocked (§6 R7), so every retry that R7 does not need goes
-before it, and any run after R7 (R6, or a retry) needs the reviewed reconciliation first (O8).
+before it, and any run after R7 (R6, or a retry) needs the reviewed reconciliation first (O8). Drill run
+R0 comes before R1: signed, its hub half live, never granted or created, so it does not count
+([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
 
 ### Preconditions before R1
 
