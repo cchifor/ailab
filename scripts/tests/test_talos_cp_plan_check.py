@@ -11,6 +11,9 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
+# Bound at import (before any test runs), so a test elsewhere that patches the shared subprocess
+# module cannot turn this module's CLI checks into canned output.
+_RUN = subprocess.run
 spec = importlib.util.spec_from_file_location("plan_check", ROOT / "scripts/talos-cp-plan-check.py")
 plan_check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(plan_check)
@@ -120,7 +123,7 @@ class PlanCheck(unittest.TestCase):
                 pj, mj = Path(d, "plan.json"), Path(d, "mc.json")
                 pj.write_text(json.dumps(p), encoding="utf-8")
                 mj.write_text(mc, encoding="utf-8")
-                r = subprocess.run([sys.executable, str(ROOT / "scripts/talos-cp-plan-check.py"), str(pj), str(mj), "cp1"],
+                r = _RUN([sys.executable, str(ROOT / "scripts/talos-cp-plan-check.py"), str(pj), str(mj), "cp1"],
                                    capture_output=True, text=True)
             self.assertEqual(r.returncode, 1)
             self.assertIn("VERDICT: STOP", r.stdout)
