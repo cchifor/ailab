@@ -80,6 +80,11 @@ prefix (`read`/`create`/`update`, no `delete`), listed in `registry_zot_scoped_p
 |---|---|---|
 | `trueswarm-ci` | `trueswarm/**` | `cchifor/trueswarm` `.gitea/workflows/publish.yml` (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`) |
 | `workbricks-ci` | `workbricks/**` | `cchifor/workbricks` image-publish CI (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`; Workbricks OR-12). The cell pulls anonymously, like every other image; the registry is LAN-only. |
+| `strive-ci-push` | `strive/ci/**` | `cchifor/platform` e2e build-once (platform#2823): stack-smoke pushes `strive/ci/<image>:ci-<40-hex commit>` and the journey shards pull by digest. Only the 10 most-recently-pushed `ci-` tags per repository are kept (`registry_zot_strive_ci_keep_recent`); its retention policy precedes `strive/**`. Entry carries `password_optional: true` until its SOPS key exists. |
+
+A logged-in scoped user has **no** rights outside its prefix, not even read: zot's `anonymousPolicy`
+applies only to unauthenticated requests. Use the credential for the push only (platform#2823 writes
+it into a throwaway `DOCKER_CONFIG`); pulls stay anonymous or use `pull`.
 
 zot authorizes a repo by its **longest matching pattern only** — policies are not merged — so each
 scoped entry repeats the `**` grants (anonymous read, `ci`, `pull`, admins) via the template macro.
@@ -88,7 +93,11 @@ The password is `registry_scoped_push_passwords[<user>]` in `registry.sops.yaml`
 **never projected to dev-workers**. An agent ships an image by pushing a `v*` tag (or
 `workflow_dispatch`) on its repo and then pinning the digest in the repo's deploy overlay, which
 Flux reconciles. Adding a project = a new list entry + a SOPS key + `just registry` + the two repo
-secrets (the role asserts the SOPS key exists before touching the htpasswd).
+secrets (the role asserts the SOPS key exists before touching the htpasswd). To merge the entry
+before the key exists, mark it `password_optional: true`: the play then skips that user with a
+`SKIPPED` message instead of failing; drop the flag in the change that adds the key. Add the key
+UNDER `registry_scoped_push_passwords` (the file's `encrypted_regex` covers that map; a new
+top-level key would be stored in plaintext).
 
 **Retiring a project:** removing the list entry drops its policy, but the htpasswd task only
 adds/updates, so the user would still AUTHENTICATE. Remove it explicitly, then the other homes:
@@ -123,8 +132,13 @@ path. Zot `gc` (every `gcInterval`, now 1h) reclaims the orphaned blobs.
 The store lives on the mp0 data disk; its desired size is `kubernetes/infra/registry-lxc`
 `data_gb` (including effective overrides). Check `pct config 5004` and the filesystem for the live size. A
 `storage.retention` policy (config.json.j2) bounds growth with policies evaluated **in order**,
-each more specific one listed before the catch-all it would otherwise fall through to:
+each more specific one listed before the catch-all it would otherwise fall through to (zot applies
+only the FIRST policy whose glob matches a repo):
 
+- `strive/ci/**` (listed before `strive/**`) keeps the `registry_zot_strive_ci_keep_recent` (10)
+  most-recently-pushed `ci-<40-hex commit>` tags per repo and prunes every other tag there. These
+  are cchifor/platform's per-pipeline e2e images (platform#2823); under `strive/**` a `ci-` tag
+  would match no keep pattern and the hourly GC would delete it mid-pipeline.
 - `strive/**` keeps `latest` + the `registry_zot_strive_keep_recent` (100) most-recently-pushed
   `sha-<commit>` tags per repo and GC reclaims the rest.
 - `agentforge/**` keeps `latest` + the `registry_zot_agentforge_keep_recent` (40)

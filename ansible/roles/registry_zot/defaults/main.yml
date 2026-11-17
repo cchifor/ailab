@@ -31,11 +31,26 @@ registry_zot_pull_user: "pull"
 # is SOPS `registry_scoped_push_passwords[<user>]` (registry.sops.yaml), escrowed at af/estate/registry
 # `<user, - as _>_password` (trueswarm_ci_password), and handed to the app repo as Gitea Actions secrets REGISTRY_USERNAME /
 # REGISTRY_PASSWORD. Never projected to dev-workers (docs/runbooks/registry-cache.md).
+#
+# A scoped user has NO rights outside its prefix, not even read: zot's anonymousPolicy applies only
+# to UNAUTHENTICATED requests, so a client logged in as one of these users cannot pull other repos
+# (base images through the mirror, strive/* pins). Keep its credential confined to the push step.
+#
+# `password_optional: true` lets an entry merge before its SOPS key exists: the role then skips its
+# htpasswd line with a message instead of failing the play. Its accessControl grant still renders,
+# but stays inert, because a user with no htpasswd line cannot log in. Remove the flag in the change
+# that adds the key, so the assert guards it like the others.
 registry_zot_scoped_push_users:
   - user: "trueswarm-ci"
     repositories: "trueswarm/**"   # cchifor/trueswarm .gitea/workflows/publish.yml
   - user: "workbricks-ci"
     repositories: "workbricks/**"  # cchifor/workbricks image-publish CI (Workbricks OR-12)
+  # cchifor/platform e2e build-once (platform#2823): stack-smoke pushes each commit's test images to
+  # strive/ci/<image>:ci-<40-hex commit> and the journey shards pull them by digest instead of
+  # rebuilding (NVMe write budget). Retention: registry_zot_strive_ci_keep_recent below.
+  - user: "strive-ci-push"
+    repositories: "strive/ci/**"
+    password_optional: true        # until registry_scoped_push_passwords has 'strive-ci-push'
 
 # Web-UI SSO via Authelia (zot-native OIDC). Docker push (ci/htpasswd) + anonymous pull are
 # UNAFFECTED — only the browser UI gains a "Login with Authelia" button. The plaintext client
@@ -160,6 +175,15 @@ registry_zot_sync_credentials_file: "{{ registry_zot_config_dir }}/sync-credenti
 # ~5-6 strive builds/day it pruned sha-b80a376c out from under the LIVE ailab pins in ~4 days,
 # causing registry-404 ImagePullBackOff on every reschedule (2026-06-28 incident).
 registry_zot_strive_keep_recent: 100
+
+# strive/ci/** holds cchifor/platform's per-commit e2e images (`ci-<40-hex commit>`, pushed by
+# strive-ci-push above). Its policy is listed BEFORE strive/** in config.json.j2: zot applies only
+# the FIRST policy whose repositories glob matches a repo, and under strive/** a ci- tag matches no
+# keepTags entry, so the hourly GC would delete it while the pipeline's shards still need it. Keeps
+# the N most-recently-pushed ci- tags per repository; any other tag under strive/ci/** is pruned.
+# These are throwaway build outputs, never deployed or pinned: the window only has to outlive one
+# pipeline (smoke pushes, the shards pull), so it is small on purpose.
+registry_zot_strive_ci_keep_recent: 10
 
 # agentforge/** does NOT all push the same tag shape (verified against the live tag lists AND
 # both engine repos' workflows on 2026-09-02, see docs/decisions/0014-registry-pull-through-cache.md
