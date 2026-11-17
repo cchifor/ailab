@@ -23,7 +23,10 @@ installation is exactly what was reviewed here, and then copies the only two thi
          agent policy against the definition it came from (installationPolicy verbatim, podTiers and
          allowedTemplates from the binding, the same policy in values and config, report.json's
          identity; placements on relay-worker-1 with relay-gvisor's overhead, every key of its
-         scheduling.nodeSelector and exactly its tolerations, read from relay-workers.tf); pins already filled against the definition. With --chart it also renders that checkout's
+         scheduling.nodeSelector and exactly its tolerations, read from relay-workers.tf); pins already
+         filled against the definition (check_pins: installationId and sourceCommit exactly; agentImage
+         too, unless the bundle's is the one researcher-binding-inputs.json pins, the agent-only update
+         that import writes). With --chart it also renders that checkout's
          deploy/infrastructure-agent with 30-agent-values.json (helm template, no cluster) and
          compares every rendered object with the committed mirror. Exit 1 on the first mismatch.
   import <bundle-dir> --chart <relay-checkout>
@@ -61,6 +64,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 TREE = ROOT / "kubernetes/apps/relay-researcher"
 TEMPLATE = ROOT / "docs/relay-workers/researcher-installation-definition.json"
+INPUTS = ROOT / "docs/relay-workers/researcher-binding-inputs.json"
 EGRESS_STAGES = {"execution-egress.yaml": "enrollment", "qualification-egress.yaml": "qualification"}
 # Owner decision G3 (relay#277 comment 122379): the qualification stage's workers reach these three
 # pinned Services through measured hostAliases, and trust only the ailab root CA for them.
@@ -125,6 +129,28 @@ def pins_filled(p: dict) -> bool:
     return bool(
         UUID.match(p["installationId"]) and COMMIT.match(p["sourceCommit"]) and AGENT_IMAGE.match(p["agentImage"])
     )
+
+
+def reviewed_agent_image() -> str:
+    """The agent image the reviewed binding inputs pin: `agentRelease`'s for an agent-only update (runbook,
+    "Agent-only update"), else `release`'s."""
+    inputs = json.loads(INPUTS.read_text(encoding="utf-8"))
+    return (inputs["agentRelease"] if "agentRelease" in inputs else inputs["release"])["agentImage"]
+
+
+def check_pins(p: dict, definition: dict) -> None:
+    """Filled pins against the bundle's definition. installationId and sourceCommit exactly. sourceCommit
+    is the RUNTIME's commit: the definition's, which Relay's preparation requires to equal the binding's
+    runtime manifest, and the commit of the chart mirrored in ../agent; an agent-only update never
+    changes it. agentImage exactly too, except when the bundle's is the agent image the reviewed inputs
+    pin: then this bundle is the agent-only update (or its reversal) that import writes."""
+    if not pins_filled(p):
+        return
+    if (p["installationId"], p["sourceCommit"]) != (definition["identity"]["installationId"], definition["sourceCommit"]):
+        fail("kubernetes/apps/relay-researcher/pins/pins.yaml differs from the bundle's definition")
+    if p["agentImage"] != definition["agentImage"] and definition["agentImage"] != reviewed_agent_image():
+        fail("kubernetes/apps/relay-researcher/pins/pins.yaml agentImage differs from the bundle's definition, and the "
+             "bundle's agentImage is not the one docs/relay-workers/researcher-binding-inputs.json pins")
 
 
 def measurement_digest(policy: dict) -> str:
@@ -539,6 +565,8 @@ def chart_compare(chart_root: Path, bundle: Path, definition: dict, agent: dict)
         fail(f"{chart} is not the Relay infrastructure-agent chart")
     head = subprocess.run(["git", "-C", str(chart_root), "rev-parse", "HEAD"], check=True,
                           capture_output=True, text=True).stdout.strip()
+    # The chart is the definition's sourceCommit's (the runtime's), under an agent-only update too:
+    # only the image comes from the later release.
     if head != definition["sourceCommit"]:
         fail(f"--chart checkout is at {head}, the definition pins {definition['sourceCommit']}")
     dirty = subprocess.run(["git", "-C", str(chart_root), "status", "--porcelain", "--", "deploy/infrastructure-agent"],
@@ -595,10 +623,7 @@ def check(bundle: Path, chart: Path | None) -> dict:
         fail("the definition's installationId is not a lowercase UUID")
     if not COMMIT.match(definition["sourceCommit"]) or not AGENT_IMAGE.match(definition["agentImage"]):
         fail("the definition's sourceCommit or agentImage is not a reviewed pin shape")
-    p = pins()
-    if pins_filled(p) and (p["installationId"], p["agentImage"], p["sourceCommit"]) != (
-            installation_id, definition["agentImage"], definition["sourceCommit"]):
-        fail("kubernetes/apps/relay-researcher/pins/pins.yaml differs from the bundle's definition")
+    check_pins(pins(), definition)
 
     installation = TREE / "installation"
     compare_objects("10-namespaces.json", tool_list(bundle, "10-namespaces.json"),

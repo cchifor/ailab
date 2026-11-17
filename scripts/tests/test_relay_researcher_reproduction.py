@@ -35,6 +35,11 @@ def load(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def releases(inputs: dict) -> list[dict]:
+    """The pinned releases: `release`, then `agentRelease` when an agent-only update pins one."""
+    return [inputs["release"], *([inputs["agentRelease"]] if "agentRelease" in inputs else [])]
+
+
 def module(name: str, path: Path):
     spec = importlib.util.spec_from_file_location(name, path)
     loaded = importlib.util.module_from_spec(spec)
@@ -75,7 +80,10 @@ class CommittedState(unittest.TestCase):
     def test_imported_pins_are_the_i4_output(self):
         self.require_imported()
         release, approved = self.inputs["release"], self.inputs["installation"]
-        self.assertEqual(self.pins, {"installationId": approved["installationId"], "agentImage": release["agentImage"],
+        # The agent image is the last pinned release's (agentRelease's after an agent-only update); the
+        # source commit is always the runtime's.
+        self.assertEqual(self.pins, {"installationId": approved["installationId"],
+                                     "agentImage": releases(self.inputs)[-1]["agentImage"],
                                      "sourceCommit": release["sourceCommit"]})
         self.assertEqual((self.summary["installationId"], self.summary["agentImage"],
                           self.summary["release"]["sourceCommit"]),
@@ -135,14 +143,16 @@ class CommittedState(unittest.TestCase):
         return {*release["assets"].values(), release["runtimeDigest"], release["sourceCommit"],
                 release["runtimeImage"].rsplit(":", 1)[1], release["agentImage"].rsplit(":", 1)[1],
                 summary["policyDigest"], summary["bindingDigest"], summary["template"]["digest"],
-                *summary["files"].values(), *self.definition["installationPolicy"]["allowedImageDigests"]}
+                *summary["files"].values(), *self.definition["installationPolicy"]["allowedImageDigests"],
+                *(d for r in releases(self.inputs)[1:]
+                  for d in (*r["assets"].values(), r["sourceCommit"], r["agentImage"].rsplit(":", 1)[1]))}
 
     def expected_by_field(self) -> dict:
         """Each committed field the provenance record must state: (its hashes, its other values). Every
         hash must appear (whole or abbreviated) and no other hash may; every other value must appear."""
         release, approved, policy = self.inputs["release"], self.inputs["installation"], self.config["policy"]
         (template,) = policy["allowedTemplates"]
-        repository, agent_digest = release["agentImage"].split("@sha256:")
+        repository, agent_digest = releases(self.inputs)[-1]["agentImage"].split("@sha256:")
         ceiling = policy["installation"]["resourceCeiling"]
         return {
             "installationId": (set(), {approved["installationId"]}),
@@ -211,12 +221,16 @@ class CommittedState(unittest.TestCase):
         # Step I5 commits the record with the import; the pins never land without it.
         self.assertTrue(PROVENANCE.is_file(), f"{PROVENANCE.relative_to(ROOT)} is missing")
         text = PROVENANCE.read_text(encoding="utf-8")
-        assets = self.inputs["release"]["assets"]
-        # The worker assets it lists are exactly the pinned files and hashes (whole or abbreviated).
+        # The worker assets it lists are exactly the pinned files and hashes (whole or abbreviated), of
+        # every pinned release (the agent release's too after an agent-only update).
+        assets = {}
+        for r in releases(self.inputs):
+            for name, digest in r["assets"].items():
+                assets.setdefault(name, set()).add(digest)
         listed = re.findall(r"^\s*[-*]\s*`?([\w.-]+\.json)`?\s*:\s*(.*)$", text, re.M)
         self.assertEqual({name for name, _ in listed}, {n for n in assets if n.startswith("worker-")})
         for name, rest in listed:
-            self.assert_hashes(rest, {assets[name]}, name, required={assets[name]})
+            self.assert_hashes(rest, assets[name], name, required=assets[name] if len(assets[name]) == 1 else set())
         # Each committed field has a table row that states its value: exactly its hashes, all of them,
         # and its other values. Rows are matched by the field's name with or without backticks.
         expected, seen = self.expected_by_field(), set()
@@ -246,13 +260,14 @@ class CommittedState(unittest.TestCase):
                     stated = [json.loads(v) for v in re.findall(r"`(\[[^`]*\])`", cells[1])]
                     self.assertEqual(stated, [listed], f"row {cells[0]!r} must state exactly {listed}")
         self.assertEqual(seen, set(expected), "the provenance record does not state every imported field")
-        # The release it names is the pinned one: every "release <id>" and, where the tag follows it
-        # ("release <id> (<tag>, ..."), that tag. Other version mentions (tools) are not the release.
-        release = self.inputs["release"]
-        self.assertEqual(set(re.findall(r"\brelease (\d+)\b", text)), {str(release["giteaReleaseId"])})
+        # The releases it names are the pinned ones (release, and agentRelease after an agent-only update):
+        # every "release <id>" and, where the tag follows it ("release <id> (<tag>, ..."), that tag, each
+        # named with its tag. Other version mentions (tools) are not a release.
+        pinned = {(str(r["giteaReleaseId"]), r["tag"]) for r in releases(self.inputs)}
+        self.assertEqual(set(re.findall(r"\brelease (\d+)\b", text)), {rid for rid, _ in pinned})
         tagged = re.findall(r"\brelease (\d+)\s*\((v\d+\.\d+\.\d+)(?![\w.])", text)
         self.assertTrue(tagged, "the record does not name the release with its tag")
-        self.assertEqual(set(tagged), {(str(release["giteaReleaseId"]), release["tag"])})
+        self.assertEqual(set(tagged), pinned)
         # Anything else it quotes is a pinned or derived hash.
         self.assert_hashes(text, self.known_digests(), "record")
         self.assertTrue(self.states(self.inputs["installation"]["publicKeyFingerprint"], text),
@@ -267,6 +282,9 @@ class CommittedState(unittest.TestCase):
         self.assertEqual(script.INPUTS, str(INPUTS.relative_to(ROOT)))
         recipe = (ROOT / "justfile").read_text(encoding="utf-8")
         self.assertIn("scripts/relay-researcher-reproduce.py", recipe)
+        # An agent-only update reproduces with the agent release's assets as well (fourth argument).
+        self.assertIn('relay-researcher-reproduce relay assets ref="HEAD" agent_assets="":', recipe)
+        self.assertIn('" --agent-assets " + agent_assets', recipe)
 
 
 if __name__ == "__main__":
