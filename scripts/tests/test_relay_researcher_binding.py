@@ -62,6 +62,12 @@ def template() -> dict:
     return data
 
 
+def agent_source(inputs: dict) -> dict:
+    """Where the agent image comes from: `agentRelease` for an agent-only update (runbook, "Agent-only
+    update"), else `release`. Every runtime value comes from `release` either way."""
+    return inputs["agentRelease"] if "agentRelease" in inputs else inputs["release"]
+
+
 def placeholder_paths(value, path=""):
     if isinstance(value, str):
         return [path] if value.startswith("OPERATOR-FILLS") else []
@@ -123,8 +129,11 @@ class Output(unittest.TestCase):
             self.assertIn(f'"{leaf}"', generator, f"the generator does not fill {leaf}")
         self.assertEqual(self.definition["binding"], self.binding)
         release = self.inputs["release"]
+        # sourceCommit is the runtime's even after an agent-only update (Relay's preparation requires the
+        # runtime manifest's); only the agent image may come from a later release.
         self.assertEqual(self.definition["sourceCommit"], release["sourceCommit"])
-        self.assertEqual(self.definition["agentImage"], release["agentImage"])
+        self.assertEqual(self.definition["agentImage"], agent_source(self.inputs)["agentImage"])
+        self.assertEqual(self.summary["agentImage"], self.definition["agentImage"])
         policy = self.definition["installationPolicy"]
         self.assertEqual(policy["allowedImageDigests"], [release["runtimeImage"].rsplit(":", 1)[1]])
         self.assertEqual(policy["allowedHarnessAdapters"], [self.manifest["adapterName"]])
@@ -143,6 +152,36 @@ class Output(unittest.TestCase):
         self.assertEqual(self.summary["release"]["relayCheckoutHead"], release["sourceCommit"])
         self.assertNotIn("releaseApproval", self.binding)
         self.assertEqual(self.inputs["decisions"]["releaseApproval"], "absent")
+
+    def test_agent_release_is_recorded_only_when_pinned(self):
+        """An agent-only update's `agentRelease` (the generator checks its assets and receipt): a later
+        release, in the agent's own repository, recorded in the summary; without one, the summary is
+        exactly what it was before agent-only updates existed."""
+        agent = self.inputs.get("agentRelease")
+        if agent is None:
+            self.assertNotIn("agentRelease", self.summary)
+            return
+        release = self.inputs["release"]
+        self.assertEqual(set(agent), {"tag", "giteaReleaseId", "sourceCommit", "assets", "agentReceipt", "agentImage"})
+        version = lambda tag: tuple(map(int, re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag).groups()))
+        self.assertGreater(version(agent["tag"]), version(release["tag"]))
+        self.assertRegex(agent["sourceCommit"], r"^[0-9a-f]{40}$")
+        self.assertLessEqual({"SHA256SUMS", "manifest.json", agent["agentReceipt"]}, set(agent["assets"]))
+        self.assertEqual(agent["agentImage"].split("@")[0], release["agentImage"].split("@")[0])
+        self.assertRegex(agent["agentImage"], r"@sha256:[0-9a-f]{64}$")
+        self.assertEqual(self.summary["agentRelease"], {k: agent[k] for k in ("tag", "giteaReleaseId", "sourceCommit",
+                                                                            "assets")})
+
+    def test_generator_takes_only_the_agent_image_from_an_agent_release(self):
+        # What CI can see of the generator (the agent-release test runs it with a synthetic release):
+        # the checkout, definition.sourceCommit and every runtime receipt and asset come from `release`.
+        text = GENERATOR.read_text(encoding="utf-8")
+        self.assertIn('verifyCheckout(args["--relay"], release.sourceCommit)', text)
+        self.assertIn("definition.sourceCommit = release.sourceCommit;", text)
+        self.assertIn('receipt(assets, release.runtimeReceipt, "worker-runtime", release.sourceCommit)', text)
+        # agentRelease has no runtime field to read: main uses only its six agent fields.
+        used = set(re.findall(r"agentRelease\.(\w+)", text.split("async function main")[1]))
+        self.assertLessEqual(used, {"assets", "sourceCommit", "tag", "agentReceipt", "agentImage", "giteaReleaseId"})
 
     def test_g3_fields_in_both_stages(self):
         bundle = bundle_module()

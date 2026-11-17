@@ -8,9 +8,12 @@
  * Run it with that checkout's tsx (Node 22.21 or newer), from the ailab checkout:
  *
  *   <relay>/node_modules/.bin/tsx scripts/relay-researcher-binding.mts \
- *     --relay <relay> --assets <dir> \
+ *     --relay <relay> --assets <dir> [--agent-assets <dir>] \
  *     --installation-id <uuid> --installation-public-key <base64url> --out <new dir>
  *
+ *   --assets  the assets researcher-binding-inputs.json `release` pins (the runtime's release).
+ *   --agent-assets   required exactly when the inputs pin an `agentRelease` (an agent-only update,
+ *             runbook "Agent-only update"), refused otherwise: the assets `agentRelease` pins.
  *   --installation-id / --installation-public-key   the identity Relay approved at step I3. They must
  *             equal the reviewed record (researcher-binding-inputs.json `installation`), whose
  *             fingerprint Relay's publicKeyFingerprint must reproduce; a typo is refused, not built.
@@ -19,12 +22,27 @@
  * The committed docs/relay-workers/researcher-i4/ is this command's output for the recorded identity:
  * the operator's run must reproduce it byte for byte.
  *
+ * Agent-only update (owner decision 2026-11-17): an optional `agentRelease` in the inputs pins a LATER
+ * Relay release from which ONLY the infrastructure-agent image is taken (definition.agentImage, which
+ * Relay's preparation names by digest only). Everything else still comes from `release` alone, as
+ * without it: the checkout (HEAD = release.sourceCommit, whose code seals the binding), the runtime
+ * manifest, runtime receipt and image, definition.sourceCommit (Relay's preparation requires it to equal
+ * the runtime manifest's: installation-preparation.ts "runtime-source"), the template and the binding.
+ * So binding.json, template-preparation-input.json and the binding digest are byte-identical with or
+ * without it; definition.json differs only in agentImage, and summary.json also records agentRelease.
+ * The agent receipt must then come from the agentRelease assets (pinned sha256s), name
+ * agentRelease.sourceCommit and be an infrastructure-agent receipt whose digest-only publication.image
+ * is agentRelease.agentImage (in release.agentImage's repository); that release's manifest.json must
+ * name its sourceCommit and tag; and its tag must be newer than release's. Without `agentRelease` the
+ * agent is release's, exactly as before.
+ *
  * Refuses: a Relay checkout whose HEAD is not the pinned sourceCommit, or that has local changes;
  * a tsx that is not that checkout's; Node older than 22.21; any release asset whose sha256 is not
- * the pinned one; receipts that do not join the manifest; a runtime manifest without the G3 fields
- * the template requires (a BLOCKER: only a rebuilt image can fix it); a template with OPERATOR-FILLS
- * leaves other than the seven this fills; an identity other than the I3 record, or a key Relay's
- * Ed25519 check refuses; any definition Relay's preparePodInstallation refuses.
+ * the pinned one; receipts that do not join the manifest; --agent-assets without an `agentRelease`,
+ * or an `agentRelease` without --agent-assets, or one that fails the checks above; a runtime manifest
+ * without the G3 fields the template requires (a BLOCKER: only a rebuilt image can fix it); a
+ * template with OPERATOR-FILLS leaves other than the seven this fills; an identity other than the I3
+ * record, or a key Relay's Ed25519 check refuses; any definition Relay's preparePodInstallation refuses.
  *
  * Writes a NEW directory (never overwrites) with canonical JSON (Relay canonicalJson + "\n"):
  *   binding.json                     the PodRuntimeBinding
@@ -32,7 +50,8 @@
  *                                    OPERATOR-FILLS leaf filled; input of prepare-pod-installation.ts
  *   template-preparation-input.json  the input of Relay scripts/prepare-worker-templates.ts that
  *                                    seals the same researcher template (for an independent rerun)
- *   summary.json                     the pins, digests and output sha256s
+ *   summary.json                     the pins, digests and output sha256s (and `agentRelease`, with its
+ *                                    tag, Gitea release, sourceCommit and assets, when the inputs pin one)
  * Deterministic: identical inputs give byte-identical files. Reads no secret, contacts nothing.
  */
 import { execFileSync } from "node:child_process";
@@ -57,6 +76,9 @@ const FILLED = [
   "/binding",
 ];
 const MIN_NODE = [22, 21];
+/** The release tags an agent-only update compares: vMAJOR.MINOR.PATCH, nothing else. */
+const TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const AGENT_RELEASE_KEYS = ["agentImage", "agentReceipt", "assets", "giteaReleaseId", "sourceCommit", "tag"];
 
 class Refusal extends Error {}
 const refuse = (message: string): never => {
@@ -68,7 +90,7 @@ const readJson = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 function parseArgs(argv: string[]) {
   const out: Record<string, string> = {};
   const values = new Set(["--relay", "--assets", "--installation-id", "--installation-public-key", "--out",
-    "--fence-object-uid"]);
+    "--fence-object-uid", "--agent-assets"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (values.has(a) && i + 1 < argv.length && !(a in out)) out[a] = argv[++i]!;
@@ -83,6 +105,7 @@ function parseArgs(argv: string[]) {
     "--installation-id": string;
     "--installation-public-key": string;
     "--fence-object-uid"?: string;
+    "--agent-assets"?: string;
   };
 }
 
@@ -131,6 +154,45 @@ function verifyAssets(dir: string, pinned: Record<string, string>) {
   return bytes;
 }
 
+/** A newer vMAJOR.MINOR.PATCH than `than` (both already matched TAG). */
+function newerTag(tag: string, than: string) {
+  const [a, b] = [tag, than].map((t) => TAG.exec(t)!.slice(1).map(Number));
+  for (let i = 0; i < 3; i++) if (a![i] !== b![i]) return a![i]! > b![i]!;
+  return false;
+}
+
+/**
+ * The inputs' `agentRelease` (agent-only update), checked before anything reads its assets: exactly
+ * its six fields, a vMAJOR.MINOR.PATCH tag newer than release's, a 40-hex sourceCommit, pinned sha256s
+ * that include SHA256SUMS, manifest.json and the agent receipt, and a digest-only image in the same
+ * repository as release.agentImage. It never carries a runtime field: nothing else is taken from it.
+ */
+function checkAgentRelease(agent: any, release: any) {
+  if (!agent || typeof agent !== "object" || Array.isArray(agent) ||
+      JSON.stringify(Object.keys(agent).sort()) !== JSON.stringify(AGENT_RELEASE_KEYS))
+    refuse(`agentRelease must be an object with exactly ${AGENT_RELEASE_KEYS.join(", ")}`);
+  if (typeof agent.tag !== "string" || !TAG.test(agent.tag))
+    refuse(`agentRelease.tag ${JSON.stringify(agent.tag)} is not a vMAJOR.MINOR.PATCH release tag`);
+  if (!TAG.test(release.tag)) refuse(`release.tag ${JSON.stringify(release.tag)} is not a vMAJOR.MINOR.PATCH release tag`);
+  if (!newerTag(agent.tag, release.tag))
+    refuse(`agentRelease ${agent.tag} is not newer than release ${release.tag}: an agent-only update takes a LATER agent`);
+  if (!Number.isSafeInteger(agent.giteaReleaseId) || agent.giteaReleaseId <= 0)
+    refuse("agentRelease.giteaReleaseId is not a Gitea release ID");
+  if (typeof agent.sourceCommit !== "string" || !/^[0-9a-f]{40}$/.test(agent.sourceCommit))
+    refuse("agentRelease.sourceCommit is not a 40-hex commit");
+  const assets = agent.assets;
+  if (!assets || typeof assets !== "object" || Array.isArray(assets) ||
+      Object.entries(assets).some(([n, d]) => !/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(n) ||
+        typeof d !== "string" || !/^[0-9a-f]{64}$/.test(d)))
+    refuse("agentRelease.assets is not a map of plain asset file name to sha256");
+  for (const name of ["SHA256SUMS", "manifest.json", agent.agentReceipt])
+    if (typeof name !== "string" || !Object.hasOwn(assets, name)) refuse(`agentRelease.assets does not pin ${name}`);
+  const repository = String(release.agentImage).split("@")[0];
+  if (typeof agent.agentImage !== "string" || agent.agentImage.split("@")[0] !== repository ||
+      !/^[^@]+@sha256:[0-9a-f]{64}$/.test(agent.agentImage))
+    refuse(`agentRelease.agentImage is not a digest-only ${repository} image`);
+}
+
 function placeholderPaths(value: unknown, path = ""): string[] {
   if (typeof value === "string") return value.startsWith(PLACEHOLDER) ? [path] : [];
   if (Array.isArray(value)) return value.flatMap((v, i) => placeholderPaths(v, `${path}/${i}`));
@@ -142,7 +204,14 @@ function placeholderPaths(value: unknown, path = ""): string[] {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const inputs = readJson(INPUTS);
-  const { release, derived, decisions, installation: approved } = inputs;
+  const { release, agentRelease, derived, decisions, installation: approved } = inputs;
+  // Agent-only update: --agent-assets exactly when the inputs pin an agentRelease.
+  const agentOnly = Object.hasOwn(inputs, "agentRelease");
+  if (agentOnly && args["--agent-assets"] === undefined)
+    refuse("researcher-binding-inputs.json pins an agentRelease: --agent-assets <its asset directory> is required");
+  if (!agentOnly && args["--agent-assets"] !== undefined)
+    refuse("--agent-assets is refused: researcher-binding-inputs.json pins no agentRelease (the agent comes from release)");
+  if (agentOnly) checkAgentRelease(agentRelease, release);
   const { relay, head } = verifyCheckout(args["--relay"], release.sourceCommit);
   const relayModule = (path: string) => import(pathToFileURL(join(relay, path)).href);
   const [bindingTs, manifestTs, digestTs, configTs, primitivesTs, templateTs, rolesTs, preparationTs,
@@ -190,21 +259,21 @@ async function main() {
   const manifest = WorkerRuntimeManifest.parse(publishedManifest);
   if (canonicalJson(manifest) !== canonicalJson(publishedManifest))
     refuse("Relay's manifest schema would normalize the published runtime manifest");
-  const receipt = (name: string, component: string) => {
-    const r = JSON.parse(assets[name]!.toString("utf8"));
+  const receipt = (from: Record<string, Buffer>, name: string, component: string, sourceCommit: string) => {
+    const r = JSON.parse(from[name]!.toString("utf8"));
     const image = r.publication?.image;
     if (r.kind !== "relay-worker-image" || r.version !== 1 || r.component !== component ||
-        r.sourceCommit !== release.sourceCommit || r.platform !== "linux/amd64" ||
+        r.sourceCommit !== sourceCommit || r.platform !== "linux/amd64" ||
         typeof image !== "string" || image !== `${image.split("@")[0]}@sha256:${r.publication.manifestSha256}`)
       refuse(`${name} is not the ${component} publish receipt of the pinned commit`);
     return r;
   };
-  const runtimeReceipt = receipt(release.runtimeReceipt, "worker-runtime");
-  const agentReceipt = receipt(release.agentReceipt, "infrastructure-agent");
+  const runtimeReceipt = receipt(assets, release.runtimeReceipt, "worker-runtime", release.sourceCommit);
+  const agentReceipt = receipt(assets, release.agentReceipt, "infrastructure-agent", release.sourceCommit);
   const runtimeImage: string = runtimeReceipt.publication.image;
-  const agentImage: string = agentReceipt.publication.image;
+  const releaseAgentImage: string = agentReceipt.publication.image;
   const runtimeDigest: string = workerRuntimeDigest(manifest);
-  if (runtimeImage !== release.runtimeImage || agentImage !== release.agentImage)
+  if (runtimeImage !== release.runtimeImage || releaseAgentImage !== release.agentImage)
     refuse("the receipts' images are not the pinned images");
   if (runtimeReceipt.runtime?.manifestSha256 !== sha256(manifestBytes) ||
       runtimeReceipt.runtime?.runtimeDigest !== runtimeDigest || runtimeDigest !== release.runtimeDigest ||
@@ -212,6 +281,23 @@ async function main() {
     refuse("the runtime receipt does not name this runtime manifest");
   if (manifest.sourceCommit !== release.sourceCommit || manifest.version !== release.tag.replace(/^v/, ""))
     refuse("the runtime manifest is not built from the pinned release");
+
+  // The agent image: release's, or (agent-only update) agentRelease's, verified from ITS assets. Only
+  // the image is taken from agentRelease; every runtime value above came from release alone.
+  let agentImage = releaseAgentImage;
+  if (agentOnly) {
+    const agentAssets = verifyAssets(resolve(args["--agent-assets"]!), agentRelease.assets);
+    const agentManifest = JSON.parse(agentAssets["manifest.json"]!.toString("utf8"));
+    // The RELEASE manifest.json records the tag itself ("v0.10.3"), exactly as release's check above
+    // compares it; only the worker-runtime manifest drops the "v".
+    if (agentManifest.sourceCommit !== agentRelease.sourceCommit || agentManifest.version !== agentRelease.tag)
+      refuse("the agent release's manifest.json is not the pinned agentRelease (sourceCommit and tag)");
+    const agentOnlyReceipt = receipt(agentAssets, agentRelease.agentReceipt, "infrastructure-agent",
+      agentRelease.sourceCommit);
+    if (agentOnlyReceipt.publication.image !== agentRelease.agentImage)
+      refuse("the agent release's receipt image is not agentRelease.agentImage");
+    agentImage = agentOnlyReceipt.publication.image;
+  }
 
   // G3 in the published runtime (template binding leaf). Only a rebuilt image can change these.
   const template = readJson(TEMPLATE);
@@ -329,6 +415,15 @@ async function main() {
     kind: "ailab.relay-researcher-binding-summary",
     version: 1,
     release: { tag: release.tag, sourceCommit: release.sourceCommit, relayCheckoutHead: head, assets: release.assets },
+    // Only for an agent-only update, so a summary without one is byte-identical to before.
+    ...(agentOnly ? {
+      agentRelease: {
+        tag: agentRelease.tag,
+        giteaReleaseId: agentRelease.giteaReleaseId,
+        sourceCommit: agentRelease.sourceCommit,
+        assets: agentRelease.assets,
+      },
+    } : {}),
     installationId,
     publicKeyFingerprint,
     runtimeImage,
