@@ -9,6 +9,16 @@
     "retention": {
       "dryRun": false,
       "policies": [
+{#- zot applies only the FIRST policy whose repositories glob matches a repo, so strive/ci-build/**
+    must precede strive/**, where a ci- tag matches no keepTags entry and would be deleted. It must
+    NOT widen to strive/ci/**: those existing repos keep their strive/** rules. #}
+        {
+          "repositories": ["strive/ci-build/**"],
+          "deleteUntagged": true,
+          "keepTags": [
+            { "patterns": ["^ci-[0-9a-f]{40}$"], "mostRecentlyPushedCount": {{ registry_zot_strive_ci_build_keep_recent }}, "pushedWithin": {{ registry_zot_strive_ci_build_keep_within | to_json }} }
+          ]
+        },
         {
           "repositories": ["strive/**"],
           "deleteUntagged": true,

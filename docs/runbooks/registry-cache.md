@@ -14,6 +14,35 @@ just ping-registry                                 # connectivity check
 
 The `sync` config is rendered into `/etc/zot/config.json`; a change triggers the `restart zot` handler.
 
+### Applying a config change (pin the live binary)
+
+There is no config-only apply: `registry.yml` always runs the WHOLE role. Besides `config.json`,
+it converges the htpasswd lines, the certs, the sync upstream credentials and the systemd unit, and
+a change to any of them restarts zot. Its `get_url` task also converges `/usr/local/bin/zot` to
+`registry_zot_version` (the renovate pin in defaults), and the live binary can lag it (2026-11-17:
+live `v2.1.18`, pin `v2.1.23`). For a config or auth change, pin the version that is running:
+
+```bash
+python scripts/node-ssh.py 192.168.0.2 "pct exec 5004 -- /usr/local/bin/zot -v"   # e.g. commit v2.1.18-0-g...
+# WSL: ansible ignores the world-writable /mnt/c ansible.cfg, so name it explicitly
+export ANSIBLE_CONFIG=/mnt/c/Users/chifo/work/home/ailab/ansible/ansible.cfg
+cd /mnt/c/Users/chifo/work/home/ailab/ansible
+SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey ansible-playbook registry.yml -e registry_zot_version=v2.1.18
+```
+
+With the live version pinned, the binary task is EXPECTED to be a no-op: `get_url` sends a
+conditional request (`If-Modified-Since` = the binary's mtime) and gets `304`, or downloads the same
+bytes, and the file's mode/owner already match (`0755 root:root`), so `changed=False` and no
+restart from it. It still runs, and it would replace the binary (and restart zot) if the bytes or
+those attributes differed, so confirm `zot -v` first. The role has no task-level switch to skip it;
+the pin is the gate.
+
+**Any change the role makes restarts zot** (`restart zot` handler: config, htpasswd, certs, sync
+credentials, unit) = a registry outage while zot
+re-parses the store before binding :443 (40 s warm, up to ~8 min cold). Pulls and pushes fail
+meanwhile. Poll `GET https://registry.chifor.me/v2/` for 200 (`systemctl is-active` reports active
+early). Batch changes into one apply where possible.
+
 ## Enable Docker Hub upstream auth (recommended)
 
 **Now optional (failover only) — see ADR 0014 Update 2026-06-23.** The docker.io sync upstream is
@@ -80,6 +109,11 @@ prefix (`read`/`create`/`update`, no `delete`), listed in `registry_zot_scoped_p
 |---|---|---|
 | `trueswarm-ci` | `trueswarm/**` | `cchifor/trueswarm` `.gitea/workflows/publish.yml` (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`) |
 | `workbricks-ci` | `workbricks/**` | `cchifor/workbricks` image-publish CI (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`; Workbricks OR-12). The cell pulls anonymously, like every other image; the registry is LAN-only. |
+| `strive-ci-push` | `strive/ci-build/**` | `cchifor/platform` e2e build-once (platform#2823): stack-smoke pushes `strive/ci-build/<image>:ci-<40-hex commit>` and the journey shards pull by digest. A `ci-` tag is kept while it is among the 10 most recently pushed in its repository OR was pushed within 24h (`registry_zot_strive_ci_build_keep_recent` / `_keep_within`); its retention policy precedes `strive/**`. NOT `strive/ci/**`: those 12 existing platform repos keep their `strive/**` rules. Entry carries `password_optional: true` until its SOPS key exists. |
+
+A logged-in scoped user has **no** rights outside its prefix, not even read: zot's `anonymousPolicy`
+applies only to unauthenticated requests. Use the credential for the push only (platform#2823 writes
+it into a throwaway `DOCKER_CONFIG`); pulls stay anonymous or use `pull`.
 
 zot authorizes a repo by its **longest matching pattern only** — policies are not merged — so each
 scoped entry repeats the `**` grants (anonymous read, `ci`, `pull`, admins) via the template macro.
@@ -88,7 +122,13 @@ The password is `registry_scoped_push_passwords[<user>]` in `registry.sops.yaml`
 **never projected to dev-workers**. An agent ships an image by pushing a `v*` tag (or
 `workflow_dispatch`) on its repo and then pinning the digest in the repo's deploy overlay, which
 Flux reconciles. Adding a project = a new list entry + a SOPS key + `just registry` + the two repo
-secrets (the role asserts the SOPS key exists before touching the htpasswd).
+secrets (the role asserts the SOPS key exists before touching the htpasswd). To merge the entry
+before the key exists, mark it `password_optional: true`: the play then skips that user with a
+`SKIPPED` message instead of failing, and REMOVES any htpasswd line it has, so the user cannot log
+in until the key exists. Drop the flag in the change that adds the key; while both exist, every
+run prints a `STALE FLAG` message. Add the key
+UNDER `registry_scoped_push_passwords` (the file's `encrypted_regex` covers that map; a new
+top-level key would be stored in plaintext).
 
 **Retiring a project:** removing the list entry drops its policy, but the htpasswd task only
 adds/updates, so the user would still AUTHENTICATE. Remove it explicitly, then the other homes:
@@ -123,8 +163,18 @@ path. Zot `gc` (every `gcInterval`, now 1h) reclaims the orphaned blobs.
 The store lives on the mp0 data disk; its desired size is `kubernetes/infra/registry-lxc`
 `data_gb` (including effective overrides). Check `pct config 5004` and the filesystem for the live size. A
 `storage.retention` policy (config.json.j2) bounds growth with policies evaluated **in order**,
-each more specific one listed before the catch-all it would otherwise fall through to:
+each more specific one listed before the catch-all it would otherwise fall through to (zot applies
+only the FIRST policy whose glob matches a repo):
 
+- `strive/ci-build/**` (listed before `strive/**`) keeps a `ci-<40-hex commit>` tag while it is
+  among the `registry_zot_strive_ci_build_keep_recent` (10) most recently pushed in its repo OR was
+  pushed within `registry_zot_strive_ci_build_keep_within` (24h). Both rules sit in ONE keepTags
+  entry, which zot ORs; the time floor stops a burst of pushes evicting a running pipeline's image.
+  Every other tag there is pruned. These are cchifor/platform's per-pipeline e2e images
+  (platform#2823); under `strive/**` a `ci-` tag would match no keep pattern and the hourly GC would
+  delete it mid-pipeline. Never widen it to `strive/ci/**`: that namespace already holds platform
+  repos (`strive/ci/platform-e2e-local`, ...) whose `latest`/`ailab*`/`sha-*` tags rely on
+  `strive/**`, and a first-match policy there would strip them.
 - `strive/**` keeps `latest` + the `registry_zot_strive_keep_recent` (100) most-recently-pushed
   `sha-<commit>` tags per repo and GC reclaims the rest.
 - `agentforge/**` keeps `latest` + the `registry_zot_agentforge_keep_recent` (40)
