@@ -516,6 +516,9 @@ signed on the live hub.
       extraction rehearsal in [relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md)),
       exact-UID cleanup, and the agent at zero keeping the bootstrap Secret past its expiry `E`
       (Relay #536).
+- [ ] U9: exactly one agent -> journal connection on TCP 8443, admitted by
+      `relay-infrastructure-agent-journal-egress` (the chart's `10.96.0.42/32` rule admits nothing under
+      Cilium), and no agent egress to the journal on any other port.
 
 ## 5. Cross-cutting checks
 
@@ -806,7 +809,11 @@ before the bundle (§3.5), settled in the E6 rehearsal.
 6. U6: settling an unknown slot by hand: no operator command or UI at `c0fe50f0`.
 7. U7: how often local-tool prompts raise native approval requests.
 8. U8: the R1 whole-second `T` (supported by `least(original, grant)`; the 71/73 race remains).
-9. U9: the agent's journal egress values (`networkPolicy.candidateJournalCidrs`, port 8443).
+9. U9: decided 2026-11-17. The chart values are `networkPolicy.candidateJournalCidrs: ["10.96.0.42/32"]`,
+   port 8443 (inert under Cilium, required by the chart), and ailab's selector policy
+   `relay-infrastructure-agent-journal-egress` admits agent -> journal on TCP 8443
+   ([relay-candidate-run-generator.md](relay-candidate-run-generator.md)). E6 must show exactly one
+   agent -> journal connection on 8443 (the rehearsal list in §4).
 10. U10: R6's older snapshot taken from §3.4's own pre-migration dump.
 11. U11: the Talos and `chronyc` clock commands on the operator's hosts.
 12. U12: all durations in §4 and every `D_x`, until E6 measures them.
