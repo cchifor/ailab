@@ -10,9 +10,14 @@ Where a runbook gives a command, it is copied verbatim. A command that the runbo
 marked **NEW (not in the runbook)**; the owner reviews those before use. Values that git cannot give
 are `<operator fills: …>` placeholders, each saying where to read the value.
 
-File line numbers are those of this file's own merge: ailab `main` `bce1a51b` plus this PR's one
-link sentence in the hub runbook. The open H6 PR (#1811) edits the hub runbook's "Staged here" table,
-so once it merges, the hub runbook's later line numbers shift by a few lines.
+**How to read the citations.** Every step names its source by runbook and section or step number (for
+example "Router connection step 3", or the budget runbook's "Changing the witness"), and the section
+is the anchor. The `file:line` ranges point to the exact lines, as they stand in the commit that
+merges this file: ailab `main` `bce1a51b` plus this PR's one link sentence in the hub runbook.
+
+Later edits to those runbooks will move the lines; the open H6 PR (#1811), for one, shifts the hub
+runbook's later lines by a few. To read a cited range after that, use
+`git show <the commit that merged this file>:docs/runbooks/<file>`, or follow the named section.
 
 ## Starting state
 
@@ -31,6 +36,12 @@ Operator readbacks of 2026-11-16. Step 0 checks them again.
   `af/relay-budget/witness` version 1, sha256
   `8e5a41044815b67975b794d9d82dc3535bd900fbd9e74d1f4c0c05611c13527b` (#1753 comment 123957). The
   Router and Relay Pods both mounted A when they rolled (#1807 and #1805).
+
+  Both components mount `witness.json` as a `subPath` file: `subPath: witness.json` in
+  `kubernetes/components/llm-router-worker-budget-reader/deployment.yaml` and
+  `kubernetes/components/relay-worker-budget-client/deployment.yaml`. A `subPath` file never updates
+  in a running Pod (`relay-worker-budget-authority.md:376-378`), so a Pod's mounted witness is the one
+  from its own start until it is rolled. Every "mounted" readback below relies on that.
 - **OpenBao.** `af/relay-router` is empty. ExternalSecret `relay/relay-router-files` is
   `SecretSyncedError`.
 - **Collector Secrets.** There is no `relay-control-metrics` Secret in any namespace, and no
@@ -41,6 +52,10 @@ Operator readbacks of 2026-11-16. Step 0 checks them again.
 - **Context.** Use `kubectl --context admin@ai` only. The default context is a different cluster.
 - **One step at a time.** Run the pre-checks, then the commands, then the readback. Any failed
   pre-check or readback stops the sequence. Nothing later runs until the owner has decided.
+- **The session.** Steps may be days apart. Every step runs in a bash (4.4 or later) shell where
+  step 0's command block has been run. In a new shell, run that block again first: it defines the
+  helpers and changes nothing live. The helpers set their own shell options, so their failure checks
+  do not depend on how the shell was started.
 - **Secrets move in pipes only.** They never appear in argv, a transcript, a log, a PR or an issue.
   Use the style of installation runbook steps I3 and I8 (`relay-researcher-installation.md:295-315`
   and `:418-432`):
@@ -114,9 +129,10 @@ bao token lookup -format=json | jq '.data | {display_name, policies, expire_time
 # so nothing is overwritten. (It sets a variable rather than printing, so the counter survives.)
 capfile() { CAPN=$(( ${CAPN:-0} + 1 )); CAPF="$(printf '%s/cap/%05d-%s-%s' "$ev" "$CAPN" "$(date -u +%Y%m%dT%H%M%SZ)" "$1")"; }
 # cap <label> <command...>: run a command, keep its output under $ev/cap, and return the command's own status.
-cap() { capfile "$1"; f="$CAPF.txt"; shift; { date -u +%FT%TZ; "$@"; } 2>&1 | tee "$f"; }
+cap() { local -; set -o pipefail; capfile "$1"; f="$CAPF.txt"; shift; { date -u +%FT%TZ; "$@"; } 2>&1 | tee "$f"; }
 # Router admin API call. The bearer reaches curl on stdin (-H @-, curl 7.55 or later). No -f, so error bodies stay visible.
 radmin() {
+  local -; set -o pipefail
   <operator fills: a command that prints the Router admin bearer (the ROUTER_ADMIN_TOKEN value) from the operator's credential store> \
     | sed 's/^/Authorization: Bearer /' | curl -sS -H @- "$@"
 }
@@ -128,21 +144,27 @@ lsql() {
 # A ledger write from "$ev/<name>.sql", output kept in a new evidence file each time.
 # Prints COMMITTED only on psql exit 0 plus a literal COMMIT line (124071 §4.1).
 lwrite() {
+  local -; set -o pipefail
   capfile "$1"; out="$CAPF.out"
   lsql < "$ev/$1.sql" 2>&1 | tee "$out"; rc=$?
   if [ "$rc" -eq 0 ] && grep -qx 'COMMIT' "$out"; then echo "$1 COMMITTED ($out)"; else echo "$1 NOT COMMITTED (rc=$rc, $out)"; return 1; fi
 }
 # The witness's sha256 in OpenBao, in each ExternalSecret-rendered Secret, and as mounted in each Pod.
 # Each fails (non-zero) when a read fails, so a failed read can never look like the empty witness's hash.
+# They set pipefail themselves (local -, bash 4.4+), so this holds in any shell.
 # An empty witness.json value is legitimate (drill B); a missing key is an error.
-wsha_bao()    { bao kv get -mount=af -field=witness relay-budget/witness | sha256sum; }
-wsha_secret() { kubectl --context admin@ai -n "$1" get secret "$2" -o json \
+wsha_bao()    { local -; set -o pipefail; bao kv get -mount=af -field=witness relay-budget/witness | sha256sum; }
+wsha_secret() { local -; set -o pipefail; kubectl --context admin@ai -n "$1" get secret "$2" -o json \
                   | jq -er '.data["witness.json"] // error("witness.json missing")' | base64 -d | sha256sum; }
 wsha_router() { kubectl --context admin@ai -n llm-router exec deploy/llm-router -c router -- sha256sum /run/llm-router-worker-budget/witness.json; }
 wsha_relay()  { kubectl --context admin@ai -n relay exec deploy/relay -c relay -- sha256sum /run/relay-worker-budget/witness.json; }
-plugins() { radmin https://router.chifor.me/admin/v1/plugins | jq -c '.[] | select(.id=="worker-budget-authority" or .id=="relay-keys") | {id, state, error}'; }
+# plugins: the two plugins' states. Fails loudly if the answer is not the documented array of PluginInfo.
+plugins() {
+  local -; set -o pipefail
+  radmin https://router.chifor.me/admin/v1/plugins | jq -ec 'if type == "array" then (.[] | select(.id=="worker-budget-authority" or .id=="relay-keys") | {id, state, error}) else error("plugins: not an array") end'
+}
 # The Router trust document as ESO rendered it (public keys only).
-trust() { kubectl --context admin@ai -n llm-router get secret llm-router-relay-trust -o json | jq -r '.data["trust.json"]' | base64 -d; }
+trust() { local -; set -o pipefail; kubectl --context admin@ai -n llm-router get secret llm-router-relay-trust -o json | jq -er '.data["trust.json"]' | base64 -d; }
 ```
 
 **Baseline readback.** This block is read-only. All of it is NEW except the two `bao` lines from
@@ -439,9 +461,13 @@ for k in tenant-id expires-at; do
 done
 kubectl --context admin@ai get prometheus -A -o json | jq -c '.items[] | {name: .metadata.name, sm: .spec.serviceMonitorSelector, ns: .spec.serviceMonitorNamespaceSelector}'
 # RBAC and watch scope of the two identities that use the ServiceMonitor and its token Secret:
-psa="$(kubectl --context admin@ai -n monitoring get prometheus -o jsonpath='{.items[0].spec.serviceAccountName}')"
-osa="$(kubectl --context admin@ai -n monitoring get deploy -o json | jq -r '.items[] | select(.metadata.name | endswith("-operator")) | .spec.template.spec.serviceAccountName')"
-echo "prometheus=$psa operator=$osa"
+# Each lookup must find exactly one identity; anything else stops here instead of building a malformed --as.
+psa="$(kubectl --context admin@ai -n monitoring get prometheus -o json \
+  | jq -er '[.items[].spec.serviceAccountName] | if length == 1 then .[0] else error("expected one Prometheus, got \(length)") end')" &&
+osa="$(kubectl --context admin@ai -n monitoring get deploy -o json \
+  | jq -er '[.items[] | select(.metadata.name | endswith("-operator")) | .spec.template.spec.serviceAccountName]
+            | if length == 1 then .[0] else error("expected one operator Deployment, got \(length)") end')" &&
+echo "prometheus=$psa operator=$osa" || echo "STOP: identity lookup failed"
 for v in "get secrets -n monitoring" "list servicemonitors.monitoring.coreos.com -n monitoring"; do
   echo "operator $v: $(kubectl --context admin@ai auth can-i $v --as="system:serviceaccount:monitoring:$osa")"
 done
@@ -674,7 +700,10 @@ H6 rollout.
 
 **Pre-checks.**
 
-- Step 4's readback holds, and its client Pod is Running.
+- Step 4's readback holds, and its client Pod is Running. The Pod ends after 24 h
+  (`activeDeadlineSeconds`). If it is not Running, delete it
+  (`kubectl --context admin@ai -n relay-budget-authority delete pod relay-budget-operator-client`) and
+  create it again with step 4's manifest and `wait` before continuing.
 - **Clocks.** The NTP readback of #1753 comment 124071 §6, because the drills set `ready=true`. Find
   the nodes with `kubectl --context admin@ai get pod -o wide` for `relay/relay-*`,
   `llm-router/llm-router-*` and `relay-budget-authority/relay-budget-postgres-0`. Then run
@@ -733,6 +762,7 @@ force_sync() {
 # wait_hashes <sha256>: bounded wait (2 minutes) until OpenBao and both rendered Secrets carry it.
 # A failed read is never a match: each read must succeed before its hash is compared.
 wait_hashes() {
+  local -; set -o pipefail
   for i in $(seq 1 24); do
     a=; b=; c=
     if a="$(wsha_bao | cut -d' ' -f1)" && b="$(wsha_secret relay relay-worker-budget | cut -d' ' -f1)" &&
