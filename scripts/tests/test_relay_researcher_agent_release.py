@@ -31,6 +31,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -53,10 +54,26 @@ FAKE_TAG, FAKE_RELEASE_ID = "v0.10.5", 999001
 FAKE_SOURCE = hashlib.sha1(b"synthetic relay v0.10.5").hexdigest()
 FAKE_DIGEST = hashlib.sha256(b"synthetic infrastructure-agent v0.10.5").hexdigest()
 FAKE_RECEIPT = "worker-image-infrastructure-agent-999001.json"
+# A whole 64- or 40-hex value, or an abbreviated one (prefix…suffix), as the provenance record quotes them.
+HASH = re.compile(r"(?<![0-9a-f])(?:([0-9a-f]{64}|[0-9a-f]{40})|([0-9a-f]{6,})…([0-9a-f]{4,}))(?![0-9a-f])")
 
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def substitute_hashes(text: str, mapping: dict[str, str]) -> str:
+    """Every quoted hash that `mapping` names, whole or abbreviated, replaced in the same form."""
+    def one(match):
+        if match.group(1):
+            return mapping.get(match.group(1), match.group(1))
+        prefix, suffix = match.group(2), match.group(3)
+        hits = {b for a, b in mapping.items() if a.startswith(prefix) and a.endswith(suffix)}
+        if len(hits) != 1:
+            return match.group(0)
+        (b,) = hits
+        return f"{b[:len(prefix)]}…{b[-len(suffix):]}"
+    return HASH.sub(one, text)
 
 
 def module(name: str, path: Path):
@@ -228,14 +245,19 @@ class SyntheticAgentRelease(unittest.TestCase):
         cls.relay, cls.assets = Path(RELAY).resolve(), Path(ASSETS).resolve()
         cls.tsx = cls.relay / "node_modules/.bin/tsx"
         cls.tmp = Path(tempfile.mkdtemp(prefix="relay-agent-release-"))  # 0700, as prepare requires
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, True)  # also when the setup below fails
         cls.tree = cls.tmp / "tree"
         files = run(["git", "-C", ROOT, "ls-files", "-z"]).stdout.split("\0")
         for name in filter(None, files):
             if (ROOT / name).is_file():
                 (cls.tree / name).parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(ROOT / name, cls.tree / name)
-        cls.inputs_text = (cls.tree / INPUTS).read_text(encoding="utf-8")
-        cls.inputs = json.loads(cls.inputs_text)
+        # The runtime-only inputs: the committed ones without any agentRelease (the committed state may
+        # already be a real agent-only update; the synthetic one then replaces it).
+        text = (cls.tree / INPUTS).read_text(encoding="utf-8")
+        cls.inputs = json.loads(text)
+        cls.committed_agent = cls.inputs.pop("agentRelease", None)
+        cls.runtime_inputs_text = text if cls.committed_agent is None else json.dumps(cls.inputs, indent=2) + "\n"
         cls.release = cls.inputs["release"]
         cls.fence = json.loads((ROOT / I4 / "definition.json").read_text(encoding="utf-8"))["identity"].get(
             "fenceObjectUid")
@@ -251,20 +273,16 @@ class SyntheticAgentRelease(unittest.TestCase):
         cls.updated_bundle = cls.prepare(cls.updated[1])
 
     @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmp, ignore_errors=True)
-
-    @classmethod
     def set_inputs(cls, agent: dict | None) -> None:
-        """The copy's inputs: the committed file, plus `agent` as agentRelease."""
+        """The copy's inputs: the runtime-only inputs, plus `agent` as agentRelease."""
         if agent is None:
-            (cls.tree / INPUTS).write_text(cls.inputs_text, encoding="utf-8")
+            (cls.tree / INPUTS).write_text(cls.runtime_inputs_text, encoding="utf-8")
         else:
             write_json(cls.tree / INPUTS, {**cls.inputs, "agentRelease": agent})
 
     @classmethod
     def generate(cls, agent: dict | None, agent_assets: Path | None = None, *, inputs_agent=True):
-        """Run the copy's generator; `agent` is the inputs' agentRelease (None: the committed inputs)."""
+        """Run the copy's generator; `agent` is the inputs' agentRelease (None: runtime-only inputs)."""
         cls.set_inputs(agent if inputs_agent else None)
         cls.counter += 1
         out = cls.tmp / f"i4-{cls.counter}"
@@ -299,11 +317,24 @@ class SyntheticAgentRelease(unittest.TestCase):
         return (directory / name).read_bytes()
 
     def test_1_without_an_agent_release_the_committed_output(self):
-        out = self.base[1]
-        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted(p.name for p in (ROOT / I4).iterdir()))
-        for name in (p.name for p in out.iterdir()):
-            self.assertEqual(self.read(out, name), self.read(ROOT / I4, name), name)
+        out, committed = self.base[1], ROOT / I4
+        self.assertEqual(sorted(p.name for p in out.iterdir()), sorted(p.name for p in committed.iterdir()))
         self.assertNotIn("agentRelease", json.loads(self.read(out, "summary.json")))
+        if self.committed_agent is None:
+            for name in (p.name for p in out.iterdir()):
+                self.assertEqual(self.read(out, name), self.read(committed, name), name)
+            return
+        # The committed state is a real agent-only update: the runtime-only output is it, but release's agent.
+        for name in ("binding.json", "template-preparation-input.json"):
+            self.assertEqual(self.read(out, name), self.read(committed, name), name)
+        image = self.committed_agent["agentImage"]
+        self.assertEqual(json.loads(self.read(committed, "definition.json"))["agentImage"], image)
+        self.assertEqual(self.read(committed, "definition.json").replace(image.encode(), self.release["agentImage"].encode()),
+                         self.read(out, "definition.json"))
+        s0, s1 = (json.loads(self.read(d, "summary.json")) for d in (out, committed))
+        strip = lambda s: {**{k: v for k, v in s.items() if k not in ("agentImage", "agentRelease")},
+                           "files": {k: v for k, v in s["files"].items() if k != "definition.json"}}
+        self.assertEqual(strip(s1), strip(s0))
 
     def test_2_agent_release_changes_only_the_agent_image(self):
         base, updated = self.base[1], self.updated[1]
@@ -354,14 +385,14 @@ class SyntheticAgentRelease(unittest.TestCase):
         done = self.bundle_tool("check", self.updated_bundle)
         self.assertEqual(done.returncode, 0, done.stderr)
         pins, config = self.read(self.tree, PINS), self.read(self.tree, CONFIG)
+        (previous,) = re.findall(r'^  agentImage: "([^"]+)"$', pins.decode(), re.M)  # release's, or a real update's
         done = self.bundle_tool("import", self.updated_bundle)
         self.assertEqual(done.returncode, 0, done.stderr)
         # pins.yaml differs only in agentImage; the agent config is byte-identical.
         self.assertEqual(self.read(self.tree, CONFIG), config)
         changed = [(a, b) for a, b in zip(pins.decode().splitlines(), self.read(self.tree, PINS).decode().splitlines())
                    if a != b]
-        self.assertEqual(changed, [(f'  agentImage: "{self.release["agentImage"]}"',
-                                    f'  agentImage: "{self.agent["agentImage"]}"')])
+        self.assertEqual(changed, [(f'  agentImage: "{previous}"', f'  agentImage: "{self.agent["agentImage"]}"')])
         self.assertEqual(len(pins.splitlines()), len(self.read(self.tree, PINS).splitlines()))
         # Once imported, a bundle with release's agent is stale.
         done = self.bundle_tool("check", self.base_bundle, chart=False)
@@ -380,15 +411,26 @@ class SyntheticAgentRelease(unittest.TestCase):
         done = suite("test_relay_researcher_reproduction.py")
         self.assertEqual(done.returncode, 1)
         self.assertIn("FAIL: test_provenance_agrees_with_the_pins", done.stderr)
-        record = (self.tree / PROVENANCE).read_text(encoding="utf-8")
-        old_digest = self.release["agentImage"].rsplit(":", 1)[1]
-        abbreviated = f"{REPOSITORY}@sha256:{old_digest[:8]}…{old_digest[-4:]}"
-        self.assertEqual(record.count(abbreviated), 1)
-        record = record.replace(abbreviated, f"{REPOSITORY}@sha256:{FAKE_DIGEST[:8]}…{FAKE_DIGEST[-4:]}")
-        record = record.replace("\n| File / field |", (
-            f"\nAgent-only update (`agentRelease`): Gitea release {FAKE_RELEASE_ID} ({FAKE_TAG}, source "
-            f"`{FAKE_SOURCE}`), with these asset sha256s:\n\n"
-            f"- `{FAKE_RECEIPT}`: `{self.agent['assets'][FAKE_RECEIPT]}`\n\n| File / field |"), 1)
+        original = (self.tree / PROVENANCE).read_text(encoding="utf-8")
+        # The previous agent image (release's, or a committed real update's) becomes the synthetic one.
+        mapping = {previous.rsplit(":", 1)[1]: FAKE_DIGEST}
+        real = self.committed_agent
+        if real is None:
+            record = original.replace("\n| File / field |", (
+                f"\nAgent-only update (`agentRelease`): Gitea release {FAKE_RELEASE_ID} ({FAKE_TAG}, source "
+                f"`{FAKE_SOURCE}`), with these asset sha256s:\n\n"
+                f"- `{FAKE_RECEIPT}`: `{self.agent['assets'][FAKE_RECEIPT]}`\n\n| File / field |"), 1)
+        else:
+            # The record already states a real agent release: restate it as the synthetic one.
+            mapping[real["sourceCommit"]] = FAKE_SOURCE
+            for name, digest in real["assets"].items():
+                mapping[digest] = self.agent["assets"][FAKE_RECEIPT if name == real["agentReceipt"] else name]
+            record = original.replace(f"`{real['agentReceipt']}`", f"`{FAKE_RECEIPT}`")
+            record = re.sub(rf"\brelease {real['giteaReleaseId']}\b(\s*\(){re.escape(real['tag'])}",
+                            rf"release {FAKE_RELEASE_ID}\g<1>{FAKE_TAG}", record)
+            record = re.sub(rf"\brelease {real['giteaReleaseId']}\b", f"release {FAKE_RELEASE_ID}", record)
+        record = substitute_hashes(record, mapping)
+        self.assertNotEqual(record, original)
         (self.tree / PROVENANCE).write_text(record, encoding="utf-8")
         # Every test runs (none skips: the pins are imported), and passes.
         for name in ("test_relay_researcher_binding.py", "test_relay_researcher_reproduction.py",

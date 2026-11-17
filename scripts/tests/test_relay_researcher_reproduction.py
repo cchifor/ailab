@@ -227,10 +227,13 @@ class CommittedState(unittest.TestCase):
         for r in releases(self.inputs):
             for name, digest in r["assets"].items():
                 assets.setdefault(name, set()).add(digest)
-        listed = re.findall(r"^\s*[-*]\s*`?([\w.-]+\.json)`?\s*:\s*(.*)$", text, re.M)
-        self.assertEqual({name for name, _ in listed}, {n for n in assets if n.startswith("worker-")})
-        for name, rest in listed:
-            self.assert_hashes(rest, assets[name], name, required=assets[name] if len(assets[name]) == 1 else set())
+        listed = {}
+        for name, rest in re.findall(r"^\s*[-*]\s*`?([\w.-]+\.json)`?\s*:\s*(.*)$", text, re.M):
+            listed.setdefault(name, []).append(rest)
+        self.assertEqual(set(listed), {n for n in assets if n.startswith("worker-")})
+        # A name both releases pin (with different bytes) is listed once per release: every digest stated.
+        for name, rests in listed.items():
+            self.assert_hashes(" ".join(rests), assets[name], name, required=assets[name])
         # Each committed field has a table row that states its value: exactly its hashes, all of them,
         # and its other values. Rows are matched by the field's name with or without backticks.
         expected, seen = self.expected_by_field(), set()

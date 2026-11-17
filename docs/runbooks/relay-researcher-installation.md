@@ -559,7 +559,9 @@ python3 scripts/relay-researcher-bundle.py check /operator/researcher-bundle-age
 python3 scripts/relay-researcher-bundle.py import /operator/researcher-bundle-agent --chart /path/to/relay
 git diff --stat kubernetes/apps/relay-researcher   # pins.yaml only, its agentImage line only
 # 5. Update docs/relay-workers/researcher-i5-provenance.md: the agentImage row (the new digest, from
-#    the agentRelease receipt) and the agent release with its tag and asset sha256s. Commit, then:
+#    the agentRelease receipt) and the agent release ("Gitea release <id> (<tag>, source <commit>)")
+#    with its worker asset sha256s. The committed-state tests require both. Commit, then:
+python3 -m unittest discover -s scripts/tests -p 'test_relay_*.py'
 just relay-researcher-reproduce /path/to/relay /operator/release-assets HEAD /operator/agent-release-assets
 ```
 
@@ -586,9 +588,14 @@ digest (`kubectl -n relay-infra-control get pod -l app.kubernetes.io/name=relay-
 higher, the installation `ready` with the fence, recovery and enrollment fields unchanged, the Lease
 held and renewing, and the slot unchanged (quota `pods` 0, the gate, no Pods).
 
-**Rollback.** Remove `agentRelease` and regenerate: the output is the previous one byte for byte,
-`check` accepts the bundle again (the inputs' agent image is `release`'s), and `import` writes
-`release.agentImage` back. Reproduce with the two-argument form.
+**Rollback.** One PR, the same steps without the agent release: remove `agentRelease` and
+regenerate without `--agent-assets` (the output is the previous one byte for byte), then prepare,
+`check` (it accepts the bundle again: the inputs' agent image is `release`'s) and `import` (it writes
+`release.agentImage` back). Restore the provenance record too: the agentImage row back to
+`release.agentImage`'s digest and the agent release's paragraph removed (`git show
+<the commit before the update>:docs/relay-workers/researcher-i5-provenance.md`). The committed-state
+tests refuse a record that still names the agent release. Then run them and the two-argument
+reproduction.
 
 ## Qualification stage (owner decision G3)
 
