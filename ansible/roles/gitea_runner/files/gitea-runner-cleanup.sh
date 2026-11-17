@@ -140,6 +140,10 @@ BUILDKIT_DB="${GITEA_CLEANUP_BUILDKIT_DB:-/var/lib/docker/buildkit/cache.db}" # 
 # Leaked buildx builders (a read-only metric, see write_buildx_leak_metric): a builder container counts as
 # leaked once BuildKit has written nothing to its state volume for this long (12h, against a 3h job timeout).
 BUILDX_LEAK_IDLE_SEC="${GITEA_CLEANUP_BUILDX_LEAK_IDLE_SEC:-43200}"
+# Sizing a leaked volume walks it (du), so each size is cached this long per volume, and recomputed sooner
+# when the volume's activity changes.
+BUILDX_SIZE_TTL_SEC="${GITEA_CLEANUP_BUILDX_SIZE_TTL_SEC:-3600}"
+BUILDX_SIZE_CACHE="${GITEA_CLEANUP_BUILDX_SIZE_CACHE:-$(dirname "$HEAL_STATE")/buildx-size.cache}"
 
 # (No docker CLI -> exit 0 happens at the start of section 0, AFTER the runner recovery, which needs
 # only systemctl: a heal that left the runner stopped must still be recovered without docker.)
@@ -367,9 +371,12 @@ write_heal_beacon() { # <dangling_record 0|1>
 # whose own state volume shows no BuildKit write for BUILDX_LEAK_IDLE_SEC. Not the container's age: a
 # builder that later jobs reuse by name (rmv-builder on ci-runner-9) can be weeks old and in use, and a
 # build writes BuildKit's bbolt databases (cache.db, history.db, runc-overlayfs/metadata_v2.db, ...), so
-# their newest mtime is the builder's last activity. A container with no state volume is not counted.
+# their newest mtime is the builder's last activity. A builder whose databases cannot be found (none yet,
+# or a layout this does not know) is UNKNOWN and not counted: a directory's own mtime says nothing about
+# writes to the files in it. A container with no state volume is not counted either.
 # Written to its own file every tick; a read that fails or times out writes NOTHING, so the last value
-# stays, as the heal beacon does.
+# stays, as the heal beacon does. Sizes come from a per-volume cache (BUILDX_SIZE_CACHE, see
+# buildx_volume_bytes), so a leaked volume is walked at most once per BUILDX_SIZE_TTL_SEC.
 BUILDX_LEAK_FILE="$TEXTFILE_DIR/gitea_runner_buildx_leak.prom"
 # The mountpoint of volume <v>; non-zero when unreadable.
 buildx_volume_dir() {
@@ -377,27 +384,45 @@ buildx_volume_dir() {
   mp="$(timeout 30 docker volume inspect -f '{{.Mountpoint}}' "$1" 2>/dev/null)" && [ -n "$mp" ] && [ -d "$mp" ] || return 1
   printf '%s' "$mp"
 }
-# Bytes the directory <dir> holds on disk; non-zero when unreadable.
-buildx_dir_bytes() {
-  local b
-  b="$(timeout 120 du -sxB1 "$1" 2>/dev/null | cut -f1)" && is_num "$b" || return 1
-  printf '%s' "$b"
-}
 # Epoch seconds of BuildKit's last write in the state dir <dir>: the newest mtime among the *.db files in
-# its first three levels and the dir itself (so a dir with no database still has an answer). Bounded and
-# cheap: no walk of the snapshots. Non-zero when unreadable.
+# its first three levels. Bounded and cheap: no walk of the snapshots. 0 = found; 1 = the read failed;
+# 2 = no database there, so the activity is UNKNOWN.
 buildx_last_write() {
-  local dbs root newest
+  local dbs newest
   dbs="$(timeout 30 find "$1" -maxdepth 3 -type f -name '*.db' -printf '%T@\n' 2>/dev/null)" || return 1
-  root="$(stat -c %Y "$1" 2>/dev/null)" && is_num "$root" || return 1
-  newest="$(printf '%s\n%s\n' "$dbs" "$root" | sed 's/\..*$//' | sort -n | tail -n 1)"
+  [ -n "$dbs" ] || return 2
+  newest="$(printf '%s\n' "$dbs" | sed 's/\..*$//' | sort -n | tail -n 1)"
   is_num "$newest" || return 1
   printf '%s' "$newest"
 }
+# Bytes volume <v> (mounted at <dir>, activity <act>) holds on disk. From BUILDX_SIZE_CACHE when its entry
+# has the same activity and is younger than BUILDX_SIZE_TTL_SEC; else a bounded du, which refreshes the
+# entry. Every entry used is queued in bx_size_cache_next, which replaces the cache at the end of a pass.
+# The cache is "<volume> <activity> <sized at> <bytes>" lines, parsed and validated, never sourced.
+# The size is left in bx_bytes (not printed: a $(...) subshell would lose the queued entry). Non-zero when
+# the volume cannot be sized.
+bx_size_cache_next=""; bx_bytes=0
+buildx_volume_bytes() {
+  local v="$1" d="$2" act="$3" now ttl line cv ca cat cb b
+  now="$(date +%s)"; ttl="$BUILDX_SIZE_TTL_SEC"; is_num "$ttl" || ttl=3600
+  line="$(awk -v v="$v" '$1 == v { print; exit }' "$BUILDX_SIZE_CACHE" 2>/dev/null)"
+  read -r cv ca cat cb <<< "$line"
+  if [ "${cv:-}" = "$v" ] && [ "${ca:-}" = "$act" ] && is_num "${cat:-}" && is_num "${cb:-}" \
+     && [ "$cat" -le "$now" ] && [ $(( now - cat )) -lt "$ttl" ]; then
+    b="$cb"
+  else
+    b="$(timeout 120 du -sxB1 "$d" 2>/dev/null | cut -f1)" && is_num "$b" || return 1
+    cat="$now"
+  fi
+  bx_size_cache_next="${bx_size_cache_next}${v} ${act} ${cat} ${b}
+"
+  bx_bytes="$b"
+}
 write_buildx_leak_metric() {
   [ "$BEACON" = 1 ] && [ -d "$TEXTFILE_DIR" ] || return 0
-  local idle_max ids cid meta name mounts v mp t b bytes=0 count=0 tmp vols
+  local idle_max ids cid meta name mounts v mp t rc b bytes=0 count=0 tmp vols
   idle_max="$BUILDX_LEAK_IDLE_SEC"; is_num "$idle_max" && [ "$idle_max" -gt 0 ] || idle_max=43200
+  bx_size_cache_next=""
   ids="$(timeout 30 docker ps -aq --filter name=buildx_buildkit_ 2>/dev/null)" \
     || { log "buildx leak metric: cannot list containers -> not updated"; return 0; }
   for cid in $ids; do
@@ -409,10 +434,15 @@ write_buildx_leak_metric() {
     for v in $mounts; do
       [ "$v" = "buildx_buildkit_${name#/buildx_buildkit_}_state" ] || continue
       mp="$(buildx_volume_dir "$v")" || { log "buildx leak metric: cannot find $v -> not updated"; return 0; }
-      t="$(buildx_last_write "$mp")" || { log "buildx leak metric: cannot read $v's activity -> not updated"; return 0; }
+      rc=0; t="$(buildx_last_write "$mp")" || rc=$?
+      case "$rc" in
+        0) : ;;
+        2) log "buildx leak metric: no BuildKit database in $v -> activity unknown, not counted"; continue ;;
+        *) log "buildx leak metric: cannot read $v's activity -> not updated"; return 0 ;;
+      esac
       [ $(( $(date +%s) - t )) -ge "$idle_max" ] || continue
-      b="$(buildx_dir_bytes "$mp")" || { log "buildx leak metric: cannot size $v -> not updated"; return 0; }
-      count=$(( count + 1 )); bytes=$(( bytes + b ))
+      buildx_volume_bytes "$v" "$mp" "$t" || { log "buildx leak metric: cannot size $v -> not updated"; return 0; }
+      count=$(( count + 1 )); bytes=$(( bytes + bx_bytes ))
     done
   done
   vols="$(timeout 30 docker volume ls -q --filter dangling=true --filter name=buildx_buildkit_ 2>/dev/null)" \
@@ -420,14 +450,27 @@ write_buildx_leak_metric() {
   for v in $vols; do
     grep -qE '^buildx_buildkit_[A-Za-z0-9][A-Za-z0-9_.-]*_state$' <<< "$v" || continue
     mp="$(buildx_volume_dir "$v")" || { log "buildx leak metric: cannot find $v -> not updated"; return 0; }
-    b="$(buildx_dir_bytes "$mp")" || { log "buildx leak metric: cannot size $v -> not updated"; return 0; }
-    count=$(( count + 1 )); bytes=$(( bytes + b ))
+    # Unattached counts whatever its activity; the activity only keys its cached size ("none" = no database).
+    rc=0; t="$(buildx_last_write "$mp")" || rc=$?
+    case "$rc" in
+      0) : ;;
+      2) t=none ;;
+      *) log "buildx leak metric: cannot read $v's activity -> not updated"; return 0 ;;
+    esac
+    buildx_volume_bytes "$v" "$mp" "$t" || { log "buildx leak metric: cannot size $v -> not updated"; return 0; }
+    count=$(( count + 1 )); bytes=$(( bytes + bx_bytes ))
   done
   tmp="$(mktemp "$BUILDX_LEAK_FILE.XXXX" 2>/dev/null)" || return 0
   printf 'gitea_runner_buildx_leaked_bytes %s\ngitea_runner_buildx_leaked_builders %s\n' "$bytes" "$count" > "$tmp" \
     || { rm -f "$tmp"; return 0; }
   chmod 0644 "$tmp" 2>/dev/null || true # mktemp is 0600; node_exporter (non-root) must be able to read it
   mv -f "$tmp" "$BUILDX_LEAK_FILE" 2>/dev/null || rm -f "$tmp"
+  # The size cache keeps only the volumes sized this pass. An optimisation: failing to write it is harmless.
+  mkdir -p "$(dirname "$BUILDX_SIZE_CACHE")" 2>/dev/null || true
+  tmp="$(mktemp "$BUILDX_SIZE_CACHE.XXXX" 2>/dev/null)" || return 0
+  if ! { printf '%s' "$bx_size_cache_next" > "$tmp" && mv -f "$tmp" "$BUILDX_SIZE_CACHE" 2>/dev/null; }; then
+    rm -f "$tmp"
+  fi
 }
 
 # A heal stopped the runner and has not seen it active since -> start it. Idempotent; runs at the top

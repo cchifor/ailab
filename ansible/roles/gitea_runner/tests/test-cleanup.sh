@@ -211,6 +211,15 @@ cat >"$BIN/sort" <<EOF
 exec "$REAL_SORT" "\$@"
 EOF
 
+# du: the real one, logged to the call log, so a case can tell a volume that was walked from one whose size
+# came from the cache ([V]).
+REAL_DU="$(command -v du)"
+cat >"$BIN/du" <<EOF
+#!/usr/bin/env bash
+echo "du \$*" >> "$CALLS"
+exec "$REAL_DU" "\$@"
+EOF
+
 # findmnt -no OPTIONS --target <root>: the mount options section 6 checks for atime. MOCK_MNT_OPTS
 # (default rw,relatime); MOCK_MNT_FAIL=1 = the read fails with no output.
 cat >"$BIN/findmnt" <<EOF
@@ -1303,8 +1312,9 @@ echo "[V] leaked buildx builders are MEASURED (read-only metric), never removed"
 # uses, or a builder container whose own state volume BuildKit has not written for 12h: by INACTIVITY, not
 # by the container's age, because a builder later jobs reuse by name can be old and busy. A read that fails
 # writes nothing (the last value stays). The listings ignore the name filter: the script's checks must hold.
-BX="$WORK/bx"; MOCK_BX="$BX"; LEAKF="$BEACONDIR/gitea_runner_buildx_leak.prom"
-bx_reset() { rm -rf "$BX" "$LEAKF"; mkdir -p "$BX/containers" "$BX/volumes" "$BX/refs" "$BX/data"; }
+BX="$WORK/bx"; MOCK_BX="$BX"; LEAKF="$BEACONDIR/gitea_runner_buildx_leak.prom"; SIZEC="$WORK/buildx-size.cache"
+bx_reset() { rm -rf "$BX" "$LEAKF" "$SIZEC"; mkdir -p "$BX/containers" "$BX/volumes" "$BX/refs" "$BX/data"; }
+walked() { grep -q "^du -sxB1 $BX/data/$1\$" "$CALLS"; } # the metric walked this volume this tick
 bx_at() { printf '@%s' "$(( $(date +%s) - $1 ))"; } # <s> ago, for touch -d
 bx_volume() { # <name> <MiB> <seconds since BuildKit last wrote it> [used]: a state dir like buildkitd's
   local d="$BX/data/$1"
@@ -1328,11 +1338,18 @@ bx_fixture() {
   # snapshot metadata (two levels down) 30 min ago -> not leaked.
   bx_volume buildx_buildkit_rmv-builder0_state 1 777600 used; bx_container creused /buildx_buildkit_rmv-builder0 buildx_buildkit_rmv-builder0_state
   touch -d "$(bx_at 1800)" "$BX/data/buildx_buildkit_rmv-builder0_state/runc-overlayfs/metadata_v2.db"
-  # No database at all: the dir's own mtime (2 days) answers -> leaked.
+  # No database at all, in a dir untouched for 2 days: activity UNKNOWN -> not counted (a dir's mtime says
+  # nothing about writes to the files in it).
   mkdir -p "$BX/data/buildx_buildkit_builder-dddd0_state"; head -c 1048576 /dev/zero > "$BX/data/buildx_buildkit_builder-dddd0_state/blob"
-  touch -d "$(bx_at "$D2")" "$BX/data/buildx_buildkit_builder-dddd0_state"
+  touch -d "$(bx_at "$D2")" "$BX/data/buildx_buildkit_builder-dddd0_state/blob" "$BX/data/buildx_buildkit_builder-dddd0_state"
   printf '%s\n' "$BX/data/buildx_buildkit_builder-dddd0_state" > "$BX/volumes/buildx_buildkit_builder-dddd0_state"
   : > "$BX/refs/buildx_buildkit_builder-dddd0_state"; bx_container cnodb /buildx_buildkit_builder-dddd0 buildx_buildkit_builder-dddd0_state
+  # An unsupported layout: its databases sit four levels down, past the bounded search -> unknown, not counted.
+  mkdir -p "$BX/data/buildx_buildkit_builder-eeee0_state/a/b/c"; head -c 1048576 /dev/zero > "$BX/data/buildx_buildkit_builder-eeee0_state/blob"
+  : > "$BX/data/buildx_buildkit_builder-eeee0_state/a/b/c/cache.db"
+  touch -d "$(bx_at "$D2")" "$BX/data/buildx_buildkit_builder-eeee0_state/a/b/c/cache.db" "$BX/data/buildx_buildkit_builder-eeee0_state"
+  printf '%s\n' "$BX/data/buildx_buildkit_builder-eeee0_state" > "$BX/volumes/buildx_buildkit_builder-eeee0_state"
+  : > "$BX/refs/buildx_buildkit_builder-eeee0_state"; bx_container cdeep /buildx_buildkit_builder-eeee0 buildx_buildkit_builder-eeee0_state
   bx_container cnovol /buildx_buildkit_builder-nnnn0                  # no state volume: not counted
   bx_volume buildx_buildkit_builder-cccc0_state 4 3600               # unattached: leaked, even if recent
   bx_volume pin_data 1 "$D2" used; bx_container cdsh /dsh-conductor-image-pin pin_data
@@ -1341,9 +1358,11 @@ bx_fixture() {
 }
 
 bx_fixture; run_beacon 0 50
-want=$(( $(bx_du buildx_buildkit_builder-bbbb0_state) + $(bx_du buildx_buildkit_builder-dddd0_state) + $(bx_du buildx_buildkit_builder-cccc0_state) ))
-check "V1: leaked_bytes = the idle builder + the one with no database + the unattached volume (${want}B)" '[ "$(leak bytes)" = "$want" ]'
-check "V1: leaked_builders = 3: an old-but-active builder and one reused by name are not leaked" '[ "$(leak builders)" = 3 ]'
+want=$(( $(bx_du buildx_buildkit_builder-bbbb0_state) + $(bx_du buildx_buildkit_builder-cccc0_state) ))
+check "V1: leaked_bytes = the idle builder + the unattached volume (${want}B)" '[ "$(leak bytes)" = "$want" ]'
+check "V1: leaked_builders = 2: old-but-active, reused by name, no database, and an unsupported layout are not counted" \
+  '[ "$(leak builders)" = 2 ]'
+check "V1: an unknown-activity builder is not even sized" '! walked buildx_buildkit_builder-dddd0_state && ! walked buildx_buildkit_builder-eeee0_state'
 check "V1: the metric file is world-readable (node_exporter is not root)" '[ "$(stat -c %a "$LEAKF")" = 644 ]'
 check "V1: nothing is removed, and the runner is neither stopped nor started" \
   '! grep -qE "^docker (rm|volume rm|stop|kill) " "$CALLS" && ! calls_has "systemctl stop" && ! calls_has "systemctl start"'
@@ -1360,7 +1379,7 @@ check "V1b: an unattached state volume alone -> leaked, however recent" '[ "$(le
 
 bx_fixture; run_beacon 1 50
 check "V2: written on a busy tick too (the healthy busy skip exits before the sweep)" \
-  '[ "$(leak builders)" = 3 ] && [ "$(beacon_field busy_skip)" = 1 ]'
+  '[ "$(leak builders)" = 2 ] && [ "$(beacon_field busy_skip)" = 1 ]'
 
 # A read that fails writes nothing: the last value stays.
 stale() { printf 'gitea_runner_buildx_leaked_bytes 111\ngitea_runner_buildx_leaked_builders 1\n' > "$LEAKF"; }
@@ -1380,9 +1399,36 @@ check "V4: nothing leaked -> 0 bytes, 0 builders (a real zero replaces the last 
 bx_fixture; BEACON=0 TEXTDIR="$BEACONDIR" run_case 0 50
 check "V5: BEACON=0 -> no metric file" '[ ! -e "$LEAKF" ]'
 bx_fixture; GITEA_CLEANUP_BUILDX_LEAK_IDLE_SEC=junk run_beacon 0 50
-check "V6: a non-numeric idle window falls back to 12h (a builder written 1h ago is not leaked)" '[ "$(leak builders)" = 3 ]'
+check "V6: a non-numeric idle window falls back to 12h (a builder written 1h ago is not leaked)" '[ "$(leak builders)" = 2 ]'
 bx_fixture; GITEA_CLEANUP_BUILDX_LEAK_IDLE_SEC=600 run_beacon 0 50
-check "V6: the window is honoured (10 min: the 30-min reuse and the 1h builder count too)" '[ "$(leak builders)" = 5 ]'
+check "V6: the window is honoured (10 min: the 30-min reuse and the 1h builder count too)" '[ "$(leak builders)" = 4 ]'
+
+# V7: SIZES ARE CACHED. du walks the whole volume, so a leaked volume is sized at most once per hour, and
+# again sooner only when its activity changes. Proof: the next tick walks nothing, and bytes added to a
+# volume behind the cache's back do not show until the entry is stale.
+IDLEV=buildx_buildkit_builder-bbbb0_state; ORPHV=buildx_buildkit_builder-cccc0_state
+bx_fixture; run_beacon 0 50; first="$(leak bytes)"
+check "V7: the first tick walks both leaked volumes and records them" \
+  'walked "$IDLEV" && walked "$ORPHV" && [ "$(grep -c . "$SIZEC")" = 2 ]'
+head -c 1048576 /dev/zero >> "$BX/data/$ORPHV/blob" # grows, its databases untouched
+run_beacon 0 50
+check "V7: the next tick walks nothing and reports the cached sizes" \
+  '! grep -q "^du -sxB1 " "$CALLS" && [ "$(leak bytes)" = "$first" ] && [ "$(leak builders)" = 2 ]'
+touch -d "$(bx_at 129600)" "$BX/data/$IDLEV/cache.db" # BuildKit wrote it (36h ago: still idle)
+run_beacon 0 50
+check "V7: a changed activity re-walks that volume only" 'walked "$IDLEV" && ! walked "$ORPHV"'
+sed -i "s/^\($ORPHV [^ ]*\) [0-9]* /\1 $(( $(date +%s) - 7200 )) /" "$SIZEC" # sized 2h ago: past the 1h TTL
+run_beacon 0 50
+want=$(( $(bx_du "$IDLEV") + $(bx_du "$ORPHV") ))
+check "V7: an entry past the TTL is re-walked, and the grown volume shows (${want}B)" \
+  'walked "$ORPHV" && ! walked "$IDLEV" && [ "$(leak bytes)" = "$want" ]'
+printf 'garbage line\n%s none notanumber 5\n' "$ORPHV" > "$SIZEC"
+run_beacon 0 50
+check "V7: a corrupt cache is ignored and rebuilt" \
+  'walked "$IDLEV" && walked "$ORPHV" && [ "$(leak bytes)" = "$want" ] && [ "$(grep -c . "$SIZEC")" = 2 ]'
+bx_reset; bx_volume "$ORPHV" 4 3600; run_beacon 0 50
+rm -rf "$BX/volumes/$ORPHV" "$BX/data/$ORPHV"; run_beacon 0 50
+check "V7: a volume gone since the last tick drops out of the cache" '[ ! -s "$SIZEC" ] && [ "$(leak builders)" = 0 ]'
 unset MOCK_BX
 
 echo

@@ -646,11 +646,16 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
     or a `buildx_buildkit_*` container whose own state volume BuildKit has not written for 12h.
     - Inactivity, not age: a builder that later jobs reuse by name (`rmv-builder` on ci-runner-9) can be
       weeks old and busy.
-    - "Written" means the newest mtime of BuildKit's `*.db` files in the volume's first three levels, or
-      the volume directory itself. That is cheap and bounded, with no walk of the snapshots.
+    - "Written" means the newest mtime of BuildKit's `*.db` files in the volume's first three levels. That
+      is cheap and bounded, with no walk of the snapshots.
+    - A builder with no such database (none yet, or a layout the search does not know) has unknown
+      activity, and is not counted. A directory's own mtime is not evidence.
     - It writes `gitea_runner_buildx_leaked_bytes` and `gitea_runner_buildx_leaked_builders` every tick,
       to `gitea_runner_buildx_leak.prom`.
-    - A docker or `du` call that fails or times out writes nothing, so the last value stays.
+    - Sizes come from `du`, which walks the volume. So each leaked volume's size is cached in
+      `/var/lib/gitea-runner-cleanup/buildx-size.cache` for 1h, and re-walked sooner only when its
+      activity changes. The bytes can therefore lag a growing volume by up to an hour.
+    - A docker, `find` or `du` call that fails or times out writes nothing, so the last value stays.
   - **Why it does not reap them itself.** Removing a builder kills its buildkitd. Nothing can stop a
     build from attaching between a check and the removal: a stop of the runner gives a job only the
     10-minute drain, and nothing stops another start. Two review rounds on ailab #1832 ended in that
@@ -663,7 +668,7 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
     - only touches the exact names the metric uses (`buildx_buildkit_<name>`,
       `buildx_buildkit_<name>_state`);
     - skips, and never removes, anything it cannot read: a failed `docker inspect`, an empty or
-      unparseable creation time, or unreadable volume users;
+      unparseable creation time, unreadable volume users, or a volume `du` cannot size;
     - re-reads the idle check before each removal.
 
     1. List first (read-only): `ssh ubuntu@<ip> 'sudo bash -s list' < scripts/ci-runner-buildx-reap.sh`.

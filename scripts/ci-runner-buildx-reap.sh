@@ -45,7 +45,11 @@ for v in $(docker volume ls -q --filter name=buildx_buildkit); do
   if ! grep -qE "$VOL_RE" <<< "$v"; then echo "  SKIP volume $v: not a builder state volume's name"; continue; fi
   if ! users=$(docker ps -aq --filter volume="$v" 2>/dev/null); then echo "  SKIP volume $v: cannot read its users"; continue; fi
   n=0; [ -z "$users" ] || n=$(printf '%s\n' "$users" | wc -l)
-  sz=$(du -sh "/var/lib/docker/volumes/$v" 2>/dev/null | cut -f1)
+  # du's own status, not a pipeline's: a volume that cannot be sized is skipped, never removed.
+  if ! sz=$(du -sh "/var/lib/docker/volumes/$v" 2>/dev/null) || [ -z "$sz" ]; then
+    echo "  SKIP volume $v: cannot size it"; continue
+  fi
+  sz="${sz%%[[:space:]]*}"
   echo "  builder volume $v size=$sz users=$n"
   if [ "$MODE" = remove ] && [ "$n" -eq 0 ]; then busy && { echo "  BUSY now -> stop"; exit 3; }; docker volume rm "$v" >/dev/null && echo "    REMOVED volume $v ($sz)"; fi
 done
