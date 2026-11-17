@@ -522,3 +522,28 @@ tests:
               description: >-
                 See CIRunnerBuildkitDbLarge and docs/runbooks/ci-runners.md, Troubleshooting, "BuildKit
                 cache.db".
+
+  # ---------------------------------------- leaked buildx builders over 10 GB
+  - interval: 1m
+    name: a cloud runner's leaked buildx builders over 10 GB for 1h warn; one under it does not
+    input_series:
+      - series: 'gitea_runner_buildx_leaked_bytes{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-10", instance="192.168.0.35:9100"}'
+        values: "21474836480+0x120"
+      - series: 'gitea_runner_buildx_leaked_bytes{job="ci-runner-cloud", cloud_host="cloud3", nodename="cloud-ci-11", instance="192.168.0.30:9100"}'
+        values: "2000000000+0x120"
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: CloudCIRunnerLeakedBuildxBuilders
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: CloudCIRunnerLeakedBuildxBuilders
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ci-runner-cloud
+              cloud_host: cloud3
+              nodename: cloud-ci-10
+              instance: 192.168.0.35:9100
+            exp_annotations:
+              summary: "cloud CI runner cloud-ci-10 holds 20GiB in leaked buildx builders"
+              description: 'See CIRunnerLeakedBuildxBuilders: reap them by hand on an idle runner, docs/runbooks/ci-runners.md, Troubleshooting, "Leaked buildx builders".'

@@ -292,10 +292,10 @@ gitea_runner_cleanup_idle_confirm_polls: 3
 # runner shares this daemon, so it loses its warm cache too), hence the disk gate and a cap well above
 # the ~14GB observed working set.
 # 40 GB since 2026-11-17 (was 20). At 20 the cap fired about 3 times a day per runner: 170 full cache
-# wipes of ~25 GB each in 8 days fleet-wide, and every one makes the next jobs rebuild from cold. That
-# churn is ~1 TB/day of NVMe writes, on drives at 85-89% of their rated life. The disk budget with 40 here
-# and workbricks' own cache capped at 40 GiB is in the PR that raised it (ailab, "runner cleanup headroom").
-# Literal: test-cleanup.sh [M] compares it with the script's own default.
+# wipes of ~25 GB each in 8 days fleet-wide, and every one makes the next jobs rebuild cold. That churn
+# is ~1 TB/day of NVMe writes, on drives at 85-89% of their rated life. Sized for the 250 GB on-prem
+# runner disks (#1833/#1835) next to workbricks' own 40 GiB cache cap (workbricks #436); the budget
+# is in ailab #1832. Literal: test-cleanup.sh [M] compares it with the script's own default.
 gitea_runner_cleanup_cache_max_bytes: 40000000000
 # Disk% at which an idle sweep may run a full `image prune -af`. REPLACES the old image byte cap
 # (gitea_runner_cleanup_image_max_bytes), which was removed because an absolute cap cannot bound the
@@ -339,29 +339,8 @@ gitea_runner_cleanup_buildkit_db: /var/lib/docker/buildkit/cache.db
 # 3h) so a live job's containers are never touched — only crashed/timed-out leftovers. 4h default.
 gitea_runner_cleanup_reap_age_sec: 14400
 # Never reap containers whose image/name matches this (the persistent buildx/buildkit builder is shared
-# infra, not a job leftover). Builders have their own rules (section 2b, the knobs below).
+# infra, not a job leftover).
 gitea_runner_cleanup_infra_exclude_re: "buildkit|buildx"
-# Leaked buildx builders (section 2b of gitea-runner-cleanup.sh, 2026-11-17). A job's
-# docker/setup-buildx-action builder is a container buildx_buildkit_<name> plus a volume
-# buildx_buildkit_<name>_state holding its build cache; a cancelled or killed job leaves both, and nothing
-# else reclaimed them (20.1 GB on ci-runner-9, 20.5 GB on ci-runner-10, two builders running 14h on
-# ci-runner-5). The sweep removes a builder (container + state volume) and any state volume no container
-# uses, only inside a drain window it owns: in a confirmed idle gap it stops the runner gracefully (the
-# job in flight finishes, no new one is admitted), checks it stopped, and before EACH removal re-checks
-# that the runner is still stopped and no job container or runner-user process is left; then it starts
-# the runner again. A runner that was already stopped (quarantined) is never reaped or started. Not with
-# a co-located runner (*_peer_services), and never a builder with a build session open in it.
-# OFF by default: a fleet-wide default is a fleet rollout. Enable per host in host_vars (canary:
-# ci-runner-10), then promote as docs/runbooks/ci-runners.md describes.
-gitea_runner_cleanup_reap_builders: false
-# Only builders (and volumes) created at least this many seconds ago, AND only in the window above. MUST
-# exceed gitea_runner_job_timeout (3h) + gitea_runner_shutdown_timeout_min (10min); the script clamps it up
-# to *_min_until_sec. 0 turns the whole reap off.
-gitea_runner_cleanup_builder_max_age_sec: 43200
-# Builder names (the <name> in buildx_buildkit_<name>) never reaped, as an extended regex, for a builder a
-# workflow deliberately keeps between jobs. "none" = no exemption (an empty string is NOT that: the script
-# reads empty as unset). An invalid regex makes the script reap no builder at all.
-gitea_runner_cleanup_builder_keep_re: "none"
 # Co-located runner services that ALSO share this Docker daemon — treated as "busy" so cleanup skips work
 # while EITHER pool runs a job (the GitHub self-hosted agent during the forge-migration bake-in).
 # "none" since the GitHub agent was retired (2026-10-12): no co-located runner shares these hosts'

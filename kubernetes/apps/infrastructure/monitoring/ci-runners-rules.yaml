@@ -212,6 +212,23 @@ spec:
               The dangling-record heal stopped gitea-act-runner on {{ $labels.instance }} and it has not
               been seen active since, although every cleanup tick retries the start. Check `systemctl
               status gitea-act-runner` and `journalctl -u gitea-act-runner -t gitea-runner-cleanup`.
+        # Leaked buildx builders (2026-11-17): the containers and _state volumes that a cancelled or killed
+        # job's setup-buildx-action leaves behind. gitea-runner-cleanup.sh MEASURES them (a _state volume no
+        # container uses, or a builder container 12h or older) and never removes them: it has no
+        # job-admission guarantee to do that safely. 20.1 GB sat on ci-runner-9 and 20.5 GB on ci-runner-10,
+        # and that space pushed both into full cache wipes. A failed read keeps the last value, so a broken
+        # read neither raises nor clears this.
+        - alert: CIRunnerLeakedBuildxBuilders
+          expr: gitea_runner_buildx_leaked_bytes{job="ci-runner-node"} > 10e9
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} holds {{ $value | humanize1024 }}B in leaked buildx builders"
+            description: >-
+              Builders that cancelled or killed jobs left behind on {{ $labels.instance }} hold this much
+              disk, and nothing reclaims them (gitea_runner_buildx_leaked_builders says how many). Reap
+              them by hand on an idle runner: docs/runbooks/ci-runners.md, Troubleshooting, "Leaked buildx
+              builders".
         # ---- the 2026-08-08 mid-job-prune RCA: the two signals that were missing ----
         # 1. Did the cleanup prune THROUGH a live job? Post-fix this is a last-resort action taken only at
         # CRITICAL disk after a failed idle wait, so ANY occurrence is worth a look: a prune's containerd
