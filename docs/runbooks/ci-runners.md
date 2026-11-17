@@ -164,14 +164,40 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   **6h at ≥75%** disk, and is **4h at ≥92%** (plus an actcache trim). No window may go below 4h, because the
   job timeout is 3h. Three things run without a window, each only inside a CONFIRMED idle gap (3
   consecutive idle reads, which narrows the false idle between steps but does not close it):
-  `builder prune -af` when the build cache is over its 20 GB cap at ≥75%, `image prune -af` at **≥88%**, and
+  `builder prune -af` when the build cache is over its **40 GB cap** at ≥75% (20 GB until 2026-11-17: it
+  fired ~3 times a day per runner, 170 full wipes of ~25 GB in 8 days, each followed by cold rebuilds), `image prune -af` at **≥88%**, and
   the dangling-record heal below (`image prune -af`, a dockerd restart, `builder prune -af`). Running
-  containers are reaped only past the **4h reap age**, and NEVER the persistent `buildx_buildkit_builder`;
-  NO `docker volume prune`; workspaces untouched for 48h are deleted. The idle check covers BOTH the gitea
+  containers are reaped only past the **4h reap age**, and never a buildx builder there (builders have their
+  own rules, next bullet); NO `docker volume prune`; workspaces untouched for 48h are deleted. The idle check covers BOTH the gitea
   and GitHub runners. Only ≥92% prunes through a job the script has seen running, after its idle wait
   failed. The routine windowed prunes take one busy read, so a false idle between steps can still let them
   run during a job. Tunables: `defaults/main.yml` `gitea_runner_cleanup_*` (the source of truth for every
   number above).
+- **Leaked buildx builders** (section 2b of the same script, 2026-11-17). `docker/setup-buildx-action`
+  (and `docker buildx create`) gives each job a docker-container builder: a running container
+  `buildx_buildkit_<name>` (buildkitd) and a volume `buildx_buildkit_<name>_state` that holds that builder's
+  whole build cache. The action removes both in its post step, so a cancelled or killed job leaves them
+  behind. Nothing reclaimed them: on 2026-11-17 they held 20.1 GB on ci-runner-9, 20.5 GB on ci-runner-10
+  and 5.7 GB on ci-runner-6, and ci-runner-5 had two running for 14h.
+  - **What goes.** A builder container with its state volume, and any `buildx_buildkit_*_state` volume
+    that no container uses. Only those exact name shapes, and only a container whose process is buildkitd.
+  - **When.** Only when no job can be using it:
+    - **idle:** off the mid-job path, and a CONFIRMED idle gap re-read right before each removal. A stopped
+      runner has no job, so its builders go too; the cleanup never starts or stops the runner for this.
+    - **age:** created at least `gitea_runner_cleanup_builder_max_age_sec` ago (12h; the job timeout is 3h
+      plus a 10min drain). This works while a job runs.
+  - **Never** a builder with a build session open in it (`buildctl dial-stdio` in `docker top`; an
+    unreadable `docker top` counts as open), and never one named by `gitea_runner_cleanup_builder_keep_re`
+    (`none` by default; for a builder a workflow keeps on purpose).
+  - **Residual risk.** A job between two steps can read idle for the confirm window. If its builder goes
+    then, the next buildx call boots a new one: that build is cold, not failed.
+  - **Read it:** `journalctl -t gitea-runner-cleanup | grep -E 'builder|buildx'`, and the beacon fields
+    `gitea_runner_cleanup_builders_reaped` / `_builder_volumes_reaped`. List leftovers with
+    `sudo docker ps -a --filter name=buildx_buildkit_` and `sudo docker volume ls --filter name=buildx_buildkit_`.
+  - **NB** `sudo docker buildx ls` shows only root's builders. The jobs' builders are registered under
+    `/home/runner/.docker/buildx` (`sudo -u runner docker buildx ls`), so the cleanup's per-builder
+    `buildx prune` never reaches them.
+  - **Off switch:** `gitea_runner_cleanup_reap_builders: false` in host_vars.
 - **Cargo target sweep** (section 6 of the same script, 2026-11-08). workbricks CI keeps
   `CARGO_TARGET_DIR` in the runner's home (`~/.cache/workbricks-ci/<event>/target` and `target-verify`) and
   nothing pruned it. By 2026-11-08 that was 61-84 GB on every runner, over half of it unread for 3 days,

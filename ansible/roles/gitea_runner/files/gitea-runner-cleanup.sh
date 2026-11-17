@@ -13,15 +13,20 @@
 # decide destructive actions. Instead every operation is SAFE-BY-CONSTRUCTION — it can never remove a
 # resource a live job (Gitea OR GitHub) is using OR recently created:
 #   * containers: only `container prune` (stopped) + reap RUNNING ones OLDER than a job's max wall-clock
-#     (REAP_AGE, default 4h > the 3h job timeout), EXCLUDING the persistent buildx/buildkit builder. A
-#     live job's containers are younger than its timeout, so they are never touched.
+#     (REAP_AGE, default 4h > the 3h job timeout), EXCLUDING every buildx/buildkit builder. A live job's
+#     containers are younger than its timeout, so they are never touched.
+#   * buildx builders (buildx_buildkit_<name> containers and their <name>_state volumes): section 2b, under
+#     its own proof that no job is using one. Off the mid-job path, a builder goes in a CONFIRMED idle gap;
+#     on any path, once it is older than BUILDER_MAX_AGE_SEC (12h, against a 3h job timeout). Never one with
+#     a build session open in it, and never one named by BUILDER_KEEP_RE.
 #   * images / build-cache / networks: pruned only with a retention WINDOW (`--filter until=`), so
 #     in-use and recently-used entries are always kept (a fresh build reuses recent cache/images).
 #     NB the window bounds WHAT IS DELETED — it does NOT make a prune safe to run alongside a job.
 #     The prune's containerd GC pass can reap an in-flight pull's lease regardless of the filter, so
 #     concurrency is governed by the busy gate below, never by the window. (2026-08-08 RCA.)
 #   * NO `docker volume prune` (a job's data volumes are irreplaceable — reclaimed only via image/cache).
-#     This script still never removes a volume. The job-boundary reaper (gitea-runner-reap.py, run by the
+#     The only volumes this script removes are buildx builder state volumes (section 2b), by exact name, and
+#     never one a container still uses (docker refuses that). The job-boundary reaper (gitea-runner-reap.py, run by the
 #     reclaim tick) removes compose-labelled and anonymous volumes of EARLIER jobs, but only in
 #     gitea_runner_reap_mode=enforce, and only volumes no container references (see the role defaults).
 # THREE OPERATIONS ARE DELIBERATELY NOT SAFE-BY-CONSTRUCTION, and nothing about the window argument
@@ -74,7 +79,16 @@ REAP_AGE_SEC="${GITEA_CLEANUP_REAP_AGE_SEC:-14400}"     # remove RUNNING contain
 # This is the same invariant REAP_AGE_SEC already documents for containers ("MUST exceed the job
 # timeout"); the prune windows simply never had it applied.
 MIN_UNTIL_SEC="${GITEA_CLEANUP_MIN_UNTIL_SEC:-14400}"   # 4h > 3h job timeout
-INFRA_EXCLUDE_RE="${GITEA_CLEANUP_INFRA_EXCLUDE_RE:-buildkit|buildx}" # never reap the persistent builder
+INFRA_EXCLUDE_RE="${GITEA_CLEANUP_INFRA_EXCLUDE_RE:-buildkit|buildx}" # section 2 never reaps a builder (2b does)
+# Leaked buildx builders (section 2b). 1 enables the reap.
+REAP_BUILDERS="${GITEA_CLEANUP_REAP_BUILDERS:-1}"
+# A builder container, or a state volume no container uses, at least this many seconds old is reaped even
+# while a job runs. It must exceed the longest a job can hold one: the 3h job timeout plus the 10min drain.
+# Clamped up to MIN_UNTIL_SEC; 0 or a non-number turns this age path off (the idle path still runs).
+BUILDER_MAX_AGE_SEC="${GITEA_CLEANUP_BUILDER_MAX_AGE_SEC:-43200}"
+# Builder names (the <name> in buildx_buildkit_<name>) that are never reaped, an extended regex. The literal
+# `none` means no exemption: an EMPTY value cannot mean that, because `${VAR:-default}` reads empty as unset.
+BUILDER_KEEP_RE="${GITEA_CLEANUP_BUILDER_KEEP_RE:-none}"
 ACTCACHE_DIR="${GITEA_CLEANUP_ACTCACHE_DIR:-/home/runner/act-runner/.cache/actcache}"
 ACTCACHE_MAX_MB="${GITEA_CLEANUP_ACTCACHE_MAX_MB:-1536}"
 WORKDIR_PARENT="${GITEA_RUNNER_WORKDIR_PARENT:-/home/runner/act-runner/work}"
@@ -97,7 +111,7 @@ IDLE_CONFIRM_POLLS="${GITEA_CLEANUP_IDLE_CONFIRM_POLLS:-3}"
 # Hard SIZE cap for the docker build cache (bytes; 0 disables). Enforced with a full `builder prune -af`
 # on the idle path only, re-checking the busy signal first and only once disk is at/over PRESSURE_PCT —
 # see section 3b for why nothing cheaper bounds a continuously-reused cache, and for the residual race.
-CACHE_MAX_BYTES="${GITEA_CLEANUP_CACHE_MAX_BYTES:-20000000000}"
+CACHE_MAX_BYTES="${GITEA_CLEANUP_CACHE_MAX_BYTES:-40000000000}"
 # Disk% at which the full (unwindowed) image prune becomes available, on the idle path only. This
 # REPLACES the old IMAGE_MAX_BYTES cap, which could not bound the disk: an absolute byte cap and the
 # filesystem are independent quantities, so "images under cap" and "disk at 88%" were simultaneously
@@ -269,6 +283,9 @@ idle_confirmed() {
 # whose cache it never sees and which are EXCLUDED from container reaping (INFRA_EXCLUDE_RE) — so without
 # this their cache grows unbounded (the ~41 GB of build cache seen on the wedged ci-runner-2). Window-safe
 # (same `--filter until=` retention as the default-builder prune), so it can run under the pressure gate.
+# NB measured 2026-11-17: this runs as root, and root's `docker buildx ls` lists only root's builders, while
+# the jobs' builders are registered under /home/runner/.docker/buildx. So on the runners this reaches only
+# `default` (skipped). Leaked job builders are removed whole by section 2b instead.
 prune_extra_builders() {
   local win="$1" b
   docker buildx ls --format '{{.Name}}' 2>/dev/null | grep -vE '^$|^default$' | sort -u | while read -r b; do
@@ -830,6 +847,120 @@ for cid in $(docker ps -q 2>/dev/null || true); do
 done
 timeout 120 docker container prune -f >/dev/null 2>&1 || true
 
+# 2b. LEAKED buildx builders (2026-11-17). docker/setup-buildx-action (and `docker buildx create`) start a
+#     docker-container builder per job: a running container buildx_buildkit_<name> (buildkitd) and a volume
+#     buildx_buildkit_<name>_state holding that builder's whole build cache. The action removes both in its
+#     post step, so a cancelled or killed job leaves them behind, and nothing else reclaims them: section 2
+#     excludes every builder, `docker builder prune` reaches only the default builder, and the per-builder
+#     prunes below list builders as root, which sees none of the jobs' (their buildx state lives under
+#     /home/runner/.docker). Measured 2026-11-17: 20.1 GB of such volumes on ci-runner-9, 20.5 GB on
+#     ci-runner-10, two builders running for 14h on ci-runner-5. That pushes runners into the full wipes in
+#     3b/3c, which re-pull and rebuild everything (the NVMe write budget, 2026-11-17).
+#     A builder is removed with its state volume only when no job can be using it:
+#       * idle: off the mid-job path, and the busy signal re-read as a CONFIRMED gap immediately before this
+#         builder's removal. A stopped runner (MainPID 0) reads idle, and is never started here; or
+#       * age: created at least BUILDER_MAX_AGE_SEC ago (12h), far past the 3h job timeout plus the 10min
+#         drain, so the job that made it is over. A builder a LATER job reuses by name is still protected by
+#         the next check.
+#     And never with a build session open in it: buildx drives a docker-container builder through
+#     `buildctl dial-stdio` exec'd inside it for the whole of a build, so such a process (or a `docker top`
+#     that fails) means "in use", whatever the proofs above say.
+#     The residual case, stated plainly: a job between two steps can read idle for the confirm window (the
+#     same false idle 3b documents). If its builder goes then, the job's next buildx call finds no container
+#     and buildx boots a new one: that build is cold, not failed. A build in flight is never hit.
+#     State volumes no container uses (the builder container was pruned while stopped, or removed with
+#     --keep-state) go under the same idle-or-age rule. `docker volume rm` without -f refuses a volume any
+#     container still uses, so a builder created between the listing and the removal keeps its volume.
+#     Only names of exactly these two shapes are touched; BUILDER_KEEP_RE exempts a builder that is meant to
+#     persist.
+bx_reaped=0; bx_vols=0
+# Seconds since a docker timestamp; non-zero when it is empty, does not parse, or lies in the future. Empty
+# must be refused here: GNU `date -d ''` succeeds with today's midnight, an age the timestamp never had.
+docker_age() {
+  local t a
+  [ -n "${1:-}" ] || return 1
+  t="$(date -d "$1" +%s 2>/dev/null)" && is_num "$t" || return 1
+  a=$(( $(date +%s) - t )); [ "$a" -ge 0 ] || return 1
+  printf '%s' "$a"
+}
+# Why a builder created <age> seconds ago (empty = unknown) may go: prints "age" or "idle", or returns 1.
+# The idle read comes LAST, so it is the freshest thing before the removal it authorises.
+builder_proof() {
+  if [ "$bx_age_max" -gt 0 ] && is_num "${1:-}" && [ "$1" -ge "$bx_age_max" ]; then printf 'age'; return 0; fi
+  if [ "$midjob" -eq 0 ] && idle_confirmed; then printf 'idle'; return 0; fi
+  return 1
+}
+# 0 = a build session is open in the builder <cid>, or its process list cannot be read; 1 = none.
+builder_in_session() {
+  local top
+  top="$(timeout 30 docker top "$1" -o pid,args 2>/dev/null)" && [ -n "$top" ] || return 0
+  grep -q 'dial-stdio' <<< "$top" && return 0
+  return 1
+}
+# 0 = the builder <name> is exempt by BUILDER_KEEP_RE (or the regex is broken), 1 = not exempt.
+builder_kept() {
+  [ -n "$bx_keep_re" ] || return 1
+  grep -qE -- "$bx_keep_re" <<< "$1"; [ $? -eq 1 ] && return 1
+  return 0
+}
+if [ "$REAP_BUILDERS" = 1 ]; then
+  bx_age_max="$BUILDER_MAX_AGE_SEC"
+  if ! is_num "$bx_age_max"; then
+    log "builders: BUILDER_MAX_AGE_SEC='$BUILDER_MAX_AGE_SEC' is not a number -> the age path is off"; bx_age_max=0
+  elif [ "$bx_age_max" -gt 0 ]; then
+    bx_floor="$MIN_UNTIL_SEC"; { is_num "$bx_floor" && [ "$bx_floor" -gt 0 ]; } || bx_floor=14400
+    if [ "$bx_age_max" -lt "$bx_floor" ]; then
+      log "builders: BUILDER_MAX_AGE_SEC ${bx_age_max}s is below the ${bx_floor}s job-timeout floor -> clamped"; bx_age_max="$bx_floor"
+    fi
+  fi
+  bx_keep_re="$BUILDER_KEEP_RE"; [ "$bx_keep_re" = none ] && bx_keep_re=""
+  # A keep regex grep cannot compile would exempt nothing (grep -q fails the same way on no match), so a
+  # broken one stops the whole pass: removing less is the safe failure.
+  bx_ok=1
+  if [ -n "$bx_keep_re" ]; then
+    grep -qE -- "$bx_keep_re" < /dev/null; [ $? -le 1 ] || { log "builders: BUILDER_KEEP_RE '$bx_keep_re' is not a valid regex -> no builder reaped"; bx_ok=0; }
+  fi
+  if [ "$bx_ok" -eq 1 ]; then
+    for cid in $(timeout 60 docker ps -aq --filter name=buildx_buildkit_ 2>/dev/null || true); do
+      meta="$(timeout 30 docker inspect -f '{{.Name}}|{{.Created}}|{{.Path}}|{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$cid" 2>/dev/null)" || continue
+      IFS='|' read -r bname bcreated bpath bmounts <<< "$meta"
+      # The name filter above is a substring match; this is the exact shape, and the process must be buildkitd.
+      grep -qE '^/buildx_buildkit_[A-Za-z0-9][A-Za-z0-9_.-]*$' <<< "$bname" || continue
+      case "$bpath" in *buildkitd*) ;; *) log "builders: $bname does not run buildkitd ('$bpath') -> not touched"; continue ;; esac
+      bnode="${bname#/buildx_buildkit_}"
+      builder_kept "$bnode" && continue
+      bage="$(docker_age "$bcreated")" || bage=""
+      if ! proof="$(builder_proof "$bage")"; then
+        log "builders: $bnode (created ${bage:-?}s ago) kept: no confirmed job gap, and not past the ${bx_age_max}s age bound (0 = off)"
+        continue
+      fi
+      if builder_in_session "$cid"; then
+        log "builders: $bnode kept: a build session is open in it (or its processes cannot be read)"
+        continue
+      fi
+      log "reap leaked buildx builder $bnode (${proof}, created ${bage:-?}s ago): container + state volume"
+      timeout 120 docker rm -f "$cid" >/dev/null 2>&1 || { log "builders: removing $bnode's container FAILED"; continue; }
+      bx_reaped=$(( bx_reaped + 1 ))
+      for v in $bmounts; do
+        [ "$v" = "buildx_buildkit_${bnode}_state" ] || continue
+        timeout 300 docker volume rm "$v" >/dev/null 2>&1 && bx_vols=$(( bx_vols + 1 ))
+      done
+    done
+    for v in $(timeout 60 docker volume ls -q --filter dangling=true --filter name=buildx_buildkit_ 2>/dev/null || true); do
+      grep -qE '^buildx_buildkit_[A-Za-z0-9][A-Za-z0-9_.-]*_state$' <<< "$v" || continue
+      bnode="${v#buildx_buildkit_}"; bnode="${bnode%_state}"
+      builder_kept "$bnode" && continue
+      vage="$(docker_age "$(timeout 30 docker volume inspect -f '{{.CreatedAt}}' "$v" 2>/dev/null)")" || vage=""
+      if ! proof="$(builder_proof "$vage")"; then
+        log "builders: orphaned state volume $v (created ${vage:-?}s ago) kept: no confirmed job gap, and not past the ${bx_age_max}s age bound (0 = off)"
+        continue
+      fi
+      log "remove orphaned buildx state volume $v (${proof}, created ${vage:-?}s ago)"
+      timeout 300 docker volume rm "$v" >/dev/null 2>&1 && bx_vols=$(( bx_vols + 1 ))
+    done
+  fi
+fi
+
 # ORDER NOTE: the two SIZE caps below run BEFORE section 3's window prunes, and that ordering is
 # load-bearing rather than cosmetic. They are the only steps that can reclaim a continuously-churned
 # cache or image store, they are the only ones gated on a CONFIRMED idle window, and they were
@@ -1171,11 +1302,12 @@ freed=$(( before - after )); [ "$freed" -lt 0 ] && freed=0
 dfsize() { docker system df --format '{{.Type}}|{{.Size}}' 2>/dev/null | awk -F'|' -v t="$1" '$1==t{sub(/B$/,"",$2);print $2}' | numfmt --from=si 2>/dev/null; }
 bc_bytes="$(dfsize 'Build Cache')"; is_num "$bc_bytes" || bc_bytes=0
 img_bytes="$(dfsize 'Images')"; is_num "$img_bytes" || img_bytes=0
-log "done: disk ${before}% -> ${after}%, reaped ${reaped} stale container(s), pruned ${ws_pruned} workspace(s) (${ws_count} left), build-cache ${bc_bytes}B, cargo targets freed ${tg_freed}B"
+log "done: disk ${before}% -> ${after}%, reaped ${reaped} stale container(s), ${bx_reaped} leaked builder(s) and ${bx_vols} builder state volume(s), pruned ${ws_pruned} workspace(s) (${ws_count} left), build-cache ${bc_bytes}B, cargo targets freed ${tg_freed}B"
 # pressure_defer 0: reaching here means the sweep RAN. That includes the mid-job critical path, which
 # is recorded separately by midjob_prune — starved means "could not sweep", not "swept riskily".
 write_beacon "busy_skip 0" "pressure_defer 0" "midjob_prune ${midjob}" "last_run_seconds $(date +%s)" "disk_used_percent ${after}" \
   "disk_freed_percent ${freed}" "reaped_containers ${reaped}" \
+  "builders_reaped ${bx_reaped}" "builder_volumes_reaped ${bx_vols}" \
   "workspaces ${ws_count}" "workspaces_pruned ${ws_pruned}" \
   "build_cache_bytes ${bc_bytes}" "images_bytes ${img_bytes}" \
   "target_dirs ${tg_dirs}" "target_freed_bytes ${tg_freed}" # buildkit_db_bytes: added by write_beacon
