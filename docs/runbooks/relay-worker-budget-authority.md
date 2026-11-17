@@ -684,10 +684,15 @@ through `SET SESSION AUTHORIZATION`, which the ledger accepts because it maps
 `session_user` to the `clients` row. The probe therefore needs no password.
 
 ```sh
+# One "name|value" line per field (records of a multi-row result are separated by a blank line).
 cat > "$ev/ledger-identity.sql" <<'SQL'
 \set ON_ERROR_STOP on
+\set QUIET on
+\pset format unaligned
+\x on
 SELECT system_identifier FROM pg_control_system();
-SELECT pg_is_in_recovery() AS in_recovery, pg_postmaster_start_time() AS postmaster_started;
+SELECT pg_is_in_recovery() AS in_recovery;
+SELECT pg_postmaster_start_time() AS postmaster_started;
 SHOW fsync;
 SHOW full_page_writes;
 SHOW synchronous_commit;
@@ -910,6 +915,10 @@ skip (b). After a reset, the node's Pods restart on it once it is back.
 ```sh
 PNS=relay-budget-durability-probe
 node='<operator fills: the agent node chosen above>'
+vmid='<operator fills: its vmid, kubernetes/infra/agent-nodes/variables.tf>'
+host='<operator fills: its Proxmox host address, the same file>'
+nodeip='<operator fills: its InternalIP, kubectl get node "$node" -o wide>'
+python scripts/node-ssh.py "$host" "qm config $vmid | grep -E '^name:'"   # name: $node, or stop
 commit='<operator fills: the reviewer-merged ailab commit in use, full SHA>'
 pd="$(mktemp -d)"
 git -C '<operator fills: the ailab checkout>' archive "$commit" \
@@ -1031,15 +1040,18 @@ probe_writer() {
 has() { awk -F'\t' -v t="$1" -v k="$2" '$1 == t && $2 == k { f = 1 } END { exit !f }' "$3"; }
 # probe_compare <tier>: every row from before survives unchanged; every write psql reported is present.
 probe_compare() {
-  local b="$ev/probe/rows-$1-before.tsv" a="$ev/probe/rows-$1-after.tsv" w="$ev/probe/writer-$1.log" miss=0 x y
-  echo "lost or changed: $(LC_ALL=C comm -23 "$b" "$a" | wc -l)"
-  echo "new rows by table:"; LC_ALL=C comm -13 "$b" "$a" | cut -f1 | sort | uniq -c
+  local b="$ev/probe/rows-$1-before.tsv" a="$ev/probe/rows-$1-after.tsv" w="$ev/probe/writer-$1.log" miss=0 x y lost other
+  lost=$(LC_ALL=C comm -23 "$b" "$a" | wc -l)
+  other=$(LC_ALL=C comm -13 "$b" "$a" | cut -f1 | grep -cvxE 'allocations|outbox|receipts')
+  echo "lost or changed: $lost"
+  echo "new rows by table (other tables: $other):"; LC_ALL=C comm -13 "$b" "$a" | cut -f1 | sort | uniq -c
   while read -r _ x y; do
     { has allocations "$x" "$a" && has outbox "$x/1" "$a" && grep -qF "\"operation_id\": \"$y\"" "$a"; } \
       || { echo "MISSING prepared $x $y"; miss=$((miss + 1)); }
   done < <(grep '^PREPARED ' "$w")
   while read -r _ y; do has receipts "$y" "$a" || { echo "MISSING acknowledged $y"; miss=$((miss + 1)); }; done < <(grep '^ACKED ' "$w")
   echo "prepared $(grep -c '^PREPARED ' "$w"), acknowledged $(grep -c '^ACKED ' "$w"), missing $miss"
+  [ "$lost" -eq 0 ] && [ "$other" -eq 0 ] && [ "$miss" -eq 0 ]
 }
 cap probe-amcheck psql_probe <<<'CREATE EXTENSION amcheck;'
 cap probe-seed psql_probe < "$ev/probe-seed.sql"                    # ends COMMIT
@@ -1053,19 +1065,24 @@ cap probe-integrity-0 psql_probe < "$ev/probe-integrity.sql"
 (the checklist's step-0 readback).
 
 **Each tier** follows one pattern: rows before, a writer running across the
-interruption, the interruption, recovery, rows after, comparison, integrity.
+interruption, the interruption, recovery, rows after, comparison, integrity. Each
+tier is one `&&` chain: a failed capture stops it before the interruption, or
+before the next capture. If a chain stops after `probe_tier`, run `wait "$wpid"` and
+stop.
 
 ```sh
-probe_tier() {   # probe_tier <tier> <writer seconds>; the interruption runs while it waits
-  probe_rows "$1-before"; probe_writer "$1" "$2" & wpid=$!
+probe_tier() {   # probe_tier <tier> <writer seconds>: the baseline, then the writer in the background
+  t0=$(date -u +%FT%TZ)
+  probe_rows "$1-before" || { echo "STOP: no baseline for tier $1"; return 1; }
+  probe_writer "$1" "$2" & wpid=$!
 }
-probe_after() {  # probe_after <tier>
+probe_after() {  # probe_after <tier>: fails at the first failed capture or comparison
   wait "$wpid"
-  kubectl --context admin@ai -n "$PNS" wait --for=condition=Ready pod/relay-budget-postgres-0 --timeout=15m
-  cap "probe-$1-log" kubectl --context admin@ai -n "$PNS" logs relay-budget-postgres-0 --since=30m
-  cap "probe-$1-identity" psql_probe < "$ev/ledger-identity.sql"
-  probe_rows "$1-after"
-  cap "probe-$1-compare" probe_compare "$1"
+  kubectl --context admin@ai -n "$PNS" wait --for=condition=Ready pod/relay-budget-postgres-0 --timeout=15m &&
+  cap "probe-$1-log" kubectl --context admin@ai -n "$PNS" logs relay-budget-postgres-0 --since-time="$t0" &&
+  cap "probe-$1-identity" psql_probe < "$ev/ledger-identity.sql" &&
+  probe_rows "$1-after" &&
+  cap "probe-$1-compare" probe_compare "$1" &&
   cap "probe-$1-integrity" psql_probe < "$ev/probe-integrity.sql"
 }
 ```
@@ -1085,9 +1102,9 @@ checkpointer makes the postmaster end every process and run crash recovery from 
 WAL, which is the path a killed postmaster takes on its next start:
 
 ```sh
-probe_tier a 120; sleep 20
+probe_tier a 120 && sleep 20 &&
 cap probe-a-kill kubectl --context admin@ai -n "$PNS" exec relay-budget-postgres-0 -- \
-  sh -c 'pgrep -f "^postgres: checkpointer"; kill -9 "$(pgrep -f "^postgres: checkpointer")"'
+  sh -c 'pgrep -f "^postgres: checkpointer"; kill -9 "$(pgrep -f "^postgres: checkpointer")"' &&
 probe_after a
 ```
 
@@ -1096,8 +1113,8 @@ Killed`, `terminating any other active server processes`, `all server processes
 terminated; reinitializing`, `database system was interrupted`, `database system was
 not properly shut down; automatic recovery in progress`, `redo starts at`, `redo
 done at`, `database system is ready to accept connections`. A local run of these
-blocks (Docker, the pinned image and bundle, `kubectl` replaced by `docker`) gave 1133
-writes prepared and 1132 acknowledged across the kill, `lost or changed: 0` and
+blocks (Docker, the pinned image and bundle, `kubectl` replaced by `docker`) gave 1047
+writes prepared and 1046 acknowledged across the kill, `lost or changed: 0` and
 `missing 0`; the one write without its acknowledgement was the one in flight.
 
 **Tier (b): hard reset of the probe's node. Runs only with the owner's explicit OK
@@ -1113,12 +1130,9 @@ each Pod restarts after the reboot, each `qnap-iscsi` volume there is re-staged 
 crash-recovered by its own workload, and a singleton on the node is down until then.
 
 ```sh
-vmid='<operator fills: the node's vmid, kubernetes/infra/agent-nodes/variables.tf>'
-host='<operator fills: its Proxmox host address, same file>'
-python scripts/node-ssh.py "$host" "qm config $vmid | grep -E '^name:'"   # name: $node
-cap probe-b-collateral kubectl --context admin@ai get pods -A -o wide --field-selector spec.nodeName="$node"
-probe_tier b 600; sleep 20
-cap probe-b-reset python scripts/node-ssh.py "$host" "qm reset $vmid && date -u +%FT%TZ"
+cap probe-b-collateral kubectl --context admin@ai get pods -A -o wide --field-selector spec.nodeName="$node" &&
+probe_tier b 600 && sleep 20 &&
+cap probe-b-reset python scripts/node-ssh.py "$host" "qm reset $vmid && date -u +%FT%TZ" &&
 probe_after b
 cap probe-b-node kubectl --context admin@ai get node "$node"
 cap probe-b-collateral-after kubectl --context admin@ai get pods -A -o wide --field-selector spec.nodeName="$node"
@@ -1135,12 +1149,13 @@ naming the form below, the node and the window.**
 
 *Blast radius.* `qnap-iscsi` is the QNAP Trident CSI driver (`csi.trident.qnap.io`,
 backend `qts`, driver `qnap-nas`, `kubernetes/apps/qnap-storage/`). Each PVC is its
-own thin LUN, `trident-pvc-<uuid>`, mapped into its own iSCSI target, and all targets
-share one portal, `10.55.0.254:3260` (ADR 0011). The node logs in per target when it
-stages a volume (`iscsiadm -m node -T <iqn> -p <portal>`,
-`apps/infrastructure/storage/iscsi-recovery-tmo.yaml`), so a node holds one session
-per attached LUN (six on `talos-cp1` on 2026-08-30), all over one path: the node's
-/32 route to `10.55.0.254` through its Proxmox host. Nothing else on a Talos node
+own thin LUN, `trident-pvc-<uuid>`, mapped into an iSCSI target. A target can hold
+more than one LUN: the retired test pool's golden clones shared one (ADR 0037). All
+targets share one portal, `10.55.0.254:3260` (ADR 0011). The node logs in per target
+when it stages a volume (`iscsiadm -m node -T <iqn> -p <portal>`,
+`apps/infrastructure/storage/iscsi-recovery-tmo.yaml`), so it holds one session per
+target it uses (six on `talos-cp1` on 2026-08-30), all over one path: the node's /32
+route to `10.55.0.254` through its Proxmox host. Nothing else on a Talos node
 uses iSCSI; the other classes are `nfs-csi` (the same address, TCP 2049) and
 `local-path`. A session waits `recovery_tmo` before failing its device: 120 s once
 the reconciler has corrected it, 2 s for a session staged within its last 30 s poll
@@ -1152,13 +1167,14 @@ logout.
   session timeout is shorter than the cut. Limiting it to TCP 3260 spares the node's
   NFS mounts. The node's storage-fabric probe fails meanwhile;
   `StorageFabricUnreachable` fires only after 2 minutes.
-- **Per-target** is possible only on the NAS, one target per LUN: acting on the
-  probe's target alone confines the I/O effect to the probe's LUN. No ailab runbook
+- **Per-target** is possible only on the NAS: acting on the probe's target alone
+  confines the I/O effect to the LUNs mapped into that target, which is the probe's
+  LUN alone only if the NAS's mapping shows no other LUN there. No ailab runbook
   documents that action or Trident's reaction to it, and NAS-side mapping changes
   have gone wrong here: the 2026-08-30 incident left LUNs unmapped from their targets
   (`apps/backup/velero/helmrelease.yaml`), and one stale Trident transaction stops
   every `qnap-iscsi` provision and attach estate-wide until removed
-  (`qnap-storage-setup.md` §9). Its blast radius is the probe's LUN for I/O, and
+  (`qnap-storage-setup.md` §9). Its blast radius is that target's LUNs for I/O, and
   Trident's control plane if it goes wrong.
 
 Read the node's sessions first (read-only; the reconciler Pod mounts the node's
@@ -1175,24 +1191,32 @@ cap probe-c-sessions-before sessions
 ```
 
 Go only if every session is `LOGGED_IN` with `recovery_tmo=120` and every device
-`running`; one session per `qnap-iscsi` VolumeAttachment on the node.
+`running`. The NAS's target and LUN lists map each session's `targetname` to its
+LUNs (`<operator fills: the read-only qcli target and LUN listing, as
+qnap-storage-setup.md §9 reads the LUN list>`); keep that mapping in the evidence.
 
 The per-target form: `<operator fills: the QuTS action that disables only the
-probe's target, and its reversal, named in the owner's OK; the target is the one
-mapped to LUN trident-<the probe's PV name>>`.
+probe's target, and its reversal, named in the owner's OK>`. Go only if the mapping
+shows the probe's LUN, `trident-<the probe's PV name>`, as the **only** LUN of that
+target.
 
 The node-wide form, TCP 3260 only, on the host that routes the node, 60 s (half the
-corrected timeout), removed by the host itself even if the session to it breaks:
+corrected timeout). The host removes the rule itself even if the session to it
+breaks: a process marked `probe-cut-undo` retries the deletion until `iptables -C`
+reports the rule absent (exit 1). The command refuses to leave the rule in place
+unless that process is running.
 
 ```sh
-nodeip='<operator fills: the node's InternalIP, kubectl get node "$node" -o wide>'
 rule="FORWARD -s $nodeip/32 -d 10.55.0.254/32 -p tcp --dport 3260 -j DROP"
-probe_tier c 300; sleep 20
-cap probe-c-cut python scripts/node-ssh.py "$host" \
-  "iptables -w 5 -I $rule || exit 1; nohup sh -c 'sleep 60; iptables -w 5 -D $rule' </dev/null >/dev/null 2>&1 & date -u +%FT%TZ"
-sleep 30; cap probe-c-sessions-during sessions                  # the node's sessions are no longer LOGGED_IN
-sleep 60
-cap probe-c-rule python scripts/node-ssh.py "$host" "iptables -w 5 -C $rule 2>/dev/null && echo STILL-PRESENT || echo removed"
+undo="sleep 60; while :; do iptables -w 5 -D $rule 2>/dev/null; iptables -w 5 -C $rule 2>/dev/null; [ \$? -eq 1 ] && break; sleep 1; done"
+check="iptables -w 5 -C $rule 2>/dev/null; rc=\$?; case \$rc in 0) echo STILL-PRESENT;; 1) echo removed;; *) echo CHECK-FAILED rc=\$rc;; esac"
+probe_tier c 300 && sleep 20 &&
+cap probe-c-cut python scripts/node-ssh.py "$host" "iptables -w 5 -I $rule || exit 1
+  nohup sh -c ': probe-cut-undo; $undo' </dev/null >/dev/null 2>&1 &
+  sleep 1; pgrep -f '^sh -c : probe-cut-undo' >/dev/null || { iptables -w 5 -D $rule; echo NOT-ARMED; exit 1; }
+  echo armed; date -u +%FT%TZ" &&
+sleep 30 && cap probe-c-sessions-during sessions &&          # the node's sessions are no longer LOGGED_IN
+sleep 60 && cap probe-c-rule python scripts/node-ssh.py "$host" "$check" &&
 probe_after c
 cap probe-c-sessions-after sessions
 ```
@@ -1201,9 +1225,11 @@ Also expected: during the cut the node's sessions are not `LOGGED_IN` (the cut
 holds; if they are, it did not, and the tier proves nothing); the writer stalls and
 resumes; PostgreSQL does not restart (`postmaster_started` equal to the previous
 tier's after-identity, and no recovery lines); afterwards every
-session is `LOGGED_IN` and every device `running`. **Stop** also on `STILL-PRESENT`
-(remove it at once with `iptables -w 5 -D $rule` on the host), or any session or
-device in another state: escalate to the owner with the list of volumes on the node.
+session is `LOGGED_IN` and every device `running`. **Stop** also on `NOT-ARMED`,
+`STILL-PRESENT` or `CHECK-FAILED` (remove the rule at once with `iptables -w 5 -D
+$rule` on the host and read `$check` again until it says `removed`), or on any
+session or device in another state: escalate to the owner with the list of volumes
+on the node.
 
 **Teardown, the same day.**
 
@@ -1249,18 +1275,20 @@ ledger_capture() {   # ledger_capture <label>
 plugins                                                      # worker-budget-authority disabled
 lsql <<<'SELECT ready FROM worker_budget.authority;'         # f
 cap prod-restart-rlog rlog                                   # no budget activity since the withdrawal, at least 20 s ago
-prod_compare() {    # prod_compare <before> <after>
-  cmp "$ev/prod-rows-$1.tsv" "$ev/prod-rows-$2.tsv" && echo "rows identical"
-  cmp "$ev/prod-markers-$1.txt" "$ev/prod-markers-$2.txt" && echo "markers identical"
-  diff "$ev/prod-identity-$1.txt" "$ev/prod-identity-$2.txt"     # only postmaster_started may differ
+prod_compare() {    # prod_compare <before> <after>: fails unless everything but the start time is identical
+  cmp "$ev/prod-rows-$1.tsv" "$ev/prod-rows-$2.tsv" && echo "rows identical" &&
+  cmp "$ev/prod-markers-$1.txt" "$ev/prod-markers-$2.txt" && echo "markers identical" &&
+  diff <(grep -v '^postmaster_started|' "$ev/prod-identity-$1.txt") \
+       <(grep -v '^postmaster_started|' "$ev/prod-identity-$2.txt") && echo "identity identical" &&
+  grep -h '^postmaster_started|' "$ev/prod-identity-$1.txt" "$ev/prod-identity-$2.txt" &&
   cat "$ev/prod-pod-$1.json" "$ev/prod-pod-$2.json"
 }
-ledger_capture before
-cap prod-restart-delete kubectl --context admin@ai -n relay-budget-authority delete pod relay-budget-postgres-0 --timeout=5m
-until kubectl --context admin@ai -n relay-budget-authority get pod relay-budget-postgres-0 >/dev/null 2>&1; do sleep 2; done
-kubectl --context admin@ai -n relay-budget-authority wait --for=condition=Ready pod/relay-budget-postgres-0 --timeout=15m
-ledger_capture after
-cap prod-restart-log kubectl --context admin@ai -n relay-budget-authority logs relay-budget-postgres-0
+ledger_capture before &&
+cap prod-restart-delete kubectl --context admin@ai -n relay-budget-authority delete pod relay-budget-postgres-0 --timeout=5m &&
+{ until kubectl --context admin@ai -n relay-budget-authority get pod relay-budget-postgres-0 >/dev/null 2>&1; do sleep 2; done; } &&
+kubectl --context admin@ai -n relay-budget-authority wait --for=condition=Ready pod/relay-budget-postgres-0 --timeout=15m &&
+ledger_capture after &&
+cap prod-restart-log kubectl --context admin@ai -n relay-budget-authority logs relay-budget-postgres-0 &&
 cap prod-restart-compare prod_compare before after
 ```
 
@@ -1269,8 +1297,8 @@ PostgreSQL cleanly first. Expected:
 - the rows (authority, `clients`, `readers` and every other table) and the markers
   (`17`, `5`, the source commit, the SHA-256 of the copied `SHA256SUMS` equal to the
   manifest pin of budget step 3) are byte-identical;
-- the identity diff touches only the `postmaster_started` result (its row and header
-  width): `system_identifier`, the settings, `functions_md5` and the role memberships
+- `identity identical` apart from `postmaster_started`, which is later after the
+  restart: `system_identifier`, the settings, `functions_md5` and the role memberships
   are unchanged, `in_recovery` `f`;
 - a new Pod UID (the node may differ; a move re-attaches the LUN, minutes per
   Trident sweep);

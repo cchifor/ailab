@@ -1026,12 +1026,17 @@ non-secret evidence, nothing else:
 rv="$(mktemp -d)"
 git -C '<operator fills: the ailab checkout>' archive '<operator fills: the reviewer-merged ailab commit in use>' docs/runbooks \
   | tar -x -C "$rv"
+# This endpoint returns every comment of the issue in one answer: it takes since/before, not pages
+# (on 2026-11-17, limit=3&page=2 returned all 8 comments). The listing below is the check that every
+# evidence comment (drills A-D, durability (i)-(iii)) is in it.
 scripts/gitea-api.sh GET /repos/cchifor/ailab/issues/1753/comments > "$rv/issue-1753-comments.txt"
+sed 1d "$rv/issue-1753-comments.txt" | jq -r '.[] | "\(.id) \(.created_at) \(.body | split("\n")[0])"'
 mkdir "$rv/step4"; cp '<operator fills: the files holding step 4 readbacks, the step8-proofs capture among them>' "$rv/step4/"
 # No secret may reach the reviewer: a DSN with a password, a private key, an OpenBao token, a password
-# value. Any file listed is inspected and cleaned before the review runs.
+# value. grep exits 1 only when it read everything and found none; anything else stops here.
 grep -rlE 'postgresql://[^:@/<> ]+:[^@<> ]+@|BEGIN [A-Z ]*PRIVATE KEY|hvs\.[A-Za-z0-9_-]{20,}|password=[^-<[:space:]]' \
-  "$rv/issue-1753-comments.txt" "$rv/step4" || echo "no secret patterns"
+  "$rv/issue-1753-comments.txt" "$rv/step4"; scan=$?
+[ "$scan" -eq 1 ] && echo "no secret patterns" || echo "STOP: scan=$scan (0: clean the files listed, then scan again; 2: the scan failed)"
 cat > "$rv/REVIEW-PROMPT.txt" <<'PROMPT'
 You are the independent reviewer of step 6 of docs/runbooks/relay-researcher-remaining-live-steps.md
 (ailab). Work READ-ONLY: read the files in this directory and nothing else. Run no command that writes,
@@ -1052,11 +1057,15 @@ S4.3  in_recovery f; fsync, full_page_writes, synchronous_commit, data_checksums
 S4.4  Login roles, function grants and table privileges exactly as checklist step 4, "Expected".
 S4.5  History counts all 0; the witness three-way comparison agrees, five equal hashes. Criterion:
       checklist step 4, "Expected".
-DA..DD One item per drill A, B, C, D. Each comment has protocol step-3 captures timestamped just before
-      the observation (authority row ready=t, plugin enabled, positive control), the drill's pass
-      (budget runbook, "Drills before production ready=true"; for B and C the pass decided at checklist
-      open point 4), Router log lines, the mounted witness SHA-256, the SQL outputs and before/after
-      diffs. A refusal without same-window step-3 captures does not count.
+DA..DD One item per drill A, B, C, D. Each comment has captures timestamped just before the
+      observation that prove the gate open (authority row ready=t, positive control), Router log lines,
+      the mounted witness SHA-256, the SQL outputs and before/after diffs, and the drill's pass:
+      - A and D: the plugin enabled (HTTP 200, active) and the pass of the budget runbook's table,
+        "Drills before production ready=true";
+      - B and C: the pass decided at checklist open point 4 (step 5, B2): the enable answered HTTP 500
+        PLUGIN_FAILED and the plugin stays disabled, while the gate is open and the positive control
+        succeeds; or, if the Router started the plugin, the runbook's own pass.
+      A refusal without same-window captures of the open gate does not count.
 DE    After the drills: the record's latest entry is B, B restored and verified, the authority
       withdrawn, the authority row never rewritten to match a witness. Criterion: checklist step 5,
       "Readback, end of step 5" and "Stop and rollback".
@@ -1078,7 +1087,8 @@ Output, one line per item, exactly:
 Then one final line: VERDICT: OK if every item is PASS, otherwise VERDICT: ISSUES.
 PROMPT
 # The directory is not a git checkout, hence --skip-git-repo-check; -s read-only is the sandbox.
-codex exec -s read-only --skip-git-repo-check -C "$rv" - < "$rv/REVIEW-PROMPT.txt" | tee "$rv/review.txt"
+# It runs only after a clean scan.
+[ "$scan" -eq 1 ] && codex exec -s read-only --skip-git-repo-check -C "$rv" - < "$rv/REVIEW-PROMPT.txt" | tee "$rv/review.txt"
 ```
 
 Post `review.txt` on #1753 as "Step 6 review", with the ailab commit and the list of evidence comment
