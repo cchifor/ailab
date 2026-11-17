@@ -158,6 +158,8 @@ Zot's GC frees blobs inside the container, but the host's `fstrim.timer` never r
 points, so freed space stays allocated in ai-node1's `local-lvm` thin pool. By 2026-10-06 mp0 held
 377 GB allocated for 170 GB in use. That thin-pool fill measurably slowed the shared consumer QLC
 NVMe that also carries cp1's etcd WAL (plans/2026-10-07-etcd-leader-churn-plan.md).
+The pool's zeroing setting, which multiplies writes when trimmed chunks are reused, is a separate
+knob: node-maintenance.md "Thin-pool zeroing".
 
 `scripts/lxc-fstrim-chunked.sh <ctid> <mpN>` (tests: `scripts/tests/test-lxc-fstrim-chunked.sh`, run
 in CI) works **entirely host-side**:

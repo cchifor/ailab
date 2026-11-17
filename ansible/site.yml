@@ -5,6 +5,7 @@
 #   just net           # base + net  (tags: base,net)
 #   just node-exporter # host node_exporter for the AI Lab Fleet dashboard (tags: monitoring)
 #   just perf          # pin CPU governor to performance (tags: performance)
+#   just thinpool      # LVM thin-pool zeroing, OFF on node1/2 only (tags: thinpool)
 #   just autostart     # start onboot LXCs whose NFS bind source was late at boot (tags: autostart)
 #   just mounts        # NFS test mount (tags: mounts)  -- after QNAP export exists
 #   just validate      # link/throughput checks (tags: validate)
