@@ -518,7 +518,8 @@ panels += [
                    "flight; near 100% it is saturated and fsync latency (etcd on the Talos control "
                    "planes) climbs. A CI runner VM writes about 1 TB/day."),
     # A trend, not a table (owner, 2026-11-17: "show graphical traces to see the variation in time"):
-    # wear moves ~1%/day, so the panel is pinned to 14 d whatever the dashboard's range.
+    # wear moves ~1%/day, so the panel is pinned to 14 d (under a relative dashboard range; Grafana may not
+    # apply a panel's relative time to an absolute or zoomed range, reviewer-codex on #1834).
     ts("NVMe Wear (life used % · days to 100%)", 16, 21, 8, NVME_ROW_H,
        [hn(f'nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}}') + " * 100",
         # Guarded (reviewer-claude on #1825): used clamped to >= 1% (a fresh drive reads 0) and the daily
@@ -535,14 +536,18 @@ panels += [
        thresholds=WEAR_STEPS, legend_calcs=["lastNotNull"], time_from="14d",
        overrides=[{"matcher": {"id": "byRegexp", "options": ".* days left"},
                    "properties": [{"id": "unit", "value": "suffix: d"}, {"id": "decimals", "value": 0},
-                                  # log axis: node1/2 sit at 10-60 d while node3 reaches ~250 d
-                                  {"id": "custom.scaleDistribution", "value": {"type": "log", "log": 10}},
+                                  # symlog, not log (reviewer-codex on #1834): node1/2 sit at 10-60 d while
+                                  # node3 reaches ~250 d, and an exhausted drive reads 0, which a log axis
+                                  # cannot draw; symlog is linear below 1 d, so 0 stays visible.
+                                  {"id": "custom.scaleDistribution",
+                                   "value": {"type": "symlog", "log": 10, "linearThreshold": 1}},
                                   {"id": "custom.axisPlacement", "value": "right"},
                                   {"id": "custom.thresholdsStyle", "value": {"mode": "off"}},
                                   {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}],
-       description="Always the last 14 days. Left axis, solid: life used, the drive's own estimate of "
+       description="The last 14 days whenever the dashboard's range is relative (the default, e.g. "
+                   "'Last 6 hours'); an absolute or zoomed range may override that. Left axis, solid: life used, the drive's own estimate of "
                    "its rated write endurance consumed (SMART percentage_used; it can pass 100%, and "
-                   "failure risk rises after it); dashed lines at 70% and 85%. Right axis (log), dashed: days "
+                   "failure risk rises after it); dashed lines at 70% and 85%. Right axis (symmetric log, so 0 days still shows), dashed: days "
                    "to 100% at the last 24 h's write rate, assuming the same TB per 1% as the drive's life so "
                    "far. The legend shows the latest values. Spare blocks and media errors are in the "
                    "same source (nvme_available_spare_ratio, nvme_media_errors_total). Source: the "
