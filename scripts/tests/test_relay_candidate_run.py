@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
 """scripts/relay-candidate-run.py, the S-A per-run generator (owner decision O6).
 
-The committed state must equal the generator's output for the committed run (the placeholder until the
-first run), so a per-run PR whose diff is not exactly the generator's fails CI here. The fixture tests
-run the generator on a temporary copy of the repository with a synthetic run over the REAL frozen
-binding (no key, no signature: the generator checks consistency, Relay's composer and hub check
-cryptography), and the one-time agent candidate structure the generator expects."""
+The committed state must equal the generator's output for the committed run (the placeholder and the
+enrollment agent tree until the first run), so a per-run PR whose diff is not exactly the generator's
+fails CI here. The fixture tests run the generator on a temporary copy of the repository with a
+synthetic run over the REAL frozen binding (no key, no signature: the generator checks consistency,
+Relay's composer and hub check cryptography). The first run writes the agent's one-time candidate
+structure onto the enrollment tree; reset removes it again, byte for byte.
+
+ChartRender compares that structure with Relay's chart (helm template of deploy/infrastructure-agent at
+the pinned sourceCommit). It needs a checkout of the private Relay repository and helm, which CI has
+neither of: it runs locally with RELAY_CHECKOUT=<checkout> and is skipped otherwise."""
 from __future__ import annotations
 
 import copy
+import difflib
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -29,47 +36,123 @@ gen = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gen)
 
 RELAY = ROOT / "kubernetes/apps/apps/relay/kustomization.yaml"
-# The agent config as step I5 imports it (ailab #1788: Relay prepare-pod-installation.ts's canonical
-# 31-agent-config.json), with the one-time candidate value policy.bootstrapSecrets true.
-AGENT_CONFIG = {
-    "hub": {"caFile": "/run/relay/hub-ca/ca.crt", "origin": "https://relay.chifor.me"},
-    "identity": {"clusterUid": "faf3a521-bd08-4d6d-ba5c-9dc7da903819", "controlNamespace": "relay-infra-control",
-                 "enrollmentTokenFile": "/run/relay/enrollment/token",
-                 "installationId": "b380ff7f-0716-478d-8b01-3d39f30e750b",
-                 "installationKeyFile": "/run/relay/installation/installation.pem",
-                 "installationPublicKey": "6D2Cma_Oa4KiaDtOnpmiiztuBhEKObNtEqFNJl-FBas",
-                 "tenantId": "00000000-0000-4000-8000-000000000001"},
-    "kubernetes": {"caFile": "/run/relay/kubernetes/ca.crt", "origin": "https://kubernetes.default.svc:443",
-                   "tokenFile": "/run/relay/kubernetes/token"},
-    "leadership": {"leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2},
-    "policy": {"allowedRuntimeDigests": ["d758093f66f080a69a28fc5f8162184f9f284be981e8f9b0f0c719290af46407"],
-               "allowedTemplates": [{"digest": "abffc97e804e8069d289d58b945d9623afc9fda2400036d69d51df42fea9f195",
-                                     "revision": 1, "templateId": "4da6f919-d660-472c-b503-4d8849fa60df"}],
-               "bootstrapSecrets": True, "executionSlots": ["relay-researcher-1"],
-               "installation": {"allowedEgressDestinations": [], "allowedHarnessAdapters": ["codex"],
-                                "allowedImageDigests": [
-                                    "39aed234fe31d6c819fa472dea3422f305031d5d5a0716962c3547c960cc9b6d"],
-                                "allowedRegistries": ["registry.chifor.me"], "maxLeaseSeconds": 900,
-                                "maxLifetimeSeconds": 28800,
-                                "resourceCeiling": {"cacheGiB": 0, "maxProcesses": 512, "memoryMiB": 4096,
-                                                    "milliCpu": 2000, "retainedGiB": 0, "scratchMiB": 10240}},
-               "podTiers": [{"binding": "relay-gvisor", "runtimeClassName": "relay-gvisor", "tier": "sandboxed-pod"}],
-               "retainedStorageClass": None},
-    "version": 1,
-}
-# The chart's candidate mounts and volume (Relay deploy/infrastructure-agent, candidateRuntime.configMap set).
-AGENT_MOUNT_LINES = "".join(
-    f"        - {{name: candidate, mountPath: {m['mountPath']}, subPath: {m['subPath']}, readOnly: true}}\n"
-    for m in gen.AGENT_MOUNTS)
-AGENT_VOLUME = (
-    "      - name: candidate\n"
-    "        configMap:\n"
-    "          name: relay-candidate-control-unset\n"
-    "          defaultMode: 0444\n"
-    "          optional: false\n"
-    "          items:\n" + "".join(f"          - {{key: {k}, path: {k}}}\n" for k in gen.CONTROL_KEYS))
+
+
+def enrollment_config() -> dict:
+    """agent/config.json as step I5 imports it (Relay prepare-pod-installation.ts's canonical
+    31-agent-config.json; after I10 with the fence UID): main's config outside the campaign, and during it
+    main's config without the campaign overlay."""
+    config = json.loads((ROOT / gen.AGENT / "config.json").read_text(encoding="utf-8"))
+    config["policy"]["bootstrapSecrets"] = False
+    config.pop("candidateRuntime", None)
+    return config
+
+
+AGENT_CONFIG = enrollment_config()
 KEY = {name: (name * 43)[:43] for name in ("I", "R", "H", "P")}
 CA = b"-----BEGIN CERTIFICATE-----\nc3ludGhldGljIGpvdXJuYWwgQ0E=\n-----END CERTIFICATE-----\n"
+NOTE = "relay-candidate-run.py one-time candidate structure (reset removes it): "
+
+
+def one_time_text(control: str) -> dict:
+    """The one-time structure as generate inserts it, written out here independently of the generator:
+    per agent YAML file, (the line it follows, the inserted lines). It is Relay's chart
+    deploy/infrastructure-agent with candidateRuntime set (ChartRender proves that against the chart)."""
+    return {
+        "deployment.yaml": [
+            ("        - {name: config, mountPath: /etc/relay-agent, readOnly: true}\n",
+             f"        # {NOTE}the run's control files.\n"
+             "        - {name: candidate, mountPath: /run/relay/candidate-binding.json, subPath: binding.json, readOnly: true}\n"
+             "        - {name: candidate, mountPath: /run/relay/candidate-trust.json, subPath: config.json, readOnly: true}\n"
+             "        - {name: candidate, mountPath: /run/relay/candidate-ca.pem, subPath: ca.pem, readOnly: true}\n"
+             "        - {name: candidate, mountPath: /run/relay/candidate-network-policy.json, subPath: network-policy.json, readOnly: true}\n"),
+            ("      volumes:\n",
+             f"      # {NOTE}the run's control ConfigMap.\n"
+             "      - name: candidate\n"
+             "        configMap:\n"
+             f"          name: {control}\n"
+             "          defaultMode: 0444\n"
+             "          optional: false\n"
+             "          items:\n"
+             "          - {key: binding.json, path: binding.json}\n"
+             "          - {key: config.json, path: config.json}\n"
+             "          - {key: ca.pem, path: ca.pem}\n"
+             "          - {key: network-policy.json, path: network-policy.json}\n"),
+        ],
+        "rbac.yaml": [
+            ("  - kube-system\n",
+             f"  # {NOTE}the namespaces the run pins.\n"
+             "  - relay-infra-control\n"
+             "  - relay-researcher-1\n"),
+            ('  verbs: ["get", "create", "delete"]\n',
+             f"# {NOTE}the slot egress policy the run\n"
+             "# measures, and the bootstrap Secrets (policy.bootstrapSecrets).\n"
+             '- apiGroups: ["networking.k8s.io"]\n'
+             '  resources: ["networkpolicies"]\n'
+             '  resourceNames: ["relay-researcher-egress"]\n'
+             '  verbs: ["get"]\n'
+             '- apiGroups: [""]\n'
+             '  resources: ["secrets"]\n'
+             '  verbs: ["get", "create", "delete"]\n'),
+        ],
+        "network-policy.yaml": [
+            ("    - {protocol: TCP, port: 443}\n",
+             f"  # {NOTE}the chart's journal\n"
+             "  # rule, owner decision U9's values. Under Cilium it admits nothing: the third object below does.\n"
+             "  - to:\n"
+             '    - ipBlock: {cidr: "10.96.0.42/32"}\n'
+             "    ports:\n"
+             "    - {protocol: TCP, port: 8443}\n"),
+        ],
+    }
+
+
+def by_key(docs) -> dict:
+    return {(d["kind"], d["metadata"].get("namespace"), d["metadata"]["name"]): d for d in docs if d}
+
+
+def chart_candidate_additions(enrollment: dict, control: str) -> dict:
+    """Relay's chart deploy/infrastructure-agent with candidateRuntime set, as additions to the objects of
+    its enrollment-only render, written out here from the templates (deployment.yaml: the four mounts
+    after the config mount and the volume first; rbac.yaml: the two namespaces' reads, the slot egress
+    policy read and the bootstrap Secrets; networkpolicy.yaml: the journal rule with U9's values)."""
+    out = copy.deepcopy(enrollment)
+    ns, slot = "relay-infra-control", "relay-researcher-1"
+    pod = out["deployment.yaml"][("Deployment", ns, "relay-infrastructure-agent")]["spec"]["template"]["spec"]
+    [agent] = pod["containers"]
+    assert agent["volumeMounts"][0]["name"] == "config"
+    agent["volumeMounts"][1:1] = [
+        {"name": "candidate", "mountPath": "/run/relay/candidate-binding.json", "subPath": "binding.json", "readOnly": True},
+        {"name": "candidate", "mountPath": "/run/relay/candidate-trust.json", "subPath": "config.json", "readOnly": True},
+        {"name": "candidate", "mountPath": "/run/relay/candidate-ca.pem", "subPath": "ca.pem", "readOnly": True},
+        {"name": "candidate", "mountPath": "/run/relay/candidate-network-policy.json", "subPath": "network-policy.json",
+         "readOnly": True}]
+    pod["volumes"].insert(0, {"name": "candidate", "configMap": {
+        "name": control, "defaultMode": 0o444, "optional": False,
+        "items": [{"key": k, "path": k} for k in ("binding.json", "config.json", "ca.pem", "network-policy.json")]}})
+    rbac = out["rbac.yaml"]
+    [cluster] = rbac[("ClusterRole", None, "relay-infrastructure-agent-relay-infra-control-cluster-uid")]["rules"]
+    assert cluster["resourceNames"] == ["kube-system"]
+    cluster["resourceNames"] += [ns, slot]
+    workloads = rbac[("Role", slot, "relay-infrastructure-agent-workloads")]["rules"]
+    assert workloads == [{"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "create", "delete"]}]
+    workloads += [{"apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"],
+                   "resourceNames": ["relay-researcher-egress"], "verbs": ["get"]},
+                  {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get", "create", "delete"]}]
+    egress = out["network-policy.yaml"][("NetworkPolicy", ns, "relay-infrastructure-agent")]["spec"]["egress"]
+    assert len(egress) == 3
+    egress.append({"to": [{"ipBlock": {"cidr": "10.96.0.42/32"}}], "ports": [{"protocol": "TCP", "port": 8443}]})
+    return out
+
+
+def with_one_time_text(texts: dict, control: str) -> dict:
+    """The agent YAML texts with one_time_text() inserted, each block after the one line it follows."""
+    out = dict(texts)
+    for name, edits in one_time_text(control).items():
+        for line, block in edits:
+            assert out[name].count(line) == 1, (name, line)
+            out[name] = out[name].replace(line, line + block)
+    return out
 
 
 def canonical(value) -> str:
@@ -77,27 +160,24 @@ def canonical(value) -> str:
 
 
 def candidate_tree(root: Path) -> None:
-    """The repository after I5, Q4 and the one-time agent candidate PR, in a temporary copy."""
+    """The repository after I5 and Q4, with no run and the enrollment agent tree, in a temporary copy:
+    main, or during the campaign main as reset leaves it (Committed proves reset's output is main's)."""
     for rel in (gen.COMPONENT, gen.AGENT, gen.INSTALLATION):
         shutil.copytree(ROOT / rel, root / rel)
-    for rel in (gen.BINDING, gen.RELAY_MANIFEST):
+    for rel in (gen.BINDING, gen.RELAY_MANIFEST, gen.PINS):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / rel, root / rel)
     kust = root / gen.INSTALLATION / "kustomization.yaml"
     text = kust.read_text(encoding="utf-8")
     if "- qualification-egress.yaml" not in text:
         kust.write_text(text.replace("- execution-egress.yaml", "- qualification-egress.yaml"), encoding="utf-8")
-    (root / gen.AGENT / "config.json").write_text(canonical(AGENT_CONFIG) + "\n", encoding="utf-8")
-    deployment = root / gen.AGENT / "deployment.yaml"
-    [parsed] = [d for d in gen.load_yaml_docs(deployment) if d.get("kind") == "Deployment"]
-    if gen.agent_candidate(parsed) != ([], []):
-        return  # the one-time structure is committed already: keep it as it is
-    text = deployment.read_text(encoding="utf-8")
-    mount = "        - {name: config, mountPath: /etc/relay-agent, readOnly: true}\n"
-    volume = "      - name: config\n        configMap:\n          name: relay-infrastructure-agent-config\n"
-    assert text.count(mount) == 1 and text.count(volume) == 1
-    deployment.write_text(text.replace(mount, mount + AGENT_MOUNT_LINES).replace(volume, AGENT_VOLUME + volume),
-                          encoding="utf-8")
+    files, _ = gen.reset_files(root)
+    for path, data in files.items():
+        (root / path).write_bytes(data)
+
+
+def agent_texts(root: Path) -> dict:
+    return {name: (root / gen.AGENT / name).read_text(encoding="utf-8") for name in gen.ONE_TIME_FILES}
 
 
 def control_name(root: Path) -> str:
@@ -182,6 +262,26 @@ class Committed(unittest.TestCase):
     def test_committed_files_equal_the_generator_output(self):
         result, diff = gen.check(ROOT)
         self.assertEqual(diff, [], result)
+        # No run: no one-time structure either. A run: exactly the structure its generation wrote.
+        self.assertEqual(result["oneTimeStructure"], "absent" if gen.is_placeholder(ROOT) else "present")
+
+    def test_the_agent_tree_is_the_enrollment_tree_or_the_runs(self):
+        """Without a run, reset changes nothing on main, byte for byte; with one, generating that run onto
+        reset's output reproduces main's agent files byte for byte (the first run's addition)."""
+        reset, state = gen.reset_files(ROOT)
+        if gen.is_placeholder(ROOT):
+            self.assertEqual(state, "absent")
+            self.assertEqual({str(p): (ROOT / p).read_bytes() for p in reset}, {str(p): d for p, d in reset.items()})
+            return
+        self.assertEqual(state, "removed")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            candidate_tree(root)
+            for path in (gen.RUN_DIR / name for name in ("document.json", "kustomization.yaml", "deployment.yaml")):
+                shutil.copy2(ROOT / path, root / path)
+            files, one_time = gen.generated_files(root, gen.committed_run(root))
+            self.assertEqual(one_time, "added")
+            self.assertEqual({str(p): d for p, d in files.items()}, {str(p): (ROOT / p).read_bytes() for p in files})
 
     def test_placeholder_is_never_included(self):
         included = "../../../components/relay-worker-candidate" in (yaml.safe_load(RELAY.read_text()).get("components") or [])
@@ -197,6 +297,10 @@ class Committed(unittest.TestCase):
         journal = importlib.util.module_from_spec(render)
         render.loader.exec_module(journal)
         self.assertEqual(gen.JOURNAL_ORIGIN, journal.ORIGIN)
+        # Owner decision U9 (ailab #1818): the chart's journal rule is the journal Service on its port.
+        self.assertEqual((gen.JOURNAL_CIDRS, gen.JOURNAL_PORT), (("10.96.0.42/32",), 8443))
+        self.assertEqual(gen.JOURNAL_CIDRS, (f"{journal.CLUSTER_IP}/32",))
+        self.assertEqual(gen.JOURNAL_ORIGIN.rsplit(":", 1)[1], str(gen.JOURNAL_PORT))
         self.assertFalse(gen.HOLDER_SECRET.startswith("relay-bootstrap-"))
         for name in gen.names("f" * 64).values():
             self.assertRegex(name, r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
@@ -239,14 +343,17 @@ class Generator(unittest.TestCase):
         self.assertEqual(self.snapshot(), before, "a refusal wrote a file")
         return caught.exception.code
 
-    def test_generates_exactly_the_run_bound_values_and_checks_them(self):
+    def test_first_run_writes_the_run_values_and_the_one_time_structure(self):
+        """R0 (and R1 again after R0's reset) on the enrollment tree: the five run-bound files, and the
+        one-time structure in the four agent files, exactly as one_time_text() writes it out."""
         c = campaign(self.root, self.now)
         before = self.snapshot()
-        previous_control = control_name(self.root)
+        agent_before = agent_texts(self.root)
         out = self.generate(c)
         digest = gen.run_digest(c["run"])
         d16 = digest[:16]
         self.assertEqual(out["runDigest"], digest)
+        self.assertEqual(out["oneTimeStructure"], "added")
         self.assertEqual(out["names"], {
             "hubConfigMap": f"relay-worker-candidate-{d16}", "hubSessionKeySecret": f"relay-worker-candidate-key-{d16}",
             "controlConfigMap": f"relay-candidate-control-{d16}", "trustConfigMap": f"relay-candidate-trust-{d16}",
@@ -259,7 +366,7 @@ class Generator(unittest.TestCase):
         self.assertEqual(changed, sorted(out["files"]))
         self.assertEqual(changed, sorted(str(p) for p in (
             gen.RUN_DIR / "document.json", gen.RUN_DIR / "kustomization.yaml", gen.RUN_DIR / "deployment.yaml",
-            gen.AGENT / "config.json", gen.AGENT / "deployment.yaml")))
+            *(gen.AGENT / name for name in gen.ONE_TIME_FILES))))
         self.assertEqual(after[str(gen.RUN_DIR / "document.json")], c["document"])
         run_patch = yaml.safe_load(after[str(gen.RUN_DIR / "deployment.yaml")])
         spec = run_patch["spec"]["template"]["spec"]
@@ -270,9 +377,11 @@ class Generator(unittest.TestCase):
             {"name": "worker-candidate-key-source", "secret": {"secretName": f"relay-worker-candidate-key-{d16}"}}])
         kust = yaml.safe_load(after[str(gen.RUN_DIR / "kustomization.yaml")])
         self.assertEqual(kust["configMapGenerator"][0]["name"], f"relay-worker-candidate-{d16}")
-        # Agent config: only candidateRuntime is new; bindingSha256 is the frozen binding.
+        # Agent config: the I5 import with bootstrapSecrets true and the run's candidateRuntime, nothing else.
         config = json.loads(after[str(gen.AGENT / "config.json")])
-        self.assertEqual({k: v for k, v in config.items() if k != "candidateRuntime"}, AGENT_CONFIG)
+        imported = copy.deepcopy(AGENT_CONFIG)
+        imported["policy"]["bootstrapSecrets"] = True
+        self.assertEqual({k: v for k, v in config.items() if k != "candidateRuntime"}, imported)
         trust = (canonical({"version": 1, "issuerKeys": {"campaign-issuer": KEY["I"]},
                             "journal": {k: c["run"]["payload"]["ledger"][k] for k in ("caSha256", "origin", "replyPublicKey")},
                             "run": c["run"], "supervisorUid": 2000}) + "\n").encode()
@@ -283,21 +392,63 @@ class Generator(unittest.TestCase):
             "trustConfigMap": f"relay-candidate-trust-{d16}", "pinConfigMap": f"relay-candidate-pin-{d16}",
             "holderSecret": "relay-candidate-holder"})
         self.assertEqual(after[str(gen.AGENT / "config.json")].decode(), canonical(config) + "\n")
-        # Agent deployment: one line, the control ConfigMap.
-        old = before[str(gen.AGENT / "deployment.yaml")].decode().splitlines()
-        new = after[str(gen.AGENT / "deployment.yaml")].decode().splitlines()
-        self.assertEqual([(a, b) for a, b in zip(old, new) if a != b],
-                         [(f"          name: {previous_control}", f"          name: relay-candidate-control-{d16}")])
+        # The agent YAML files: exactly the one-time text inserted, every other byte unchanged.
+        expected = with_one_time_text(agent_before, f"relay-candidate-control-{d16}")
+        for name in gen.ONE_TIME_FILES[1:]:
+            self.assertEqual(after[str(gen.AGENT / name)].decode(), expected[name], name)
+        # ... which parses to the enrollment objects plus exactly the chart's candidate additions.
+        objects = {name: by_key(yaml.safe_load_all(after[str(gen.AGENT / name)])) for name in gen.ONE_TIME_FILES[1:]}
+        enrollment = {name: by_key(yaml.safe_load_all(agent_before[name])) for name in gen.ONE_TIME_FILES[1:]}
+        self.assertEqual(objects, chart_candidate_additions(enrollment, f"relay-candidate-control-{d16}"))
         result, diff = gen.check(self.root, digest)
         self.assertEqual(diff, [])
-        self.assertEqual(result["runDigest"], digest)
+        self.assertEqual((result["runDigest"], result["oneTimeStructure"]), (digest, "present"))
         self.assertEqual(gen.check(self.root, "0" * 64)[1], [f"run digest {digest} is not the expected {'0' * 64}"])
+
+    def test_reset_restores_the_enrollment_tree_byte_for_byte(self):
+        before = self.snapshot()
+        self.generate(campaign(self.root, self.now))
+        files, state = gen.reset_files(self.root)
+        self.assertEqual(state, "removed")
+        for path, data in files.items():
+            (self.root / path).write_bytes(data)
+        self.assertEqual(self.snapshot(), before)
+        result, diff = gen.check(self.root)
+        self.assertEqual((diff, result["state"], result["oneTimeStructure"]), ([], "placeholder", "absent"))
+        # Reset is idempotent: on the enrollment tree it writes run/ only, with the bytes already there.
+        files, state = gen.reset_files(self.root)
+        self.assertEqual((state, sorted(map(str, files))), ("absent", sorted(map(str, gen.placeholder_files()))))
+        self.assertTrue(all((self.root / p).read_bytes() == d for p, d in files.items()))
+        # Another runtime mode's agent tree (the ordinary activation, after the campaign) is not reset's to
+        # change, as long as it carries no candidate-only object; one that does is refused.
+        config = self.root / gen.AGENT / "config.json"
+        ordinary = copy.deepcopy(AGENT_CONFIG)
+        ordinary["policy"]["bootstrapSecrets"] = True
+        ordinary["ordinaryNamespacePins"] = {"control": {"name": "relay-infra-control", "uid": "0" * 8},
+                                             "execution": [{"name": "relay-researcher-1", "uid": "1" * 8}]}
+        config.write_text(canonical(ordinary) + "\n")
+        files, state = gen.reset_files(self.root)
+        self.assertEqual((state, sorted(map(str, files))), ("other-mode", sorted(map(str, gen.placeholder_files()))))
+        self.assertEqual(gen.check(self.root)[1], [])
+        texts = agent_texts(self.root)
+        for name in ("deployment.yaml", "network-policy.yaml"):
+            path = self.root / gen.AGENT / name
+            path.write_text(with_one_time_text(texts, "relay-candidate-control-" + "0" * 16)[name])
+            with self.assertRaises(gen.Refusal) as caught:
+                gen.reset_files(self.root)
+            self.assertEqual(caught.exception.code, "agent-mode-conflict", name)
+            self.assertEqual(gen.check(self.root)[1], ["agent tree: agent-mode-conflict"])
+            path.write_text(texts[name])
+        config.write_text(canonical({**ordinary, "candidateRuntime": {}}) + "\n")
+        with self.assertRaises(gen.Refusal) as caught:
+            gen.reset_files(self.root)
+        self.assertEqual(caught.exception.code, "agent-mode-conflict")
 
     def test_deterministic_and_idempotent(self):
         c = campaign(self.root, self.now)
         self.generate(c)
         first = self.snapshot()
-        self.generate(c)
+        self.assertEqual(self.generate(c)["oneTimeStructure"], "kept")
         self.assertEqual(self.snapshot(), first)
         other = Path(self.tmp.name) / "other"
         candidate_tree(other)
@@ -308,22 +459,33 @@ class Generator(unittest.TestCase):
     def test_next_run_replaces_only_run_bound_values(self):
         self.generate(campaign(self.root, self.now))
         first = self.snapshot()
+        previous_control = control_name(self.root)
 
         def next_run(run, _document):
             run["payload"]["runId"] = "3d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f6a"
             run["payload"]["leaseSeconds"] = 120
         second = campaign(self.root, self.now, next_run)
         out = self.generate(second, tag="s")
+        self.assertEqual(out["oneTimeStructure"], "kept")
         after = self.snapshot()
-        self.assertEqual(sorted(k for k in after if after[k] != first[k]), sorted(out["files"]))
+        self.assertEqual(sorted(k for k in after if after[k] != first[k]), sorted(str(p) for p in (
+            gen.RUN_DIR / "document.json", gen.RUN_DIR / "kustomization.yaml", gen.RUN_DIR / "deployment.yaml",
+            gen.AGENT / "config.json", gen.AGENT / "deployment.yaml")))
         a = json.loads(first[str(gen.AGENT / "config.json")])["candidateRuntime"]
         b = json.loads(after[str(gen.AGENT / "config.json")])["candidateRuntime"]
         self.assertEqual({k for k in a if a[k] != b[k]}, {"trustSha256", "trustConfigMap", "pinConfigMap"})
+        # Agent deployment: one line, the control ConfigMap.
+        old = first[str(gen.AGENT / "deployment.yaml")].decode().splitlines()
+        new = after[str(gen.AGENT / "deployment.yaml")].decode().splitlines()
+        self.assertEqual([(x, y) for x, y in zip(old, new) if x != y],
+                         [(f"          name: {previous_control}",
+                           f"          name: relay-candidate-control-{out['runDigest'][:16]}")])
         self.assertEqual(gen.check(self.root, out["runDigest"])[1], [])
 
     def test_hand_edits_fail_the_check(self):
-        """run/ is generator-owned byte for byte; in the agent tree the generator owns candidateRuntime
-        and the candidate volume's ConfigMap, and everything else there stays reviewed content."""
+        """run/ is generator-owned byte for byte; in the agent tree the generator owns the one-time
+        structure, candidateRuntime and the candidate volume's ConfigMap, and everything else there stays
+        reviewed content."""
         out = self.generate(campaign(self.root, self.now))
         d16 = out["runDigest"][:16]
         edits = {
@@ -332,7 +494,11 @@ class Generator(unittest.TestCase):
             str(gen.RUN_DIR / "document.json"): lambda b: b[:-1] + b" }",
             str(gen.AGENT / "config.json"): lambda b: b.replace(out["trustSha256"].encode(), b"0" * 64),
             str(gen.AGENT / "deployment.yaml"): lambda b: b.replace(f"relay-candidate-control-{d16}".encode(),
-                                                                   b"relay-candidate-control-previous"),
+                                                                   b"relay-candidate-control-" + b"0" * 16),
+            str(gen.AGENT / "rbac.yaml"): lambda b: b.replace(b'  verbs: ["get", "create", "delete"]\n---',
+                                                             b'  verbs: ["get", "create", "delete", "list"]\n---'),
+            str(gen.AGENT / "network-policy.yaml"): lambda b: b.replace(b"port: 8443}\n---\napiVersion: cilium",
+                                                                       b"port: 443}\n---\napiVersion: cilium"),
         }
         self.assertEqual(sorted(edits), sorted(out["files"]))
         for rel, edit in edits.items():
@@ -347,6 +513,96 @@ class Generator(unittest.TestCase):
                 pass  # an edited document is no longer the committed run's compact document: refused outright
             finally:
                 path.write_bytes(original)
+        self.assertEqual(gen.check(self.root)[1], [])
+
+    def test_refuses_a_hand_edited_one_time_object(self):
+        """Once written, the one-time structure is the generator's, byte for byte: any edit to one of its
+        objects, or a structure in some files and not others, is refused by generate (nothing written),
+        by reset (nothing written) and by check. Nothing is ever completed or repaired."""
+        out = self.generate(campaign(self.root, self.now))
+        control = f"relay-candidate-control-{out['runDigest'][:16]}"
+        second = campaign(self.root, self.now, lambda run, _d: run["payload"].update(
+            runId="3d4e5f6a-7b8c-4d9e-8f0a-1b2c3d4e5f6a"))
+        D, R, N, C = (str(gen.AGENT / n) for n in ("deployment.yaml", "rbac.yaml", "network-policy.yaml", "config.json"))
+
+        def configmap_first(text):
+            [d] = [d for d in yaml.safe_load_all(text) if d]
+            spec = d["spec"]["template"]["spec"]
+            spec["volumes"] = [{"configMap": v["configMap"], "name": v["name"]} if v["name"] == "candidate" else v
+                               for v in spec["volumes"]]
+            return yaml.safe_dump(d, default_flow_style=False, sort_keys=False)
+
+        def config_edit(change):
+            def edit(text):
+                cfg = json.loads(text)
+                change(cfg)
+                return canonical(cfg) + "\n"
+            return edit
+        cases = [
+            (D, lambda t: t.replace("candidate-ca.pem, subPath", "candidate-ca.crt, subPath"), "agent-one-time-edited:deployment.yaml"),
+            (D, lambda t: t.replace("          defaultMode: 0444\n          optional", "          defaultMode: 0440\n          optional"),
+             "agent-one-time-edited:deployment.yaml"),
+            (D, lambda t: t.replace("          optional: false\n", ""), "agent-one-time-edited:deployment.yaml"),
+            (D, lambda t: t.replace("path: network-policy.json}\n", "path: network-policy.json}\n          - {key: x, path: x}\n"),
+             "agent-one-time-edited:deployment.yaml"),
+            (D, lambda t: t.replace(control, "relay-candidate-control-unset"), "agent-one-time-edited:deployment.yaml"),
+            (D, lambda t: t.replace("(reset removes it): the run's control files.", "(edited by hand)."),
+             "agent-one-time-edited:deployment.yaml"),
+            # The same objects, parsed, in another layout (configMap before name, no comments).
+            (D, configmap_first, "agent-one-time-edited:deployment.yaml"),
+            (D, lambda t: t.replace("      - name: candidate\n", "      - name: candidate\n  - broken: [\n", 1),
+             "agent-one-time-yaml:deployment.yaml"),
+            (R, lambda t: t.replace('  verbs: ["get", "create", "delete"]\n---', '  verbs: ["get", "create", "delete", "list"]\n---'),
+             "agent-one-time-edited:rbac.yaml"),
+            (R, lambda t: t.replace("  - relay-researcher-1\n", ""), "agent-one-time-edited:rbac.yaml"),
+            (R, lambda t: t.replace('resourceNames: ["relay-researcher-egress"]', 'resourceNames: ["relay-default-deny"]'),
+             "agent-one-time-edited:rbac.yaml"),
+            (N, lambda t: t.replace('{cidr: "10.96.0.42/32"}', '{cidr: "10.96.0.0/16"}'), "agent-one-time-edited:network-policy.yaml"),
+            (N, lambda t: t.replace("port: 8443}\n---\napiVersion: cilium", "port: 443}\n---\napiVersion: cilium"),
+             "agent-one-time-edited:network-policy.yaml"),
+            (C, config_edit(lambda cfg: cfg["policy"].update(bootstrapSecrets=False)), "agent-one-time-edited:config.json"),
+            (C, config_edit(lambda cfg: cfg["candidateRuntime"].update(holderSecret="another-holder")),
+             "agent-candidate-runtime-fixed-fields"),
+            (C, config_edit(lambda cfg: cfg["candidateRuntime"].update(bindingSha256="0" * 64)),
+             "agent-candidate-runtime-fixed-fields"),
+            (C, config_edit(lambda cfg: cfg["candidateRuntime"].update(extra="x")), "agent-one-time-edited:config.json"),
+            (C, config_edit(lambda cfg: cfg["candidateRuntime"].update(trustConfigMap="relay-candidate-trust-" + "0" * 16)),
+             "agent-one-time-edited:config.json"),
+            (C, lambda t: json.dumps(json.loads(t), indent=2) + "\n", "agent-one-time-edited:config.json"),
+            # A candidate mount in another container (reset would leave it without its volume).
+            (D, lambda t: t.replace("      containers:\n",
+                                    "      initContainers:\n      - name: copy\n        image: x\n        volumeMounts:\n"
+                                    "        - {name: candidate, mountPath: /run/relay/candidate-trust.json, subPath: config.json}\n"
+                                    "      containers:\n"), "agent-one-time-edited:deployment.yaml"),
+            # Another line ending is another byte: refused, never rewritten.
+            (R, lambda t: t.replace("\n", "\r\n"), "agent-one-time-edited:rbac.yaml"),
+            # Another runtime mode beside the structure: never taken as that mode's tree (reset would keep it).
+            (C, config_edit(lambda cfg: cfg.update(podRuntime={})), "agent-mode-conflict"),
+            (C, config_edit(lambda cfg: cfg.update(ordinaryNamespacePins={})), "agent-mode-conflict"),
+            # Partial: one file without the structure while the others carry it.
+            (R, lambda t: gen.remove_one_time_file(t, "rbac.yaml", control, "relay-researcher-egress"), "agent-one-time-partial"),
+            (N, lambda t: gen.remove_one_time_file(t, "network-policy.yaml", control, "relay-researcher-egress"),
+             "agent-one-time-partial"),
+            (D, lambda t: gen.remove_one_time_file(t, "deployment.yaml", control, "relay-researcher-egress"),
+             "agent-one-time-partial"),
+            (C, lambda t: canonical(AGENT_CONFIG) + "\n", "agent-one-time-partial"),
+        ]
+        for rel, edit, code in cases:
+            with self.subTest(rel=rel, code=code):
+                path = self.root / rel
+                original = path.read_bytes().decode()
+                path.write_bytes(edit(original).encode())
+                self.assertNotEqual(path.read_bytes().decode(), original)
+                try:
+                    self.assertEqual(self.refusal(second, tag="s"), code)
+                    before = self.snapshot()
+                    with self.assertRaises(gen.Refusal) as caught:
+                        gen.reset_files(self.root)
+                    self.assertEqual(caught.exception.code, code)
+                    self.assertEqual(self.snapshot(), before)
+                    self.assertIn(f"agent tree: {code}", gen.check(self.root)[1])
+                finally:
+                    path.write_bytes(original.encode())
         self.assertEqual(gen.check(self.root)[1], [])
 
     def test_operator_configmaps(self):
@@ -428,7 +684,10 @@ class Generator(unittest.TestCase):
             gen.generate(self.root, run, "0" * 64, document, document_pin, now_ms=self.now)
         self.assertEqual(caught.exception.code, "run-pin")
 
-    def test_refuses_without_the_one_time_structure(self):
+    def test_refuses_an_agent_tree_it_cannot_take(self):
+        """On the enrollment tree: the qualification stage, an I5-imported config that agrees with the run,
+        and no other runtime mode; a structure in only some files, or not exactly the generator's, is
+        never completed."""
         c = campaign(self.root, self.now)
         egress = self.root / gen.INSTALLATION / "kustomization.yaml"
         original = egress.read_text()
@@ -437,59 +696,107 @@ class Generator(unittest.TestCase):
         egress.write_text(original)
         config = self.root / gen.AGENT / "config.json"
         for mutate, code in [
-            (lambda cfg: cfg["policy"].update(bootstrapSecrets=False), "agent-bootstrap-secrets-off"),
             (lambda cfg: cfg["identity"].update(installationPublicKey=KEY["H"]), "agent-mismatch:installationPublicKey"),
             (lambda cfg: cfg["policy"].update(executionSlots=["relay-researcher-2"]), "agent-mismatch:executionSlots"),
             (lambda cfg: cfg["policy"]["installation"].update(maxLeaseSeconds=600), "agent-mismatch:policyDigest"),
             (lambda cfg: cfg.update(podRuntime={}), "agent-mode-conflict"),
+            (lambda cfg: cfg.update(ordinaryNamespacePins={}), "agent-mode-conflict"),
+            # The one-time config value without candidateRuntime: neither the import nor generate's output.
+            (lambda cfg: cfg["policy"].update(bootstrapSecrets=True), "agent-one-time-edited:config.json"),
             (lambda cfg: cfg.update(candidateRuntime={**gen.AGENT_PATHS, "bindingSha256": gen.BINDING_SHA256,
                                                       "holderSecret": "another-holder"}),
-             "agent-candidate-runtime-fixed-fields"),
-            (lambda cfg: cfg.update(candidateRuntime={**gen.AGENT_PATHS, "bindingSha256": "0" * 64,
-                                                      "holderSecret": gen.HOLDER_SECRET}),
+             "agent-one-time-edited:config.json"),
+            (lambda cfg: (cfg["policy"].update(bootstrapSecrets=True), cfg.update(candidateRuntime={
+                **gen.AGENT_PATHS, "bindingSha256": "0" * 64, "holderSecret": gen.HOLDER_SECRET})),
              "agent-candidate-runtime-fixed-fields"),
         ]:
             cfg = copy.deepcopy(AGENT_CONFIG)
             mutate(cfg)
             config.write_text(canonical(cfg) + "\n")
             self.assertEqual(self.refusal(c), code)
-        # The placeholder config of main before I5 is not an imported config.
+        # A config that is not the I5 import (as main's placeholder was before I5).
         config.write_text(json.dumps(AGENT_CONFIG, indent=2) + "\n")
         self.assertEqual(self.refusal(c), "agent-config-not-imported")
         config.write_text(canonical(AGENT_CONFIG) + "\n")
-        # Structural refusals, built from whatever candidate structure the fixture carries (the
-        # committed one once it exists): the parsed Deployment, changed and dumped without comments.
+        # Part of the structure, written by hand before the run: never completed.
+        texts = agent_texts(self.root)
+        written = with_one_time_text(texts, "relay-candidate-control-" + "0" * 16)
+        for name, code in [("deployment.yaml", "agent-one-time-partial"), ("rbac.yaml", "agent-one-time-partial"),
+                           ("network-policy.yaml", "agent-one-time-partial")]:
+            (self.root / gen.AGENT / name).write_text(written[name])
+            self.assertEqual(self.refusal(c), code, name)
+            (self.root / gen.AGENT / name).write_text(texts[name])
+        # The enrollment tree with CRLF line endings: refused, not rewritten.
+        rbac = self.root / gen.AGENT / "rbac.yaml"
+        rbac.write_bytes(texts["rbac.yaml"].replace("\n", "\r\n").encode())
+        self.assertEqual(self.refusal(c), "agent-one-time-layout:rbac.yaml")
+        rbac.write_text(texts["rbac.yaml"])
+        # Another layout of the enrollment file the structure goes into: refused, not guessed.
         deployment = self.root / gen.AGENT / "deployment.yaml"
-        text = deployment.read_text()
-        [parsed] = [d for d in yaml.safe_load_all(text) if d]
-
-        def dumped(mutate):
-            d = copy.deepcopy(parsed)
-            mutate(d["spec"]["template"]["spec"])
-            return yaml.safe_dump(d, default_flow_style=False, sort_keys=False)
-
-        def drop_mounts(spec):
-            [agent] = [c for c in spec["containers"] if c["name"] == "agent"]
-            agent["volumeMounts"] = [m for m in agent["volumeMounts"] if m["name"] != "candidate"]
-
-        def configmap_first(spec):
-            spec["volumes"] = [{"configMap": v["configMap"], "name": v["name"]} if v["name"] == "candidate" else v
-                               for v in spec["volumes"]]
-
-        def drop_optional(spec):
-            [v] = [v for v in spec["volumes"] if v["name"] == "candidate"]
-            del v["configMap"]["optional"]
-        for body, code in [(dumped(drop_mounts), "agent-candidate-mounts"),
-                           (dumped(drop_optional), "agent-candidate-volume"),
-                           # The same volume with `configMap:` before `name:`: equal when parsed, but not
-                           # the block layout whose name line is replaced.
-                           (dumped(configmap_first), "agent-candidate-volume-layout"),
-                           (text.replace("      - name: candidate\n", "      - name: candidate\n  - broken: [\n", 1),
-                            "agent-deployment-yaml")]:
-            deployment.write_text(body)
-            self.assertEqual(self.refusal(c), code)
-        deployment.write_text(text)
+        deployment.write_text(texts["deployment.yaml"].replace(
+            "        - {name: config, mountPath: /etc/relay-agent, readOnly: true}\n",
+            "        - name: config\n          mountPath: /etc/relay-agent\n          readOnly: true\n"))
+        self.assertEqual(self.refusal(c), "agent-one-time-layout:deployment.yaml")
+        deployment.write_text(texts["deployment.yaml"])
         self.generate(c)
+
+    def test_any_trace_of_the_structure_is_not_its_absence(self):
+        """A one-time object anywhere in the enrollment files (not only where generate puts it), or a
+        candidateRuntime key of any value, means the structure is not absent: generate, reset and check
+        refuse instead of adding a second copy, repairing it or leaving it behind."""
+        c = campaign(self.root, self.now)
+        texts = agent_texts(self.root)
+        journal = '  - to:\n    - ipBlock: {cidr: "10.96.0.42/32"}\n    ports:\n    - {protocol: TCP, port: 8443}\n'
+        dns_rule = ("  - to:\n    - namespaceSelector:\n        matchLabels:\n          kubernetes.io/metadata.name: kube-system\n"
+                    "      podSelector:\n        matchLabels:\n          k8s-app: kube-dns\n    ports:\n"
+                    "    - {protocol: UDP, port: 53}\n    - {protocol: TCP, port: 53}\n")
+        self.assertEqual(texts["network-policy.yaml"].count(dns_rule), 1)
+        cases = [
+            # The journal rule in place of the DNS rule: still three rules.
+            ("network-policy.yaml", lambda t: t.replace(dns_rule, ""), journal, "agent-one-time-partial"),
+            # A rule on the journal's port, wherever it is.
+            ("network-policy.yaml", lambda t: t.replace("    - {protocol: TCP, port: 443}\n",
+                                                        "    - {protocol: TCP, port: 443}\n    - {protocol: TCP, port: 8443}\n"),
+             None, "agent-one-time-partial"),
+            # A candidate file mounted from a volume of another name.
+            ("deployment.yaml", lambda t: t.replace(
+                "        - {name: kubernetes,",
+                "        - {name: other, mountPath: /run/relay/candidate-trust.json, subPath: config.json, readOnly: true}\n"
+                "        - {name: kubernetes,"), None, "agent-one-time-edited:deployment.yaml"),
+            ("config.json", lambda t: canonical({**AGENT_CONFIG, "candidateRuntime": None}) + "\n", None,
+             "agent-one-time-edited:config.json"),
+            ("config.json", lambda t: canonical({**AGENT_CONFIG, "candidateRuntime": {}}) + "\n", None,
+             "agent-one-time-edited:config.json"),
+        ]
+        # A rule beyond the chart's three that is not the journal's: the enrollment tree grew, not the structure.
+        other = '  - to:\n    - ipBlock: {cidr: "10.96.0.50/32"}\n    ports:\n    - {protocol: TCP, port: 9443}\n'
+        cases.append(("network-policy.yaml", lambda t: t, other, "agent-enrollment-egress-count"))
+        for name, edit, append, code in cases:
+            with self.subTest(name=name, code=code):
+                path = self.root / gen.AGENT / name
+                body = edit(texts[name])
+                if append:
+                    body = body.replace("    - {protocol: TCP, port: 443}\n", "    - {protocol: TCP, port: 443}\n" + append)
+                self.assertNotEqual(body, texts[name])
+                path.write_text(body)
+                try:
+                    self.assertEqual(self.refusal(c), code)
+                    with self.assertRaises(gen.Refusal) as caught:
+                        gen.reset_files(self.root)
+                    self.assertEqual(caught.exception.code, code)
+                    self.assertEqual(gen.check(self.root)[1], [f"agent tree: {code}"])
+                    # ... and beside another runtime mode, a conflict.
+                    if name != "config.json":
+                        config = self.root / gen.AGENT / "config.json"
+                        config.write_text(canonical({**AGENT_CONFIG, "podRuntime": {}}) + "\n")
+                        with self.assertRaises(gen.Refusal) as caught:
+                            gen.reset_files(self.root)
+                        self.assertEqual(caught.exception.code, code if code == "agent-enrollment-egress-count"
+                                         else "agent-mode-conflict")
+                        config.write_text(texts["config.json"])
+                finally:
+                    path.write_text(texts[name])
+        self.assertEqual(gen.check(self.root)[1], [])
 
     def test_base_check_is_the_merge_gate(self):
         """S-A: the committed HEAD must be exactly the generator's output on the PR's base."""
@@ -510,19 +817,43 @@ class Generator(unittest.TestCase):
         inclusion = self.root / "kubernetes/apps/apps/relay-inclusion.txt"
         inclusion.parent.mkdir(parents=True, exist_ok=True)
         inclusion.write_text("- ../../../components/relay-worker-candidate\n")
-        deployment = self.root / gen.AGENT / "deployment.yaml"
-        original = deployment.read_text()
-        deployment.write_text(original.replace("talos-agent-node-3", "talos-agent-node-2"))
         commit("R1")
-        # The first run is H7's inclusion PR: run-bound values self-consistent, the rest by hand,
-        # including any other change to the partly generated agent files.
+        # The first run is H7's inclusion PR: the generator on the base (the enrollment agent tree) with
+        # HEAD's run, the agent's one-time structure included, is what HEAD must hold; only the other
+        # paths it changes (the inclusion line) are reviewed by hand.
         with self.assertRaises(gen.Refusal):
             gen.check_against_base(self.root, "HEAD~1", now_ms=self.now + 7_200_000)
         result, diff = gen.check_against_base(self.root, "HEAD~1", first["runDigest"])
         self.assertEqual(diff, [])
-        self.assertEqual((result["firstRun"], result["reviewByHand"]),
-                         (True, sorted([str(gen.AGENT / "config.json"), str(gen.AGENT / "deployment.yaml"),
-                                        "kubernetes/apps/apps/relay-inclusion.txt"])))
+        self.assertEqual((result["firstRun"], result["oneTimeStructure"], result["reviewByHand"]),
+                         (True, "added", ["kubernetes/apps/apps/relay-inclusion.txt"]))
+        self.assertEqual(sorted(result["files"]), sorted(first["files"]))
+        # HEAD's own tree must still agree with its run: a first run's PR that also leaves the
+        # qualification egress stage is refused, as the generator would refuse it.
+        kust = self.root / gen.INSTALLATION / "kustomization.yaml"
+        original = kust.read_text()
+        kust.write_text(original.replace("- qualification-egress.yaml", "- execution-egress.yaml"))
+        commit("R1 with the enrollment stage")
+        self.assertEqual(gen.check_against_base(self.root, "HEAD~2", first["runDigest"])[1],
+                         ["HEAD's self-check: Refusal: egress-stage-not-qualification"])
+        run_git("reset", "-q", "--hard", "HEAD~1")
+        # Any other change to the agent files fails the gate, in the structure or beside it, as does a
+        # first run's PR without the structure.
+        # (HEAD's self-check names an edit inside the structure too.)
+        deployment, rbac = self.root / gen.AGENT / "deployment.yaml", self.root / gen.AGENT / "rbac.yaml"
+        for path, change, own in [
+                (deployment, lambda t: t.replace("talos-agent-node-3", "talos-agent-node-2"), []),
+                (rbac, lambda t: t.replace("  - relay-researcher-1\n", "  - relay-researcher-1\n  - default\n"),
+                 ["HEAD's self-check: agent tree: agent-one-time-edited:rbac.yaml"]),
+                (rbac, lambda t: gen.remove_one_time_file(t, "rbac.yaml", first["names"]["controlConfigMap"],
+                                                          "relay-researcher-egress"),
+                 ["HEAD's self-check: agent tree: agent-one-time-partial"])]:
+            original = path.read_text()
+            path.write_text(change(original))
+            commit("R1 edited")
+            self.assertEqual(gen.check_against_base(self.root, "HEAD~2", first["runDigest"])[1],
+                             [f"not the generator output for the base: {path.relative_to(self.root)}", *own])
+            run_git("reset", "-q", "--hard", "HEAD~1")
         run_git("branch", "-f", "r1")
 
         def next_run(run, _document):
@@ -573,7 +904,7 @@ class Generator(unittest.TestCase):
 
         # Anything beyond the generated values fails, even an edit the self-check cannot see.
         node = {str(gen.AGENT / "deployment.yaml"):
-                lambda f: f.write_text(f.read_text().replace("talos-agent-node-2", "talos-agent-node-1"))}
+                lambda f: f.write_text(f.read_text().replace("talos-agent-node-3", "talos-agent-node-1"))}
         self.assertEqual(gen.check(self.root, second["runDigest"])[1], [])
         amended(node, [f"not the generator output for the base: {gen.AGENT / 'deployment.yaml'}"])
         amended(node, [f"not the generator output for the base: {gen.AGENT / 'deployment.yaml'}"],
@@ -583,6 +914,13 @@ class Generator(unittest.TestCase):
                 [f"not the generator output for the base: {gen.AGENT / 'config.json'}"])
         amended({"kubernetes/apps/apps/relay-inclusion.txt": lambda f: f.write_text("changed\n")},
                 ["not generated: kubernetes/apps/apps/relay-inclusion.txt"])
+        # The one-time structure is generated in every later run's PR too: unchanged, byte for byte.
+        amended({str(gen.AGENT / "network-policy.yaml"):
+                 lambda f: f.write_text(f.read_text().replace('{cidr: "10.96.0.42/32"}', '{cidr: "10.96.0.0/16"}'))},
+                [f"not the generator output for the base: {gen.AGENT / 'network-policy.yaml'}"])
+        amended({str(gen.AGENT / "rbac.yaml"):
+                 lambda f: f.write_text(f.read_text().replace("# measures, and the", "# measures and the"))},
+                [f"not the generator output for the base: {gen.AGENT / 'rbac.yaml'}"])
 
         # A generated path committed as a symlink to the right bytes is refused.
         def symlink(f):
@@ -601,6 +939,7 @@ class Generator(unittest.TestCase):
 
     def test_cli(self):
         c = campaign(self.root, self.now)
+        before = self.snapshot()
         run, run_pin, document, document_pin = self.files(c)
         base = [sys.executable, str(SCRIPT), "--repo", str(self.root)]
         ok = subprocess.run(base + ["generate", "--run", run, "--run-sha256", run_pin, "--document", document,
@@ -610,22 +949,136 @@ class Generator(unittest.TestCase):
         self.assertEqual(summary["runDigest"], gen.run_digest(c["run"]))
         self.assertEqual(summary["abortBeforeGrantIfHubNotReadBackBy"],
                          gen.iso(c["run"]["payload"]["issuedAt"] + 3_600_000))
+        self.assertEqual(summary["oneTimeStructure"], "added")
         good = subprocess.run(base + ["check", "--run-digest", summary["runDigest"]], capture_output=True, text=True)
         self.assertEqual(good.returncode, 0, good.stdout)
         self.assertTrue(json.loads(good.stdout)["equal"])
         bad = subprocess.run(base + ["check", "--run-digest", "0" * 64], capture_output=True, text=True)
         self.assertEqual(bad.returncode, 1)
-        # The removal before the canary: run/ back to the placeholder, which then checks as such.
+        # Reset refuses a hand-edited structure and writes nothing.
+        rbac = self.root / gen.AGENT / "rbac.yaml"
+        original = rbac.read_text()
+        rbac.write_text(original.replace("  - relay-researcher-1\n", ""))
+        edited = self.snapshot()
+        refused = subprocess.run(base + ["reset"], capture_output=True, text=True)
+        self.assertEqual((refused.returncode, refused.stderr.splitlines()[0]), (2, "Refusal: agent-one-time-edited:rbac.yaml"))
+        self.assertEqual(self.snapshot(), edited)
+        rbac.write_text(original)
+        # R0's reset, and the removal before the canary: run/ back to the placeholder and the agent tree
+        # back to the enrollment tree, byte for byte, which then checks as such.
         reset = subprocess.run(base + ["reset"], capture_output=True, text=True)
         self.assertEqual(reset.returncode, 0, reset.stderr)
-        for path, data in gen.placeholder_files().items():
-            self.assertEqual((self.root / path).read_bytes(), data)
+        self.assertEqual(json.loads(reset.stdout)["oneTimeStructure"], "removed")
+        self.assertEqual(self.snapshot(), before)
         placeholder = subprocess.run(base + ["check"], capture_output=True, text=True)
         self.assertEqual((placeholder.returncode, json.loads(placeholder.stdout)["state"]), (0, "placeholder"))
+        # --chart compares the working tree, never with the merge gate.
+        usage = subprocess.run(base + ["check", "--base", "HEAD", "--chart", str(self.root)], capture_output=True, text=True)
+        self.assertEqual((usage.returncode, usage.stderr.splitlines()[0]), (2, "Refusal: usage"))
         refused = subprocess.run(base + ["generate", "--run", run, "--run-sha256", "0" * 64, "--document", document,
                                          "--document-sha256", document_pin], capture_output=True, text=True)
         self.assertEqual(refused.returncode, 2)
         self.assertEqual(refused.stderr.splitlines()[0], "Refusal: run-pin")
+
+
+class R0State(unittest.TestCase):
+    """R0's per-run PR on a copy of every tracked file: the generator's synthetic first run onto main, with
+    the one-time structure. The I5 checks (test_relay_researcher_installation.py,
+    test_relay_researcher_reproduction.py and this file's Committed) must pass in that state as they do on
+    main, through their campaign paths; then reset must give main back, byte for byte. (R0's PR also carries
+    H7's inclusion, which needs H6 first: test_relay_researcher_hub_upgrade.py's order, not exercised here.)"""
+
+    def test_the_i5_checks_pass_in_r0_and_reset_restores_main(self):
+        if not gen.is_placeholder(ROOT):
+            self.skipTest("a run is committed on main: R0's state is behind us (Committed checks the run's)")
+        listing = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True)
+        if listing.returncode:
+            self.skipTest("not a git checkout")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "repo"
+            main = {}
+            for name in filter(None, listing.stdout.decode().split("\0")):
+                source = ROOT / name
+                if not source.is_file() or source.is_symlink():
+                    continue
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, root / name)
+                main[name] = source.read_bytes()
+            now = int(time.time() * 1000)
+            c = campaign(root, now)
+            run, document = Path(tmp) / "run.json", Path(tmp) / "document.json"
+            run.write_text(c["runText"], encoding="utf-8")
+            document.write_bytes(c["document"])
+            out = gen.generate(root, str(run), hashlib.sha256(c["runText"].encode()).hexdigest(), str(document),
+                               hashlib.sha256(c["document"]).hexdigest(), now_ms=now)
+            self.assertEqual(out["oneTimeStructure"], "added")
+            # The copy's I5 tooling sees the campaign (so the suites below take their campaign paths).
+            spec = importlib.util.spec_from_file_location("r0_bundle", root / "scripts/relay-researcher-bundle.py")
+            bundle = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(bundle)
+            self.assertEqual(bundle.campaign_run()["runDigest"], out["runDigest"])
+            done = subprocess.run([sys.executable, "-B", "-m", "unittest", "test_relay_researcher_installation",
+                                   "test_relay_researcher_reproduction", "test_relay_candidate_run.Committed"],
+                                  cwd=root / "scripts/tests", capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr[-6000:])
+            self.assertRegex(done.stderr, r"\nOK")
+            files, state = gen.reset_files(root)
+            self.assertEqual(state, "removed")
+            for path, data in files.items():
+                (root / path).write_bytes(data)
+            self.assertEqual({name: (root / name).read_bytes() for name in main}, main)
+
+
+class ChartRender(unittest.TestCase):
+    """The one-time structure is Relay's chart: check --chart renders deploy/infrastructure-agent at the
+    pinned sourceCommit with helm, enrollment-only and with the candidate values, and compares every object
+    and the config with the agent tree without and with the structure. LOCAL ONLY: it needs a checkout of
+    the private Relay repository (RELAY_CHECKOUT) and helm, which CI has neither of."""
+
+    def setUp(self):
+        relay = os.environ.get("RELAY_CHECKOUT")
+        if not relay or not shutil.which("helm"):
+            self.skipTest("RELAY_CHECKOUT (a Relay checkout at pins.yaml's sourceCommit) and helm are local only")
+        self.relay = Path(relay).resolve()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "repo"
+        candidate_tree(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_both_renders_equal_the_agent_tree(self):
+        # Before any run: the enrollment tree, and what generate would add (stand-in names).
+        result, diff = gen.chart_check(self.root, self.relay)
+        self.assertEqual(diff, [])
+        self.assertEqual((result["oneTimeStructure"], result["candidateSide"]), ("absent", "generated"))
+        # R0 committed: the tree with the structure and the run's values, and reset's tree.
+        now = int(time.time() * 1000)
+        c = campaign(self.root, now)
+        run, document = Path(self.tmp.name) / "run.json", Path(self.tmp.name) / "document.json"
+        run.write_text(c["runText"], encoding="utf-8")
+        document.write_bytes(c["document"])
+        out = gen.generate(self.root, str(run), hashlib.sha256(c["runText"].encode()).hexdigest(), str(document),
+                           hashlib.sha256(c["document"]).hexdigest(), now_ms=now)
+        result, diff = gen.chart_check(self.root, self.relay)
+        self.assertEqual(diff, [])
+        self.assertEqual((result["oneTimeStructure"], result["candidateSide"], result["controlConfigMap"]),
+                         ("present", "committed", out["names"]["controlConfigMap"]))
+        cli = subprocess.run([sys.executable, str(SCRIPT), "--repo", str(self.root), "check", "--run-digest",
+                              out["runDigest"], "--chart", str(self.relay)], capture_output=True, text=True)
+        self.assertEqual(cli.returncode, 0, cli.stdout + cli.stderr)
+
+    def test_a_structure_the_chart_does_not_render_fails(self):
+        """A generator whose blocks and objects agree with each other but not with the chart (one mount
+        path) passes its own checks and fails only here."""
+        mounts = copy.deepcopy(gen.AGENT_MOUNTS)
+        try:
+            gen.AGENT_MOUNTS[2]["mountPath"] = "/run/relay/candidate-ca.crt"
+            result, diff = gen.chart_check(self.root, self.relay)
+        finally:
+            gen.AGENT_MOUNTS[:] = mounts
+        self.assertEqual(diff, ["candidate: ['Deployment', 'relay-infra-control', 'relay-infrastructure-agent'] "
+                                "differs from the chart render"])
 
 
 if __name__ == "__main__":

@@ -527,8 +527,11 @@ class AgentStage(unittest.TestCase):
         dns, api, hub, *journal = np["egress"]
         if self.campaign:
             # The chart's journal egress rule: ipBlocks only, private and off the LAN, on the journal's
-            # port (its CIDRs are the one-time PR's, U9).
+            # port. Owner decision U9 (ailab #1818): exactly the journal Service address, which
+            # relay-candidate-run.py writes with the one-time structure.
             (rule,) = journal
+            self.assertEqual(rule, {"to": [{"ipBlock": {"cidr": f"{journal_render().CLUSTER_IP}/32"}}],
+                                    "ports": [{"protocol": "TCP", "port": 8443}]})
             origin = urllib.parse.urlsplit(journal_render().ORIGIN)
             self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": origin.port or 443}])
             self.assertTrue(rule["to"])
@@ -550,6 +553,20 @@ class AgentStage(unittest.TestCase):
         cnp = self.objects[("CiliumNetworkPolicy", CONTROL, "relay-infrastructure-agent-api-egress")]["spec"]
         self.assertEqual(cnp["egress"], [{"toEntities": ["kube-apiserver"],
                                           "toPorts": [{"ports": [{"port": str(p), "protocol": "TCP"} for p in net["apiServerPorts"]]}]}])
+        # ailab's journal addition (owner decision U9): an ipBlock never selects the journal Pod under
+        # Cilium, so this selector rule is what admits agent -> journal. Egress only, the agent Pod only,
+        # the journal service Pods only, TCP 8443 only: the same selector as the slot's qualification rule.
+        journal_np = self.objects[("NetworkPolicy", CONTROL, "relay-infrastructure-agent-journal-egress")]
+        self.assertEqual(journal_np["spec"], {
+            "podSelector": {"matchLabels": {"app.kubernetes.io/name": "relay-infrastructure-agent",
+                                            "app.kubernetes.io/instance": "relay-infrastructure-agent"}},
+            "policyTypes": ["Egress"],
+            "egress": [{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "relay-candidate-journal"}},
+                                "podSelector": {"matchLabels": {"app": "relay-candidate-journal"}}}],
+                        "ports": [{"protocol": "TCP", "port": 8443}]}]})
+        qualification = docs(EGRESS["qualification"])[0]["spec"]["egress"][2]
+        self.assertEqual(journal_np["spec"]["egress"][0], qualification,
+                         "the agent's journal rule must match the slot's qualification journal rule")
 
     def test_config_matches_the_template(self):
         config = json.loads((TREE / "agent/config.json").read_text(encoding="utf-8"))

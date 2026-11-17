@@ -88,7 +88,7 @@ this file):
 | 2 | point 6 |
 | 3 | points 1 and 2 |
 | 5 | points 3 and 4 |
-| 6 | point 8 |
+| 6 | points 7 and 8 |
 | 7 | point 7 |
 | 8 | point 5 |
 
@@ -102,9 +102,9 @@ Each of those steps repeats the requirement as a pre-check.
 | 3 | Control-metrics collector Secrets | control monitoring, activation step 2 | **OpenBao**: 1 document (NEW path); **Kubernetes**: 2 Secrets | none |
 | 4 | Budget step 8 proofs | budget step 8 | **Kubernetes**: one temporary client Pod | none |
 | 5 | Witness drills A-D | budget, "Drills before production `ready=true`" | **OpenBao**: witness versions; **ledger**: the rotation to B and the `ready` flips; **Router admin API**: plugin on and off; **Kubernetes**: ExternalSecret annotations, Deployment restarts, the client Pod's deletion | **Router**, 8 times |
-| 6 | Independent review | budget step 8 | none | none |
+| 6 | Durability evidence (6a), then the independent review (6b) | budget step 8; budget, "Durability evidence for the first `ready=true`" | **Kubernetes**: the disposable probe namespace and its objects, created and deleted; the ledger Pod's deletion. With the owner's OK only: a `qm reset` of the probe's node (tier b), a 60 s host firewall rule (tier c) | **the ledger Pod**, once (`OnDelete`); the probe's node VM if tier (b) runs |
 | 7 | `worker_budget.authority.ready=true` | budget step 8 | **ledger** | none |
-| 8 | Router plugin enabled (after the qualification gates) | budget step 9 | **Router admin API** | none |
+| 8 | Router plugin enabled (after the bootstrap gates) | budget step 9 | **Router admin API** | none |
 | 9 | Escrow token (H5, second half); `relay-router-openbao-tls` | Router connection step 9 | **OpenBao**: 1 document and 1 token; **Kubernetes**: 1 ExternalSecret annotation | none |
 | 10 | H6 precondition readback | hub H6 | none | none |
 
@@ -360,8 +360,10 @@ placeholder". That is out of date: since ailab #1778 the template carries 744153
   - the hub runbook's order (File B after H6, before H7, `relay-researcher-hub-upgrade.md:473`) and
     the step-7 plan (File B after the final Router rollout, 124071 §5) put them later.
 
-  This checklist follows the second order. The owner confirms it on #1753 (open point 6) before the
-  PR merges; without that confirmation the step does not run.
+  This checklist follows the second order: File B later, after H6 and before H7 (the hub runbook's
+  enablement order; the step-7 plan's "after the final Router rollout" is the same point, because H6 is
+  the last Router-facing rollout before File B). **Decided 2026-11-17** (open point 6): the trust is
+  included without File B, and File B comes after H6, before H7.
 
 **The PR.** Add `- ../../../components/llm-router-relay-keys-trust` under `components:` in
 `kubernetes/apps/apps/llm-router/kustomization.yaml`. Amend `scripts/tests/test_relay_v060_activation_gate.py`
@@ -424,8 +426,9 @@ escrows the raw token in OpenBao, as I3 does, and creates both Secrets from pipe
   Expected: one row. `00000000-0000-4000-8000-000000000001` is the only tenant of the connection
   record and of the ledger's `clients` row; the owner confirms it as the approved metrics tenant.
 - Neither Secret exists (step 0), and `bao kv list -mount=af relay-control` is empty.
-- **Owner decisions** (open points 1 and 2): the OpenBao path or no escrow, the tenant and the
-  expiry. Without them the step does not run.
+- **Owner decisions** (open points 1 and 2), **decided 2026-11-17**: escrow at `af/relay-control/collector`
+  (recorded in `openbao-recovery.md`'s path classes), the tenant `00000000-0000-4000-8000-000000000001`,
+  and the expiry `2027-02-15T00:00:00Z`.
 
 **Commands.** This block is NEW (not in the runbook).
 
@@ -441,7 +444,7 @@ sha="$(bao kv get -mount=af -field=token relay-control/collector | tr -d '\n' | 
 kubectl --context admin@ai -n relay create secret generic relay-control-metrics \
   --from-literal=tenant-id=00000000-0000-4000-8000-000000000001 \
   --from-literal=token-sha256="$sha" \
-  --from-literal=expires-at='<operator fills: the expiry the owner approves, UTC, form YYYY-MM-DDTHH:MM:SSZ>'
+  --from-literal=expires-at='2027-02-15T00:00:00Z'
 unset sha
 ```
 
@@ -696,7 +699,8 @@ does not start before H7, because it has no profile source (hub runbook H4a,
 `relay-researcher-hub-upgrade.md:299-310`). The runbook's Relay half of drills A-C therefore cannot be
 observed yet (`relay-worker-budget-authority.md:418-419`). Relay's ExternalSecret is still
 force-synced with the Router's, as the procedure says, so its Secret follows. Its Pod mounts B at the
-H6 rollout.
+H6 rollout. Relay's half runs in drill run R0, after File B and before R1
+([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
 
 **Pre-checks.**
 
@@ -711,7 +715,9 @@ H6 rollout.
 - **No Relay connection.** The Relay Pod env has no `RELAY_ROUTER_CONNECTIONS_FILE`.
 - **The owner holds the record.** The owner has the offline issuance record and confirms the window.
 - **Owner decisions** (open points 3 and 4) are recorded on #1753. Open point 4 sets the pass
-  criterion of drills B and C on the live Router (see B2). Without it, drills B and C do not run.
+  criterion of drills B and C on the live Router (see B2); it is **decided 2026-11-17**: the refused enable,
+  with the gate proven open, is the pass. Open point 3 is **decided 2026-11-17**: Relay's half of the
+  drills runs in drill run R0, after File B and before R1.
 
 **Building blocks.** These are used by every drill. All are NEW (not in the runbook), except the
 lines marked otherwise. Write the SQL files once, filling in the IDs from the record (the witness is
@@ -988,26 +994,142 @@ Router qualifies a row is H6's preflight after File B (124071 §5).
 - **B cannot be restored and verified.** Stop and escalate to the owner. Authority stays withdrawn.
 - **Never rewrite the authority row to match a witness** (`relay-worker-budget-authority.md:398-399`).
 
-## Step 6. Independent review
+## Step 6. Durability evidence, then the independent review
 
 **Purpose.** "After independent review, set `worker_budget.authority.ready=true`"
 (`relay-worker-budget-authority.md:236`). "The production `ready=true` (step 8) waits for all four
-drills to be reviewed" (`:481`).
+drills to be reviewed" (`:481`). The owner decided (open point 7) that it also waits for the durability
+evidence, which 6a produces and 6b reviews.
 
-**Writes:** none. **Restarts:** none.
+**Writes:** 6a: **Kubernetes**: the disposable probe (namespace `relay-budget-durability-probe` and its
+objects, its PV's reclaim policy and label), deleted again the same day; the production ledger Pod's
+deletion for (iii). With the owner's explicit OK on #1753 only: tier (b)'s `qm reset` of the probe's
+node VM, tier (c)'s 60 s host firewall rule. 6b: two comments on #1753.
 
-**What is reviewed.** The reviewer reads three things:
+**Restarts:** **the production ledger Pod**, once ((iii), `OnDelete`, authority withdrawn and plugin
+disabled); every Pod on the probe's node if tier (b) runs.
 
-- step 4's proofs;
-- the four drill comments on #1753;
-- the durability and recovery evidence the owner accepted (open point 7).
+### 6a. Durability evidence
 
-The reviewer is `<owner names the independent reviewer>` (open point 8), not the operator who ran the
-drills.
+Run the budget runbook's "Durability evidence for the first `ready=true`" in this session (its
+commands use step 0's and step 5's helpers): (i); (ii) with tier (a), and tiers (b) and (c) only with
+the owner's explicit OK on #1753; the NAS-side record of its "Limit"; then (iii). (iii) runs here,
+after step 5: the drills leave `ready=f` with B's IDs and the plugin disabled, the state it asserts
+before it restarts the ledger Pod. Post each part on #1753 as that section says.
 
-**Readback.** The reviewer's acceptance is recorded on #1753.
+**Stop.** A chain or comparison that fails keeps `ready=false`; the result goes to the owner.
 
-**Stop.** Any finding keeps `ready=false`. Fix it, then repeat the affected proof or drill.
+### 6b. The independent review
+
+**The reviewer (owner decision 2026-11-17, open point 8).** Two parts, both on #1753:
+
+1. **A structured Codex review** of the full scope below, read-only, each item checked against its
+   criterion, with a VERDICT per item. Its output is posted verbatim as a comment titled "Step 6
+   review".
+2. **The owner's explicit acceptance**, a later comment that names the review comment and accepts it.
+
+**A known limit of independence.** The owner took part in the drills: the `ready` flips (the protocol's
+re-opening and withdrawals) and the rotation to B. The owner's acceptance is therefore not independent
+of those parts; the review is the independent read of them. The acceptance comment states this limit.
+
+**What is reviewed: the full step-6 scope.**
+
+- Step 4's proofs: the `step8-proofs` capture and the outputs of the TLS, refusal and privilege proofs.
+- The four drill comments on #1753 ("Witness drill A/B/C/D") and the end-of-step-5 readback.
+- The durability evidence: (i), (ii) and (iii) of the budget runbook's "Durability evidence for the
+  first `ready=true`", and the NAS-side record of its "Limit", as posted on #1753 (open point 7).
+
+**Commands.** NEW (not in the runbook). The review directory holds the reviewed runbooks and the
+non-secret evidence, nothing else:
+
+```sh
+rv="$(mktemp -d)"
+git -C '<operator fills: the ailab checkout>' archive '<operator fills: the reviewer-merged ailab commit in use>' docs/runbooks \
+  | tar -x -C "$rv"
+# This endpoint returns every comment of the issue in one answer: it takes since/before, not pages
+# (on 2026-11-17, limit=3&page=2 returned all 8 comments). The listing below is the check that every
+# evidence comment (drills A-D, durability (i)-(iii)) is in it.
+scripts/gitea-api.sh GET /repos/cchifor/ailab/issues/1753/comments > "$rv/issue-1753-comments.txt"
+sed 1d "$rv/issue-1753-comments.txt" | jq -r '.[] | "\(.id) \(.created_at) \(.body | split("\n")[0])"'
+mkdir "$rv/step4"; cp '<operator fills: the files holding step 4 readbacks, the step8-proofs capture among them>' "$rv/step4/"
+# No secret may reach the reviewer: a DSN with a password, a private key, an OpenBao token, a password
+# value. grep exits 1 only when it read everything and found none; anything else stops here.
+grep -rlE 'postgresql://[^:@/<> ]+:[^@<> ]+@|BEGIN [A-Z ]*PRIVATE KEY|hvs\.[A-Za-z0-9_-]{20,}|password=[^-<[:space:]]' \
+  "$rv/issue-1753-comments.txt" "$rv/step4"; scan=$?
+[ "$scan" -eq 1 ] && echo "no secret patterns" || echo "STOP: scan=$scan (0: clean the files listed, then scan again; 2: the scan failed)"
+cat > "$rv/REVIEW-PROMPT.txt" <<'PROMPT'
+You are the independent reviewer of step 6 of docs/runbooks/relay-researcher-remaining-live-steps.md
+(ailab). Work READ-ONLY: read the files in this directory and nothing else. Run no command that writes,
+and contact no network, cluster, database, OpenBao or Router.
+
+Inputs: docs/runbooks/ (the criteria, at the reviewed ailab commit); issue-1753-comments.txt (every
+comment of ailab #1753, the posted evidence, as the Gitea API returned it); step4/ (step 4's readbacks).
+
+Check every item below against its criterion. Quote the evidence (comment id, or file and line) and the
+criterion (runbook file and section). Evidence that is missing, unreadable, from the wrong window, or
+contradicted elsewhere is not a pass. Do not accept a claim that is not backed by a readback.
+
+S4.1  TLS with hostname verification, both logins, TLSv1.3. Criterion: checklist step 4, "The proofs".
+S4.2  Refusals: a name not on the certificate (verify-full), plaintext, postgres over TCP, table reads
+      (42501). Criterion: checklist step 4, "The proofs".
+S4.3  in_recovery f; fsync, full_page_writes, synchronous_commit, data_checksums all on. Criterion:
+      checklist step 4, "Expected".
+S4.4  Login roles, function grants and table privileges exactly as checklist step 4, "Expected".
+S4.5  History counts all 0; the witness three-way comparison agrees, five equal hashes. Criterion:
+      checklist step 4, "Expected".
+DA..DD One item per drill A, B, C, D. Each comment has captures timestamped just before the
+      observation that prove the gate open (authority row ready=t, positive control), Router log lines,
+      the mounted witness SHA-256, the SQL outputs and before/after diffs, and the drill's pass:
+      - A: the plugin enabled (HTTP 200, active) and the pass of the budget runbook's table,
+        "Drills before production ready=true", as checklist step 5 runs it;
+      - B: B2, the pass decided at checklist open point 4: the enable answered HTTP 500
+        PLUGIN_FAILED and the plugin stays disabled, while the gate is open and the positive control
+        succeeds (or, if the Router started the plugin, the runbook's own pass); and B3, the soft
+        delete: both ExternalSecrets not Ready, both Secrets still holding the empty-witness hash,
+        the Router Pod UID unchanged;
+      - C: as B2 (checklist step 5, C2);
+      - D: checklist step 5's D3, the Router-side scope of this window: Worker budget authority
+        available, the Router's mounted witness equal to B and the record's latest entry, the
+        authority row equal before and after. Relay still mounts A until H6, so Relay's mounted
+        witness and the history comparison are deferred to drill run R0
+        (relay-researcher-r0-relay-drills.md), not a FAIL here.
+      A refusal without same-window captures of the open gate does not count.
+DE    After the drills: the record's latest entry is B, B restored and verified, the authority
+      withdrawn, the authority row never rewritten to match a witness. Criterion: checklist step 5,
+      "Readback, end of step 5" and "Stop and rollback".
+DUR1  Evidence (i). Criterion: budget runbook, "Durability evidence for the first ready=true", (i).
+NAS   The NAS-side guarantee of that section's "Limit": what QuTS states for the ledger's LUN
+      write cache and the pool's synchronous-write policy, with the owner's explicit acceptance or
+      refusal. Criterion: the same section, "Limit".
+DUR2  Evidence (ii): same image, flags and schema (the StatefulSet diff, the bundle receipt, the
+      functions_md5 equal to production's); throwaway identities that differ from production's;
+      for each tier run: its command and UTC time, the PostgreSQL log lines, "lost or changed: 0",
+      "missing 0", integrity zeros and every index checked; tiers (b) and (c) only with an owner OK
+      on #1753 naming node, window and form, and their after-captures; the teardown (namespace, PV and
+      LUN gone); no witness in OpenBao. Criterion: the same section, (ii).
+DUR3  Evidence (iii): the maintenance procedure followed (ready=f, plugin disabled, at least 20 s,
+      drained); rows and markers identical; the identity identical except postmaster_started; a
+      clean-shutdown log line. Criterion: the same section, (iii).
+SEC   No secret anywhere in the evidence: no password, token or private key, and no DSN with its
+      password (the rendered `dsn` files). Host names, ports and sslmode are not secrets.
+
+Output, one line per item, exactly:
+<item>: VERDICT: PASS | FAIL | MISSING - <evidence location> - <criterion> - <one-sentence reason>
+Then one final line: VERDICT: OK if every item is PASS, otherwise VERDICT: ISSUES.
+PROMPT
+# The directory is not a git checkout, hence --skip-git-repo-check; -s read-only is the sandbox.
+# It runs only after a clean scan.
+[ "$scan" -eq 1 ] && codex exec -s read-only --skip-git-repo-check -C "$rv" - < "$rv/REVIEW-PROMPT.txt" | tee "$rv/review.txt"
+```
+
+Post `review.txt` on #1753 as "Step 6 review", with the ailab commit and the list of evidence comment
+ids it read. Keep the review directory with the raw evidence.
+
+**Readback.** On #1753: the "Step 6 review" comment ends `VERDICT: OK`, and the owner's later comment
+accepts it, names the known limit of independence, and is the acceptance step 7 needs.
+
+**Stop.** Any FAIL, MISSING or owner finding keeps `ready=false`. Fix it, repeat the affected proof,
+drill or durability tier, post the new evidence, and run the review again over the full scope.
 
 ## Step 7. `worker_budget.authority.ready=true`
 
@@ -1019,10 +1141,11 @@ drills.
 
 **Pre-checks.**
 
-- Step 6 is accepted.
-- **Durability gate (hard stop).** The owner has accepted named durability and recovery evidence, or
-  approved a reviewed runbook change for the allocation part (open point 7; step 4, "Durability and
-  recovery evidence"). Without it this step does not run.
+- Step 6 is accepted: "Step 6 review" ends `VERDICT: OK`, and the owner's acceptance names it.
+- **Durability gate (hard stop).** (i), (ii) and (iii) of the budget runbook's "Durability evidence
+  for the first `ready=true`", and its "Limit" (the NAS-side record), are posted on #1753 and accepted
+  there by the owner (open point 7, decided 2026-11-17). Without that this step does not run. The same section's confirmation after R1
+  is a later gate, before R2 is signed.
 - The NTP readback (124071 §6) is repeated.
 - The three-way witness comparison agrees on B (`openbao-recovery.md:215-218`), and `wsha_router`
   shows B.
@@ -1047,16 +1170,18 @@ cap gate-after-open lsql <<<"SELECT worker_budget.gate('<B instanceId>', '<B rec
 
 **Stop and rollback.** `lwrite withdraw` (`ready=false`), as "Changing the witness" step 1 does.
 
-## Step 8. Router plugin enabled (budget step 9, after the qualification gates)
+## Step 8. Router plugin enabled (budget step 9, after the bootstrap gates)
 
-**Purpose.** Enable the Router's `worker-budget-authority` plugin. The budget runbook puts it
-**"Only after step 8 and the qualification gates"** (`relay-worker-budget-authority.md:239-242`).
+**Purpose.** Enable the Router's `worker-budget-authority` plugin. Budget step 9 puts it after its
+**bootstrap gates** (owner decision 2026-11-17, open point 5; `relay-worker-budget-authority.md`, step 9).
 
 - H6 needs it: the plugin enabled is an H6 precondition (`relay-researcher-hub-upgrade.md:324-327`,
   and the table at `:469`).
 - The step-7 plan places it between File A and File B (124071 §5).
-- The runbooks do not name "the qualification gates". That is open point 5, and the owner settles it
-  before this step.
+- File B is not one of those gates. Without `qualifications` rows the ledger refuses every allocation
+  (`42501` `Worker budget qualification unavailable`, budget step 9), so this step proves availability
+  only. File B is committed, read back and qualified by the Router before any candidate run is signed
+  (hub H7).
 
 **Writes:** **Router admin API**: the plugin state, which the Router keeps in its own store. No
 manifest enables it.
@@ -1066,16 +1191,22 @@ manifest enables it.
 **Pre-checks.**
 
 - Step 7's readback holds.
-- **Qualification gates (hard stop).** The owner has named the qualification gates on #1753 (open
-  point 5), and each is read back. Without that, this step does not run.
+- **Bootstrap gates (hard stop; budget step 9).** Each is read back in this window. Without them, this
+  step does not run.
+  - Step 8 of the budget runbook is complete: step 4's proofs, the drills reviewed and the durability
+    evidence accepted (step 6), and step 7's readback (`ready=t` with B's IDs, `gate(...)` returns).
+  - The trust is included: step 2's readback (`plugins` shows `relay-keys` active; the mounted trust's
+    SHA-256 equals `trust | sha256sum`).
+  - The Router's `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` is `547353ac…1a261ad`, and the `clients` and
+    `readers` rows (File A) are unchanged: step 0's baseline readback, those lines.
 
-**Commands.** Verbatim (`relay-worker-budget-authority.md:240-241`):
+**Commands.** Verbatim (`relay-worker-budget-authority.md`, step 9):
 `POST /admin/v1/plugins/worker-budget-authority` with `{"enabled":true}`. With step 5's helper, that
 is `plugin true`.
 
 **Readback.**
 
-- Verbatim (`relay-worker-budget-authority.md:241-242`): `GET /admin/v1/plugins` shows the plugin active (run `plugins`), and the
+- Verbatim (`relay-worker-budget-authority.md`, step 9): `GET /admin/v1/plugins` shows the plugin active (run `plugins`), and the
   Router log has `Worker budget authority available`.
 - From 124071 §4.1: the line stays, with no `snapshot_invalid` or `policy_digest_invalid`. Check
   again after 10 s with `cap plugin-on rlog` (step 5's helper).
@@ -1252,36 +1383,44 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
    Router change.
 4. **The E6 rehearsal**
    ([relay-researcher-qualification-campaign.md](relay-researcher-qualification-campaign.md) §4).
-5. **R1.** Its per-run PR includes H7's candidate component. Relay's half of drills A-C runs before
-   its first grant (see the open points).
+5. **R1.** Its per-run PR includes H7's candidate component. Before it, drill run R0 runs Relay's half
+   of drills A-C ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
 
 ## Open points for the owner
 
-1. **Collector token escrow.** Is `af/relay-control/collector` the right OpenBao path for the raw
-   collector token (step 3), or is there to be no escrow at all? If it is kept, a follow-up PR adds the
-   path to `openbao-recovery.md`'s path classes.
-2. **Metrics tenant and expiry.** The metrics tenant is `00000000-0000-4000-8000-000000000001`, and the
-   collector expiry is the owner's to set (step 3).
+1. **Collector token escrow. Decided 2026-11-17:** escrow at `af/relay-control/collector`; the path class is
+   in `openbao-recovery.md`.
+2. **Metrics tenant and expiry. Decided 2026-11-17:** the tenant `00000000-0000-4000-8000-000000000001` and
+   the collector expiry `2027-02-15T00:00:00Z` (step 3).
 3. **Relay in the drills.** Relay is wired since H4a, and the budget runbook's drill text predates that.
    This checklist rolls only the Router, and Relay mounts B at H6. When does Relay's half of drills A-C
-   run? Relay's budget authority starts only at H7, inside R1's 60-minute readback window.
+   run? Relay's budget authority starts only at H7, inside R1's 60-minute readback window. **Decided
+   2026-11-17:** drill run R0 before R1 ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
 4. **Drills B and C on the current Router.** On llm-router `main`
    (`packages/plugins/worker-budget-authority/index.ts`, `packages/kernel/manager.ts:108-116`) the
    witness is parsed when the plugin starts. With an empty or malformed witness, enabling the plugin
    therefore answers `HTTP 500` `PLUGIN_FAILED` and the plugin stays disabled. The runbook's pass ("Router
    unavailable, as in A", with the plugin enabled) cannot be observed. Is the refused enable, with the
-   gate proven open, accepted as these drills' pass (step 5, B2)?
+   gate proven open, accepted as these drills' pass (step 5, B2)? **Decided 2026-11-17: yes.**
 5. **"The qualification gates" of budget step 9.** Which gates are meant? H6 requires the plugin on,
    File B comes after H6, and an `available` Router proves no qualification. The owner names them, and
-   a follow-up PR writes them into the budget runbook.
+   a follow-up PR writes them into the budget runbook. **Decided 2026-11-17: a bootstrap exception.**
+   The plugin may be enabled after budget step 8 and the Router-side readbacks (trust, deployment digest,
+   File A); File B is not needed to enable it, because the ledger refuses every allocation without it,
+   and is mandatory before any candidate run is signed. Budget step 9 now lists the gates (step 8).
 6. **Trust inclusion without File B.** Router connection step 6 lists the `qualifications` rows before
    the trust inclusion. The hub runbook and the step-7 plan put File B after the final Router rollout.
-   Confirm the trust inclusion without File B (step 2). A follow-up PR then makes the Router
-   connection runbook agree.
+   Confirm the trust inclusion without File B (step 2). **Decided 2026-11-17: included without File B**;
+   the Router connection runbook's step 6 now says so.
 7. **Durability evidence for `ready=true`.** The runbook asks for measured QNAP/CSI power-loss
    durability and an acknowledged test allocation through controlled interruptions. The second
    cannot exist before H6. Which evidence does the owner accept now, or which reviewed runbook change
-   defers that part? Step 7 is blocked until this is settled.
-8. **The independent reviewer** for step 6.
+   defers that part? Step 7 is blocked until this is settled. **Decided 2026-11-17:** (i) the settings,
+   (ii) a measured probe on a disposable second ledger through interruption tiers, (iii) a committed-row
+   comparison across one planned production restart, and a confirmation after R1. The procedure is the
+   budget runbook's "Durability evidence for the first `ready=true`"; step 7's blocker points there.
+8. **The independent reviewer** for step 6. **Decided 2026-11-17:** a structured Codex review of the
+   full step-6 scope plus the owner's explicit acceptance, both on #1753, with the owner's part in the
+   drills noted as a known limit of independence (step 6).
 9. **A stale runbook line.** Router connection step 3's readback still says the trust carries the
    `maxTokens` placeholder. That is a follow-up fix to the runbook text.

@@ -499,7 +499,7 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
   it is the cost of restoring, not of initializing.
 - **H4a, H6 and H4b:** revert that step's inclusion PR; nothing in the database changes.
 - **H7's candidate files:** the next run's PR replaces a run's values; before the canary one PR drops
-  the component and resets `run/` (`scripts/relay-candidate-run.py reset`). Removing the file stops
+  the component and resets `run/` and the agent's candidate values (`scripts/relay-candidate-run.py reset`). Removing the file stops
   new candidate admission; Relay keeps the candidate rows it already wrote. Before
   reverting H6 after any issuance, revoke worker credentials through Relay and let escrow cleanup
   finish (Router connection runbook, "Rollback"). Reverting the last profile source (H4b once H7's

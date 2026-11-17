@@ -38,6 +38,12 @@ node-exporter:
 perf:
     cd {{ansible_dir}} && ansible-playbook site.yml --tags performance
 
+# Ansible: converge LVM thin-pool zeroing on the Proxmox hosts (pve_thin_pool_zero; OFF on node1/2 only).
+# The change reloads the pool online (a brief guest I/O pause): ONE host at a time, e.g.
+# `just thinpool --limit ai-node1` (docs/runbooks/node-maintenance.md "Thin-pool zeroing").
+thinpool *args:
+    cd {{ansible_dir}} && ansible-playbook site.yml --tags thinpool {{args}}
+
 # Ansible: start onboot LXCs whose NFS bind-mount source was late at boot (power-cut race with the QNAP)
 autostart:
     cd {{ansible_dir}} && ansible-playbook site.yml --tags autostart
@@ -214,10 +220,12 @@ manifest-lint:
 
 # Needs the pinned Relay checkout (`npm ci` done), Node 22.21+ and helm on PATH, and the five pinned
 # release assets (docs/runbooks/relay-researcher-installation.md, I5). CI cannot run it: the Relay
-# repository and its release assets are private.
+# repository and its release assets are private. After an agent-only update (the inputs pin an
+# `agentRelease`, runbook "Agent-only update") also pass the agent release's asset directory:
+# `just relay-researcher-reproduce <relay> <assets> HEAD <agent-assets>`; without one it is refused.
 # Re-run the Relay researcher I4 generator and I5 import against `ref`; fail on any byte difference
-relay-researcher-reproduce relay assets ref="HEAD":
-    python3 scripts/relay-researcher-reproduce.py --relay {{relay}} --assets {{assets}} --ref {{ref}}
+relay-researcher-reproduce relay assets ref="HEAD" agent_assets="":
+    python3 scripts/relay-researcher-reproduce.py --relay {{relay}} --assets {{assets}} --ref {{ref}}{{ if agent_assets == "" { "" } else { " --agent-assets " + agent_assets } }}
 
 # Verify the two LiteLLM consumer spans (Open WebUI's Local-group model_ids, litellm.yaml's
 # checksum/config annotation) still agree with litellm.yaml's model_list that derives them. dsh is

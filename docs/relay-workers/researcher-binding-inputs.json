@@ -1,5 +1,5 @@
 {
-  "_comment": "Inputs of scripts/relay-researcher-binding.mts, which rebuilds the researcher installation's PodRuntimeBinding and the complete operator definition for runbook step I4 (docs/runbooks/relay-researcher-installation.md) with the pinned Relay checkout's own code. `release` pins the Relay v0.10.3 release (Gitea release 2142) and the sha256 of each asset the generator reads: it refuses any other bytes and any checkout whose HEAD is not sourceCommit. `derived` holds the values the reviewed template's binding leaf requires (researcher-installation-definition.json), plus the relay-gvisor RuntimeClass's scheduling.nodeSelector key ailab.io/runtime-gvisor (RuntimeClass admission merges it into every Pod, and Relay pins the placement selector exactly); scripts/tests/test_relay_researcher_binding.py compares them with the template, relay-workers.tf and the internal TLS and journal manifests. `decisions` holds every binding value that is NOT derived from the release, the template or a Relay constant, as the owner decided them on 2026-11-15 (runbook, 'Binding inputs that are decisions'). `installation` is the identity Relay approved at step I3 (public values; fingerprint = Relay's publicKeyFingerprint, the first 16 hex of sha256 over the base64url key text): the generator refuses any other installation ID or public key, and researcher-i4/ is its committed output for exactly this identity.",
+  "_comment": "Inputs of scripts/relay-researcher-binding.mts, which rebuilds the researcher installation's PodRuntimeBinding and the complete operator definition for runbook step I4 (docs/runbooks/relay-researcher-installation.md) with the pinned Relay checkout's own code. `release` pins the Relay v0.10.3 release (Gitea release 2142) and the sha256 of each asset the generator reads: it refuses any other bytes and any checkout whose HEAD is not sourceCommit. `derived` holds the values the reviewed template's binding leaf requires (researcher-installation-definition.json), plus the relay-gvisor RuntimeClass's scheduling.nodeSelector key ailab.io/runtime-gvisor (RuntimeClass admission merges it into every Pod, and Relay pins the placement selector exactly); scripts/tests/test_relay_researcher_binding.py compares them with the template, relay-workers.tf and the internal TLS and journal manifests. `decisions` holds every binding value that is NOT derived from the release, the template or a Relay constant, as the owner decided them on 2026-11-15 (runbook, 'Binding inputs that are decisions'). `installation` is the identity Relay approved at step I3 (public values; fingerprint = Relay's publicKeyFingerprint, the first 16 hex of sha256 over the base64url key text): the generator refuses any other installation ID or public key, and researcher-i4/ is its committed output for exactly this identity. `agentRelease` pins the Relay v0.10.5 release (Gitea release 2144, source 7521974a), an agent-only update (owner decision 2026-11-17; the installation runbook's \"Agent-only update\"): only the infrastructure agent image comes from it, everything else stays `release`'s.",
   "schema": "ailab.relay-researcher-binding-inputs/v1",
   "release": {
     "tag": "v0.10.3",
@@ -18,6 +18,18 @@
     "runtimeImage": "registry.chifor.me/relay/worker-runtime@sha256:39aed234fe31d6c819fa472dea3422f305031d5d5a0716962c3547c960cc9b6d",
     "runtimeDigest": "d758093f66f080a69a28fc5f8162184f9f284be981e8f9b0f0c719290af46407",
     "agentImage": "registry.chifor.me/relay/infrastructure-agent@sha256:ba4cdd9cf94362a0ab8f06565460c48dbe2a1262ae87e50a77bd145c8811a4ef"
+  },
+  "agentRelease": {
+    "tag": "v0.10.5",
+    "giteaReleaseId": 2144,
+    "sourceCommit": "7521974a8a08219c1b63703d27a16213746cda24",
+    "assets": {
+      "SHA256SUMS": "e6f0d0f0174bf94da6aba1390ff995ed4ceb4789ea0d779c6a143d6fcc6da96a",
+      "manifest.json": "ca63de82612ecb64344921b9731b75528b7177e14f48d02a425940fe4495a498",
+      "worker-image-infrastructure-agent-137245.json": "2f152886c597b4d2f3006bd2d03dab77aa103e60888e24f1bc2525a7ee4a9239"
+    },
+    "agentReceipt": "worker-image-infrastructure-agent-137245.json",
+    "agentImage": "registry.chifor.me/relay/infrastructure-agent@sha256:5b0a85a37a281ccabdb93e4d35f7efe49c552ce24a043e4f021679ed1b63ae3c"
   },
   "derived": {
     "placement": {

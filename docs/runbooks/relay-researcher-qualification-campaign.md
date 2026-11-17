@@ -42,7 +42,9 @@ The `main:` line references below are unchanged between `1ea5ecc9` and `9e09962f
 **Order:** R1 → R2 → R5 → R3 → reserve retries (R4 if needed) → R7 → O8 reconciliation → R6. Hold one
 reserve for an R6 retry. **Count:** 6 runs + 2 reserves (O1): E3 merged as Relay #527, so R3 gives both
 #10 and #18. R7 leaves the pool's only slot blocked (§6 R7), so every retry that R7 does not need goes
-before it, and any run after R7 (R6, or a retry) needs the reviewed reconciliation first (O8).
+before it, and any run after R7 (R6, or a retry) needs the reviewed reconciliation first (O8). Drill run
+R0 comes before R1: signed, its hub half live, never granted or created, so it does not count
+([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
 
 ### Preconditions before R1
 
@@ -55,7 +57,7 @@ Each is read back; a missing one stops the campaign before any signing.
 | Candidate journal on `10.96.0.42`, authority row `ready` | [relay-worker-candidate-journal.md](relay-worker-candidate-journal.md) | Flux `relay-candidate-journal` (base at zero replicas, Service on `.42`) and the one-replica flip: held PRs ("Activation under Flux"); the authority row is the operator's ceremony |
 | File B: ledger step 7 `qualifications` row; its `tokenPolicyDigest` goes into every run's `router.tokenPolicyDigests` | h4: "H7", "Enablement order at a glance" | not generated; D is fixed with the owner when it is (O3, §7) |
 | H7 candidate component (hub `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`) and the S-A generator | hub runbook H7; [relay-candidate-run-generator.md](relay-candidate-run-generator.md) | staged, not included: R1's per-run PR includes it |
-| Agent one-time candidate values: candidate volume, `policy.bootstrapSecrets: true`, journal egress | installation runbook, "Beyond enrollment" item 3; the generator's "One-time prerequisites" | not staged |
+| Agent one-time candidate values: candidate mounts and volume, `policy.bootstrapSecrets: true`, the candidate RBAC, journal egress | installation runbook, "Beyond enrollment" item 3; the generator's "One-time prerequisites" | staged in `scripts/relay-candidate-run.py`: `generate` writes them with the first run (R0's PR, R1's again after R0's reset), `reset` removes them |
 | E2 window + storage converters (#523), E3 lease → two rows (#527), E4 replay disruption (#524), defaultCommunication observer (#519) | Relay `main` | merged |
 | E1 delayed start: pre-session observer, converter branch, hold procedure | Relay #532; bootstrap-Secret hold #536 | merged (`1ea5ecc9`, `eb6033fd`); R7 also needs O7's audit policy and O8's reconciliation |
 | Hub v0.10.4: the `c0fe50f0` candidate loader refuses every real binding | §8 G0; fixed by #525, released as v0.10.4, pinned by ailab #1789 | **live** since 2026-11-16 10:08Z (`…@sha256:d1482bc1…57a7`, schema 79; ailab #1789 comment 125493) |
@@ -516,6 +518,9 @@ signed on the live hub.
       extraction rehearsal in [relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md)),
       exact-UID cleanup, and the agent at zero keeping the bootstrap Secret past its expiry `E`
       (Relay #536).
+- [ ] U9: exactly one agent -> journal connection on TCP 8443, admitted by
+      `relay-infrastructure-agent-journal-egress` (the chart's `10.96.0.42/32` rule admits nothing under
+      Cilium), and no agent egress to the journal on any other port.
 
 ## 5. Cross-cutting checks
 
@@ -806,7 +811,11 @@ before the bundle (§3.5), settled in the E6 rehearsal.
 6. U6: settling an unknown slot by hand: no operator command or UI at `c0fe50f0`.
 7. U7: how often local-tool prompts raise native approval requests.
 8. U8: the R1 whole-second `T` (supported by `least(original, grant)`; the 71/73 race remains).
-9. U9: the agent's journal egress values (`networkPolicy.candidateJournalCidrs`, port 8443).
+9. U9: decided 2026-11-17. The chart values are `networkPolicy.candidateJournalCidrs: ["10.96.0.42/32"]`,
+   port 8443 (inert under Cilium, required by the chart), and ailab's selector policy
+   `relay-infrastructure-agent-journal-egress` admits agent -> journal on TCP 8443
+   ([relay-candidate-run-generator.md](relay-candidate-run-generator.md)). E6 must show exactly one
+   agent -> journal connection on 8443 (the rehearsal list in §4).
 10. U10: R6's older snapshot taken from §3.4's own pre-migration dump.
 11. U11: the Talos and `chronyc` clock commands on the operator's hosts.
 12. U12: all durations in §4 and every `D_x`, until E6 measures them.

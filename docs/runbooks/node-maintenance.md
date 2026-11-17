@@ -201,6 +201,35 @@ Tier-B RWO singletons recover in ~2–3 min instead of ~13. **Remove the taint o
 kubectl --context admin@ai taint nodes <node> node.kubernetes.io/out-of-service=nodeshutdown:NoExecute-
 ```
 
+## Thin-pool zeroing (`pve_thin_pool_zero`, OFF on ai-node1/2 since 2026-11-17)
+
+The LVM thin pool `pve/data` (64 KiB chunks) zero-fills the rest of each newly provisioned chunk
+when zeroing is on. These drives have no Write Zeroes, and the guests discard online, so freed
+chunks are reused and zeroed all day: about 0.7 TB/day across the three drives. node1/2 run with
+zeroing OFF (host_vars); node3 keeps it ON for the relay-worker pool. The isolation trade-off and
+its limits are in `ansible/roles/pve_base/defaults/main.yml`.
+
+Changing the flag reloads the pool's table ONLINE. LVM suspends the pool and its active thin
+volumes, commits, and resumes, so every guest on that host pauses I/O briefly; a slow or busy
+drive can make it longer. So, one host at a time:
+
+```bash
+# 0. Pool healthy, with data AND metadata headroom; no other storage maintenance on that host.
+python scripts/node-ssh.py <host-ip> "lvs -o lv_name,data_percent,metadata_percent,zero pve/data; dmsetup table | grep thin-pool"
+#    (zeroing ON: the thin-pool line has no feature args, e.g. `... 128 0 0`)
+_out/talosctl-1142.exe -n 192.168.0.41 etcd status          # 3/3 in-sync before you start
+# 1. Converge ONE host (from WSL, ANSIBLE_CONFIG set; see ailab-ansible notes in CLAUDE.md):
+just thinpool --limit ai-node1
+# 2. Verify: the flag, the live table, and that a second run changes nothing.
+python scripts/node-ssh.py <host-ip> "lvs --noheadings --binary -o zero pve/data; dmsetup table | grep thin-pool"
+#    expect `0` and `... 128 0 1 skip_block_zeroing`
+just thinpool --limit ai-node1                              # changed=0
+# 3. Watch guest latency / etcd for a few minutes (etcd 3/3), then the next host.
+```
+
+Rollback: `pve_thin_pool_zero: true` in that host's host_vars (or `lvchange --zero y pve/data`).
+Re-enabling does NOT scrub chunks provisioned while zeroing was off.
+
 ## Post-maintenance checklist (gates before touching the next node)
 
 ```bash
