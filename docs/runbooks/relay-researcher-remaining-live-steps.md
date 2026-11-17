@@ -1017,7 +1017,7 @@ of those parts; the review is the independent read of them. The acceptance comme
 - Step 4's proofs: the `step8-proofs` capture and the outputs of the TLS, refusal and privilege proofs.
 - The four drill comments on #1753 ("Witness drill A/B/C/D") and the end-of-step-5 readback.
 - The durability evidence: (i), (ii) and (iii) of the budget runbook's "Durability evidence for the
-  first `ready=true`", as posted on #1753 (open point 7).
+  first `ready=true`", and the NAS-side record of its "Limit", as posted on #1753 (open point 7).
 
 **Commands.** NEW (not in the runbook). The review directory holds the reviewed runbooks and the
 non-secret evidence, nothing else:
@@ -1060,16 +1060,26 @@ S4.5  History counts all 0; the witness three-way comparison agrees, five equal 
 DA..DD One item per drill A, B, C, D. Each comment has captures timestamped just before the
       observation that prove the gate open (authority row ready=t, positive control), Router log lines,
       the mounted witness SHA-256, the SQL outputs and before/after diffs, and the drill's pass:
-      - A and D: the plugin enabled (HTTP 200, active) and the pass of the budget runbook's table,
-        "Drills before production ready=true";
-      - B and C: the pass decided at checklist open point 4 (step 5, B2): the enable answered HTTP 500
+      - A: the plugin enabled (HTTP 200, active) and the pass of the budget runbook's table,
+        "Drills before production ready=true", as checklist step 5 runs it;
+      - B: B2, the pass decided at checklist open point 4: the enable answered HTTP 500
         PLUGIN_FAILED and the plugin stays disabled, while the gate is open and the positive control
-        succeeds; or, if the Router started the plugin, the runbook's own pass.
+        succeeds (or, if the Router started the plugin, the runbook's own pass); and B3, the soft
+        delete: both ExternalSecrets not Ready, both Secrets still holding the empty-witness hash,
+        the Router Pod UID unchanged;
+      - C: as B2 (checklist step 5, C2);
+      - D: checklist step 5's D3, the Router-side scope of this window: Worker budget authority
+        available, the Router's mounted witness equal to B and the record's latest entry, the
+        authority row equal before and after. Relay still mounts A until H6, so Relay's mounted
+        witness and the history comparison are deferred to the Relay-wired drills, not a FAIL here.
       A refusal without same-window captures of the open gate does not count.
 DE    After the drills: the record's latest entry is B, B restored and verified, the authority
       withdrawn, the authority row never rewritten to match a witness. Criterion: checklist step 5,
       "Readback, end of step 5" and "Stop and rollback".
 DUR1  Evidence (i). Criterion: budget runbook, "Durability evidence for the first ready=true", (i).
+NAS   The NAS-side guarantee of that section's "Limit": what QuTS states for the ledger's LUN
+      write cache and the pool's synchronous-write policy, with the owner's explicit acceptance or
+      refusal. Criterion: the same section, "Limit".
 DUR2  Evidence (ii): same image, flags and schema (the StatefulSet diff, the bundle receipt, the
       functions_md5 equal to production's); throwaway identities that differ from production's;
       for each tier run: its command and UTC time, the PostgreSQL log lines, "lost or changed: 0",
@@ -1112,8 +1122,8 @@ drill or durability tier, post the new evidence, and run the review again over t
 
 - Step 6 is accepted: "Step 6 review" ends `VERDICT: OK`, and the owner's acceptance names it.
 - **Durability gate (hard stop).** (i), (ii) and (iii) of the budget runbook's "Durability evidence
-  for the first `ready=true`" are posted on #1753 and accepted there by the owner (open point 7,
-  decided 2026-11-17). Without that this step does not run. The same section's confirmation after R1
+  for the first `ready=true`", and its "Limit" (the NAS-side record), are posted on #1753 and accepted
+  there by the owner (open point 7, decided 2026-11-17). Without that this step does not run. The same section's confirmation after R1
   is a later gate, before R2 is signed.
 - The NTP readback (124071 §6) is repeated.
 - The three-way witness comparison agrees on B (`openbao-recovery.md:215-218`), and `wsha_router`

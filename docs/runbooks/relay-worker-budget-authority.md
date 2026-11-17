@@ -1092,8 +1092,9 @@ probe_after() {  # probe_after <tier>: fails at the first failed capture or comp
 interruption may exist or not, never in part: `allocations_without_outbox`,
 `outbox_inconsistent` and `orphan_receipts` are 0, and every `worker_budget` index
 passes `bt_index_check`. `in_recovery` `f`. **Stop** on any other result, on
-`PANIC`, `could not fsync`, `invalid page` or `checksum` in the log, or no `database system is ready to accept connections`
-within 15 minutes: no further tier runs, and the result goes to the owner.
+`PANIC`, `could not fsync`, `invalid page` or `checksum` in the log, or the probe not Ready within 15 minutes (and, for tiers
+(a) and (b), no `database system is ready to accept connections` in the tier's
+log): no further tier runs, and the result goes to the owner.
 
 **Tier (a): `kill -9` of PostgreSQL (owner-approved).** The postmaster is PID 1 of
 its container and ignores a SIGKILL sent from inside its own PID namespace (`kill -9
@@ -1209,7 +1210,7 @@ unless that process is running.
 ```sh
 rule="FORWARD -s $nodeip/32 -d 10.55.0.254/32 -p tcp --dport 3260 -j DROP"
 undo="sleep 60; while :; do iptables -w 5 -D $rule 2>/dev/null; iptables -w 5 -C $rule 2>/dev/null; [ \$? -eq 1 ] && break; sleep 1; done"
-check="iptables -w 5 -C $rule 2>/dev/null; rc=\$?; case \$rc in 0) echo STILL-PRESENT;; 1) echo removed;; *) echo CHECK-FAILED rc=\$rc;; esac"
+check="iptables -w 5 -C $rule 2>/dev/null; rc=\$?; case \$rc in 0) echo STILL-PRESENT; exit 2;; 1) echo removed;; *) echo CHECK-FAILED rc=\$rc; exit 3;; esac"
 probe_tier c 300 && sleep 20 &&
 cap probe-c-cut python scripts/node-ssh.py "$host" "iptables -w 5 -I $rule || exit 1
   nohup sh -c ': probe-cut-undo; $undo' </dev/null >/dev/null 2>&1 &
@@ -1240,7 +1241,10 @@ kubectl --context admin@ai get pv "$pv"        # NotFound once Trident has delet
 
 Then confirm on the NAS that LUN `trident-<pv>` is gone, as `qnap-storage-setup.md`
 §9 reads the LUN list (`<operator fills: the read-only qcli LUN listing used
-there>`). A PV left `Released` follows that section's NAS-first cleanup.
+there>`). If the PV or the LUN is still there after 30 minutes, stop and hand it to
+the storage owner (Trident's logs, the LUN list). That section's NAS-first cleanup
+is for PVs set to `Retain` with no VolumeAttachment left; it applies only after the
+storage owner has established both, never while Trident may still delete the LUN.
 
 **Evidence on #1753**, one comment titled "Durability evidence (ii): disposable
 ledger probe", no secret (the probe has none):
