@@ -38,9 +38,11 @@ node-exporter:
 perf:
     cd {{ansible_dir}} && ansible-playbook site.yml --tags performance
 
-# Ansible: converge LVM thin-pool zeroing on the Proxmox hosts (pve_thin_pool_zero; OFF on node1/2 only)
-thinpool:
-    cd {{ansible_dir}} && ansible-playbook site.yml --tags thinpool
+# Ansible: converge LVM thin-pool zeroing on the Proxmox hosts (pve_thin_pool_zero; OFF on node1/2 only).
+# The change reloads the pool online (a brief guest I/O pause): ONE host at a time, e.g.
+# `just thinpool --limit ai-node1` (docs/runbooks/node-maintenance.md "Thin-pool zeroing").
+thinpool *args:
+    cd {{ansible_dir}} && ansible-playbook site.yml --tags thinpool {{args}}
 
 # Ansible: start onboot LXCs whose NFS bind-mount source was late at boot (power-cut race with the QNAP)
 autostart:

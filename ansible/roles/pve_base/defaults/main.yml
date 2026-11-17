@@ -16,10 +16,17 @@ pve_grub_cmdline_linux_default: "quiet"
 # These drives have no Write Zeroes (write_zeroes_max_bytes = 0), so the zeros are real NAND writes.
 # The runner VMs mount / with online `discard` (the Ubuntu cloud-image default), so freed chunks go
 # back to the pool all day and get zeroed again on reuse. Measured 2026-11-17: ~0.7 TB/day of the
-# ~9.4 TB/day across the three drives, with node1/2's drives at 89%/85% of rated life.
-# OFF trades isolation for wear: a guest that reads a block it never wrote can see another guest's
-# deleted data. So ON is the default, and only hosts without untrusted guests opt out in host_vars
-# (ai-node1/2). node3 keeps it: the gVisor relay-worker pool runs there.
-# The flag lives in the VG metadata and survives reboots; lvchange applies it online.
+# ~9.4 TB/day across all three drives (~0.5-0.6 of it on node1/2), with node1/2's drives at 89%/85%
+# of rated life.
+# OFF trades isolation for wear. When a guest partially writes a newly provisioned chunk, the rest of
+# that chunk is NOT zeroed, so a guest with raw-disk access can read whatever another guest (or a
+# deleted volume) left in those sectors. Reading a wholly unprovisioned chunk still returns zeros.
+# Guest discard does not substitute for zeroing. Turning zeroing back ON does not scrub chunks that
+# were provisioned while it was off. So ON is the default, and only hosts that run our own workloads
+# opt out in host_vars (ai-node1/2). node3 keeps it: the gVisor relay-worker pool runs there, and gVisor
+# does not replace storage isolation.
+# The flag lives in the VG metadata and survives reboots. lvchange applies it ONLINE by reloading the
+# pool's table: LVM suspends the pool (and its active thin volumes), commits, and resumes, so guest I/O
+# pauses briefly. Roll out one host at a time: docs/runbooks/node-maintenance.md "Thin-pool zeroing".
 pve_thin_pool: pve/data
 pve_thin_pool_zero: true

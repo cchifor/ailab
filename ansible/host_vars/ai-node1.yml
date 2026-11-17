@@ -1,6 +1,7 @@
 ---
 # Thin-pool zeroing OFF (owner-approved 2026-11-17, NVMe wear): this host's drive was at
-# 89% of its rated write life, and the zero-fill of reused 64 KiB chunks was ~0.7 TB/day
-# across node1/2. No untrusted guests run here (no relay-worker pool), so the isolation
-# trade-off in roles/pve_base/defaults/main.yml is acceptable. node3 keeps zeroing ON.
+# 89% of its rated write life. The zero-fill of reused 64 KiB chunks was ~0.7 TB/day across
+# all three drives, ~0.5-0.6 of it on node1/2. Only our own workloads run here (no relay-worker
+# pool), so the isolation trade-off in roles/pve_base/defaults/main.yml is accepted. node3 keeps
+# zeroing ON. Rollout and verification: docs/runbooks/node-maintenance.md "Thin-pool zeroing".
 pve_thin_pool_zero: false
