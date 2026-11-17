@@ -156,11 +156,12 @@ Record each on ailab #1753. Without them R0 is not signed.
    and after. For A, also `current_epoch(<A ids>)` as `relay_budget_allocator` fails with 42501. This
    replaces the runbook's "`worker_budget_ledger_unavailable`, allocation refused", which needs an
    allocation, as owner decision 4 did for the Router's drills B and C.
-3. **The agent tree.** The generator always writes the agent half and refuses without the agent's
-   one-time candidate structure (generator runbook, "One-time prerequisites"). R0's per-run PR therefore
-   carries that structure and R0's agent values. `relay-researcher-agent` stays suspended from before
-   the merge until the reset PR has merged, so the live agent never runs them, and the reset reverts
-   them (§10).
+3. **The agent tree.** The generator always writes the agent half, and with the first run onto main's
+   enrollment agent tree it also writes the agent's one-time candidate structure (generator runbook,
+   "One-time prerequisites"). R0's per-run PR therefore carries that structure and R0's agent values, as
+   generator output the merge gate compares byte for byte. `relay-researcher-agent` stays suspended from
+   before the merge until the reset PR has merged, so the live agent never runs them, and the reset
+   reverts them (§10). R1's `generate` then writes the same structure again.
 4. **A shortened run.** If a drill cannot start by its latest start (§5), it is not run in R0. The
    missing drills need another drill run, signed fresh and also never granted, which needs its own
    owner approval.
@@ -316,10 +317,10 @@ SQL
   `relay_check`'s `since` is the operator host's clock, while the hub stamps its checks with its own.
   With both within 0.25 s of NTP, the skew is far below `relay_check`'s 5 s margin. Run §5.1 again
   before the first drill; an operator host offset of 1 s or more stops R0.
-- **The per-run branch** is prepared (generator runbook §4a, "R1's PR is H7's inclusion PR"): the
-  `relay-worker-candidate` inclusion line in `kubernetes/apps/apps/relay/kustomization.yaml`, the H7
-  group removed from `scripts/tests/test_relay_v060_activation_gate.py`, and the agent's one-time
-  candidate structure (generator runbook, "One-time prerequisites"). R0's run files come at §6.2.
+- **The per-run branch** is prepared (generator runbook §4a, "The first run's PR ... is H7's inclusion
+  PR"): the `relay-worker-candidate` inclusion line in `kubernetes/apps/apps/relay/kustomization.yaml`
+  and the H7 group removed from `scripts/tests/test_relay_v060_activation_gate.py`. The agent tree stays
+  as on main: R0's run files and the agent's one-time candidate structure come from `generate` at §6.2.
 - **The signing input** follows campaign §3.0 steps 2-5, with R0's own fresh `runId`, worker and launch
   IDs and session-permit key. R0 sends no prompt; record the text its `promptSha256` was computed from.
   R1's input later differs from R0's only in the fields §3.0 step 5 lists.
@@ -344,7 +345,8 @@ SQL
    has no session and no allocation.
 2. **Compose and generate**: generator runbook §1 (the composer), then §2's `generate` on the per-run
    branch **without** `--journal-ca` and `--operator-out`. R0 needs no control, trust or pin ConfigMap,
-   because its agent half never runs. Paste the summary into the PR body.
+   because its agent half never runs. The summary shows `"oneTimeStructure": "added"`. Paste it into
+   the PR body.
 3. **The session-key Secret**: generator runbook §3's first two commands (create, then compare the two
    hashes), before the merge. That runbook says "`kubectl --context admin@ai` throughout", but its
    commands omit the flag: add `--context admin@ai` to each `kubectl` that talks to the cluster (the
@@ -352,9 +354,10 @@ SQL
 4. **Open the PR** right after signing, labelled `no-automerge` (campaign §2, S-A). Its title names
    R0 as a drill run that is never granted.
 5. **Merge gate**: generator runbook §4a, unchanged. `check --base origin/main --run-digest <R0
-   runDigest>` exits 0 with `"firstRun": true` and `"hubReadbackDeadlinePassed": false`. Review every
-   `reviewByHand` path: the inclusion line, the activation-gate edit and the agent structure. CI is
-   green.
+   runDigest>` exits 0 with `"firstRun": true`, `"oneTimeStructure": "added"` and
+   `"hubReadbackDeadlinePassed": false`: the run files, the agent values and the agent's one-time
+   structure equal the generator's output on main. Review every `reviewByHand` path: the inclusion line
+   and the activation-gate edit. CI is green.
 6. **Merge**, after the `spec.suspend` read of §6.1 shows `true` once more. Flux applies the hub half.
    Optionally, to start it at once (NEW):
    `flux --context admin@ai reconcile source git flux-system -n flux-system && flux --context admin@ai reconcile kustomization apps -n flux-system`.
@@ -549,17 +552,18 @@ the drills, escalate to the owner, and continue with F_R step 2 once the hub is 
 
 ## 10. Reset, then cleanup
 
-R0's per-run PR is reverted as a whole: the generator's `reset` for `run/`, the inclusion line, the
-activation-gate group, and the agent files. R1's per-run PR is then H7's inclusion PR again, as the
+R0's per-run PR is reverted as a whole: the generator's `reset` for `run/` and the agent files (R0's
+agent values and the one-time structure), the inclusion line and the activation-gate group. R1's per-run
+PR is then H7's inclusion PR again, and its `generate` writes the one-time structure again, as the
 generator runbook describes. All of this section is NEW, except where a line says otherwise.
 
 1. **The reset PR.** On a branch from `origin/main`:
 
    ```sh
    git revert --no-edit <R0's squash-merge commit on main>
-   python3 scripts/relay-candidate-run.py reset   # writes the placeholder run/
+   python3 scripts/relay-candidate-run.py reset   # placeholder run/; "oneTimeStructure": "absent" (reverted)
    git status --porcelain                         # empty: the revert already restored those bytes
-   python3 scripts/relay-candidate-run.py check   # exit 0, "state": "placeholder"
+   python3 scripts/relay-candidate-run.py check   # exit 0, "state": "placeholder", "oneTimeStructure": "absent"
    git diff <R0's squash-merge commit>^ HEAD -- kubernetes/components/relay-worker-candidate \
      kubernetes/apps/apps/relay/kustomization.yaml scripts/tests/test_relay_v060_activation_gate.py \
      kubernetes/apps/relay-researcher/agent        # empty, unless another merged PR touched these paths
