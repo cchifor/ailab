@@ -419,6 +419,30 @@ class Generator(unittest.TestCase):
         files, state = gen.reset_files(self.root)
         self.assertEqual((state, sorted(map(str, files))), ("absent", sorted(map(str, gen.placeholder_files()))))
         self.assertTrue(all((self.root / p).read_bytes() == d for p, d in files.items()))
+        # Another runtime mode's agent tree (the ordinary activation, after the campaign) is not reset's to
+        # change, as long as it carries no candidate-only object; one that does is refused.
+        config = self.root / gen.AGENT / "config.json"
+        ordinary = copy.deepcopy(AGENT_CONFIG)
+        ordinary["policy"]["bootstrapSecrets"] = True
+        ordinary["ordinaryNamespacePins"] = {"control": {"name": "relay-infra-control", "uid": "0" * 8},
+                                             "execution": [{"name": "relay-researcher-1", "uid": "1" * 8}]}
+        config.write_text(canonical(ordinary) + "\n")
+        files, state = gen.reset_files(self.root)
+        self.assertEqual((state, sorted(map(str, files))), ("other-mode", sorted(map(str, gen.placeholder_files()))))
+        self.assertEqual(gen.check(self.root)[1], [])
+        texts = agent_texts(self.root)
+        for name in ("deployment.yaml", "network-policy.yaml"):
+            path = self.root / gen.AGENT / name
+            path.write_text(with_one_time_text(texts, "relay-candidate-control-" + "0" * 16)[name])
+            with self.assertRaises(gen.Refusal) as caught:
+                gen.reset_files(self.root)
+            self.assertEqual(caught.exception.code, "agent-mode-conflict", name)
+            self.assertEqual(gen.check(self.root)[1], ["agent tree: agent-mode-conflict"])
+            path.write_text(texts[name])
+        config.write_text(canonical({**ordinary, "candidateRuntime": {}}) + "\n")
+        with self.assertRaises(gen.Refusal) as caught:
+            gen.reset_files(self.root)
+        self.assertEqual(caught.exception.code, "agent-mode-conflict")
 
     def test_deterministic_and_idempotent(self):
         c = campaign(self.root, self.now)
@@ -545,6 +569,9 @@ class Generator(unittest.TestCase):
             (C, config_edit(lambda cfg: cfg["candidateRuntime"].update(trustConfigMap="relay-candidate-trust-" + "0" * 16)),
              "agent-one-time-edited:config.json"),
             (C, lambda t: json.dumps(json.loads(t), indent=2) + "\n", "agent-one-time-edited:config.json"),
+            # Another runtime mode beside the structure: never taken as that mode's tree (reset would keep it).
+            (C, config_edit(lambda cfg: cfg.update(podRuntime={})), "agent-mode-conflict"),
+            (C, config_edit(lambda cfg: cfg.update(ordinaryNamespacePins={})), "agent-mode-conflict"),
             # Partial: one file without the structure while the others carry it.
             (R, lambda t: gen.remove_one_time_file(t, "rbac.yaml", control, "relay-researcher-egress"), "agent-one-time-partial"),
             (N, lambda t: gen.remove_one_time_file(t, "network-policy.yaml", control, "relay-researcher-egress"),
@@ -731,18 +758,32 @@ class Generator(unittest.TestCase):
         self.assertEqual((result["firstRun"], result["oneTimeStructure"], result["reviewByHand"]),
                          (True, "added", ["kubernetes/apps/apps/relay-inclusion.txt"]))
         self.assertEqual(sorted(result["files"]), sorted(first["files"]))
+        # HEAD's own tree must still agree with its run: a first run's PR that also leaves the
+        # qualification egress stage is refused, as the generator would refuse it.
+        kust = self.root / gen.INSTALLATION / "kustomization.yaml"
+        original = kust.read_text()
+        kust.write_text(original.replace("- qualification-egress.yaml", "- execution-egress.yaml"))
+        commit("R1 with the enrollment stage")
+        with self.assertRaises(gen.Refusal) as caught:
+            gen.check_against_base(self.root, "HEAD~2", first["runDigest"])
+        self.assertEqual(caught.exception.code, "egress-stage-not-qualification")
+        run_git("reset", "-q", "--hard", "HEAD~1")
         # Any other change to the agent files fails the gate, in the structure or beside it, as does a
         # first run's PR without the structure.
+        # (HEAD's self-check names an edit inside the structure too.)
         deployment, rbac = self.root / gen.AGENT / "deployment.yaml", self.root / gen.AGENT / "rbac.yaml"
-        for path, change in [(deployment, lambda t: t.replace("talos-agent-node-3", "talos-agent-node-2")),
-                             (rbac, lambda t: t.replace("  - relay-researcher-1\n", "  - relay-researcher-1\n  - default\n")),
-                             (rbac, lambda t: gen.remove_one_time_file(t, "rbac.yaml", first["names"]["controlConfigMap"],
-                                                                       "relay-researcher-egress"))]:
+        for path, change, own in [
+                (deployment, lambda t: t.replace("talos-agent-node-3", "talos-agent-node-2"), []),
+                (rbac, lambda t: t.replace("  - relay-researcher-1\n", "  - relay-researcher-1\n  - default\n"),
+                 ["HEAD's self-check: agent tree: agent-one-time-edited:rbac.yaml"]),
+                (rbac, lambda t: gen.remove_one_time_file(t, "rbac.yaml", first["names"]["controlConfigMap"],
+                                                          "relay-researcher-egress"),
+                 ["HEAD's self-check: agent tree: agent-one-time-partial"])]:
             original = path.read_text()
             path.write_text(change(original))
             commit("R1 edited")
             self.assertEqual(gen.check_against_base(self.root, "HEAD~2", first["runDigest"])[1],
-                             [f"not the generator output for the base: {path.relative_to(self.root)}"])
+                             [f"not the generator output for the base: {path.relative_to(self.root)}", *own])
             run_git("reset", "-q", "--hard", "HEAD~1")
         run_git("branch", "-f", "r1")
 

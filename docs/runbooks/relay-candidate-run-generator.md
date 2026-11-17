@@ -157,7 +157,9 @@ The first run's PR (R0's, then R1's again after R0's reset) is H7's inclusion PR
 has the placeholder `run/` and the enrollment agent tree, so the check reports `"firstRun": true` and
 `"oneTimeStructure": "added"`, requires the generated files, the agent's one-time structure included,
 to equal the generator's output on that base, and lists every other changed path under `reviewByHand`
-(the overlay line and the activation-gate edit), which are reviewed like any H-step change.
+(the overlay line and the activation-gate edit), which are reviewed like any H-step change. HEAD's own
+tree must also pass `check` with its run (`HEAD's self-check: ...` otherwise), so none of those paths
+can contradict the run.
 
 The operator merges once CI, the §3.2-§3.3 readbacks and that check pass. Flux then rolls the hub
 (Recreate: `backup-database` up to 1800 s, `backup-artifacts`, `migrate`).

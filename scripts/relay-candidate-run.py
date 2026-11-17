@@ -53,7 +53,8 @@ hand-edited or partial structure is never completed or repaired. `reset` removes
       (uncommitted changes are ignored): the generator runs on the BASE revision's files with HEAD's
       run, and HEAD must equal that output in every generated file, as regular files, the one-time
       structure included. A later run's PR changes nothing else. The first run's PR (base run/ still
-      the placeholder) is H7's inclusion PR: every other path it changes is listed under reviewByHand.
+      the placeholder) is H7's inclusion PR: every other path it changes is listed under reviewByHand,
+      and HEAD's own tree must also pass check with its run (no such path may contradict the run).
       The gate refuses a branch that does not contain the base (base-not-in-branch: merge origin/main
       into it first) and an expired run (run-expired), and fails (exit 1) past t_s + 60 min
       (hubReadbackDeadlinePassed: abort the run).
@@ -695,8 +696,10 @@ def add_one_time_yaml(texts: dict, control: str, policy_name: str) -> dict:
                 refuse(f"agent-one-time-layout:{name}")
             text = text.replace(anchor, anchor + block)
         out[name] = text
-    if agent_objects(out) != one_time_objects(before, control, policy_name):
-        refuse("agent-one-time-layout")
+    after, expected = agent_objects(out), one_time_objects(before, control, policy_name)
+    for name in ONE_TIME_FILES[1:]:
+        if after[name] != expected[name]:
+            refuse(f"agent-one-time-layout:{name}")
     return out
 
 
@@ -736,6 +739,17 @@ def one_time_state(repo: Path, texts: dict) -> tuple[str, dict]:
     if not isinstance(config, dict) or not isinstance(config.get("policy"), dict):
         refuse("agent-config-schema")
     if any(k in config for k in OTHER_MODES):
+        # Another runtime mode is not this generator's to write or remove, and it never carries a
+        # candidate-only object: candidateRuntime, the candidate mounts and volume, the slot egress policy
+        # read or the journal rule (the namespace reads and bootstrap Secrets are the ordinary mode's too).
+        try:
+            parts = one_time_parts(agent_objects(texts))
+            candidate_reads = [r for r in parts["rbac.yaml"][1] if "networkpolicies" in r["resources"]]
+        except (KeyError, ValueError, TypeError, AttributeError):
+            refuse("agent-one-time-objects")
+        if ("candidateRuntime" in config or parts["deployment.yaml"] != ([], []) or candidate_reads
+                or parts["network-policy.yaml"]):
+            refuse("agent-mode-conflict")
         return "other-mode", texts
     absent = no_one_time_trace(agent_objects(texts))
     runtime = config.get("candidateRuntime")
@@ -1078,10 +1092,14 @@ def check_against_base(repo: Path, base: str, expected_digest: str | None = None
             refuse("document-schema")
         v = validate(base_tree, run_text, document)
         expected, one_time = generated_files(base_tree, v)
+        # The first run's PR may change other paths: HEAD's own tree must still agree with its run (an
+        # installation, binding or hub image change there would contradict it) and its generated files.
+        own = check(head_tree, expected_digest)[1] if first else []
     if now >= v["payload"]["expiresAt"]:
         refuse("run-expired")  # merging it would only roll the hub to log worker_candidate_unavailable
     diff = [f"not the generator output for the base: {path}" for path, data in expected.items()
             if blob(repo, "HEAD", str(path)) != data]
+    diff += [f"HEAD's self-check: {d}" for d in own if not (expected_digest and d.startswith("run digest "))]
     others = sorted(changed - {str(path) for path in expected})
     if not first:
         diff += [f"not generated: {p}" for p in others]
