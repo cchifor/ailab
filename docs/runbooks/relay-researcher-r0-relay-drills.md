@@ -98,8 +98,10 @@ ledger-side controls as the same login, in the same window (§7).
 lazily, on each query (`rel4:server/workers/inference/budget-ledger.ts:245-272`); startup reads only
 the DSN and the CA (`budget-ledger.ts:276-324`, `budget-startup.ts:27-43`). With an empty or malformed
 witness the hub still reports `authority_started` 1 and `observer_started` 1, and every check fails at
-the witness parse (`budget-observer.ts:59`). With the stale A, the parse succeeds and `current_epoch`
-raises 42501.
+the witness parse (`budget-observer.ts:59`). That parse sits inside the check's `try`, so a parse
+failure is stamped like any other failed check: `{succeeded: false, checkedAt: Date.now()}`
+(`budget-observer.ts:57-72`, the stamp at `:71`), and `check_timestamp_seconds` still advances. With the
+stale A, the parse succeeds and `current_epoch` raises 42501.
 
 **F4. Nothing else touches the ledger in R0.** The authority's refresh loop selects only workers that
 have a budget preparation (`rel4:server/workers/inference/budget-preparation.ts:572-580`), and there is
@@ -135,7 +137,12 @@ follows the drill protocol (`relay-worker-budget-authority.md:423-459`):
 
 After drill C, the owner re-opens the production gate (§8). Its end state is exactly the state before
 R0. The Router is not rolled in R0: its mounted witness stays B throughout and serves as an in-window
-control.
+control. That holds because both consumers mount `witness.json` as a `subPath` file
+(`kubernetes/components/llm-router-worker-budget-reader/deployment.yaml:39-41`,
+`kubernetes/components/relay-worker-budget-client/deployment.yaml:32-34`), which never updates in a
+running Pod (`relay-worker-budget-authority.md:376-378`; checklist, "Starting state"). A force-sync
+changes the Secret, not a running Pod's file: only a roll does. Every W_R and O_R captures
+`wsha_router` and `wsha_relay` to show it.
 
 ## 4. Owner confirmations before R0 is signed
 
@@ -254,7 +261,7 @@ ralerts() { curl -sS --fail --connect-timeout 5 --max-time 10 -G http://127.0.0.
 hpod() {
   kubectl --context admin@ai -n relay get pod -l app=relay -o json | jq -c '.items[] | {pod: .metadata.name, uid: .metadata.uid, phase: .status.phase,
     init: [.status.initContainerStatuses[]? | {name, exit: .state.terminated.exitCode}],
-    relay: (.status.containerStatuses[]? | select(.name=="relay") | {ready, restartCount}),
+    relay: (first(.status.containerStatuses[]? | select(.name=="relay") | {ready, restartCount}) // null),
     candidateSha256: ([.spec.containers[] | select(.name=="relay") | .env[]? | select(.name=="RELAY_WORKER_CANDIDATE_SHA256") | .value][0]),
     document: ([.spec.volumes[] | select(.name=="worker-candidate-document") | .configMap.name][0])}'
 }
@@ -294,11 +301,21 @@ SQL
   history counts 0. `cap plugins-before plugins` shows `worker-budget-authority` `active`.
 - **Witness.** `wsha_bao`, both `wsha_secret`, `wsha_router` and `wsha_relay` all show B's hash (H6
   mounted B in Relay).
+- **Both client logins.** Step 4's `q` reads each login's password from OpenBao on stdin
+  (`af/relay-budget/allocator` and `af/relay-budget/router`, field `password`, budget runbook "Credential
+  delivery"); step 4's proofs already used both. Check them again from the new client Pod (NEW
+  statements): `cap login-allocator q relay_budget_allocator "SELECT current_user"` returns
+  `relay_budget_allocator`, and `cap login-router q relay_budget_router "SELECT current_user"` returns
+  `relay_budget_router`.
 - **Hub.** `cap hub-before hpod`: one Running Pod with no `candidateSha256`.
   `cap relay-metrics-before rcheck`: `up` 1, `authority_start_failed` 1, `observer_started` 0 (H6's
   expected state, no profile source yet). `cap hub-counts-before hub_counts`.
 - **Clocks.** Campaign §5.1 for signing, and the checklist step 5 NTP readback for the nodes of
   `relay/relay-*`, `llm-router/llm-router-*` and `relay-budget-authority/relay-budget-postgres-0`.
+  §5.1 includes the operator host (`chronyc tracking`, offset under 0.25 s), which matters here:
+  `relay_check`'s `since` is the operator host's clock, while the hub stamps its checks with its own.
+  With both within 0.25 s of NTP, the skew is far below `relay_check`'s 5 s margin. Run §5.1 again
+  before the first drill; an operator host offset of 1 s or more stops R0.
 - **The per-run branch** is prepared (generator runbook §4a, "R1's PR is H7's inclusion PR"): the
   `relay-worker-candidate` inclusion line in `kubernetes/apps/apps/relay/kustomization.yaml`, the H7
   group removed from `scripts/tests/test_relay_v060_activation_gate.py`, and the agent's one-time
