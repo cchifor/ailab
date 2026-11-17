@@ -1230,23 +1230,24 @@ shows the probe's LUN, `trident-<the probe's PV name>`, as the **only** LUN of t
 target.
 
 The node-wide form, TCP 3260 only, on the host that routes the node, 60 s (half the
-corrected timeout). The host removes the rule itself even if the session to it
-breaks. The removal is armed **before** the rule exists: a detached process marked
-with this cut's own token waits 60 s, then retries the deletion until `iptables -C`
-reports the rule absent (exit 1). The rule is inserted only once that process is
-seen running. If the insertion fails, the process finds no rule and ends.
+corrected timeout). The whole cut runs in **one detached host process**, marked with
+this cut's own token: it inserts the rule, waits 60 s, then retries the deletion
+until `iptables -C` reports the rule absent (exit 1). No insertion can happen without
+the removal that follows it in the same process, whatever happens to the session or
+to the timing. The foreground only starts that process and reads whether the rule
+is in place; if it reads `NOT-CUT`, the process still removes any rule it inserts.
 
 ```sh
 rule="FORWARD -s $nodeip/32 -d 10.55.0.254/32 -p tcp --dport 3260 -j DROP"
-undo="sleep 60; while :; do iptables -w 5 -D $rule 2>/dev/null; iptables -w 5 -C $rule 2>/dev/null; [ \$? -eq 1 ] && break; sleep 1; done"
+cut="iptables -w 5 -I $rule || exit 1; sleep 60; while :; do iptables -w 5 -D $rule 2>/dev/null; iptables -w 5 -C $rule 2>/dev/null; [ \$? -eq 1 ] && break; sleep 1; done"
 check="iptables -w 5 -C $rule 2>/dev/null; rc=\$?; case \$rc in 0) echo STILL-PRESENT; exit 2;; 1) echo removed;; *) echo CHECK-FAILED rc=\$rc; exit 3;; esac"
-tok="probe-cut-undo-$(date -u +%Y%m%dT%H%M%SZ)"
+tok="probe-cut-$(date -u +%Y%m%dT%H%M%SZ)"
 cap probe-c-sessions-before sessions_ok &&
 probe_tier c 300 && sleep 20 && ti=$(date -u +%FT%TZ) &&
-cap probe-c-cut python scripts/node-ssh.py "$host" "nohup sh -c ': $tok; $undo' </dev/null >/dev/null 2>&1 &
-  sleep 1; pgrep -f '^sh -c : $tok' >/dev/null || { echo NOT-ARMED; exit 1; }
-  iptables -w 5 -I $rule || { echo INSERT-FAILED; exit 1; }
-  echo armed-and-cut; date -u +%FT%TZ" &&
+cap probe-c-cut python scripts/node-ssh.py "$host" "nohup sh -c ': $tok; $cut' </dev/null >/dev/null 2>&1 &
+  sleep 2; iptables -w 5 -C $rule 2>/dev/null || { echo NOT-CUT; exit 1; }
+  pgrep -f '^sh -c : $tok' >/dev/null || { echo NO-REMOVER; exit 1; }
+  echo cut-in-place; date -u +%FT%TZ" &&
 { sleep 30; cap probe-c-sessions-during sessions_cut; held=$?             # the rule check runs either way
   sleep 60; cap probe-c-rule python scripts/node-ssh.py "$host" "$check" && [ "$held" -eq 0 ]; } &&
 probe_after c &&
@@ -1257,9 +1258,10 @@ Also expected: during the cut the node's sessions are not `LOGGED_IN` (the cut
 holds; `sessions_cut` fails the chain otherwise, since the tier then proves nothing);
 the writer stalls and resumes; PostgreSQL does not restart (`postmaster_started` equal to the previous
 tier's after-identity, and no recovery lines); afterwards every
-session is `LOGGED_IN` and every device `running`. **Stop** also on `NOT-ARMED` or
-`INSERT-FAILED` (no cut happened; the tier proves nothing), and on `STILL-PRESENT`
-or `CHECK-FAILED` (remove the rule at once with `iptables -w 5 -D
+session is `LOGGED_IN` and every device `running`. **Stop** also on `NOT-CUT` (the
+rule was not in place 2 s after the start; the tier proves nothing, and the process
+removes any rule it still inserts: read `$check` after 70 s), and on `NO-REMOVER`,
+`STILL-PRESENT` or `CHECK-FAILED` (remove the rule at once with `iptables -w 5 -D
 $rule` on the host and read `$check` again until it says `removed`), or on any
 session or device in another state: escalate to the owner with the list of volumes
 on the node.
