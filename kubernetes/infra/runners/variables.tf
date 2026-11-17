@@ -273,7 +273,11 @@ variable "runner_nodes" {
     # to 30": cp2 hit 4.46 s at 20:27Z (node2 NVMe 79% busy). Raise again only after a clean night, one node at a
     # time, in daytime, comparing cp2 stall-minutes against node2 job failures.
     "ci-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "ci-runner-2", disk_write_mibps = 30, disk_write_iops = 1000 } # write cap: D1, above ci-runner-1
-    "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3" }
+    # D1d rule (2026-11-17 23:08Z): node3 runners capped at 60 MiB/s (no IOPS cap) after cp3 -- the etcd LEADER --
+    # hit a 1-min WAL fsync p99 of 0.51 s while these two uncapped runners burst to 109-220 MiB/s; that night the
+    # node1 runners were paused in Gitea (cp1 degraded), so CI load shifted here. node3 has the healthiest NVMe
+    # (55% life used), so 60 is twice the node1/node2 cap. Lift only after a clean daytime check of cp3.
+    "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3", disk_write_mibps = 60 }
     # ci-runner-4 and ci-runner-9 (both ai-node1): floor 14 GiB, raised live 2026-11-16 (owner-approved).
     # ai-node1 sits at pvestatd's ~80% auto-balloon line ALL DAY, so its runners never inflate above
     # their floor: the floor is their working size (Prometheus 2026-11-15 17Z to 2026-11-16 07Z: 7.4-9.8
@@ -288,7 +292,7 @@ variable "runner_nodes" {
     # node1 runners now sit at 14 GiB. Check node1's free memory (`free -g` on the host) before raising more.
     "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336, disk_write_mibps = 30, disk_write_iops = 1000 } # write cap: D1, above ci-runner-1
     "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5", disk_write_mibps = 30, disk_write_iops = 1000 }                              # write cap: D1, above ci-runner-1
-    "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
+    "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6", disk_write_mibps = 60 }
     # ci-runner-7 (vm_id 4107, .29, ai-node3) RETIRED 2026-09-16 — removed from this map so the next
     # apply destroys it. Retired to free ai-node3 for a qwen3.8-27b-ailab instance: the VM held a
     # MEASURED 10.40 GiB RSS, which takes node3's 7-day-minimum MemAvailable from 18.15 GiB to ~28.6
