@@ -545,7 +545,8 @@ panels += [
                                   {"id": "custom.thresholdsStyle", "value": {"mode": "off"}},
                                   {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}],
        description="The last 14 days whenever the dashboard's range is relative (the default, e.g. "
-                   "'Last 6 hours'); an absolute or zoomed range may override that. Left axis, solid: life used, the drive's own estimate of "
+                   "'Last 6 hours'); after an absolute or zoomed range, the panel link opens it alone over the "
+                   "last 14 days. Left axis, solid: life used, the drive's own estimate of "
                    "its rated write endurance consumed (SMART percentage_used; it can pass 100%, and "
                    "failure risk rises after it); dashed lines at 70% and 85%. Right axis (symmetric log, so 0 days still shows), dashed: days "
                    "to 100% at the last 24 h's write rate, assuming the same TB per 1% as the drive's life so "
@@ -553,6 +554,12 @@ panels += [
                    "same source (nvme_available_spare_ratio, nvme_media_errors_total). Source: the "
                    "hosts' nvme textfile collector, refreshed every few minutes."),
 ]
+# An enforced 14-day view (reviewer-codex on #1834): Grafana applies a panel's relative time only under a
+# relative dashboard range, so the wear panel also links to itself, alone, over the last 14 days.
+for _p in panels:
+    if _p.get("title", "").startswith("NVMe Wear ("):
+        _p["links"] = [{"title": "Open the last 14 days (this panel alone)", "targetBlank": False,
+                        "url": f"/d/ailab-reporting/?from=now-14d&to=now&viewPanel=panel-{_p['id']}"}]
 HV_EXTRA_H = NVME_ROW_H  # the thermal/NVMe line above; every later row shifts by this (as HEALTH_H does below)
 _hv_end = len(panels)
 
