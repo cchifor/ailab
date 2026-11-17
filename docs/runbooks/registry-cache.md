@@ -14,9 +14,11 @@ just ping-registry                                 # connectivity check
 
 The `sync` config is rendered into `/etc/zot/config.json`; a change triggers the `restart zot` handler.
 
-### Config-only apply (pin the live binary)
+### Applying a config change (pin the live binary)
 
-`just registry` is NOT config-only: the role's `get_url` task converges `/usr/local/bin/zot` to
+There is no config-only apply: `registry.yml` always runs the WHOLE role. Besides `config.json`,
+it converges the htpasswd lines, the certs, the sync upstream credentials and the systemd unit, and
+a change to any of them restarts zot. Its `get_url` task also converges `/usr/local/bin/zot` to
 `registry_zot_version` (the renovate pin in defaults), and the live binary can lag it (2026-11-17:
 live `v2.1.18`, pin `v2.1.23`). For a config or auth change, pin the version that is running:
 
@@ -28,11 +30,15 @@ cd /mnt/c/Users/chifo/work/home/ailab/ansible
 SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey ansible-playbook registry.yml -e registry_zot_version=v2.1.18
 ```
 
-With the live version pinned, the binary task is a no-op: `get_url` sends a conditional request
-(`If-Modified-Since` = the binary's mtime) and gets `304`, or downloads identical bytes; either way
-`changed=False`, no restart from it. The role has no task-level switch to skip it; the pin is the gate.
+With the live version pinned, the binary task is EXPECTED to be a no-op: `get_url` sends a
+conditional request (`If-Modified-Since` = the binary's mtime) and gets `304`, or downloads the same
+bytes, and the file's mode/owner already match (`0755 root:root`), so `changed=False` and no
+restart from it. It still runs, and it would replace the binary (and restart zot) if the bytes or
+those attributes differed, so confirm `zot -v` first. The role has no task-level switch to skip it;
+the pin is the gate.
 
-**A config or htpasswd change restarts zot** (`restart zot` handler) = a registry outage while zot
+**Any change the role makes restarts zot** (`restart zot` handler: config, htpasswd, certs, sync
+credentials, unit) = a registry outage while zot
 re-parses the store before binding :443 (40 s warm, up to ~8 min cold). Pulls and pushes fail
 meanwhile. Poll `GET https://registry.chifor.me/v2/` for 200 (`systemctl is-active` reports active
 early). Batch changes into one apply where possible.

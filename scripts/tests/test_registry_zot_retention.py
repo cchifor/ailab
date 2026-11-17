@@ -315,7 +315,8 @@ class RegistryZotScopedPushAccessTest(unittest.TestCase):
 
 
 # ---- strive/ci-build/** : cchifor/platform e2e build-once (platform#2823) ----
-# zot semantics simulated below were read from the source of BOTH the pinned and the live release
+# No test here runs zot: retention and authorization are SIMULATED from the rendered config, with
+# the semantics below read from the source of BOTH the pinned and the live release
 # (v2.1.23 and v2.1.18 are identical here):
 #   pkg/retention/retention.go  getRepoPolicy: the FIRST policy whose repositories doublestar glob
 #     matches wins; getTagPolicy: the FIRST keepTags entry whose patterns match a tag; a tag with no
@@ -359,6 +360,7 @@ _EXISTING_STRIVE_CI_REPOS = [
 # Repositories that exercise every accessControl / retention pattern in the rendered config,
 # including prefix look-alikes that must NOT fall under strive/ci-build/**.
 _SAMPLE_REPOS = _EXISTING_STRIVE_CI_REPOS + [
+    "strive/ci-build",                       # the bare prefix: doublestar `a/**` matches `a` too
     "strive/ci-build/platform-e2e-local",
     "strive/ci-build/nested/image",
     "strive/ci-buildx/foo",
@@ -393,6 +395,11 @@ def _glob(pattern: str) -> "re.Pattern":
             out.append(re.escape(pattern[i]))
             i += 1
     return re.compile("".join(out) + r"\Z")
+
+
+def _in_ci_build(repo: str) -> bool:
+    # What `strive/ci-build/**` matches under doublestar: the bare prefix and everything below it.
+    return repo == "strive/ci-build" or repo.startswith("strive/ci-build/")
 
 
 def _first_retention_policy(policies: list, repo: str) -> dict:
@@ -481,6 +488,25 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
             },
         )
 
+    def test_bare_prefix_and_catalog_boundaries(self):
+        # doublestar: `strive/ci-build/**` matches the bare `strive/ci-build` as well as everything
+        # below it, and nothing that merely shares the prefix string.
+        rx = _glob(_CI_BUILD_REPOS)
+        self.assertTrue(rx.match("strive/ci-build"))
+        self.assertFalse(rx.match("strive/ci-buildx"))
+        self.assertFalse(rx.match("strive/ci"))
+        self.assertIn("strive/ci-build", _SAMPLE_REPOS)
+        for repo in _SAMPLE_REPOS:
+            self.assertEqual(
+                _first_retention_policy(self.policies, repo)["repositories"] == [_CI_BUILD_REPOS],
+                _in_ci_build(repo),
+                repo,
+            )
+        # None of the existing strive/ci/* repos (the catalog) falls inside the new namespace.
+        for repo in _EXISTING_STRIVE_CI_REPOS:
+            self.assertFalse(_in_ci_build(repo), repo)
+            self.assertFalse(rx.match(repo), repo)
+
     def test_no_policy_targets_strive_ci(self):
         for policy in self.policies:
             for pattern in policy["repositories"]:
@@ -528,7 +554,7 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
                 self.assertEqual(entry, want, f"{repo}:{tag}")
 
     def test_ci_build_tag_is_governed_by_the_new_policy(self):
-        for repo in ("strive/ci-build/x", "strive/ci-build/platform-e2e-local", "strive/ci-build/a/b"):
+        for repo in ("strive/ci-build", "strive/ci-build/x", "strive/ci-build/platform-e2e-local", "strive/ci-build/a/b"):
             policy, entry = _keep_entry(self.policies, repo, _CI_TAG)
             self.assertEqual(policy["repositories"], [_CI_BUILD_REPOS], repo)
             self.assertEqual(entry, _CI_BUILD_ENTRY)
@@ -540,6 +566,7 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
         expected = {
             "strive/ci-build/platform-e2e-local": _CI_BUILD_REPOS,
             "strive/ci-build/nested/image": _CI_BUILD_REPOS,
+            "strive/ci-build": _CI_BUILD_REPOS,
             "strive/ci-buildx/foo": "strive/**",
             "strive/ci/platform-e2e-local": "strive/**",
             "strive/ci": "strive/**",
@@ -604,7 +631,7 @@ class RegistryZotStriveCiPushAccessTest(unittest.TestCase):
         entry = self.access["repositories"][_CI_BUILD_REPOS]
         mine = [g for g in entry["policies"] if _STRIVE_CI_USER in g.get("users", [])]
         self.assertEqual(mine, [{"users": [_STRIVE_CI_USER], "actions": ["read", "create", "update"]}])
-        for repo in ("strive/ci-build/platform-e2e-local", "strive/ci-build/nested/image"):
+        for repo in ("strive/ci-build", "strive/ci-build/platform-e2e-local", "strive/ci-build/nested/image"):
             self.assertEqual(
                 _effective_actions(self.access, repo, _STRIVE_CI_USER), {"read", "create", "update"}
             )
@@ -613,7 +640,7 @@ class RegistryZotStriveCiPushAccessTest(unittest.TestCase):
         for repo in _SAMPLE_REPOS:
             actions = _effective_actions(self.access, repo, _STRIVE_CI_USER)
             self.assertNotIn("delete", actions, repo)
-            if not repo.startswith("strive/ci-build/"):
+            if not _in_ci_build(repo):
                 # Not even read: zot's anonymousPolicy covers only unauthenticated requests. This
                 # includes the existing strive/ci/* repos.
                 self.assertEqual(actions, set(), f"{_STRIVE_CI_USER} must have no rights on {repo}")
@@ -666,11 +693,21 @@ class RegistryZotStriveCiPushAccessTest(unittest.TestCase):
         self.assertNotIn(_CI_BUILD_REPOS, self.baseline["http"]["accessControl"]["repositories"])
 
 
+def _ansible_bool(value):
+    # ansible's `bool` filter, not Python's: strings are parsed ("no" is False).
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        value = value.strip().lower()
+    return value in ("yes", "on", "1", "true", 1)
+
+
 class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
     """The role reads each scoped password from registry_scoped_push_passwords (SOPS). An entry
     marked `password_optional` is skipped while its key is absent, and its htpasswd line removed,
     so the change can merge before the operator adds the secret; every other entry still fails the
-    play without its key. (Real ansible-core runs of these tasks are in the PR description.)"""
+    play without its key. These tests evaluate the tasks' real conditions with jinja2; they do not
+    execute the tasks or the htpasswd module (a one-off ansible-core run is in the PR, ailab#1836)."""
 
     def setUp(self):
         tasks = yaml.safe_load((ROLE_DIR / "tasks" / "main.yml").read_text())
@@ -685,7 +722,7 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
         self.htpasswd_task = self.tasks["Generate bcrypt htpasswd for the scoped per-project push users"]
         self.stale_task = self.tasks["Report a stale password_optional flag (the SOPS key now exists)"]
         self.env = jinja2.Environment()
-        self.env.filters["bool"] = bool
+        self.env.filters["bool"] = _ansible_bool
         self.users = {p["user"]: p for p in _load_defaults()["registry_zot_scoped_push_users"]}
 
     def _eval(self, when, item: dict, passwords) -> bool:
