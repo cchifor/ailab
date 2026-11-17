@@ -564,6 +564,7 @@ def chart_compare(chart_root: Path, bundle: Path, definition: dict, agent: dict)
              + (" with the campaign's candidate values" if v is not None else ""))
     committed = copy.deepcopy(agent)
     committed.pop(("CiliumNetworkPolicy", ns, "relay-infrastructure-agent-api-egress"))  # ailab addition
+    committed.pop(("NetworkPolicy", ns, "relay-infrastructure-agent-journal-egress"))  # ailab addition (U9)
     deployment = committed[("Deployment", ns, "relay-infrastructure-agent")]
     deployment["spec"]["template"]["spec"]["containers"][0]["image"] = definition["agentImage"]
     # The two documented differences: config rollout by hashed ConfigMap name instead of the

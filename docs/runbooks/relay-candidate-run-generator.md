@@ -256,7 +256,17 @@ later run's PR pass them unchanged. `scripts/relay-researcher-bundle.py` (and wi
 It accepts the campaign only while this generator's `check` passes on the committed tree. Its tests
 pin the chart's candidate RBAC (the two namespaces' reads, the slot egress policy read, the slot's
 bootstrap Secrets), the four mounts and the volume, and one journal egress rule (private CIDRs off the
-LAN, port 8443; its CIDRs are U9's). Any other difference in the agent tree still fails.
+LAN, port 8443). Any other difference in the agent tree still fails.
+
+**U9, decided by the owner on 2026-11-17.** The chart values are `networkPolicy.candidateJournalCidrs:
+["10.96.0.42/32"]` and `candidateJournalPort: 8443`, set with the rest of the one-time candidate
+structure in R1's PR. Under Cilium that rule admits nothing: an `ipBlock` never selects a Cilium-managed
+Pod, and the Service address is translated to the journal Pod before policy. The chart still requires it
+(it refuses `candidateRuntime` without `candidateJournalCidrs`). What admits agent -> journal is ailab's
+own `relay-infrastructure-agent-journal-egress` in `kubernetes/apps/relay-researcher/agent/network-policy.yaml`:
+egress from the agent Pod to the `relay-candidate-journal` Pods (namespace `relay-candidate-journal`, label
+`app: relay-candidate-journal`) on TCP 8443 only, the selector the slot's qualification egress uses. It
+is already committed, outside the chart comparison, like the agent's API-server rule.
 
 ## After the campaign
 
