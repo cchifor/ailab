@@ -166,7 +166,8 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   consecutive idle reads, which narrows the false idle between steps but does not close it):
   `builder prune -af` when the build cache is over its **40 GB cap** at ≥75% (20 GB until 2026-11-17: it
   fired ~3 times a day per runner, 170 full wipes of ~25 GB in 8 days, each followed by cold rebuilds;
-  40 is sized for the 250 GB on-prem disks), `image prune -af` at **≥88%**, and
+  40 is sized for the 250 GB on-prem disks; the cloud runners keep 20 GB through `group_vars/cloud_gitea_runners.yml`
+  until their 200 GB disks get a budget check), `image prune -af` at **≥88%**, and
   the dangling-record heal below (`image prune -af`, a dockerd restart, `builder prune -af`). Running
   containers are reaped only past the **4h reap age**, and NEVER the persistent `buildx_buildkit_builder`;
   NO `docker volume prune`; workspaces untouched for 48h are deleted. The idle check covers BOTH the gitea
