@@ -481,9 +481,11 @@ def hn(expr):
     return f'max by (instance, nodename) (({expr}) * on(instance) group_left(nodename) node_uname_info{{{HOSTS}}})'
 
 
-def hwmon(chip_name, sensor="temp1"):
-    """One hwmon temperature by chip NAME (k10temp, nvme): chip ids are PCI paths, names are stable."""
-    return (f'node_hwmon_temp_celsius{{{HOSTS},sensor="{sensor}"}} * on(instance, chip) group_left() '
+def hwmon(chip_name, sensor="temp1", chip=None):
+    """One hwmon temperature by chip NAME (k10temp, nvme): chip ids are PCI paths, names are stable.
+    `chip` pins one device where a name can repeat (nvme_nvme0 vs nvme_nvme1)."""
+    pin = f',chip="{chip}"' if chip else ""
+    return (f'node_hwmon_temp_celsius{{{HOSTS},sensor="{sensor}"{pin}}} * on(instance, chip) group_left() '
             f'node_hwmon_chip_names{{{HOSTS},chip_name="{chip_name}"}}')
 
 
@@ -491,17 +493,23 @@ def hwmon(chip_name, sensor="temp1"):
 # write life, written at ~4 TB/day (CI runners ~1 TB/day each), the APUs sat at their ~100 °C limit
 # and node1's system fan read 0 rpm (ailab memory ai-node-nvme-wear-and-thermals). Nothing on the
 # dashboard showed any of it.
+# ONE drive in all three panels: nvme0 (each host has one NVMe; local-lvm lives on it). Pinned, so a
+# second drive or a re-enumeration after a replacement can't mix devices (reviewer-claude on #1825).
 NVME_DISK = 'device="nvme0n1"'
-NVME_LIMITS = [{"color": "green", "value": None}, {"color": "orange", "value": 86}, {"color": "red", "value": 90}]
+NVME_HWMON_CHIP = "nvme_nvme0"
+# Dashed lines: the drive's warning/critical (86/90 C, NVMe only) and the APU's ~100 C throttle point.
+TEMP_LIMITS = [{"color": "green", "value": None}, {"color": "orange", "value": 86}, {"color": "red", "value": 90},
+               {"color": "purple", "value": 100}]
 DAYS_LEFT_STEPS = [{"color": "red", "value": None}, {"color": "orange", "value": 30}, {"color": "green", "value": 90}]
 WEAR_STEPS = [{"color": "green", "value": None}, {"color": "orange", "value": 70}, {"color": "red", "value": 85}]
 panels += [
     ts("Temperature per Hypervisor (APU / NVMe)", 0, 21, 8, 8,
-       [hn(hwmon("k10temp")), hn(hwmon("nvme"))], "celsius",
-       legends=["{{nodename}} APU", "{{nodename}} NVMe"], fill=0, decimals=0, thresholds=NVME_LIMITS,
+       [hn(hwmon("k10temp")), hn(hwmon("nvme", chip=NVME_HWMON_CHIP))], "celsius",
+       legends=["{{nodename}} APU", "{{nodename}} NVMe"], fill=0, decimals=0, thresholds=TEMP_LIMITS,
        description="APU: Tctl (k10temp); this chip throttles itself at about 100 °C. NVMe: the drive's "
                    "composite temperature, the one its own throttling uses. Dashed lines: the drive's "
-                   "warning (86 °C) and critical (90 °C) thresholds from `nvme id-ctrl` (WCTEMP/CCTEMP). "
+                   "warning (86 °C) and critical (90 °C) thresholds from `nvme id-ctrl` (WCTEMP/CCTEMP), "
+                   "which apply to the NVMe series only, and the APU's ~100 °C throttle point. "
                    "Fan speeds are not exported: the fans hang off the board's EC, which Linux does not "
                    "expose under Secure Boot."),
     ts("NVMe Writes per Day + Busy % per Hypervisor", 8, 21, 8, 8,
@@ -518,14 +526,18 @@ panels += [
                    "flight; near 100% it is saturated and fsync latency (etcd on the Talos control "
                    "planes) climbs. A CI runner VM writes about 1 TB/day."),
     mtable("NVMe Wear & Health per Hypervisor", 16, 21, 8, 8,
-           [("A", hn(f'nvme_percentage_used_ratio{{{HOSTS}}}') + " * 100"),
-            ("B", hn(f'((1 - nvme_percentage_used_ratio{{{HOSTS}}}) / nvme_percentage_used_ratio{{{HOSTS}}})'
-                     f' * nvme_data_units_written_total{{{HOSTS}}}'
-                     f' / (rate(nvme_data_units_written_total{{{HOSTS}}}[7d]) * 86400)')),
-            ("C", hn(f'nvme_data_units_written_total{{{HOSTS}}}') + " * 512000"),
-            ("D", hn(f'rate(nvme_data_units_written_total{{{HOSTS}}}[7d])') + " * 512000 * 86400"),
-            ("E", hn(f'nvme_available_spare_ratio{{{HOSTS}}}') + " * 100"),
-            ("F", hn(f'nvme_media_errors_total{{{HOSTS}}}'))],
+           [("A", hn(f'nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}}') + " * 100"),
+            # Guarded (reviewer-claude on #1825): used clamped to >= 1% (a fresh drive reads 0) and the daily
+            # rate to >= 1 data unit, so neither divides by zero; a drive past 100% shows 0, not negative.
+            ("B", "clamp_min(" + hn(f'((1 - nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}})'
+                                    f' / clamp_min(nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}}, 0.01))'
+                                    f' * nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}'
+                                    f' / clamp_min(rate(nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}[7d]) * 86400, 1)')
+             + ", 0)"),
+            ("C", hn(f'nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}') + " * 512000"),
+            ("D", hn(f'rate(nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}[7d])') + " * 512000 * 86400"),
+            ("E", hn(f'nvme_available_spare_ratio{{{HOSTS},{NVME_DISK}}}') + " * 100"),
+            ("F", hn(f'nvme_media_errors_total{{{HOSTS},{NVME_DISK}}}'))],
            rename={"nodename": "Host", "Value #A": "Life used", "Value #B": "To 100%",
                    "Value #C": "Written", "Value #D": "Per day", "Value #E": "Spare",
                    "Value #F": "Errors"},
