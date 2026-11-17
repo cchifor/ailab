@@ -8,7 +8,8 @@ home dashboard via grafana.ini default_home_dashboard_path). Sections (collapsib
                  what alerted in the selected range + a per-node readiness timeline and the alert
                  table. Added after the 2026-09-20 env-node outage, which this dashboard could
                  only show as "Envs Ready = 0" in the (since retired, ADR 0037) test-pool row.
-  Hypervisors  — host-level node_exporter on the 3 Proxmox hosts (job="proxmox-node")
+  Hypervisors  — host-level node_exporter on the 3 Proxmox hosts (job="proxmox-node"), incl. APU/NVMe
+                 temperatures, NVMe writes/busy and NVMe wear (SMART, the hosts' nvme textfile)
   Instances    — pve-exporter per-guest (VMs + LXCs), label `id` = qemu/<vmid> | lxc/<vmid>
   AI           — amdgpu_* (iGPU) + llamacpp:* + AI-node CPU (node_exporter on the LXCs)
   Storage      — pve_storage pools + k8s PVC usage + host disk I/O + QNAP fabric probes
@@ -62,7 +63,10 @@ def row(title, y):
             "gridPos": {"x": 0, "y": y, "w": 24, "h": 1}, "panels": []}
 
 
-def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=None, maxv=None):
+def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=None, maxv=None,
+       thresholds=None, overrides=None, description=None):
+    """`thresholds` (steps) draws each step as a dashed horizontal line (a limit to read the series
+    against, not a colour scheme); `overrides` are Grafana field overrides (e.g. a second axis)."""
     legends = legends or ["{{instance}}"] * len(exprs)
     defaults = {"unit": unit, "custom": {"drawStyle": "line", "fillOpacity": fill, "showPoints": "never",
                                          "stacking": {"mode": "none"}}}
@@ -70,14 +74,20 @@ def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=N
         defaults["decimals"] = decimals
     if maxv is not None:
         defaults["max"] = maxv
-    return {
+    if thresholds:
+        defaults["thresholds"] = {"mode": "absolute", "steps": thresholds}
+        defaults["custom"]["thresholdsStyle"] = {"mode": "dashed"}
+    panel = {
         "id": _nid(), "type": "timeseries", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
-        "fieldConfig": {"defaults": defaults, "overrides": []},
+        "fieldConfig": {"defaults": defaults, "overrides": overrides or []},
         "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
         "targets": [{"refId": chr(65 + i), "datasource": _ds(), "expr": e, "legendFormat": legends[i]}
                     for i, e in enumerate(exprs)],
     }
+    if description:
+        panel["description"] = description
+    return panel
 
 
 def stat(title, x, y, w, h, expr, unit="none", decimals=0, steps=None, color="value", graph="area",
@@ -288,6 +298,21 @@ def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None, order=None,
     }
 
 
+def mtable(title, x, y, w, h, targets, rename, exclude=("Time",), overrides=None, order=None, sort=None,
+           description=None):
+    """Several instant queries, each aggregated to the SAME label set, merged into one row per label
+    set: a value column per query ("Value #<refId>"). `merge` (not joinByField) because every frame
+    carries its own Time column, and merge folds them into one. `order`/`sort` use ORIGINAL names."""
+    panel = qtable(title, x, y, w, h, "", rename, exclude=list(exclude), overrides=overrides, order=order,
+                   sort=sort)
+    panel["transformations"].insert(0, {"id": "merge", "options": {}})
+    panel["targets"] = [{"refId": r, "datasource": _ds(), "expr": e, "format": "table", "instant": True}
+                        for r, e in targets]
+    if description:
+        panel["description"] = description
+    return panel
+
+
 # ── routing, one block for both personas (router-only since 2026-10-26) ───────────────────
 # Both reviewers review through ONE seat each, `r`, an API key on llm-router (ailab #1421 and
 # the router-only seat PRs): reviewer-1 asks the smart pool `pool-claude` for fable, then opus
@@ -449,6 +474,86 @@ panels += [
                                        {"id": "mappings", "value": [{"type": "value", "options": {
                                            "performance": {"color": "green", "index": 0}}}]}])]),
 ]
+
+
+# Host panels keyed by hostname (ai-node1..3) instead of the scrape IP: join node_uname_info.
+def hn(expr):
+    return f'max by (instance, nodename) (({expr}) * on(instance) group_left(nodename) node_uname_info{{{HOSTS}}})'
+
+
+def hwmon(chip_name, sensor="temp1"):
+    """One hwmon temperature by chip NAME (k10temp, nvme): chip ids are PCI paths, names are stable."""
+    return (f'node_hwmon_temp_celsius{{{HOSTS},sensor="{sensor}"}} * on(instance, chip) group_left() '
+            f'node_hwmon_chip_names{{{HOSTS},chip_name="{chip_name}"}}')
+
+
+# Thermals and the NVMe drives, added 2026-11-17: node1/2's drives were at 89%/85% of their rated
+# write life, written at ~4 TB/day (CI runners ~1 TB/day each), the APUs sat at their ~100 °C limit
+# and node1's system fan read 0 rpm (ailab memory ai-node-nvme-wear-and-thermals). Nothing on the
+# dashboard showed any of it.
+NVME_DISK = 'device="nvme0n1"'
+NVME_LIMITS = [{"color": "green", "value": None}, {"color": "orange", "value": 86}, {"color": "red", "value": 90}]
+DAYS_LEFT_STEPS = [{"color": "red", "value": None}, {"color": "orange", "value": 30}, {"color": "green", "value": 90}]
+WEAR_STEPS = [{"color": "green", "value": None}, {"color": "orange", "value": 70}, {"color": "red", "value": 85}]
+panels += [
+    ts("Temperature per Hypervisor (APU / NVMe)", 0, 21, 8, 8,
+       [hn(hwmon("k10temp")), hn(hwmon("nvme"))], "celsius",
+       legends=["{{nodename}} APU", "{{nodename}} NVMe"], fill=0, decimals=0, thresholds=NVME_LIMITS,
+       description="APU: Tctl (k10temp); this chip throttles itself at about 100 °C. NVMe: the drive's "
+                   "composite temperature, the one its own throttling uses. Dashed lines: the drive's "
+                   "warning (86 °C) and critical (90 °C) thresholds from `nvme id-ctrl` (WCTEMP/CCTEMP). "
+                   "Fan speeds are not exported: the fans hang off the board's EC, which Linux does not "
+                   "expose under Secure Boot."),
+    ts("NVMe Writes per Day + Busy % per Hypervisor", 8, 21, 8, 8,
+       [hn(f'rate(node_disk_written_bytes_total{{{HOSTS},{NVME_DISK}}}[1h])') + " * 86400",
+        hn(f'rate(node_disk_io_time_seconds_total{{{HOSTS},{NVME_DISK}}}[5m])') + " * 100"], "decbytes",
+       legends=["{{nodename}} written/day", "{{nodename}} busy %"], fill=0, decimals=1,
+       overrides=[{"matcher": {"id": "byRegexp", "options": ".* busy %"},
+                   "properties": [{"id": "unit", "value": "percent"}, {"id": "min", "value": 0},
+                                  {"id": "max", "value": 100}, {"id": "decimals", "value": 0},
+                                  {"id": "custom.axisPlacement", "value": "right"},
+                                  {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}],
+       description="Left axis: bytes written to the host's NVMe, as a daily rate over the last hour "
+                   "(what wears the drive). Right axis, dashed: share of time the drive had I/O in "
+                   "flight; near 100% it is saturated and fsync latency (etcd on the Talos control "
+                   "planes) climbs. A CI runner VM writes about 1 TB/day."),
+    mtable("NVMe Wear & Health per Hypervisor", 16, 21, 8, 8,
+           [("A", hn(f'nvme_percentage_used_ratio{{{HOSTS}}}') + " * 100"),
+            ("B", hn(f'((1 - nvme_percentage_used_ratio{{{HOSTS}}}) / nvme_percentage_used_ratio{{{HOSTS}}})'
+                     f' * nvme_data_units_written_total{{{HOSTS}}}'
+                     f' / (rate(nvme_data_units_written_total{{{HOSTS}}}[7d]) * 86400)')),
+            ("C", hn(f'nvme_data_units_written_total{{{HOSTS}}}') + " * 512000"),
+            ("D", hn(f'rate(nvme_data_units_written_total{{{HOSTS}}}[7d])') + " * 512000 * 86400"),
+            ("E", hn(f'nvme_available_spare_ratio{{{HOSTS}}}') + " * 100"),
+            ("F", hn(f'nvme_media_errors_total{{{HOSTS}}}'))],
+           rename={"nodename": "Host", "Value #A": "Life used", "Value #B": "To 100%",
+                   "Value #C": "Written", "Value #D": "Per day", "Value #E": "Spare",
+                   "Value #F": "Errors"},
+           exclude=["Time", "instance"],
+           order=["nodename", "Value #A", "Value #B", "Value #C", "Value #D", "Value #E", "Value #F"],
+           sort="nodename",
+           overrides=[_ov("Life used", [{"id": "unit", "value": "percent"}, {"id": "decimals", "value": 0},
+                                        {"id": "thresholds", "value": {"mode": "absolute", "steps": WEAR_STEPS}},
+                                        {"id": "custom.cellOptions", "value": {"type": "color-background"}}]),
+                      _ov("To 100%", [{"id": "unit", "value": "suffix: d"}, {"id": "decimals", "value": 0},
+                                      {"id": "thresholds", "value": {"mode": "absolute", "steps": DAYS_LEFT_STEPS}},
+                                      {"id": "custom.cellOptions", "value": {"type": "color-text"}}]),
+                      _ov("Written", [{"id": "unit", "value": "decbytes"}, {"id": "decimals", "value": 0}]),
+                      _ov("Per day", [{"id": "unit", "value": "decbytes"}, {"id": "decimals", "value": 1}]),
+                      _ov("Spare", [{"id": "unit", "value": "percent"}, {"id": "decimals", "value": 0}]),
+                      _ov("Errors", [{"id": "decimals", "value": 0},
+                                     {"id": "thresholds", "value": {"mode": "absolute", "steps": [
+                                         {"color": "green", "value": None}, {"color": "red", "value": 1}]}},
+                                     {"id": "custom.cellOptions", "value": {"type": "color-text"}}])],
+           description="Life used: the drive's own estimate of its rated write endurance consumed "
+                       "(SMART percentage_used; it can pass 100%, and failure risk rises after it). "
+                       "To 100%: days left at the 7-day write rate, assuming the same TB per 1% as the "
+                       "drive's life so far. Written / Per day: host writes (data units x 512,000 B; "
+                       "per day = 7-day average). Spare: reserve blocks left. Errors: media errors. "
+                       "Source: the hosts' nvme textfile collector, refreshed every few minutes."),
+]
+HV_EXTRA_H = 8  # the thermal/NVMe line above; every later row shifts by this (as HEALTH_H does below)
+_hv_end = len(panels)
 
 # ───────────────────────── Instances (VMs + Containers) ─────────────────────────
 panels.append(row("Instances (VMs + Containers — pve-exporter)", 21))
@@ -850,6 +955,8 @@ health += [
                                     {"id": "mappings", "value": [{"type": "value", "options": {
                                         "0": {"text": "n/a", "index": 0}}}]}])]),
 ]
+for _p in panels[_hv_end:]:
+    _p["gridPos"]["y"] += HV_EXTRA_H
 HEALTH_H = 13  # row (1) + stat tiles (4) + timeline/table (8): every pre-existing row shifts by this
 for _p in panels:
     _p["gridPos"]["y"] += HEALTH_H
