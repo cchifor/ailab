@@ -232,14 +232,41 @@ variable "runner_nodes" {
     hostname  = string
     # Optional per-runner balloon floor (MiB); null = runner_memory_floating_mib.
     memory_floating_mib = optional(number)
+    # Optional per-runner root-disk WRITE cap; null = uncapped. Rendered as bpg disk.speed (main.tf)
+    # with the burstable value equal to the cap, i.e. Proxmox mbps_wr = mbps_wr_max and
+    # iops_wr = iops_wr_max. Units: MiB/s (bpg says "megabytes", but 30 gives QEMU
+    # bps-write 31457280 = 30 x 1048576) and write IOPS. See the D1 note above ci-runner-1.
+    disk_write_mibps = optional(number)
+    disk_write_iops  = optional(number)
   }))
+  validation {
+    # A limit of 0 means "no limit" to QEMU (bpg reads an unset limit back as 0), so 0 is not how to
+    # remove a cap: delete the field instead.
+    condition     = alltrue([for v in values(var.runner_nodes) : coalesce(v.disk_write_mibps, 1) > 0 && coalesce(v.disk_write_iops, 1) > 0])
+    error_message = "runner_nodes[*].disk_write_mibps and disk_write_iops must be > 0, or omitted for no cap."
+  }
   default = {
     # ci-runner-1..5: consecutive IPs .14-.18, managed here. The commented 6..10 are out-of-band;
     # their real addresses are in the header note above and in docs/network-plan.md. cloud-init sets the IP at create
     # and lifecycle.ignore_changes=[initialization] makes editing `ip` here DOCUMENTATION ONLY — the live
     # IPs were changed in-guest via netplan (see docs/runbooks/ci-runners.md).
-    "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1", memory_floating_mib = 14336 } # floor: see ci-runner-4
-    "ci-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "ci-runner-2" }
+    #
+    # DISK WRITE CAPS (D1, owner-delegated 2026-11-17): 30 MiB/s, burstable 30, 1000 write IOPS,
+    # burstable 1000, on the six ai-node1/ai-node2 runners: ci-runner-1, -4, -9 (ai-node1) and
+    # ci-runner-2, -5, -10 (ai-node2). ci-runner-3 and ci-runner-6 (ai-node3) are NOT capped.
+    # Why: Kubernetes control-plane write stalls came from CI write bursts on the hosts' worn NVMe
+    # drives. cp1/cp2 etcd fsync p99 reached 1-6 s during 128-162 MB/s CI write bursts. At the 25-min
+    # checkpoint after the caps went on, cp1's stall-minutes went from 18 in the preceding 3 h to 0.
+    # How it was applied: LIVE, per VM, with no restart:
+    #   qm set <vmid> --scsi0 <existing>,mbps_wr=30,mbps_wr_max=30,iops_wr=1000,iops_wr_max=1000
+    # QEMU confirms bps-write 31457280, bps-write-max 31457280, iops-write 1000. These fields only
+    # record that state: `tofu plan` with them is a no-op, and without them it plans the caps away.
+    # To remove a cap: delete the runner's disk_write_* fields. The plan shows an in-place
+    # `- speed { ... } -> null` on that runner, and the apply clears it live (QEMU's
+    # block_set_io_throttle; no restart, as when relay-worker-1's throttle was removed in #1706).
+    # Do NOT set 0 to remove one: the validation above rejects it.
+    "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1", memory_floating_mib = 14336, disk_write_mibps = 30, disk_write_iops = 1000 } # floor: see ci-runner-4
+    "ci-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "ci-runner-2", disk_write_mibps = 30, disk_write_iops = 1000 }                              # write cap: D1, above ci-runner-1
     "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3" }
     # ci-runner-4 and ci-runner-9 (both ai-node1): floor 14 GiB, raised live 2026-11-16 (owner-approved).
     # ai-node1 sits at pvestatd's ~80% auto-balloon line ALL DAY, so its runners never inflate above
@@ -253,8 +280,8 @@ variable "runner_nodes" {
     # Fleet-wide, workbricks' tenants stack lane failed ~30% of runs on runners under 11.4 GiB vs <1% above
     # (dev-worker-2, 179 runs since 11-14); r1's own sample was small (1 failure in 5 runs). All three
     # node1 runners now sit at 14 GiB. Check node1's free memory (`free -g` on the host) before raising more.
-    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336 }
-    "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
+    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336, disk_write_mibps = 30, disk_write_iops = 1000 } # write cap: D1, above ci-runner-1
+    "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5", disk_write_mibps = 30, disk_write_iops = 1000 }                              # write cap: D1, above ci-runner-1
     "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
     # ci-runner-7 (vm_id 4107, .29, ai-node3) RETIRED 2026-09-16 — removed from this map so the next
     # apply destroys it. Retired to free ai-node3 for a qwen3.8-27b-ailab instance: the VM held a
@@ -287,7 +314,7 @@ variable "runner_nodes" {
     # .30 returns to the free pool; docs/network-plan.md is the IPAM registry and records it.
     # ci-runner-9 MOVED ai-node2 -> ai-node1 on 2026-09-07 (offline qm migrate) to pull ~10 GiB off
     # ai-node2, which was floor-pinning its dev-workers. Placement here reflects the live estate.
-    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9", memory_floating_mib = 14336 } # floor: see ci-runner-4
-    "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10" }
+    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9", memory_floating_mib = 14336, disk_write_mibps = 30, disk_write_iops = 1000 } # floor: see ci-runner-4; write cap: D1, above ci-runner-1
+    "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10", disk_write_mibps = 30, disk_write_iops = 1000 }                             # write cap: D1, above ci-runner-1
   }
 }
