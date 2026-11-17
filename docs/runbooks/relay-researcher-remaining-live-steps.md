@@ -1091,7 +1091,8 @@ DA..DD One item per drill A, B, C, D. Each comment has captures timestamped just
       - D: checklist step 5's D3, the Router-side scope of this window: Worker budget authority
         available, the Router's mounted witness equal to B and the record's latest entry, the
         authority row equal before and after. Relay still mounts A until H6, so Relay's mounted
-        witness and the history comparison are deferred to the Relay-wired drills, not a FAIL here.
+        witness and the history comparison are deferred to drill run R0
+        (relay-researcher-r0-relay-drills.md), not a FAIL here.
       A refusal without same-window captures of the open gate does not count.
 DE    After the drills: the record's latest entry is B, B restored and verified, the authority
       withdrawn, the authority row never rewritten to match a witness. Criterion: checklist step 5,
