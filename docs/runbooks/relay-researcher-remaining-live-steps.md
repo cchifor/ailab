@@ -8,9 +8,11 @@ confirmation for that step.
 
 Where a runbook gives a command, it is copied verbatim. A command that the runbooks leave unspecified is
 marked **NEW (not in the runbook)**; the owner reviews those before use. Values that git cannot give
-are `<operator fills: …>` placeholders, each saying where to read the value. File line numbers are at
-ailab `main` `f649c017`. Two open PRs change some of them: #1812 edits the top of the hub runbook and
-the budget runbook's "Consumer wiring", and #1811 edits the hub runbook's "Staged here" table.
+are `<operator fills: …>` placeholders, each saying where to read the value.
+
+File line numbers are those of this file's own merge: ailab `main` `bce1a51b` plus this PR's one
+link sentence in the hub runbook. The open H6 PR (#1811) edits the hub runbook's "Staged here" table,
+so once it merges, the hub runbook's later line numbers shift by a few lines.
 
 ## Starting state
 
@@ -56,7 +58,7 @@ Operator readbacks of 2026-11-16. Step 0 checks them again.
   has a literal `COMMIT` line. Step 0 defines `lwrite` for that.
 - **Evidence.** Keep only readbacks that hold no secret: names, keys, hashes, accessors, row values and
   timestamps. Never DSNs, passwords, tokens or private keys. Post each drill's evidence on ailab #1753,
-  as the budget runbook's "Evidence" says (`relay-worker-budget-authority.md:464-478`). The other
+  as the budget runbook's "Evidence" says (`relay-worker-budget-authority.md:467-481`). The other
   steps' evidence goes in the operator evidence, as their runbooks say.
 
 **Tags.** Each step has a **Writes** line, naming any write to OpenBao, the budget ledger, Kubernetes
@@ -196,7 +198,7 @@ wsha_bao; wsha_secret relay relay-worker-budget; wsha_secret llm-router llm-rout
 
 **Purpose.** Create the two Ed25519 signer keys that Relay uses, and the document that gives the Router
 their public keys (Router connection step 3, `relay-router-connection.md:219-231`, readback
-`:263-274`). The hub runbook's H5 (`relay-researcher-hub-upgrade.md:302-306`) names only the escrow
+`:263-274`). The hub runbook's H5 (`relay-researcher-hub-upgrade.md:312-316`) names only the escrow
 token, because it assumed this step was already done. It is not: `af/relay-router` is empty. The
 escrow token is not minted here, because its 720 h lifetime starts when it is minted. It is step 9.
 
@@ -333,7 +335,7 @@ placeholder". That is out of date: since ailab #1778 the template carries 744153
   conflicts here:
   - Router connection step 6 (`relay-router-connection.md:282-291`) lists them before the trust
     inclusion;
-  - the hub runbook's order (File B after H6, before H7, `relay-researcher-hub-upgrade.md:459`) and
+  - the hub runbook's order (File B after H6, before H7, `relay-researcher-hub-upgrade.md:473`) and
     the step-7 plan (File B after the final Router rollout, 124071 §5) put them later.
 
   This checklist follows the second order. The owner confirms it on #1753 (open point 6) before the
@@ -628,7 +630,7 @@ wsha_bao; wsha_secret relay relay-worker-budget; wsha_secret llm-router llm-rout
   - the `SHOW` values above;
   - storage-cache and power-loss guarantees;
   - a test allocation acknowledged before controlled PostgreSQL, node or storage interruptions,
-    compared afterwards (`:573-578`).
+    compared afterwards (`:576-581`).
 
   The QNAP no-snapshot check was done at step 6 (#1753 comment 123957). An acknowledged test
   allocation cannot exist before H6: no Relay connection, no allocation. Step 7 therefore does not run
@@ -641,8 +643,8 @@ owner's investigation. Keep the client Pod for step 5.
 ## Step 5. Witness drills A-D
 
 **Purpose.** Run the four witness drills, in a drill window before the production opening. Their source
-is the budget runbook's "Drills before production `ready=true`" (`relay-worker-budget-authority.md:408-478`),
-with its procedure "Changing the witness" (`:372-396`) and "Restoring B" (`:458-462`). The window is
+is the budget runbook's "Drills before production `ready=true`" (`relay-worker-budget-authority.md:411-481`),
+with its procedure "Changing the witness" (`:375-399`) and "Restoring B" (`:461-465`). The window is
 valid now: no Relay router connection or credential binding exists, because H6 is not merged and
 `relay-router-files` has no token. So no allocation is possible whatever the gate says.
 
@@ -665,8 +667,8 @@ Recreate outage of all Router traffic, so announce the window.
 
 Relay is not rolled here; see the open points. Relay is wired since H4a, but its budget authority
 does not start before H7, because it has no profile source (hub runbook H4a,
-`relay-researcher-hub-upgrade.md:289-300`). The runbook's Relay half of drills A-C therefore cannot be
-observed yet (`relay-worker-budget-authority.md:415-416`). Relay's ExternalSecret is still
+`relay-researcher-hub-upgrade.md:299-310`). The runbook's Relay half of drills A-C therefore cannot be
+observed yet (`relay-worker-budget-authority.md:418-419`). Relay's ExternalSecret is still
 force-synced with the Router's, as the procedure says, so its Secret follows. Its Pod mounts B at the
 H6 rollout.
 
@@ -794,7 +796,7 @@ later roll cannot overwrite it.
 - **R, restore B and prove it.** This is "Restoring B", on the normal path only, after a drill whose
   readback passed.
   1. Run W with step 3 = `bao kv put -mount=af relay-budget/witness witness=- < "$ev/witness-B.json"`
-     (the form of "Who writes it", `:363`), and B's sha256 expected.
+     (the form of "Who writes it", `:366`), and B's sha256 expected.
   2. `lwrite open-B`, then `plugin true` (`HTTP 200`, `active`).
   3. `cap router-log rlog` shows `Worker budget authority available`, and the positive control
      succeeds.
@@ -804,7 +806,7 @@ later roll cannot overwrite it.
   2. `cap ledger-state ledger_state`.
   3. If the authority row is not B's, or any history count is not 0, the ledger's history is in
      question. Stop and escalate to the owner, and restore nothing
-     (`relay-worker-budget-authority.md:612-619`).
+     (`relay-worker-budget-authority.md:615-622`).
   4. Otherwise run W with B, as in R step 1. Authority stays withdrawn and the plugin disabled.
   5. Stop. Re-opening, even for a drill, needs the owner's review of the failure first.
 
@@ -815,7 +817,7 @@ later roll cannot overwrite it.
   1. Generate B, and write `rotate-B.sql` with B's IDs (block below).
   2. The owner and operator write the offline record entry for B **before any write**: the witness
      JSON, the UTC date, reason `rotation, witness drill A`, the operator, the ailab commit
-     (`relay-worker-budget-authority.md:343-358`).
+     (`relay-worker-budget-authority.md:346-361`).
   3. Run W, with step 3 being two writes, in this order:
      - `lwrite rotate-B`, the ledger row (COMMITTED);
      - `bao kv put -mount=af relay-budget/witness witness=- < "$ev/witness-B.json"`, the witness.
@@ -948,19 +950,19 @@ Router qualifies a row is H6's preflight after File B (124071 §5).
   - the mounted hashes;
   - the SQL outputs and the before and after diffs.
 
-  Never post DSNs, passwords or tokens (`relay-worker-budget-authority.md:464-478`).
+  Never post DSNs, passwords or tokens (`relay-worker-budget-authority.md:467-481`).
 
 **Stop and rollback.**
 
 - **A drill readback fails.** Run F. It never re-opens.
 - **B cannot be restored and verified.** Stop and escalate to the owner. Authority stays withdrawn.
-- **Never rewrite the authority row to match a witness** (`relay-worker-budget-authority.md:395-396`).
+- **Never rewrite the authority row to match a witness** (`relay-worker-budget-authority.md:398-399`).
 
 ## Step 6. Independent review
 
 **Purpose.** "After independent review, set `worker_budget.authority.ready=true`"
 (`relay-worker-budget-authority.md:236`). "The production `ready=true` (step 8) waits for all four
-drills to be reviewed" (`:478`).
+drills to be reviewed" (`:481`).
 
 **Writes:** none. **Restarts:** none.
 
@@ -1020,8 +1022,8 @@ cap gate-after-open lsql <<<"SELECT worker_budget.gate('<B instanceId>', '<B rec
 **Purpose.** Enable the Router's `worker-budget-authority` plugin. The budget runbook puts it
 **"Only after step 8 and the qualification gates"** (`relay-worker-budget-authority.md:239-242`).
 
-- H6 needs it: the plugin enabled is an H6 precondition (`relay-researcher-hub-upgrade.md:310-313`,
-  and the table at `:455`).
+- H6 needs it: the plugin enabled is an H6 precondition (`relay-researcher-hub-upgrade.md:324-327`,
+  and the table at `:469`).
 - The step-7 plan places it between File A and File B (124071 §5).
 - The runbooks do not name "the qualification gates". That is open point 5, and the owner settles it
   before this step.
@@ -1037,13 +1039,13 @@ manifest enables it.
 - **Qualification gates (hard stop).** The owner has named the qualification gates on #1753 (open
   point 5), and each is read back. Without that, this step does not run.
 
-**Commands.** Verbatim (`:240-241`):
+**Commands.** Verbatim (`relay-worker-budget-authority.md:240-241`):
 `POST /admin/v1/plugins/worker-budget-authority` with `{"enabled":true}`. With step 5's helper, that
 is `plugin true`.
 
 **Readback.**
 
-- Verbatim (`:241-242`): `GET /admin/v1/plugins` shows the plugin active (run `plugins`), and the
+- Verbatim (`relay-worker-budget-authority.md:241-242`): `GET /admin/v1/plugins` shows the plugin active (run `plugins`), and the
   Router log has `Worker budget authority available`.
 - From 124071 §4.1: the line stays, with no `snapshot_invalid` or `policy_digest_invalid`. Check
   again after 10 s with `cap plugin-on rlog` (step 5's helper).
@@ -1058,7 +1060,7 @@ is `plugin true`.
 **Purpose.** Mint the escrow token that Relay uses for the escrow (Router connection step 9,
 `relay-router-connection.md:233-241`, readback `:310-316`; hub H5). Its 720 h lifetime starts when it
 is minted: mint it only when the owner has scheduled the H6 rollout, "so H6 follows promptly"
-(`relay-researcher-hub-upgrade.md:302-306`).
+(`relay-researcher-hub-upgrade.md:312-316`).
 
 **Writes:**
 
@@ -1166,7 +1168,7 @@ done
 ## Step 10. H6 precondition readback
 
 **Purpose.** One readback of every H6 precondition, before the owner lifts #1811's hold. The list is
-the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:308-313`) and #1811's body.
+the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) and #1811's body.
 
 **Writes:** none. **Restarts:** none.
 
@@ -1212,8 +1214,9 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:308-313`) a
    - Relay's mounted `witness.json` (`wsha_relay`) equals the record's latest entry, B. The drills
      rotated the witness after H4a's roll, and H6's Recreate rollout is what mounts B.
    - Budget startup `start_failed` and `RelayWorkerBudgetStartupFailed` are expected until H7.
-2. **The candidate journal** on `10.96.0.42`
-   ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)).
+2. **The candidate journal** on `10.96.0.42`. It is under Flux at zero replicas since ailab #1813,
+   and its activation is its own held PRs
+   ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md), "Activation under Flux").
 3. **File B,** budget step 7's `qualifications` row (#1753 comment 124071). It is generated from live
    Router readings taken after the last Router rollout: this checklist's step 5 rolls, or any later
    Router change.
