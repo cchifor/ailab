@@ -271,7 +271,8 @@ Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authorit
 
    Each role's two fingerprints are equal and the admin and reconciler fingerprints differ.
    `llm-router-relay-trust` becomes Ready; its `trust.json` (public keys only) parses as JSON and
-   still carries the `maxTokens` placeholder. `relay-router-files` stays not Ready (no token yet).
+   carries `workerBudgets.maxTokens` 7441536 (ailab #1778). `relay-router-files` stays not Ready (no
+   token yet).
 4. **Readers row** (budget step 7): `relay_budget_router` → this digest.
    Readback: `SELECT login, deployment_digest FROM worker_budget.readers;`
 5. **Router budget-reader inclusion** (budget step 8): one PR includes
@@ -279,11 +280,15 @@ Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authorit
    Recreate rollout; the `worker-budget-authority` plugin stays disabled. Readback: the router's
    `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` equals the digest, `GET /admin/v1/plugins` shows the plugin
    disabled, the mounted files' SHA-256 equal the Secret's.
-6. **Qualification, then Router trust inclusion.** After the route precondition is resolved and
-   qualification proves I (comment 120818 A/B): the `qualifications` rows (keyed on this digest) and
-   the `clients` row for `relay_budget_allocator` (issuer `relay.chifor.me`, connection
+6. **Router trust inclusion; File B later.** The owner decided on 2026-11-17 (remaining-live-steps
+   open point 6) to include the trust without the `qualifications` rows (File B, keyed on this
+   digest). File B follows H6, before H7 (`relay-researcher-hub-upgrade.md`, enablement order).
+   Before this step the route precondition is resolved, I is accepted (comment 120818 A/B), and
+   the `clients` row exists for `relay_budget_allocator`. It is written with File A at budget step 7
+   (`relay-worker-budget-authority.md`, step 7; the step-7 plan, ailab #1753 comment 124071), not here.
+   The row carries issuer `relay.chifor.me`, connection
    `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`, this digest, tenant `00000000-0000-4000-8000-000000000001`,
-   `max_tokens` 8 × (I + 8192), `max_requests` 8, `max_authority_ms` 120000). The ledger's
+   `max_tokens` 8 × (I + 8192), `max_requests` 8, `max_authority_ms` 120000. The ledger's
    `max_requests` applies only to scoped allocations (candidate runs); the canary's unscoped
    allocation is capped at 8 requests by the Router from the `requestLimit` Relay v0.10.3 sends
    (owner decision U10, relay#277 comment 124122). The trust `maxTokens` is already
