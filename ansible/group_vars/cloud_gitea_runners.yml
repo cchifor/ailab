@@ -20,6 +20,10 @@ gitea_runner_label: self-hosted-hv
 # understands; an empty string would fall back to the GitHub unit (see the role defaults).
 gitea_runner_cleanup_peer_services: "none"
 
+# cloud runners: 200 GB disks, not measured at 40 GB; raise after a budget check. The role default is
+# 40 GB, sized for the 250 GB on-prem disks (ailab #1832); these stay at the old 20 GB build-cache cap.
+gitea_runner_cleanup_cache_max_bytes: 20000000000
+
 # node_exporter textfile collector for the gitea_runner reclaim/cleanup beacons (same as
 # group_vars/github_runners.yml — this group is not a child of it, so the flag is repeated here).
 node_exporter_extra_args: "--collector.textfile.directory=/var/lib/prometheus/node-exporter"

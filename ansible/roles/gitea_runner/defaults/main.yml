@@ -291,7 +291,12 @@ gitea_runner_cleanup_idle_confirm_polls: 3
 # reclaimed on ci-runner-3, disk 74% -> 62%. Destructive to warm cache (and the co-located GitHub
 # runner shares this daemon, so it loses its warm cache too), hence the disk gate and a cap well above
 # the ~14GB observed working set.
-gitea_runner_cleanup_cache_max_bytes: 20000000000
+# 40 GB since 2026-11-17 (was 20). At 20 the cap fired about 3 times a day per runner: 170 full cache
+# wipes of ~25 GB each in 8 days fleet-wide, and every one makes the next jobs rebuild cold. That churn
+# is ~1 TB/day of NVMe writes, on drives at 85-89% of their rated life. Sized for the 250 GB on-prem
+# runner disks (#1833/#1835) next to workbricks' own 40 GiB cache cap (workbricks #436); the budget
+# is in ailab #1832. Literal: test-cleanup.sh [M] compares it with the script's own default.
+gitea_runner_cleanup_cache_max_bytes: 40000000000
 # Disk% at which an idle sweep may run a full `image prune -af`. REPLACES the old image byte cap
 # (gitea_runner_cleanup_image_max_bytes), which was removed because an absolute cap cannot bound the
 # filesystem: with cache and images each capped at 20 GB, "every cap satisfied" and "disk at 88%" were
