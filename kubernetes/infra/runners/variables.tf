@@ -236,10 +236,11 @@ variable "runner_nodes" {
     # full profile, ~20 containers) loses its file cache and swap-thrashes: ci-runner-9 hit 43% full
     # IO pressure and ~85% of node1's single NVMe (80% util), slowing ci-runner-4 and talos-cp1 too;
     # every workbricks stack-lane failure 2026-11-15 23:16Z onward ran on r4 or r9. 14 GiB matches what
-    # the node2 runners passed the same jobs with. +8 GiB committed on node1 (~25 -> ~17 GB available).
-    # ci-runner-1 (also node1): raised to 14 GiB live 2026-11-17 (owner-approved) after it showed the pattern:
-    # workbricks' tenants stack lane failed 35% of runs on runners under 11.4 GiB vs <1% above (179 runs
-    # since 11-14, dev-worker-2). All three node1 runners now sit at 14 GiB; ai-node1 keeps ~22 GB available.
+    # the node2 runners passed the same jobs with.
+    # ci-runner-1 (also node1): raised to 14 GiB live 2026-11-17 (owner-approved), for parity with r4/r9.
+    # Fleet-wide, workbricks' tenants stack lane failed ~30% of runs on runners under 11.4 GiB vs <1% above
+    # (dev-worker-2, 179 runs since 11-14); r1's own sample was small (1 failure in 5 runs). All three
+    # node1 runners now sit at 14 GiB. Check node1's free memory (`free -g` on the host) before raising more.
     "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336 }
     "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
     "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
