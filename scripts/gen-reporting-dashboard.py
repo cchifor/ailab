@@ -64,9 +64,11 @@ def row(title, y):
 
 
 def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=None, maxv=None,
-       thresholds=None, overrides=None, description=None):
+       thresholds=None, overrides=None, description=None, legend_calcs=None, time_from=None):
     """`thresholds` (steps) draws each step as a dashed horizontal line (a limit to read the series
-    against, not a colour scheme); `overrides` are Grafana field overrides (e.g. a second axis)."""
+    against, not a colour scheme); `overrides` are Grafana field overrides (e.g. a second axis).
+    `legend_calcs` puts values in the legend (e.g. ["lastNotNull"]); `time_from` pins the panel to its
+    own relative window (e.g. "14d") whatever the dashboard's range, for slow-moving series."""
     legends = legends or ["{{instance}}"] * len(exprs)
     defaults = {"unit": unit, "custom": {"drawStyle": "line", "fillOpacity": fill, "showPoints": "never",
                                          "stacking": {"mode": "none"}}}
@@ -85,6 +87,10 @@ def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=N
         "targets": [{"refId": chr(65 + i), "datasource": _ds(), "expr": e, "legendFormat": legends[i]}
                     for i, e in enumerate(exprs)],
     }
+    if legend_calcs:
+        panel["options"]["legend"]["calcs"] = legend_calcs
+    if time_from:
+        panel["timeFrom"] = time_from
     if description:
         panel["description"] = description
     return panel
@@ -298,21 +304,6 @@ def qtable(title, x, y, w, h, expr, rename, exclude, overrides=None, order=None,
     }
 
 
-def mtable(title, x, y, w, h, targets, rename, exclude=("Time",), overrides=None, order=None, sort=None,
-           description=None):
-    """Several instant queries, each aggregated to the SAME label set, merged into one row per label
-    set: a value column per query ("Value #<refId>"). `merge` (not joinByField) because every frame
-    carries its own Time column, and merge folds them into one. `order`/`sort` use ORIGINAL names."""
-    panel = qtable(title, x, y, w, h, "", rename, exclude=list(exclude), overrides=overrides, order=order,
-                   sort=sort)
-    panel["transformations"].insert(0, {"id": "merge", "options": {}})
-    panel["targets"] = [{"refId": r, "datasource": _ds(), "expr": e, "format": "table", "instant": True}
-                        for r, e in targets]
-    if description:
-        panel["description"] = description
-    return panel
-
-
 # ── routing, one block for both personas (router-only since 2026-10-26) ───────────────────
 # Both reviewers review through ONE seat each, `r`, an API key on llm-router (ailab #1421 and
 # the router-only seat PRs): reviewer-1 asks the smart pool `pool-claude` for fable, then opus
@@ -500,10 +491,11 @@ NVME_HWMON_CHIP = "nvme_nvme0"
 # Dashed lines: the drive's warning/critical (86/90 C, NVMe only) and the APU's ~100 C throttle point.
 TEMP_LIMITS = [{"color": "green", "value": None}, {"color": "orange", "value": 86}, {"color": "red", "value": 90},
                {"color": "purple", "value": 100}]
-DAYS_LEFT_STEPS = [{"color": "red", "value": None}, {"color": "orange", "value": 30}, {"color": "green", "value": 90}]
+# Height of this line of panels: 10, so the wear trend's six-entry legend (with latest values) fits.
+NVME_ROW_H = 10
 WEAR_STEPS = [{"color": "green", "value": None}, {"color": "orange", "value": 70}, {"color": "red", "value": 85}]
 panels += [
-    ts("Temperature per Hypervisor (APU / NVMe)", 0, 21, 8, 8,
+    ts("Temperature per Hypervisor (APU / NVMe)", 0, 21, 8, NVME_ROW_H,
        [hn(hwmon("k10temp")), hn(hwmon("nvme", chip=NVME_HWMON_CHIP))], "celsius",
        legends=["{{nodename}} APU", "{{nodename}} NVMe"], fill=0, decimals=0, thresholds=TEMP_LIMITS,
        description="APU: Tctl (k10temp); this chip throttles itself at about 100 °C. NVMe: the drive's "
@@ -512,7 +504,7 @@ panels += [
                    "which apply to the NVMe series only, and the APU's ~100 °C throttle point. "
                    "Fan speeds are not exported: the fans hang off the board's EC, which Linux does not "
                    "expose under Secure Boot."),
-    ts("NVMe Writes per Day + Busy % per Hypervisor", 8, 21, 8, 8,
+    ts("NVMe Writes per Day + Busy % per Hypervisor", 8, 21, 8, NVME_ROW_H,
        [hn(f'rate(node_disk_written_bytes_total{{{HOSTS},{NVME_DISK}}}[1h])') + " * 86400",
         hn(f'rate(node_disk_io_time_seconds_total{{{HOSTS},{NVME_DISK}}}[5m])') + " * 100"], "decbytes",
        legends=["{{nodename}} written/day", "{{nodename}} busy %"], fill=0, decimals=1,
@@ -525,48 +517,38 @@ panels += [
                    "(what wears the drive). Right axis, dashed: share of time the drive had I/O in "
                    "flight; near 100% it is saturated and fsync latency (etcd on the Talos control "
                    "planes) climbs. A CI runner VM writes about 1 TB/day."),
-    mtable("NVMe Wear & Health per Hypervisor", 16, 21, 8, 8,
-           [("A", hn(f'nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}}') + " * 100"),
-            # Guarded (reviewer-claude on #1825): used clamped to >= 1% (a fresh drive reads 0) and the daily
-            # rate to >= 1 data unit, so neither divides by zero; a drive past 100% shows 0, not negative.
-            ("B", "clamp_min(" + hn(f'((1 - nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}})'
-                                    f' / clamp_min(nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}}, 0.01))'
-                                    f' * nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}'
-                                    f' / clamp_min(rate(nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}[7d]) * 86400, 1)')
-             + ", 0)"),
-            ("C", hn(f'nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}') + " * 512000"),
-            ("D", hn(f'rate(nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}[7d])') + " * 512000 * 86400"),
-            ("E", hn(f'nvme_available_spare_ratio{{{HOSTS},{NVME_DISK}}}') + " * 100"),
-            ("F", hn(f'nvme_media_errors_total{{{HOSTS},{NVME_DISK}}}'))],
-           rename={"nodename": "Host", "Value #A": "Life used", "Value #B": "To 100%",
-                   "Value #C": "Written", "Value #D": "Per day", "Value #E": "Spare",
-                   "Value #F": "Errors"},
-           exclude=["Time", "instance"],
-           order=["nodename", "Value #A", "Value #B", "Value #C", "Value #D", "Value #E", "Value #F"],
-           sort="nodename",
-           # Fixed widths (Errors takes the rest): seven columns fit a third of a 1920px window unscrolled.
-           overrides=[_ov("Host", [{"id": "custom.width", "value": 78}]),
-                      _ov("Life used", [{"id": "custom.width", "value": 76}, {"id": "unit", "value": "percent"}, {"id": "decimals", "value": 0},
-                                        {"id": "thresholds", "value": {"mode": "absolute", "steps": WEAR_STEPS}},
-                                        {"id": "custom.cellOptions", "value": {"type": "color-background"}}]),
-                      _ov("To 100%", [{"id": "custom.width", "value": 70}, {"id": "unit", "value": "suffix: d"}, {"id": "decimals", "value": 0},
-                                      {"id": "thresholds", "value": {"mode": "absolute", "steps": DAYS_LEFT_STEPS}},
-                                      {"id": "custom.cellOptions", "value": {"type": "color-text"}}]),
-                      _ov("Written", [{"id": "custom.width", "value": 70}, {"id": "unit", "value": "decbytes"}, {"id": "decimals", "value": 0}]),
-                      _ov("Per day", [{"id": "custom.width", "value": 70}, {"id": "unit", "value": "decbytes"}, {"id": "decimals", "value": 1}]),
-                      _ov("Spare", [{"id": "custom.width", "value": 60}, {"id": "unit", "value": "percent"}, {"id": "decimals", "value": 0}]),
-                      _ov("Errors", [{"id": "decimals", "value": 0},
-                                     {"id": "thresholds", "value": {"mode": "absolute", "steps": [
-                                         {"color": "green", "value": None}, {"color": "red", "value": 1}]}},
-                                     {"id": "custom.cellOptions", "value": {"type": "color-text"}}])],
-           description="Life used: the drive's own estimate of its rated write endurance consumed "
-                       "(SMART percentage_used; it can pass 100%, and failure risk rises after it). "
-                       "To 100%: days left at the 7-day write rate, assuming the same TB per 1% as the "
-                       "drive's life so far. Written / Per day: host writes (data units x 512,000 B; "
-                       "per day = 7-day average). Spare: reserve blocks left. Errors: media errors. "
-                       "Source: the hosts' nvme textfile collector, refreshed every few minutes."),
+    # A trend, not a table (owner, 2026-11-17: "show graphical traces to see the variation in time"):
+    # wear moves ~1%/day, so the panel is pinned to 14 d whatever the dashboard's range.
+    ts("NVMe Wear (life used % · days to 100%)", 16, 21, 8, NVME_ROW_H,
+       [hn(f'nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}}') + " * 100",
+        # Guarded (reviewer-claude on #1825): used clamped to >= 1% (a fresh drive reads 0) and the daily
+        # rate to >= 1 data unit, so neither divides by zero; a drive past 100% shows 0, not negative.
+        "clamp_min(" + hn(f'((1 - nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}})'
+                          f' / clamp_min(nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}}, 0.01))'
+                          f' * nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}'
+                          # 1d, not 7d: Prometheus keeps ~15 d, so a 7-day window is partial (and reads
+                          # far too optimistic) over the first half of a 14-day trend; 1d also shows the
+                          # day-to-day swings in CI load.
+                          f' / clamp_min(rate(nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}[1d]) * 86400, 1)')
+        + ", 0)"], "percent",
+       legends=["{{nodename}} used", "{{nodename}} days left"], fill=0, decimals=0,
+       thresholds=WEAR_STEPS, legend_calcs=["lastNotNull"], time_from="14d",
+       overrides=[{"matcher": {"id": "byRegexp", "options": ".* days left"},
+                   "properties": [{"id": "unit", "value": "suffix: d"}, {"id": "decimals", "value": 0},
+                                  # log axis: node1/2 sit at 10-60 d while node3 reaches ~250 d
+                                  {"id": "custom.scaleDistribution", "value": {"type": "log", "log": 10}},
+                                  {"id": "custom.axisPlacement", "value": "right"},
+                                  {"id": "custom.thresholdsStyle", "value": {"mode": "off"}},
+                                  {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}],
+       description="Always the last 14 days. Left axis, solid: life used, the drive's own estimate of "
+                   "its rated write endurance consumed (SMART percentage_used; it can pass 100%, and "
+                   "failure risk rises after it); dashed lines at 70% and 85%. Right axis (log), dashed: days "
+                   "to 100% at the last 24 h's write rate, assuming the same TB per 1% as the drive's life so "
+                   "far. The legend shows the latest values. Spare blocks and media errors are in the "
+                   "same source (nvme_available_spare_ratio, nvme_media_errors_total). Source: the "
+                   "hosts' nvme textfile collector, refreshed every few minutes."),
 ]
-HV_EXTRA_H = 8  # the thermal/NVMe line above; every later row shifts by this (as HEALTH_H does below)
+HV_EXTRA_H = NVME_ROW_H  # the thermal/NVMe line above; every later row shifts by this (as HEALTH_H does below)
 _hv_end = len(panels)
 
 # ───────────────────────── Instances (VMs + Containers) ─────────────────────────
