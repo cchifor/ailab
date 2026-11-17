@@ -14,12 +14,16 @@ Pinned inputs (`docs/relay-workers/researcher-binding-inputs.json`, `release`): 
 - `worker-image-infrastructure-agent-133788.json`: `cc119a6ac87a3554103a2471605277881793dc9701abdaeebe86914f86a94434`
 - `worker-runtime-manifest-133788.json`: `593e34b69b85abf4c0429ec563c97c73d74f39eb4ad0b68abab97eb659aa3d61`
 
+Agent-only update (`agentRelease`, owner decision 2026-11-17): Gitea release 2144 (v0.10.5, source `7521974a8a08219c1b63703d27a16213746cda24`), the agent leadership fix (relay #537, #540). Only the infrastructure agent image comes from it; its `SHA256SUMS` and `manifest.json` are pinned in the inputs file too. Its worker asset:
+
+- `worker-image-infrastructure-agent-137245.json`: `2f152886c597b4d2f3006bd2d03dab77aa103e60888e24f1bc2525a7ee4a9239`
+
 | File / field | Value | Source |
 | --- | --- | --- |
 | `pins.yaml` `installationId`, `config.json` `identity.installationId` | `b380ff7f-0716-478d-8b01-3d39f30e750b` | I3: Relay's approval receipt (`POST /api/infrastructure/installations`, 201, `approved`); the inputs file's `installation.installationId` |
 | `config.json` `identity.installationPublicKey` | `6D2Cma_Oa4KiaDtOnpmiiztuBhEKObNtEqFNJl-FBas` | I3: the public half of the key in OpenBao `af/relay-infrastructure/installation-key`. Its fingerprint `25070c63dada58d3` (sha256 of the key text, first 16 hex) equals the approval's |
-| `pins.yaml` `agentImage` | `registry.chifor.me/relay/infrastructure-agent@sha256:ba4cdd9c…a4ef` | agent receipt `publication.image` |
-| `pins.yaml` `sourceCommit` | `c0fe50f0…5233` | `sourceCommit` of both worker receipts, which equals release v0.10.3 |
+| `pins.yaml` `agentImage` | `registry.chifor.me/relay/infrastructure-agent@sha256:5b0a85a3…ae3c` | the `agentRelease` agent receipt's `publication.image` (worker-images run 137245, source `7521974a`). The registry manifest readback on 2026-11-17 hashed to this value, and its config digest equals the receipt's `imageConfigDigest`. It replaced the v0.10.3 agent `ba4cdd9c…a4ef` |
+| `pins.yaml` `sourceCommit` | `c0fe50f0…5233` | `sourceCommit` of the runtime receipt (and of the v0.10.3 agent receipt), which equals release v0.10.3. The agent-only update keeps it: it is the runtime's commit. The v0.10.5 agent never compares its own build commit with it: the only `sourceCommit` comparison in the agent (`candidate-runtime.ts`, the candidate run's scope check) is the runtime manifest's against the signed run's, both `c0fe50f0`. So the agent Pod's `chifor.me/source-commit` annotation shows `c0fe50f0` for an agent built from `7521974a`; the agent's own source is `agentRelease.sourceCommit` |
 | `config.json` `policy.allowedRuntimeDigests` | `d758093f…6407` | runtime receipt `runtime.runtimeDigest`; inputs `release.runtimeDigest` |
 | `config.json` `policy.installation.allowedImageDigests` | `39aed234…9b6d` | The digest of the runtime IMAGE: runtime receipt `publication.image` / `publication.manifestSha256`, which equals inputs `release.runtimeImage`. Set by the generator as `[imageDigest(runtimeImage)]` (`scripts/relay-researcher-binding.mts`). The registry manifest readback at I1 hashed to this value |
 | `config.json` `policy.installation.allowedHarnessAdapters` | `["codex"]` | The sealed researcher template's `definition.harness.adapter` (generator, same file). The template comes from the runtime manifest, whose `adapterName` and `holderProfiles.workerTemplates[0].definition.session.harness` are both `codex`. The v0.10.3 runtime image ships the Codex adapter only, which is how the owner's model decision (gpt-6-luna) runs |
