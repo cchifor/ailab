@@ -360,8 +360,8 @@ placeholder". That is out of date: since ailab #1778 the template carries 744153
   - the hub runbook's order (File B after H6, before H7, `relay-researcher-hub-upgrade.md:473`) and
     the step-7 plan (File B after the final Router rollout, 124071 §5) put them later.
 
-  This checklist follows the second order. The owner confirms it on #1753 (open point 6) before the
-  PR merges; without that confirmation the step does not run.
+  This checklist follows the second order. **Decided 2026-11-17** (open point 6): the trust is included
+  without File B; File B comes after H6.
 
 **The PR.** Add `- ../../../components/llm-router-relay-keys-trust` under `components:` in
 `kubernetes/apps/apps/llm-router/kustomization.yaml`. Amend `scripts/tests/test_relay_v060_activation_gate.py`
@@ -424,8 +424,9 @@ escrows the raw token in OpenBao, as I3 does, and creates both Secrets from pipe
   Expected: one row. `00000000-0000-4000-8000-000000000001` is the only tenant of the connection
   record and of the ledger's `clients` row; the owner confirms it as the approved metrics tenant.
 - Neither Secret exists (step 0), and `bao kv list -mount=af relay-control` is empty.
-- **Owner decisions** (open points 1 and 2): the OpenBao path or no escrow, the tenant and the
-  expiry. Without them the step does not run.
+- **Owner decisions** (open points 1 and 2), **decided 2026-11-17**: escrow at `af/relay-control/collector`
+  (recorded in `openbao-recovery.md`'s path classes), the tenant `00000000-0000-4000-8000-000000000001`,
+  and the expiry `2027-02-15T00:00:00Z`.
 
 **Commands.** This block is NEW (not in the runbook).
 
@@ -441,7 +442,7 @@ sha="$(bao kv get -mount=af -field=token relay-control/collector | tr -d '\n' | 
 kubectl --context admin@ai -n relay create secret generic relay-control-metrics \
   --from-literal=tenant-id=00000000-0000-4000-8000-000000000001 \
   --from-literal=token-sha256="$sha" \
-  --from-literal=expires-at='<operator fills: the expiry the owner approves, UTC, form YYYY-MM-DDTHH:MM:SSZ>'
+  --from-literal=expires-at='2027-02-15T00:00:00Z'
 unset sha
 ```
 
@@ -711,7 +712,9 @@ H6 rollout.
 - **No Relay connection.** The Relay Pod env has no `RELAY_ROUTER_CONNECTIONS_FILE`.
 - **The owner holds the record.** The owner has the offline issuance record and confirms the window.
 - **Owner decisions** (open points 3 and 4) are recorded on #1753. Open point 4 sets the pass
-  criterion of drills B and C on the live Router (see B2). Without it, drills B and C do not run.
+  criterion of drills B and C on the live Router (see B2); it is **decided 2026-11-17**: the refused enable,
+  with the gate proven open, is the pass. Open point 3 is still open; without it, Relay's half of the
+  drills does not run.
 
 **Building blocks.** These are used by every drill. All are NEW (not in the runbook), except the
 lines marked otherwise. Write the SQL files once, filling in the IDs from the record (the witness is
@@ -1257,11 +1260,10 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
 
 ## Open points for the owner
 
-1. **Collector token escrow.** Is `af/relay-control/collector` the right OpenBao path for the raw
-   collector token (step 3), or is there to be no escrow at all? If it is kept, a follow-up PR adds the
-   path to `openbao-recovery.md`'s path classes.
-2. **Metrics tenant and expiry.** The metrics tenant is `00000000-0000-4000-8000-000000000001`, and the
-   collector expiry is the owner's to set (step 3).
+1. **Collector token escrow. Decided 2026-11-17:** escrow at `af/relay-control/collector`; the path class is
+   in `openbao-recovery.md`.
+2. **Metrics tenant and expiry. Decided 2026-11-17:** the tenant `00000000-0000-4000-8000-000000000001` and
+   the collector expiry `2027-02-15T00:00:00Z` (step 3).
 3. **Relay in the drills.** Relay is wired since H4a, and the budget runbook's drill text predates that.
    This checklist rolls only the Router, and Relay mounts B at H6. When does Relay's half of drills A-C
    run? Relay's budget authority starts only at H7, inside R1's 60-minute readback window.
@@ -1270,14 +1272,14 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
    witness is parsed when the plugin starts. With an empty or malformed witness, enabling the plugin
    therefore answers `HTTP 500` `PLUGIN_FAILED` and the plugin stays disabled. The runbook's pass ("Router
    unavailable, as in A", with the plugin enabled) cannot be observed. Is the refused enable, with the
-   gate proven open, accepted as these drills' pass (step 5, B2)?
+   gate proven open, accepted as these drills' pass (step 5, B2)? **Decided 2026-11-17: yes.**
 5. **"The qualification gates" of budget step 9.** Which gates are meant? H6 requires the plugin on,
    File B comes after H6, and an `available` Router proves no qualification. The owner names them, and
    a follow-up PR writes them into the budget runbook.
 6. **Trust inclusion without File B.** Router connection step 6 lists the `qualifications` rows before
    the trust inclusion. The hub runbook and the step-7 plan put File B after the final Router rollout.
-   Confirm the trust inclusion without File B (step 2). A follow-up PR then makes the Router
-   connection runbook agree.
+   Confirm the trust inclusion without File B (step 2). **Decided 2026-11-17: included without File B**;
+   the Router connection runbook's step 6 now says so.
 7. **Durability evidence for `ready=true`.** The runbook asks for measured QNAP/CSI power-loss
    durability and an acknowledged test allocation through controlled interruptions. The second
    cannot exist before H6. Which evidence does the owner accept now, or which reviewed runbook change
