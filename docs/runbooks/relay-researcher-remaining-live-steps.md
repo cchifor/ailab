@@ -699,7 +699,8 @@ does not start before H7, because it has no profile source (hub runbook H4a,
 `relay-researcher-hub-upgrade.md:299-310`). The runbook's Relay half of drills A-C therefore cannot be
 observed yet (`relay-worker-budget-authority.md:418-419`). Relay's ExternalSecret is still
 force-synced with the Router's, as the procedure says, so its Secret follows. Its Pod mounts B at the
-H6 rollout.
+H6 rollout. Relay's half runs in drill run R0, after File B and before R1
+([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
 
 **Pre-checks.**
 
@@ -715,8 +716,8 @@ H6 rollout.
 - **The owner holds the record.** The owner has the offline issuance record and confirms the window.
 - **Owner decisions** (open points 3 and 4) are recorded on #1753. Open point 4 sets the pass
   criterion of drills B and C on the live Router (see B2); it is **decided 2026-11-17**: the refused enable,
-  with the gate proven open, is the pass. Open point 3 is still open; without it, Relay's half of the
-  drills does not run.
+  with the gate proven open, is the pass. Open point 3 is **decided 2026-11-17**: Relay's half of the
+  drills runs in drill run R0, after File B and before R1.
 
 **Building blocks.** These are used by every drill. All are NEW (not in the runbook), except the
 lines marked otherwise. Write the SQL files once, filling in the IDs from the record (the witness is
@@ -1381,8 +1382,8 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
    Router change.
 4. **The E6 rehearsal**
    ([relay-researcher-qualification-campaign.md](relay-researcher-qualification-campaign.md) §4).
-5. **R1.** Its per-run PR includes H7's candidate component. Relay's half of drills A-C runs before
-   its first grant (see the open points).
+5. **R1.** Its per-run PR includes H7's candidate component. Before it, drill run R0 runs Relay's half
+   of drills A-C ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
 
 ## Open points for the owner
 
@@ -1392,7 +1393,8 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
    the collector expiry `2027-02-15T00:00:00Z` (step 3).
 3. **Relay in the drills.** Relay is wired since H4a, and the budget runbook's drill text predates that.
    This checklist rolls only the Router, and Relay mounts B at H6. When does Relay's half of drills A-C
-   run? Relay's budget authority starts only at H7, inside R1's 60-minute readback window.
+   run? Relay's budget authority starts only at H7, inside R1's 60-minute readback window. **Decided
+   2026-11-17:** drill run R0 before R1 ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
 4. **Drills B and C on the current Router.** On llm-router `main`
    (`packages/plugins/worker-budget-authority/index.ts`, `packages/kernel/manager.ts:108-116`) the
    witness is parsed when the plugin starts. With an empty or malformed witness, enabling the plugin
