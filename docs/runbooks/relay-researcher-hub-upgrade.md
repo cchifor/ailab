@@ -305,6 +305,10 @@ becomes visible with H6's metrics.
 `relay-router-escrow` token, read it back, `relay-router-files` becomes Ready. Its 720 h clock starts
 now, so H6 follows promptly.
 
+[relay-researcher-remaining-live-steps.md](relay-researcher-remaining-live-steps.md) is the checklist
+of the owner and operator live steps still open before H6, H5 and the H6 preconditions included. It
+also lists the owner decisions those steps need first.
+
 ### H6. Router connection, control plane, monitoring
 
 Preconditions: budget authority `ready=true` and the Router plugin enabled (budget runbook steps
