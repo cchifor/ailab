@@ -288,6 +288,8 @@ async function main() {
   if (agentOnly) {
     const agentAssets = verifyAssets(resolve(args["--agent-assets"]!), agentRelease.assets);
     const agentManifest = JSON.parse(agentAssets["manifest.json"]!.toString("utf8"));
+    // The RELEASE manifest.json records the tag itself ("v0.10.3"), exactly as release's check above
+    // compares it; only the worker-runtime manifest drops the "v".
     if (agentManifest.sourceCommit !== agentRelease.sourceCommit || agentManifest.version !== agentRelease.tag)
       refuse("the agent release's manifest.json is not the pinned agentRelease (sourceCommit and tag)");
     const agentOnlyReceipt = receipt(agentAssets, agentRelease.agentReceipt, "infrastructure-agent",

@@ -157,6 +157,18 @@ class PinRule(unittest.TestCase):
         imported = {**self.pins, "agentImage": self.later}
         self.assertIsNone(self.check(imported, self.definition(), None))
 
+    def test_malformed_inputs_are_a_refusal_not_a_traceback(self):
+        for agent in ({}, {"agentImage": "registry.chifor.me/relay/infrastructure-agent:v0.10.5"}, "v0.10.5", None):
+            with self.subTest(agent=agent):
+                inputs = copy.deepcopy(self.inputs)
+                inputs["agentRelease"] = agent
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "inputs.json"
+                    path.write_text(json.dumps(inputs), encoding="utf-8")
+                    with mock.patch.object(self.bundle, "INPUTS", path):
+                        with self.assertRaisesRegex(self.bundle.Mismatch, "pins no digest-only agentImage in agentRelease"):
+                            self.bundle.check_pins(self.pins, self.definition(agentImage=self.later))
+
     def test_placeholder_pins_are_not_compared(self):
         placeholders = {k: f"operator-fills-{k}" for k in self.pins}
         self.assertIsNone(self.check(placeholders, self.definition(agentImage=self.later), None))
@@ -220,6 +232,9 @@ def write_agent_release(directory: Path, release_assets: Path, release: dict, *,
         receipt(r)
     receipt_body = write_json(directory / agent["agentReceipt"], r)
     m = json.loads((release_assets / "manifest.json").read_text(encoding="utf-8"))
+    # The fake keeps the real release manifest's shape: its version is the tag itself, "v" included
+    # (the worker-runtime manifest's drops it), and its sourceCommit the release's.
+    assert (m["version"], m["sourceCommit"]) == (release["tag"], release["sourceCommit"]), m["version"]
     m.update(version=FAKE_TAG, sourceCommit=FAKE_SOURCE)
     if manifest:
         manifest(m)
@@ -477,6 +492,8 @@ class SyntheticAgentRelease(unittest.TestCase):
                                                 "receipt image is not agentRelease.agentImage"),
             "manifest of another version": (dict(manifest=lambda m: m.update(version="v0.10.4")), None,
                                             "manifest.json is not the pinned agentRelease"),
+            "manifest version without the v": (dict(manifest=lambda m: m.update(version=FAKE_TAG[1:])), None,
+                                               "manifest.json is not the pinned agentRelease"),
             "manifest of another commit": (dict(manifest=lambda m: m.update(sourceCommit=release["sourceCommit"])), None,
                                            "manifest.json is not the pinned agentRelease"),
             "SHA256SUMS disagrees": (dict(sums=f"{'1' * 64}  {FAKE_RECEIPT}\n"), None,

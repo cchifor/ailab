@@ -135,7 +135,12 @@ def reviewed_agent_image() -> str:
     """The agent image the reviewed binding inputs pin: `agentRelease`'s for an agent-only update (runbook,
     "Agent-only update"), else `release`'s."""
     inputs = json.loads(INPUTS.read_text(encoding="utf-8"))
-    return (inputs["agentRelease"] if "agentRelease" in inputs else inputs["release"])["agentImage"]
+    source = inputs["agentRelease"] if "agentRelease" in inputs else inputs.get("release")
+    image = source.get("agentImage") if isinstance(source, dict) else None
+    if not isinstance(image, str) or not AGENT_IMAGE.match(image):
+        fail("docs/relay-workers/researcher-binding-inputs.json pins no digest-only agentImage in "
+             + ("agentRelease" if "agentRelease" in inputs else "release"))
+    return image
 
 
 def check_pins(p: dict, definition: dict) -> None:
