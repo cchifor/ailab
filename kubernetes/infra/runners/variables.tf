@@ -115,7 +115,18 @@ variable "runner_memory_floating_mib" {
 }
 variable "runner_rootfs_gb" {
   description = <<-EOT
-    Runner root disk (GB). 200, was 120 — 120 was not enough and the shortfall was reding CI jobs.
+    Runner root disk (GB). 250 since 2026-11-17 (was 200, before that 120).
+
+    250 (owner-approved 2026-11-17, NVMe wear): CI churn writes ~1 TB/day per runner, and ~1 TB/day of
+    the fleet's total came from FULL wipes (build cache wiped 170x in 8 days, ~25 GB each; image prunes
+    118x) that the next jobs re-pull and rebuild. With the build-cache cap at 40 GB (ailab #1832) and
+    the workbricks cache at 45 GiB (workbricks #445), 200 GB left only 4-15% free at the 7-day image
+    peak (~40 GB of images), so 7 of 8 runners would still cross the 88% full-prune line. +50 GB keeps
+    the peak under it. Done like the 08-12 growth below: `qm resize <vmid> scsi0 250G` LIVE, one runner
+    at a time, then `just runners --tags rootfs` (roles/rootfs_grow: growpart + resize2fs online), then
+    this value, so the plan stays a no-op and no runner reboots.
+
+    200, was 120 — 120 was not enough and the shortfall was reding CI jobs.
 
     Measured 2026-08-12 over the ~2.2d Prometheus retains: root-fs peaks of 91/93/92/97/91% across
     ci-runner-1..5. gitea-runner-cleanup.sh treats >=92% as CRITICAL and will then prune THROUGH a
@@ -149,7 +160,7 @@ variable "runner_rootfs_gb" {
     cloud-init instead and needs neither step.
   EOT
   type        = number
-  default     = 200
+  default     = 250
 }
 
 # ---- SSH public key seeded into the cloud-init `ubuntu` user, so Ansible can reach the guest ----

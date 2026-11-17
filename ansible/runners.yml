@@ -33,3 +33,9 @@
     - role: github_runner
       tags: [runners]
       when: github_runner_enabled | default(false)
+
+    # Grow / to fill scsi0 after a live `qm resize` (kubernetes/infra/runners: runner_rootfs_gb), without a
+    # reboot. Idempotent no-op otherwise. Own tag: `just runners --tags rootfs`.
+    - role: rootfs_grow
+      tags: [runners, rootfs]
+      when: github_runner_enabled | default(false)
