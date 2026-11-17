@@ -18,7 +18,7 @@ per-run ceremony is [relay-researcher-qualification-campaign.md](relay-researche
 | --- | --- | --- | --- |
 | Sign (§3.1) | Relay `scripts/sign-candidate-run.ts` | `run.json`, its `runDigest` and file `sha256` | operator host |
 | Compose the hub document | Relay `scripts/compose-candidate-hub-document.ts` | `document.json` (canonical compact JSON, about 57 KB of the hub reader's 65,536 bytes) | operator host |
-| Generate | ailab `scripts/relay-candidate-run.py generate` | the five run-bound git files, three public ConfigMaps, a summary | the per-run branch; the operator directory |
+| Generate | ailab `scripts/relay-candidate-run.py generate` | the five run-bound git files (with the first run, the agent's one-time structure too), three public ConfigMaps, a summary | the per-run branch; the operator directory |
 | Create the run's objects | `kubectl create` | the session-key Secret (`relay`), the control ConfigMap (`relay-infra-control`), the slot's trust and pin ConfigMaps (`relay-researcher-1`) | cluster, never git |
 | S-A PR, or S-B apply then commit | Gitea; `kubectl apply --server-side` | hub rollout; agent values | git, cluster |
 | Readback (H7's) | metrics, log, Pod status | | before the grant, by `t_s + 60 min` |
@@ -81,6 +81,10 @@ It writes exactly these files and nothing else (`d16` = the first 16 hex of the 
 | `kubernetes/apps/relay-researcher/agent/config.json` | `candidateRuntime`: `trustSha256`, `trustConfigMap` = `relay-candidate-trust-<d16>`, `pinConfigMap` = `relay-candidate-pin-<d16>`; `bindingSha256` = `fbf5cdb3…ae39` (the frozen I4 binding), `holderSecret` = `relay-candidate-holder` and the four file paths never change |
 | `kubernetes/apps/relay-researcher/agent/deployment.yaml` | the `candidate` volume's ConfigMap = `relay-candidate-control-<d16>` (one line) |
 
+and, with the first run only (R0's PR, and R1's again after R0's reset), the agent's one-time candidate
+structure in `config.json`, `deployment.yaml`, `rbac.yaml` and `network-policy.yaml` ("One-time
+prerequisites" below). Every later run keeps it byte for byte.
+
 and, with `--operator-out` (a new directory; public data only), the three ConfigMaps the operator
 creates: `control-configmap.json` (`relay-candidate-control-<d16>` in `relay-infra-control`:
 `binding.json` = the frozen binding bytes, `config.json` = the `CandidateAgentTrust`, `ca.pem` = the
@@ -97,11 +101,15 @@ profiles differ from the run and the repository; a run whose hub image is not th
 deploys, whose namespaces, tenant, hub or journal origin, installation, policy, image, source commit
 or role templates are not this installation's; the installation tree not on the qualification
 egress stage; a document over 65,536 bytes; a run outside its validity window; and an agent tree
-without the one-time candidate structure or whose identity, slot, runtime digests, templates, local
-policy digest or installation key disagree with the run.
+whose identity, slot, runtime digests, templates, local policy digest or installation key disagree
+with the run, that is in another runtime mode (`agent-mode-conflict`), or whose one-time structure is
+in some files and not others (`agent-one-time-partial`) or differs from the generator's in any byte
+(`agent-one-time-edited:<file>`, `agent-candidate-runtime-fixed-fields`). It never completes or
+repairs a structure.
 
-The summary names the run digest, the five names, `trustSha256`, every written file's SHA-256 and
-`abortBeforeGrantIfHubNotReadBackBy` (`t_s + 60 min`). Paste it into the PR body.
+The summary names the run digest, the five names, `trustSha256`, every generated file's SHA-256,
+`oneTimeStructure` (`added` with the first run, `kept` after it) and `abortBeforeGrantIfHubNotReadBackBy`
+(`t_s + 60 min`). Paste it into the PR body.
 
 ### 3. Create the run's objects (never in git)
 
@@ -124,8 +132,8 @@ before the per-launch bundle's guards freeze them (§3.7). The holder Secret `re
 
 ### 4a. S-A: the per-run PR
 
-Commit the five files, open the PR right after signing with label `no-automerge` (campaign runbook
-§2), and paste the summary. CI's `script-tests` runs `scripts/tests/test_relay_candidate_run.py`,
+Commit the generated files (the summary's `files`), open the PR right after signing with label
+`no-automerge` (campaign runbook §2), and paste the summary. CI's `script-tests` runs `scripts/tests/test_relay_candidate_run.py`,
 which regenerates every run-bound value from the committed `run/document.json` (it carries the signed
 run) and fails on any difference in them. **The merge gate** is stricter, and the reviewer and the
 operator run it on the PR branch: it runs the generator on the base revision's files with the
@@ -137,17 +145,19 @@ python3 scripts/relay-candidate-run.py check --base origin/main --run-digest <ru
 # exit 0, "equal": true, "firstRun": false, "hubReadbackDeadlinePassed": false
 ```
 
-It reads both revisions from git's tree objects (uncommitted changes never count) and refuses with
+It reads both revisions from git's tree objects (uncommitted changes never count), compares the
+agent's one-time structure as generator output too, and refuses with
 `base-not-in-branch` when main has moved on since the branch was cut (merge it and re-run; the run's
 values are checked against the new base, so a hub image bump there is caught), and with `run-expired`
 for a run past its `expiresAt` (merging it would only roll the hub to log
 `worker_candidate_unavailable`). Past `t_s + 60 min` it fails (exit 1, `hubReadbackDeadlinePassed:
 true`): abort the run before the grant instead of merging.
 
-R1's PR is H7's inclusion PR: its base still has the placeholder `run/`, so the check reports
-`"firstRun": true`, checks the generated values for self-consistency and lists every other changed
-path under `reviewByHand` (the overlay line, the activation-gate edit and, if it lands there, the
-agent's one-time structure), which are reviewed like any H-step change.
+The first run's PR (R0's, then R1's again after R0's reset) is H7's inclusion PR: its base still
+has the placeholder `run/` and the enrollment agent tree, so the check reports `"firstRun": true` and
+`"oneTimeStructure": "added"`, requires the generated files, the agent's one-time structure included,
+to equal the generator's output on that base, and lists every other changed path under `reviewByHand`
+(the overlay line and the activation-gate edit), which are reviewed like any H-step change.
 
 The operator merges once CI, the §3.2-§3.3 readbacks and that check pass. Flux then rolls the hub
 (Recreate: `backup-database` up to 1800 s, `backup-artifacts`, `migrate`).
@@ -157,7 +167,7 @@ The operator merges once CI, the §3.2-§3.3 readbacks and that check pass. Flux
 Under `flux suspend kustomization apps -n flux-system` (as in hub step H3), render the hub overlay
 from the per-run branch with the pinned kustomize of `scripts/manifest-lint.sh` (the CI render), keep
 only the run's ConfigMap and the `relay` Deployment (the overlay also renders SOPS-encrypted Secrets,
-which only Flux can apply), and apply them server-side; then commit the same five files and resume
+which only Flux can apply), and apply them server-side; then commit the same generated files and resume
 once git equals the live objects:
 
 ```sh
@@ -180,6 +190,9 @@ docker run --rm -v "$PWD:/repo:ro" -w /repo <KUSTOMIZE_IMAGE of scripts/manifest
   > /operator/<run>/agent-apply.yaml
 kubectl apply --server-side --field-manager=kustomize-controller -f /operator/<run>/agent-apply.yaml
 ```
+
+With the first run whose agent half is applied (R1: R0's never is), this apply also carries the
+one-time structure: the candidate RBAC and the journal rule land with the run's values.
 
 Readback: the Deployment has `replicas: 0` and its `candidate` volume names
 `relay-candidate-control-<d16>`; the `config.json` of the ConfigMap its `config` volume names has the
@@ -232,35 +245,48 @@ from a Secret under `fsGroup` (`root:1000 0440`) → `signer-file-untrusted`; fr
 
 ## One-time prerequisites
 
-- **H7's inclusion** is the first run's (R1's) per-run PR: it also adds
+- **H7's inclusion** is the first run's (R0's, then R1's) per-run PR: it also adds
   `- ../../../components/relay-worker-candidate` to `kubernetes/apps/apps/relay/kustomization.yaml` and
   removes the H7 group from `scripts/tests/test_relay_v060_activation_gate.py`. Later runs change only
   the five generated files.
-- **The agent's one-time candidate structure** (installation runbook, "Beyond enrollment" item 3),
-  which the generator requires and never writes: `config.json` as imported at I5 with
-  `policy.bootstrapSecrets: true`; in `deployment.yaml` the chart's four `candidate` mounts
-  (`/run/relay/candidate-binding.json`, `-trust.json`, `-ca.pem`, `-network-policy.json`, subPaths
-  `binding.json`, `config.json`, `ca.pem`, `network-policy.json`, read-only) and the `candidate`
-  volume, in block style with `name:` on the line after `configMap:`, `defaultMode: 0444`,
-  `optional: false` and those four items; plus the journal egress and the agent's namespace and
-  NetworkPolicy reads. Without a run's control ConfigMap the structure cannot mount, so it lands
-  with R1's PR at the latest (listed under `reviewByHand` there), under the agent Kustomization's
-  suspension; the generator then owns only the values above.
+- **The agent's one-time candidate structure** (installation runbook, "Beyond enrollment" item 3) is
+  generator output: `generate` writes it with the first run onto main's enrollment agent tree, keeps it
+  byte for byte for every later run, and `reset` removes it. It is what Relay's chart
+  `deploy/infrastructure-agent` at the pinned `sourceCommit` adds to its enrollment-only render once
+  `candidateRuntime` is set, in each file's own style and in the chart's order:
+  - `config.json`: `policy.bootstrapSecrets: true` (canonical JSON, with the run's `candidateRuntime`);
+  - `deployment.yaml`: the four `candidate` mounts after the `config` mount
+    (`/run/relay/candidate-binding.json`, `-trust.json`, `-ca.pem`, `-network-policy.json`, subPaths
+    `binding.json`, `config.json`, `ca.pem`, `network-policy.json`, read-only) and the `candidate`
+    volume first (the run's control ConfigMap in block style, `name:` on the line after `configMap:`,
+    `defaultMode: 0444`, `optional: false`, those four items);
+  - `rbac.yaml`: `get` on the Namespaces `relay-infra-control` and `relay-researcher-1` (their UIDs are
+    pinned by the run), and in the slot `get` on the NetworkPolicy `relay-researcher-egress` (the run
+    measures it) and `get`/`create`/`delete` on Secrets (`policy.bootstrapSecrets`);
+  - `network-policy.yaml`: the chart's journal rule, `10.96.0.42/32` on TCP 8443 (U9, below).
+
+  Each block carries a one-line comment naming the generator. A structure in only some of the files,
+  or one that differs in any byte from the generator's, is refused by `generate`, `reset` and `check`
+  (nothing written). `check --chart <Relay checkout at the pinned sourceCommit>` (helm; local only,
+  CI has neither the private chart nor helm) renders the chart enrollment-only and with the candidate
+  values and compares every object and the config with the agent tree without and with the structure:
+  before any run with stand-ins for the run's names and `trustSha256`, with a run committed with the
+  committed tree.
 - **The qualification egress stage** (installation runbook Q4) selected in the installation tree.
 
-The installation's I5 checks accept exactly this overlay while a run is committed, so R1's PR and every
-later run's PR pass them unchanged. `scripts/relay-researcher-bundle.py` (and with it
+The installation's I5 checks accept exactly this overlay while a run is committed, so the first run's
+PR and every later run's PR pass them unchanged. `scripts/relay-researcher-bundle.py` (and with it
 `just relay-researcher-reproduce`) compares the committed agent config with this generator's
 `candidate_config()` of the I5 import, which sets `policy.bootstrapSecrets` true and adds the run's
 `candidateRuntime` and nothing else, and renders the pinned chart with the matching candidate values.
-It accepts the campaign only while this generator's `check` passes on the committed tree. Its tests
-pin the chart's candidate RBAC (the two namespaces' reads, the slot egress policy read, the slot's
-bootstrap Secrets), the four mounts and the volume, and one journal egress rule (private CIDRs off the
-LAN, port 8443). Any other difference in the agent tree still fails.
+It accepts the campaign only while this generator's `check` passes on the committed tree, the one-time
+structure included. Its tests pin the chart's candidate RBAC (the two namespaces' reads, the slot
+egress policy read, the slot's bootstrap Secrets), the four mounts and the volume, and the one journal
+egress rule (U9's address, port 8443). Any other difference in the agent tree still fails.
 
 **U9, decided by the owner on 2026-11-17.** The chart values are `networkPolicy.candidateJournalCidrs:
-["10.96.0.42/32"]` and `candidateJournalPort: 8443`, set with the rest of the one-time candidate
-structure in R1's PR. Under Cilium that rule admits nothing: an `ipBlock` never selects a Cilium-managed
+["10.96.0.42/32"]` and `candidateJournalPort: 8443`, written by the generator with the rest of the
+one-time structure. Under Cilium that rule admits nothing: an `ipBlock` never selects a Cilium-managed
 Pod, and the Service address is translated to the journal Pod before policy. The chart still requires it
 (it refuses `candidateRuntime` without `candidateJournalCidrs`). What admits agent -> journal is ailab's
 own `relay-infrastructure-agent-journal-egress` in `kubernetes/apps/relay-researcher/agent/network-policy.yaml`:
@@ -271,6 +297,8 @@ is already committed, outside the chart comparison, like the agent's API-server 
 ## After the campaign
 
 Relay's design removes the candidate authority before the ordinary canary: one PR drops the
-component from the overlay and runs `python3 scripts/relay-candidate-run.py reset` (the placeholder
-`run/`). Delete each run's session-key Secret once a later rollout no longer mounts it, and the
+component from the overlay and runs `python3 scripts/relay-candidate-run.py reset`, which writes the
+placeholder `run/` and removes the agent's one-time structure with the last run's agent values, so the
+agent tree is the enrollment tree again, byte for byte (the ordinary activation adds its own values in
+its own PR). `check` then requires exactly that state: no run, no structure. Delete each run's session-key Secret once a later rollout no longer mounts it, and the
 control and slot ConfigMaps as the campaign runbook's §3.10 step 7 says.

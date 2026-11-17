@@ -2,7 +2,7 @@
 """S-A per-run generator for the Relay researcher qualification campaign (owner decision O6).
 
 One signed candidate run needs one mechanical ailab PR (docs/runbooks/relay-candidate-run-generator.md).
-This script writes exactly the run-bound values of that PR, from the signed run.json and the hub
+This script writes exactly the generated values of that PR, from the signed run.json and the hub
 document Relay's scripts/compose-candidate-hub-document.ts composed for it, and nothing else:
 
   hub   kubernetes/components/relay-worker-candidate/run/ (whole files):
@@ -15,49 +15,63 @@ document Relay's scripts/compose-candidate-hub-document.ts composed for it, and 
           trustConfigMap, pinConfigMap; bindingSha256 = the frozen I4 binding, holderSecret and the
           file paths fixed), the rest of the file unchanged;
         kubernetes/apps/relay-researcher/agent/deployment.yaml: the `candidate` volume's ConfigMap,
-          relay-candidate-control-<runDigest[:16]>, the only line that changes.
+          relay-candidate-control-<runDigest[:16]>, the only line that changes from run to run.
 
-The agent half needs the one-time candidate structure in the agent tree (installation runbook,
-"Beyond enrollment" item 3): config.json as imported at I5 (canonical JSON) with
-policy.bootstrapSecrets true, and the chart's four `candidate` mounts and `candidate` volume
-(Relay deploy/infrastructure-agent/templates/deployment.yaml with candidateRuntime.configMap set), the
-volume in block style with `configMap:` then `name:` on the next line. Without it the generator
-refuses (`agent-...`): no candidate run can launch without those values.
+The agent's ONE-TIME candidate structure (installation runbook, "Beyond enrollment" item 3) is what
+Relay's deploy/infrastructure-agent chart at the pinned sourceCommit adds to its enrollment-only render
+once candidateRuntime is set: policy.bootstrapSecrets true in config.json; the four `candidate` mounts
+and the `candidate` volume in deployment.yaml; the reads of the two namespaces, of the slot's egress
+policy and the slot's bootstrap Secrets in rbac.yaml; the journal egress rule (owner decision U9:
+10.96.0.42/32, TCP 8443) in network-policy.yaml. `generate` writes it with the first run onto an agent
+tree that has no trace of it (the enrollment tree on main: R0's and R1's PRs), keeps it when it is
+exactly what generate writes (every later run), and refuses anything else (`agent-one-time-...`): a
+hand-edited or partial structure is never completed or repaired. `reset` removes it.
 
   generate --run RUN.json --run-sha256 SHA --document DOCUMENT.json --document-sha256 SHA
            [--journal-ca CA.pem --operator-out NEW_DIR] [--repo DIR]
       Refuses inconsistent inputs (each refusal prints `Refusal: <code>` and exits 2), writes the files
-      above and prints a JSON summary naming the run digest. With --operator-out it also writes the
-      three public ConfigMaps the operator creates with kubectl (never in git): the agent's control
-      ConfigMap (binding.json, config.json = the CandidateAgentTrust, ca.pem, network-policy.json) in
-      relay-infra-control, and the slot's trust (config.json) and pin (sha256) ConfigMaps in
-      relay-researcher-1. trustSha256 is the SHA-256 of those exact trust bytes, which are
+      above (and, with the first run, the one-time structure) and prints a JSON summary naming the run
+      digest and whether the one-time structure was `added` or `kept`. With --operator-out it also
+      writes the three public ConfigMaps the operator creates with kubectl (never in git): the agent's
+      control ConfigMap (binding.json, config.json = the CandidateAgentTrust, ca.pem,
+      network-policy.json) in relay-infra-control, and the slot's trust (config.json) and pin (sha256)
+      ConfigMaps in relay-researcher-1. trustSha256 is the SHA-256 of those exact trust bytes, which are
       canonical JSON plus a final newline, as Relay's candidate policy preparation measures them.
   reset [--repo DIR]
-      Writes the placeholder run/ back (the component's removal PR before the canary). The agent's
-      candidate values leave with the agent's own change to the canary runtime.
-  check [--run-digest DIGEST] [--base GIT_REF] [--repo DIR]
+      Writes the placeholder run/ back and removes the one-time structure with the run's agent values,
+      so the agent tree is the enrollment tree again, byte for byte (R0's reset; the component's
+      removal PR before the canary). Refuses, writing nothing, an agent tree whose structure is not
+      exactly the generator's.
+  check [--run-digest DIGEST] [--base GIT_REF | --chart RELAY_CHECKOUT] [--repo DIR]
       Regenerates every generated value from the committed run/document.json (it carries the signed
       run) and compares it with the committed files: exit 0 when they are equal, 1 with the differing
       paths otherwise. With --run-digest, the committed run must be that run. The placeholder state
-      (no run yet) must equal the generator's placeholder exactly. Without --base this is
-      self-consistency (what CI runs): the agent files' other content is taken as committed.
+      (no run yet) must equal the generator's placeholder exactly, and its agent tree carry no
+      one-time structure. Without --base this is self-consistency (what CI runs): the agent files'
+      other content is taken as committed.
       With --base (the PR's base, e.g. origin/main) it is the S-A merge gate on the committed HEAD
       (uncommitted changes are ignored): the generator runs on the BASE revision's files with HEAD's
-      run, and HEAD must equal that output in every generated file, as regular files, and change
-      nothing else. The first run's PR (base run/ still the
-      placeholder) is H7's inclusion PR: its generated values are checked for self-consistency and
-      every other changed path is listed under reviewByHand. The gate refuses a branch that does
-      not contain the base (base-not-in-branch: merge origin/main into it first) and an expired run
-      (run-expired), and fails (exit 1) past t_s + 60 min (hubReadbackDeadlinePassed: abort the run).
+      run, and HEAD must equal that output in every generated file, as regular files, the one-time
+      structure included. A later run's PR changes nothing else. The first run's PR (base run/ still
+      the placeholder) is H7's inclusion PR: every other path it changes is listed under reviewByHand.
+      The gate refuses a branch that does not contain the base (base-not-in-branch: merge origin/main
+      into it first) and an expired run (run-expired), and fails (exit 1) past t_s + 60 min
+      (hubReadbackDeadlinePassed: abort the run).
+      With --chart (a Relay checkout at pins.yaml's sourceCommit, `helm` on PATH; local only, CI has
+      neither) it also renders that chart's deploy/infrastructure-agent twice, enrollment-only and
+      with the candidate values, and compares every object and the config with the agent tree without
+      and with the one-time structure (the committed run's values, or before any run stand-ins for
+      them). ailab's own additions (the API-server and journal-egress policies) are not the chart's.
 
 Deterministic: the same inputs give the same bytes. Offline: no cluster, hub, Router or journal
 access, and it never reads a private key. The run's issuer signature is verified by Relay's composer
-and again by the hub at startup; this script checks consistency, not cryptography. Stdlib + PyYAML.
+and again by the hub at startup; this script checks consistency, not cryptography. Stdlib + PyYAML
+(and helm for --chart).
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import os
@@ -118,6 +132,20 @@ AGENT_MOUNTS = [
 AGENT_VOLUME_LINE = re.compile(r"^(?P<lead>[ \t]*- name: candidate\n[ \t]+configMap:\n[ \t]+name: )(?P<name>\S+)$",
                                re.M)
 GENERATED = "relay-candidate-run.py"
+# The chart's candidate journal egress rule (templates/networkpolicy.yaml), owner decision U9 (ailab #1818):
+# the journal Service's address (kubernetes/optional/relay-candidate-journal/render.py CLUSTER_IP) and port.
+# Inert under Cilium, required by the chart; the agent's own relay-infrastructure-agent-journal-egress
+# selector policy admits the traffic.
+JOURNAL_CIDRS = ("10.96.0.42/32",)
+JOURNAL_PORT = 8443
+AGENT_NAME = "relay-infrastructure-agent"
+PINS = Path("kubernetes/apps/relay-researcher/pins/pins.yaml")
+# The agent files the one-time structure touches; the generator owns them while a run is committed.
+ONE_TIME_FILES = ("config.json", "deployment.yaml", "rbac.yaml", "network-policy.yaml")
+# The config keys of Relay's other runtime modes: never together with candidateRuntime.
+OTHER_MODES = ("podRuntime", "ordinaryCanaryRuntime", "ordinaryNamespacePins", "provenancePreparation",
+               "provenanceExecution")
+ONE_TIME_NOTE = f"# {GENERATED} one-time candidate structure (reset removes it): "
 
 
 class Refusal(Exception):
@@ -526,9 +554,242 @@ def committed_run(repo: Path) -> dict | None:
     return validate(repo, run_text, document)
 
 
-def agent_config(repo: Path, v: dict) -> bytes:
-    path = repo / AGENT / "config.json"
-    text = path.read_text(encoding="utf-8")
+# --- the agent's one-time candidate structure ------------------------------------------------------
+
+def slot_policy_name(repo: Path) -> str:
+    """The slot egress policy the run measures: the chart's candidateRuntime.networkPolicyName."""
+    try:
+        [policy] = load_yaml_docs(repo / QUALIFICATION_EGRESS)
+        return policy["metadata"]["name"]
+    except (OSError, yaml.YAMLError, ValueError, KeyError, TypeError):
+        refuse("egress-policy")
+
+
+def journal_rule() -> dict:
+    return {"to": [{"ipBlock": {"cidr": cidr}} for cidr in JOURNAL_CIDRS],
+            "ports": [{"protocol": "TCP", "port": JOURNAL_PORT}]}
+
+
+def one_time_blocks(control: str, policy_name: str) -> dict:
+    """Per agent YAML file, the (anchor, block) pairs of the one-time structure: each block goes right
+    after its anchor, which must occur exactly once. Relay's chart objects (deploy/infrastructure-agent
+    templates/deployment.yaml, rbac.yaml and networkpolicy.yaml with candidateRuntime set) in each
+    file's own style and in the chart's order; one_time_objects() is what they must parse to."""
+    mounts = "".join(f"        - {{name: candidate, mountPath: {m['mountPath']}, subPath: {m['subPath']}, "
+                     "readOnly: true}\n" for m in AGENT_MOUNTS)
+    items = "".join(f"          - {{key: {k}, path: {k}}}\n" for k in CONTROL_KEYS)
+    cidrs = "".join(f'    - ipBlock: {{cidr: "{cidr}"}}\n' for cidr in JOURNAL_CIDRS)
+    return {
+        "deployment.yaml": [
+            ("        - {name: config, mountPath: /etc/relay-agent, readOnly: true}\n",
+             f"        {ONE_TIME_NOTE}the run's control files.\n" + mounts),
+            ("      volumes:\n",
+             f"      {ONE_TIME_NOTE}the run's control ConfigMap.\n"
+             "      - name: candidate\n"
+             "        configMap:\n"
+             f"          name: {control}\n"
+             "          defaultMode: 0444\n"
+             "          optional: false\n"
+             "          items:\n" + items),
+        ],
+        "rbac.yaml": [
+            ("  resourceNames:\n  - kube-system\n",
+             f"  {ONE_TIME_NOTE}the namespaces the run pins.\n"
+             f"  - {CONTROL_NAMESPACE}\n"
+             f"  - {EXECUTION_NAMESPACE}\n"),
+            ('  resources: ["pods"]\n  verbs: ["get", "create", "delete"]\n',
+             f"{ONE_TIME_NOTE}the slot egress policy the run\n"
+             "# measures, and the bootstrap Secrets (policy.bootstrapSecrets).\n"
+             '- apiGroups: ["networking.k8s.io"]\n'
+             '  resources: ["networkpolicies"]\n'
+             f'  resourceNames: ["{policy_name}"]\n'
+             '  verbs: ["get"]\n'
+             '- apiGroups: [""]\n'
+             '  resources: ["secrets"]\n'
+             '  verbs: ["get", "create", "delete"]\n'),
+        ],
+        "network-policy.yaml": [
+            ("    - {protocol: TCP, port: 443}\n",
+             f"  {ONE_TIME_NOTE}the chart's journal\n"
+             "  # rule, owner decision U9's values. Under Cilium it admits nothing: the third object below does.\n"
+             "  - to:\n" + cidrs +
+             "    ports:\n"
+             f"    - {{protocol: TCP, port: {JOURNAL_PORT}}}\n"),
+        ],
+    }
+
+
+def yaml_objects(text: str, code: str) -> dict:
+    try:
+        docs = [d for d in yaml.safe_load_all(text) if d]
+        objects = {(d["kind"], d["metadata"].get("namespace"), d["metadata"]["name"]): d for d in docs}
+    except (yaml.YAMLError, KeyError, TypeError, AttributeError):
+        refuse(code)
+    if len(objects) != len(docs):
+        refuse(code)
+    return objects
+
+
+def agent_objects(texts: dict, code: str = "agent-one-time-yaml") -> dict:
+    return {name: yaml_objects(texts[name], f"{code}:{name}") for name in ONE_TIME_FILES[1:]}
+
+
+def one_time_parts(objects: dict) -> dict:
+    """Each one-time object as the agent YAML files hold it (KeyError/ValueError when a file lacks the
+    object it belongs in)."""
+    ns, slot = CONTROL_NAMESPACE, EXECUTION_NAMESPACE
+    deployment = objects["deployment.yaml"][("Deployment", ns, AGENT_NAME)]
+    mounts, volumes = agent_candidate(deployment)
+    [cluster] = objects["rbac.yaml"][("ClusterRole", None, f"{AGENT_NAME}-{ns}-cluster-uid")]["rules"]
+    workloads = objects["rbac.yaml"][("Role", slot, f"{AGENT_NAME}-workloads")]["rules"]
+    egress = objects["network-policy.yaml"][("NetworkPolicy", ns, AGENT_NAME)]["spec"]["egress"]
+    return {"deployment.yaml": (mounts, volumes),
+            "rbac.yaml": ([n for n in cluster["resourceNames"] if n in (ns, slot)],
+                          [r for r in workloads if set(r["resources"]) & {"networkpolicies", "secrets"}]),
+            "network-policy.yaml": egress[3:]}
+
+
+def no_one_time_trace(objects: dict) -> dict:
+    """Per agent YAML file: True when it carries none of the one-time objects (the enrollment tree)."""
+    try:
+        parts = one_time_parts(objects)
+    except (KeyError, ValueError, TypeError, AttributeError):
+        refuse("agent-one-time-objects")
+    return {"deployment.yaml": parts["deployment.yaml"] == ([], []),
+            "rbac.yaml": parts["rbac.yaml"] == ([], []),
+            "network-policy.yaml": parts["network-policy.yaml"] == []}
+
+
+def one_time_objects(objects: dict, control: str, policy_name: str) -> dict:
+    """The agent YAML objects with exactly the chart's candidate additions (what the text edits must parse
+    to): the mounts after the config mount, the volume first, the namespaces after kube-system, the
+    slot's two rules after the Pod rule, the journal rule after the hub rule."""
+    out = copy.deepcopy(objects)
+    ns, slot = CONTROL_NAMESPACE, EXECUTION_NAMESPACE
+    pod = out["deployment.yaml"][("Deployment", ns, AGENT_NAME)]["spec"]["template"]["spec"]
+    [agent] = [c for c in pod["containers"] if c["name"] == "agent"]
+    at = [m["name"] for m in agent["volumeMounts"]].index("config") + 1
+    agent["volumeMounts"][at:at] = copy.deepcopy(AGENT_MOUNTS)
+    pod["volumes"].insert(0, {"name": "candidate", "configMap": {
+        "name": control, "defaultMode": 0o444, "optional": False,
+        "items": [{"key": k, "path": k} for k in CONTROL_KEYS]}})
+    [cluster] = out["rbac.yaml"][("ClusterRole", None, f"{AGENT_NAME}-{ns}-cluster-uid")]["rules"]
+    cluster["resourceNames"] += [ns, slot]
+    rules = out["rbac.yaml"][("Role", slot, f"{AGENT_NAME}-workloads")]["rules"]
+    rules += [{"apiGroups": ["networking.k8s.io"], "resources": ["networkpolicies"], "resourceNames": [policy_name],
+               "verbs": ["get"]},
+              {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get", "create", "delete"]}]
+    out["network-policy.yaml"][("NetworkPolicy", ns, AGENT_NAME)]["spec"]["egress"].append(journal_rule())
+    return out
+
+
+def add_one_time_yaml(texts: dict, control: str, policy_name: str) -> dict:
+    """The agent YAML files with the one-time structure inserted, verified to parse to exactly
+    one_time_objects() of the files without it (nothing else changes)."""
+    before = agent_objects(texts)
+    out = dict(texts)
+    for name, edits in one_time_blocks(control, policy_name).items():
+        text = out[name]
+        for anchor, block in edits:
+            if text.count(anchor) != 1:
+                refuse(f"agent-one-time-layout:{name}")
+            text = text.replace(anchor, anchor + block)
+        out[name] = text
+    if agent_objects(out) != one_time_objects(before, control, policy_name):
+        refuse("agent-one-time-layout")
+    return out
+
+
+def remove_one_time_file(text: str, name: str, control: str, policy_name: str) -> str:
+    """The exact inverse of add_one_time_yaml for one file: each block, right after its anchor, must occur
+    exactly once."""
+    for anchor, block in one_time_blocks(control, policy_name)[name]:
+        if text.count(anchor + block) != 1:
+            refuse(f"agent-one-time-edited:{name}")
+        text = text.replace(anchor + block, anchor)
+    return text
+
+
+def control_configmap(text: str) -> str:
+    """The one candidate volume's ConfigMap name in deployment.yaml (a run's control ConfigMap)."""
+    matches = list(AGENT_VOLUME_LINE.finditer(text))
+    if len(matches) != 1 or not re.fullmatch(r"relay-candidate-control-[0-9a-f]{16}", matches[0]["name"]):
+        refuse("agent-one-time-edited:deployment.yaml")
+    return matches[0]["name"]
+
+
+def read_agent(repo: Path) -> dict:
+    try:
+        return {name: (repo / AGENT / name).read_text(encoding="utf-8") for name in ONE_TIME_FILES}
+    except (OSError, UnicodeDecodeError):
+        refuse("agent-unreadable")
+
+
+def one_time_state(repo: Path, texts: dict) -> tuple[str, dict]:
+    """("absent", texts): no trace of the structure (the enrollment tree): generate adds it.
+    ("present", the texts without it): exactly what generate writes, for one run's names: generate keeps
+    it, reset removes it. ("other-mode", texts): the config is in another runtime mode, which this
+    generator never writes. Anything else is refused: a file that is neither without the structure nor
+    exactly with it (agent-one-time-edited:<file>, agent-candidate-runtime-fixed-fields), or some files
+    with it and others without (agent-one-time-partial)."""
+    config = strict_json(texts["config.json"], "agent-config-json")
+    if not isinstance(config, dict) or not isinstance(config.get("policy"), dict):
+        refuse("agent-config-schema")
+    if any(k in config for k in OTHER_MODES):
+        return "other-mode", texts
+    absent = no_one_time_trace(agent_objects(texts))
+    runtime = config.get("candidateRuntime")
+    absent["config.json"] = config["policy"].get("bootstrapSecrets") is False and runtime is None
+    if all(absent.values()):
+        return "absent", texts
+    # Some of it is there: every file must then carry exactly the blocks generate writes, for the one
+    # control ConfigMap the candidate volume names, and nothing of the structure may be left without them.
+    policy_name = slot_policy_name(repo)
+    control = None if absent["deployment.yaml"] else control_configmap(texts["deployment.yaml"])
+    removed = dict(texts)
+    for name in ONE_TIME_FILES[1:]:
+        if not absent[name]:
+            if control is None:
+                refuse("agent-one-time-partial")
+            removed[name] = remove_one_time_file(texts[name], name, control, policy_name)
+    for name, clean in no_one_time_trace(agent_objects(removed, "agent-one-time-edited")).items():
+        if not clean:
+            refuse(f"agent-one-time-edited:{name}")
+    if not absent["config.json"]:
+        newline = "\n" if texts["config.json"].endswith("\n") else ""
+        if (config["policy"].get("bootstrapSecrets") is not True or not isinstance(runtime, dict)
+                or texts["config.json"] != canonical(config) + newline):
+            refuse("agent-one-time-edited:config.json")
+        if ({k: runtime.get(k) for k in AGENT_PATHS} != AGENT_PATHS or runtime.get("bindingSha256") != BINDING_SHA256
+                or runtime.get("holderSecret") != HOLDER_SECRET):
+            refuse("agent-candidate-runtime-fixed-fields")  # the binding and the holder Secret are frozen
+        d16 = control[len("relay-candidate-control-"):] if control else ""
+        if (set(runtime) != {*AGENT_PATHS, "bindingSha256", "trustSha256", "trustConfigMap", "pinConfigMap",
+                             "holderSecret"}
+                or not re.fullmatch(r"[0-9a-f]{64}", str(runtime["trustSha256"]))
+                or (d16 and (runtime["trustConfigMap"], runtime["pinConfigMap"]) != (
+                    f"relay-candidate-trust-{d16}", f"relay-candidate-pin-{d16}"))):
+            refuse("agent-one-time-edited:config.json")  # one run's names throughout
+        unconfigured = json.loads(json.dumps(config))
+        del unconfigured["candidateRuntime"]
+        unconfigured["policy"]["bootstrapSecrets"] = False
+        removed["config.json"] = canonical(unconfigured) + newline
+    if any(absent.values()):
+        refuse("agent-one-time-partial")
+    # Generate, on the tree without it, writes these exact bytes again (nothing else in the blocks' files).
+    try:
+        again = add_one_time_yaml(removed, control, policy_name)
+    except Refusal as refusal:
+        refuse(refusal.code.replace("agent-one-time-layout", "agent-one-time-edited"))
+    for name in ONE_TIME_FILES[1:]:
+        if again[name] != texts[name]:
+            refuse(f"agent-one-time-edited:{name}")
+    return "present", removed
+
+
+def agent_config(text: str, v: dict) -> bytes:
+    """config.json with the one-time policy.bootstrapSecrets true and the run's candidateRuntime: the
+    generator's candidate_config of the I5 import (one_time_state has checked the rest of the overlay)."""
     config = strict_json(text, "agent-config-json")
     newline = "\n" if text.endswith("\n") else ""
     if text != canonical(config) + newline:
@@ -536,11 +797,6 @@ def agent_config(repo: Path, v: dict) -> bytes:
     p = v["payload"]
     try:
         identity, policy = config["identity"], config["policy"]
-        if policy["bootstrapSecrets"] is not True:
-            refuse("agent-bootstrap-secrets-off")
-        if any(k in config for k in ("podRuntime", "ordinaryCanaryRuntime", "ordinaryNamespacePins",
-                                      "provenancePreparation", "provenanceExecution")):
-            refuse("agent-mode-conflict")
         binding = json.loads(v["binding"])
         mismatches = [name for name, ok in [
             ("clusterUid", identity["clusterUid"] == p["clusterUid"]),
@@ -560,13 +816,7 @@ def agent_config(repo: Path, v: dict) -> bytes:
         refuse("agent-config-schema")
     if mismatches:
         refuse("agent-mismatch:" + ",".join(mismatches))
-    previous = config.get("candidateRuntime")
-    if previous is not None and (
-            not isinstance(previous, dict)
-            or {k: previous.get(k) for k in AGENT_PATHS} != AGENT_PATHS
-            or previous.get("bindingSha256") != BINDING_SHA256
-            or previous.get("holderSecret") != HOLDER_SECRET):
-        refuse("agent-candidate-runtime-fixed-fields")  # the binding and the holder Secret are frozen
+    config["policy"]["bootstrapSecrets"] = True
     config["candidateRuntime"] = candidate_runtime(v)
     return (canonical(config) + newline).encode("utf-8")
 
@@ -579,11 +829,10 @@ def agent_candidate(deployment: dict) -> tuple[list, list]:
     return mounts, volumes
 
 
-def agent_deployment(repo: Path, v: dict) -> bytes:
-    path = repo / AGENT / "deployment.yaml"
-    text = path.read_text(encoding="utf-8")
+def agent_deployment(text: str, v: dict) -> bytes:
+    """deployment.yaml (with the one-time structure) with the run's control ConfigMap: one line changes."""
     try:
-        [before] = [d for d in load_yaml_docs(path) if d.get("kind") == "Deployment"]
+        [before] = [d for d in yaml.safe_load_all(text) if d and d.get("kind") == "Deployment"]
         mounts, volumes = agent_candidate(before)
     except (yaml.YAMLError, ValueError, KeyError, TypeError, AttributeError):
         refuse("agent-deployment-yaml")
@@ -607,10 +856,36 @@ def agent_deployment(repo: Path, v: dict) -> bytes:
     return out.encode("utf-8")
 
 
-def generated_files(repo: Path, v: dict) -> dict:
-    return {**hub_files(v),
-            AGENT / "config.json": agent_config(repo, v),
-            AGENT / "deployment.yaml": agent_deployment(repo, v)}
+def agent_files(repo: Path, v: dict) -> tuple[dict, str]:
+    """The agent files for the run, and whether the one-time structure was "added" (the tree had none:
+    the first run) or "kept" (a later run's tree)."""
+    texts = read_agent(repo)
+    state, _ = one_time_state(repo, texts)
+    if state == "other-mode":
+        refuse("agent-mode-conflict")
+    if state == "absent":
+        texts = add_one_time_yaml(texts, v["names"]["controlConfigMap"], slot_policy_name(repo))
+    return {AGENT / "config.json": agent_config(texts["config.json"], v),
+            AGENT / "deployment.yaml": agent_deployment(texts["deployment.yaml"], v),
+            AGENT / "rbac.yaml": texts["rbac.yaml"].encode("utf-8"),
+            AGENT / "network-policy.yaml": texts["network-policy.yaml"].encode("utf-8")}, (
+        "added" if state == "absent" else "kept")
+
+
+def generated_files(repo: Path, v: dict) -> tuple[dict, str]:
+    agent, one_time = agent_files(repo, v)
+    return {**hub_files(v), **agent}, one_time
+
+
+def reset_files(repo: Path) -> tuple[dict, str]:
+    """The placeholder run/ and the agent files without the one-time structure (and with it the run's
+    agent values): the enrollment tree. "removed", or "absent" when there was none (nothing written to
+    the agent tree), or "other-mode" (another runtime mode's agent tree is not this generator's)."""
+    files = placeholder_files()
+    state, removed = one_time_state(repo, read_agent(repo))
+    if state == "present":
+        files.update({AGENT / name: removed[name].encode("utf-8") for name in ONE_TIME_FILES})
+    return files, {"present": "removed"}.get(state, state)
 
 
 # --- operator-local ConfigMaps (public, never in git) ----------------------------------------------
@@ -681,7 +956,7 @@ def generate(repo: Path, run_path: str, run_pin: str, document_path: str, docume
         refuse("run-not-yet-valid")
     if now >= v["payload"]["expiresAt"]:
         refuse("run-expired")
-    files = generated_files(repo, v)  # every refusal happens before anything is written
+    files, one_time = generated_files(repo, v)  # every refusal happens before anything is written
     objects = None
     if operator_out is not None:
         objects = operator_objects(v, read_pinned(journal_ca, v["payload"]["ledger"]["caSha256"], 256 * 1024,
@@ -696,6 +971,7 @@ def generate(repo: Path, run_path: str, run_pin: str, document_path: str, docume
     for path, data in files.items():
         (repo / path).write_bytes(data)
     result = summary(v, files)
+    result["oneTimeStructure"] = one_time  # "added" with the first run (R0, then R1 again after R0's reset)
     if objects is not None:
         result["operatorFiles"] = {name: str(Path(operator_out) / name) for name in objects}
     return result
@@ -705,13 +981,20 @@ def check(repo: Path, expected_digest: str | None = None) -> tuple[dict, list]:
     if is_placeholder(repo):
         if expected_digest:
             return {"runDigest": None}, ["no run recorded: run/ is the placeholder"]
-        expected = placeholder_files()
-        diff = [str(path) for path, data in expected.items() if (repo / path).read_bytes() != data]
-        return {"kind": "ailab.relay-candidate-run-check", "runDigest": None, "state": "placeholder"}, diff
+        # No run: run/ is the placeholder, and the agent tree carries no one-time structure (reset's output).
+        diff = []
+        try:
+            expected, one_time = reset_files(repo)
+        except Refusal as refusal:
+            expected, one_time = placeholder_files(), None
+            diff.append(f"agent tree: {refusal.code}")
+        diff += [str(path) for path, data in expected.items() if (repo / path).read_bytes() != data]
+        return {"kind": "ailab.relay-candidate-run-check", "runDigest": None, "state": "placeholder",
+                "oneTimeStructure": {"removed": "present without a run", "absent": "absent"}.get(one_time, one_time)}, diff
     v = committed_run(repo)
-    diff = []
+    diff, one_time = [], None
     try:
-        expected = generated_files(repo, v)
+        expected, one_time = generated_files(repo, v)
     except Refusal as refusal:
         expected = hub_files(v)
         diff.append(f"agent tree: {refusal.code}")
@@ -720,6 +1003,7 @@ def check(repo: Path, expected_digest: str | None = None) -> tuple[dict, list]:
         diff.append(f"run digest {v['runDigest']} is not the expected {expected_digest}")
     result = summary(v, expected)
     result["kind"] = "ailab.relay-candidate-run-check"
+    result["oneTimeStructure"] = {"kept": "present", "added": "missing"}.get(one_time, one_time)
     return result, diff
 
 
@@ -772,7 +1056,6 @@ def check_against_base(repo: Path, base: str, expected_digest: str | None = None
         refuse("base-not-in-branch")  # merge the base (origin/main) into the branch, then re-run
     now = int(time.time() * 1000) if now_ms is None else now_ms
     changed = {p for p in git(repo, "diff", "--name-only", "-z", base, "HEAD", "--").decode().split("\0") if p}
-    run_files = {str(RUN_DIR / name) for name in ("document.json", "kustomization.yaml", "deployment.yaml")}
     with tempfile.TemporaryDirectory() as tmp:
         base_tree, head_tree = Path(tmp) / "base", Path(tmp) / "head"
         base_tree.mkdir()
@@ -784,36 +1067,187 @@ def check_against_base(repo: Path, base: str, expected_digest: str | None = None
             result, diff = check(head_tree, expected_digest)
             result.update(base=base, reviewByHand=sorted(changed))
             return result, diff
-        if not (base_tree / RUN_DIR / "document.json").is_file() or is_placeholder(base_tree):
-            # H7's inclusion PR (the first run): its run-bound values are checked for self-consistency;
-            # every other change, including the rest of the agent files, is reviewed by hand.
-            result, diff = check(head_tree, expected_digest)
-            if now >= iso_ms(result["expiresAt"]):
-                refuse("run-expired")
-            late = now > iso_ms(result["issuedAt"]) + HUB_READBACK_DEADLINE_MS
-            result.update(base=base, firstRun=True, reviewByHand=sorted(changed - run_files),
-                          hubReadbackDeadlinePassed=late)
-            return result, diff + ([DEADLINE_PASSED] if late else [])
+        # H7's inclusion PR (the first run: the base's run/ is still the placeholder) is checked like every
+        # later run's PR: the generator on the base's files with HEAD's run, and its output (with the first
+        # run, the agent's one-time structure too) is what HEAD must hold. Only the first run's PR may change
+        # other paths (the inclusion line, the activation-gate edit): those are reviewed by hand.
+        first = not (base_tree / RUN_DIR / "document.json").is_file() or is_placeholder(base_tree)
         document = blob(repo, "HEAD", str(RUN_DIR / "document.json"))
         run_text = strict_json(utf8(document, "document-json"), "document-json").get("run")
         if not isinstance(run_text, str):
             refuse("document-schema")
         v = validate(base_tree, run_text, document)
-        expected = generated_files(base_tree, v)
+        expected, one_time = generated_files(base_tree, v)
     if now >= v["payload"]["expiresAt"]:
         refuse("run-expired")  # merging it would only roll the hub to log worker_candidate_unavailable
     diff = [f"not the generator output for the base: {path}" for path, data in expected.items()
             if blob(repo, "HEAD", str(path)) != data]
-    diff += sorted(f"not generated: {p}" for p in changed - {str(path) for path in expected})
+    others = sorted(changed - {str(path) for path in expected})
+    if not first:
+        diff += [f"not generated: {p}" for p in others]
     if expected_digest and expected_digest != v["runDigest"]:
         diff.append(f"run digest {v['runDigest']} is not the expected {expected_digest}")
     late = now > v["payload"]["issuedAt"] + HUB_READBACK_DEADLINE_MS
     if late:
         diff.append(DEADLINE_PASSED)
     result = summary(v, expected)
-    result.update(kind="ailab.relay-candidate-run-check", base=base, firstRun=False,
+    result.update(kind="ailab.relay-candidate-run-check", base=base, firstRun=first, oneTimeStructure=one_time,
                   hubReadbackDeadlinePassed=late)
+    if first:
+        result["reviewByHand"] = others
     return result, diff
+
+
+# --- check --chart: the one-time structure against the pinned chart (local only) --------------------
+
+CHART = Path("deploy/infrastructure-agent")
+AILAB_ADDITIONS = (("CiliumNetworkPolicy", CONTROL_NAMESPACE, f"{AGENT_NAME}-api-egress"),
+                   ("NetworkPolicy", CONTROL_NAMESPACE, f"{AGENT_NAME}-journal-egress"))
+
+
+def chart_values(texts: dict, agent_image: str) -> dict:
+    """The chart's enrollment-only values that render this agent tree: relay-researcher-bundle.py's
+    check_values mapping read the other way (that tool proves the bundle's own values against the same
+    tree). Only candidateRuntime, policy.bootstrapSecrets and the journal values differ for the candidate
+    render, so the two renders differ by exactly the chart's candidate additions."""
+    try:
+        config = json.loads(texts["config.json"])
+        objects = agent_objects(texts)
+        deployment = objects["deployment.yaml"][("Deployment", CONTROL_NAMESPACE, AGENT_NAME)]
+        pod = deployment["spec"]["template"]["spec"]
+        [agent] = pod["containers"]
+        volumes = {v["name"]: v for v in pod["volumes"]}
+        dns, api, hub = objects["network-policy.yaml"][("NetworkPolicy", CONTROL_NAMESPACE, AGENT_NAME)]["spec"]["egress"]
+        identity = config["identity"]
+        return {
+            "image": {"reference": agent_image, "pullPolicy": agent["imagePullPolicy"]},
+            "controlNamespace": identity["controlNamespace"],
+            "executionSlots": config["policy"]["executionSlots"],
+            "replicas": deployment["spec"]["replicas"],
+            "leadership": {"allowStandby": False, **config["leadership"]},
+            "hub": {"origin": config["hub"]["origin"], "caConfigMap": volumes["hub-ca"]["configMap"]["name"]},
+            "kubernetes": {"origin": config["kubernetes"]["origin"]},
+            "identity": {**{k: identity[k] for k in ("tenantId", "installationId", "clusterUid", "installationPublicKey")},
+                         "fenceObjectUid": identity.get("fenceObjectUid", ""),
+                         "installationKeySecret": volumes["installation-key"]["secret"]["secretName"],
+                         "enrollmentTokenSecret": volumes.get("enrollment-token", {}).get("secret", {}).get(
+                             "secretName", "")},
+            "policy": {**{k: config["policy"][k] for k in ("installation", "podTiers", "allowedRuntimeDigests",
+                                                          "allowedTemplates", "retainedStorageClass",
+                                                          "bootstrapSecrets")},
+                       "persistentVolumeClaims": False},
+            "serviceAccountTokenSeconds":
+                volumes["kubernetes"]["projected"]["sources"][0]["serviceAccountToken"]["expirationSeconds"],
+            "resources": agent["resources"],
+            "nodeSelector": pod.get("nodeSelector", {}),
+            "tolerations": pod.get("tolerations", []),
+            "networkPolicy": {
+                "enabled": True,
+                "dnsSelector": {"namespace": dns["to"][0]["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"],
+                                "podLabels": dns["to"][0]["podSelector"]["matchLabels"]},
+                "apiServerCidrs": [peer["ipBlock"]["cidr"] for peer in api["to"]],
+                "apiServerPorts": [port["port"] for port in api["ports"]],
+                "hubCidrs": [peer["ipBlock"]["cidr"] for peer in hub["to"]],
+                "hubPort": hub["ports"][0]["port"],
+                "candidateJournalCidrs": [], "candidateJournalPort": 443},
+        }
+    except (KeyError, TypeError, ValueError, AttributeError):
+        refuse("chart-values")
+
+
+def chart_render(chart: Path, values: dict) -> tuple[dict, dict]:
+    """helm template of the chart with `values` (no cluster): its objects and its config.json."""
+    with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8") as values_file:
+        json.dump(values, values_file)
+        values_file.flush()
+        try:
+            done = subprocess.run(["helm", "template", AGENT_NAME, str(chart), "--namespace", CONTROL_NAMESPACE,
+                                   "-f", values_file.name], capture_output=True, text=True)
+        except OSError:
+            refuse("chart-helm-missing")
+    if done.returncode:
+        print(done.stderr.strip()[-2000:], file=sys.stderr)
+        refuse("chart-render")
+    objects = yaml_objects(done.stdout, "chart-render")
+    config = json.loads(objects.pop(("ConfigMap", CONTROL_NAMESPACE, f"{AGENT_NAME}-config"))["data"]["config.json"])
+    deployment = objects[("Deployment", CONTROL_NAMESPACE, AGENT_NAME)]
+    deployment["spec"]["template"]["metadata"].pop("annotations", None)  # Helm's config-digest rollout
+    return objects, config
+
+
+def tree_render(texts: dict, agent_image: str) -> tuple[dict, dict]:
+    """The agent tree as the chart renders it: without ailab's two additions, with the pinned image, and
+    without the pod annotations (ailab rolls the config by its hashed ConfigMap name and records the
+    source commit; the chart uses a config-digest annotation). relay-researcher-bundle.py check --chart
+    normalizes the same way."""
+    objects = {}
+    for name in ONE_TIME_FILES[1:]:
+        objects.update(yaml_objects(texts[name], f"agent-one-time-yaml:{name}"))
+    for k in AILAB_ADDITIONS:
+        objects.pop(k, None)
+    deployment = objects[("Deployment", CONTROL_NAMESPACE, AGENT_NAME)]
+    deployment["spec"]["template"]["spec"]["containers"][0]["image"] = agent_image
+    deployment["spec"]["template"]["metadata"].pop("annotations", None)
+    return objects, json.loads(texts["config.json"])
+
+
+def compare_render(label: str, chart: tuple[dict, dict], tree: tuple[dict, dict]) -> list:
+    (chart_objects, chart_config), (tree_objects, tree_config) = chart, tree
+    diff = [f"{label}: only in the chart render: {list(k)}" for k in sorted(set(chart_objects) - set(tree_objects), key=str)]
+    diff += [f"{label}: only in the agent tree: {list(k)}" for k in sorted(set(tree_objects) - set(chart_objects), key=str)]
+    diff += [f"{label}: {list(k)} differs from the chart render" for k in sorted(set(chart_objects) & set(tree_objects), key=str)
+             if chart_objects[k] != tree_objects[k]]
+    if chart_config != tree_config:
+        diff.append(f"{label}: config.json differs from the chart's rendered config")
+    return diff
+
+
+def chart_check(repo: Path, relay: Path) -> tuple[dict, list]:
+    """The agent tree without and with the one-time structure against the pinned chart's enrollment-only
+    and candidate renders, object for object and the config. With a run committed the candidate side is
+    the committed tree; before any run it is what generate would add, with stand-ins for the run's names
+    and trustSha256 (digest 0...0)."""
+    try:
+        pins = yaml.safe_load((repo / PINS).read_text(encoding="utf-8"))["data"]
+        source, agent_image = pins["sourceCommit"], pins["agentImage"]
+    except (OSError, yaml.YAMLError, KeyError, TypeError):
+        refuse("chart-pins")
+    chart = relay / CHART
+    if not (chart / "Chart.yaml").is_file():
+        refuse("chart-missing")
+    head = git(relay, "rev-parse", "HEAD").decode().strip()
+    if head != source:
+        refuse("chart-not-pinned")  # the checkout must be pins.yaml's sourceCommit
+    if git(relay, "status", "--porcelain", "--", str(CHART)).strip():
+        refuse("chart-dirty")
+    texts = read_agent(repo)
+    state, enrollment = one_time_state(repo, texts)
+    if state == "other-mode":
+        refuse("agent-mode-conflict")
+    policy_name = slot_policy_name(repo)
+    if state == "present":
+        candidate = texts
+        control = control_configmap(texts["deployment.yaml"])
+        runtime = json.loads(texts["config.json"])["candidateRuntime"]
+    else:
+        v = committed_run(repo) or {"names": names("0" * 64), "trustSha256": "0" * 64}
+        control, runtime = v["names"]["controlConfigMap"], candidate_runtime(v)
+        candidate = add_one_time_yaml(enrollment, control, policy_name)
+        candidate["config.json"] = canonical(candidate_config(json.loads(enrollment["config.json"]), v)) + "\n"
+    values = chart_values(enrollment, agent_image)
+    candidate_values = json.loads(json.dumps(values))
+    candidate_values["policy"]["bootstrapSecrets"] = True
+    candidate_values["candidateRuntime"] = {
+        "configMap": control, **{k: runtime[k] for k in ("bindingSha256", "trustSha256", "trustConfigMap",
+                                                         "pinConfigMap", "holderSecret")},
+        "networkPolicyName": policy_name}
+    candidate_values["networkPolicy"].update(candidateJournalCidrs=list(JOURNAL_CIDRS),
+                                             candidateJournalPort=JOURNAL_PORT)
+    diff = compare_render("enrollment", chart_render(chart, values), tree_render(enrollment, agent_image))
+    diff += compare_render("candidate", chart_render(chart, candidate_values), tree_render(candidate, agent_image))
+    return {"kind": "ailab.relay-candidate-run-chart-check", "chart": f"{CHART}@{head}",
+            "oneTimeStructure": state, "candidateSide": "committed" if state == "present" else "generated",
+            "controlConfigMap": control}, diff
 
 
 def main(argv: list[str]) -> int:
@@ -830,6 +1264,7 @@ def main(argv: list[str]) -> int:
     c = sub.add_parser("check")
     c.add_argument("--run-digest")
     c.add_argument("--base")
+    c.add_argument("--chart", metavar="RELAY_CHECKOUT")
     sub.add_parser("reset")
     args = parser.parse_args(argv)
     repo = Path(args.repo).resolve()
@@ -839,13 +1274,19 @@ def main(argv: list[str]) -> int:
                                       args.journal_ca, args.operator_out), indent=2))
             return 0
         if args.command == "reset":
-            for path, data in placeholder_files().items():
+            files, one_time = reset_files(repo)  # every refusal happens before anything is written
+            for path, data in files.items():
                 (repo / path).write_bytes(data)
-            print(json.dumps({"kind": "ailab.relay-candidate-run-reset", "files": {
-                str(path): sha256(data) for path, data in placeholder_files().items()}}, indent=2))
+            print(json.dumps({"kind": "ailab.relay-candidate-run-reset", "oneTimeStructure": one_time, "files": {
+                str(path): sha256(data) for path, data in files.items()}}, indent=2))
             return 0
+        if args.base and args.chart:
+            refuse("usage")  # --chart compares the working tree; the merge gate reads only commits
         result, diff = (check_against_base(repo, args.base, args.run_digest) if args.base
                         else check(repo, args.run_digest))
+        if args.chart:
+            result["chart"], chart_diff = chart_check(repo, Path(args.chart).resolve())
+            diff += chart_diff
         result["equal"] = not diff
         result["differences"] = diff
         print(json.dumps(result, indent=2))

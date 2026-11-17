@@ -527,8 +527,11 @@ class AgentStage(unittest.TestCase):
         dns, api, hub, *journal = np["egress"]
         if self.campaign:
             # The chart's journal egress rule: ipBlocks only, private and off the LAN, on the journal's
-            # port (its CIDRs are the one-time PR's, U9).
+            # port. Owner decision U9 (ailab #1818): exactly the journal Service address, which
+            # relay-candidate-run.py writes with the one-time structure.
             (rule,) = journal
+            self.assertEqual(rule, {"to": [{"ipBlock": {"cidr": f"{journal_render().CLUSTER_IP}/32"}}],
+                                    "ports": [{"protocol": "TCP", "port": 8443}]})
             origin = urllib.parse.urlsplit(journal_render().ORIGIN)
             self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": origin.port or 443}])
             self.assertTrue(rule["to"])
