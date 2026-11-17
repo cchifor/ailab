@@ -226,7 +226,7 @@ variable "runner_nodes" {
     # their real addresses are in the header note above and in docs/network-plan.md. cloud-init sets the IP at create
     # and lifecycle.ignore_changes=[initialization] makes editing `ip` here DOCUMENTATION ONLY — the live
     # IPs were changed in-guest via netplan (see docs/runbooks/ci-runners.md).
-    "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1" }
+    "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1", memory_floating_mib = 14336 } # floor: see ci-runner-4
     "ci-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "ci-runner-2" }
     "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3" }
     # ci-runner-4 and ci-runner-9 (both ai-node1): floor 14 GiB, raised live 2026-11-16 (owner-approved).
@@ -236,8 +236,11 @@ variable "runner_nodes" {
     # full profile, ~20 containers) loses its file cache and swap-thrashes: ci-runner-9 hit 43% full
     # IO pressure and ~85% of node1's single NVMe (80% util), slowing ci-runner-4 and talos-cp1 too;
     # every workbricks stack-lane failure 2026-11-15 23:16Z onward ran on r4 or r9. 14 GiB matches what
-    # the node2 runners passed the same jobs with. +8 GiB committed on node1 (~25 -> ~17 GB available).
-    # ci-runner-1 (also node1) stays at the default; raise it the same way if it shows the pattern.
+    # the node2 runners passed the same jobs with.
+    # ci-runner-1 (also node1): raised to 14 GiB live 2026-11-17 (owner-approved), for parity with r4/r9.
+    # Fleet-wide, workbricks' tenants stack lane failed ~30% of runs on runners under 11.4 GiB vs <1% above
+    # (dev-worker-2, 179 runs since 11-14); r1's own sample was small (1 failure in 5 runs). All three
+    # node1 runners now sit at 14 GiB. Check node1's free memory (`free -g` on the host) before raising more.
     "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336 }
     "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
     "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
