@@ -724,6 +724,9 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
         self.env = jinja2.Environment()
         self.env.filters["bool"] = _ansible_bool
         self.users = {p["user"]: p for p in _load_defaults()["registry_zot_scoped_push_users"]}
+        # The optional-password mechanism is exercised with a synthetic entry: since the operator added
+        # strive-ci-push's key (ailab#1839) no real user is optional, and every real one fails closed.
+        self.optional = {"user": "optional-ci", "repositories": "example/**", "password_optional": True}
 
     def _eval(self, when, item: dict, passwords) -> bool:
         # Ansible ANDs a list of `when` conditions.
@@ -742,14 +745,18 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
             "write": self._eval(self.htpasswd_task["when"], item, passwords),
         }
 
-    def test_only_strive_ci_push_is_optional(self):
+    def test_no_real_user_is_optional(self):
+        # strive-ci-push's key is in SOPS (ailab#1839), so its password_optional flag is gone: every real
+        # scoped user, strive-ci-push included, must fail the play without its key.
         optional = [u for u, p in self.users.items() if p.get("password_optional")]
-        self.assertEqual(optional, [_STRIVE_CI_USER])
+        self.assertEqual(optional, [])
+        self.assertIn(_STRIVE_CI_USER, self.users)
 
     def test_assert_fails_without_key_unless_optional(self):
         that = self.assert_task["ansible.builtin.assert"]["that"]
         for passwords in (None, {}, {"unrelated": "x"}):
-            self.assertTrue(self._eval(that, self.users[_STRIVE_CI_USER], passwords))
+            self.assertTrue(self._eval(that, self.optional, passwords))
+            self.assertFalse(self._eval(that, self.users[_STRIVE_CI_USER], passwords))
             self.assertFalse(self._eval(that, self.users["trueswarm-ci"], passwords))
             self.assertFalse(self._eval(that, self.users["workbricks-ci"], passwords))
         present = {u: "x" for u in self.users}
@@ -758,9 +765,9 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
 
     def test_present_key_then_absent_key(self):
         # Run 1: the operator added the key -> the line is written, nothing removed.
-        item = self.users[_STRIVE_CI_USER]
+        item = self.optional
         self.assertEqual(
-            self._actions(item, {u: "x" for u in self.users}),
+            self._actions(item, {u: "x" for u in list(self.users) + [item["user"]]}),
             {"assert_ok": True, "skip_msg": False, "stale_msg": True, "remove": False, "write": True},
         )
         # Run 2: the key is gone again (or never existed) -> no write, and the line from run 1 is
@@ -774,17 +781,17 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
     def test_mandatory_users_are_never_removed_and_never_reported(self):
         # The SKIPPED and STALE messages are about optional users only; a mandatory user with no key
         # fails the assert instead.
-        for user in ("trueswarm-ci", "workbricks-ci"):
+        for user in ("trueswarm-ci", "workbricks-ci", _STRIVE_CI_USER):
             for passwords in (None, {}, {u: "x" for u in self.users}):
                 for task in (self.remove_task, self.skip_task, self.stale_task):
                     self.assertFalse(self._eval(task["when"], self.users[user], passwords), task["name"])
 
     def test_stale_flag_message_fires_only_with_flag_and_key(self):
-        item = self.users[_STRIVE_CI_USER]
-        self.assertTrue(self._eval(self.stale_task["when"], item, {_STRIVE_CI_USER: "x"}))
+        item = self.optional
+        self.assertTrue(self._eval(self.stale_task["when"], item, {item["user"]: "x"}))
         self.assertFalse(self._eval(self.stale_task["when"], item, {}))
         unflagged = {k: v for k, v in item.items() if k != "password_optional"}
-        self.assertFalse(self._eval(self.stale_task["when"], unflagged, {_STRIVE_CI_USER: "x"}))
+        self.assertFalse(self._eval(self.stale_task["when"], unflagged, {item["user"]: "x"}))
         self.assertIn("STALE FLAG", self.stale_task["ansible.builtin.debug"]["msg"])
 
     def test_remove_task_shape(self):
