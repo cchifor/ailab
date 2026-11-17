@@ -19,7 +19,7 @@ kind: Component
 # INCLUDED by kubernetes/apps/apps/llm-router since Router connection step 6 (remaining-live-steps
 # step 2), after the trust document was read back. scripts/tests/test_relay_v060_activation_gate.py
 # still refuses the retired llm-router-relay-keys bridge by exact name, and
-# scripts/tests/test_relay_router_connection.py refuses any inclusion while the ExternalSecret template
-# carries the workerBudgets.maxTokens placeholder (it is 7441536 since ailab #1778).
+# scripts/tests/test_relay_router_connection.py refused any inclusion while the ExternalSecret template
+# carried the workerBudgets.maxTokens placeholder; it has been 7441536 since ailab #1778.
 patches:
 - path: deployment.yaml

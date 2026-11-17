@@ -31,10 +31,11 @@ class ActivationGate(unittest.TestCase):
             ROOT / "kubernetes/apps/apps/llm-router",
         ]
         # The retired trust bridge, for good: the component llm-router-relay-keys itself. Its name is a
-        # prefix of llm-router-relay-keys-trust, the reviewed Relay trust that budget step 8 / Router
-        # connection step 6 includes (docs/runbooks/relay-researcher-remaining-live-steps.md, step 2),
-        # so the retired name is refused only where it is not that component.
-        retired = re.compile(r"llm-router-relay-keys(?!-trust\b)")
+        # prefix of llm-router-relay-keys-trust, the reviewed Relay trust that Router connection step 6
+        # includes (docs/runbooks/relay-researcher-remaining-live-steps.md, step 2), so the retired name
+        # is refused everywhere except as exactly that component's name: "-trust" followed by neither a
+        # word character nor another hyphen (so llm-router-relay-keys-trust-<anything> is refused too).
+        retired = re.compile(r"llm-router-relay-keys(?!-trust(?![\w-]))")
         forbidden = (
             "relay-router-control-plane",
             # The researcher hub upgrade (docs/runbooks/relay-researcher-hub-upgrade.md), split per
