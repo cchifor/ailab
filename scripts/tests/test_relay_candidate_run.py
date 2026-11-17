@@ -569,6 +569,13 @@ class Generator(unittest.TestCase):
             (C, config_edit(lambda cfg: cfg["candidateRuntime"].update(trustConfigMap="relay-candidate-trust-" + "0" * 16)),
              "agent-one-time-edited:config.json"),
             (C, lambda t: json.dumps(json.loads(t), indent=2) + "\n", "agent-one-time-edited:config.json"),
+            # A candidate mount in another container (reset would leave it without its volume).
+            (D, lambda t: t.replace("      containers:\n",
+                                    "      initContainers:\n      - name: copy\n        image: x\n        volumeMounts:\n"
+                                    "        - {name: candidate, mountPath: /run/relay/candidate-trust.json, subPath: config.json}\n"
+                                    "      containers:\n"), "agent-one-time-edited:deployment.yaml"),
+            # Another line ending is another byte: refused, never rewritten.
+            (R, lambda t: t.replace("\n", "\r\n"), "agent-one-time-edited:rbac.yaml"),
             # Another runtime mode beside the structure: never taken as that mode's tree (reset would keep it).
             (C, config_edit(lambda cfg: cfg.update(podRuntime={})), "agent-mode-conflict"),
             (C, config_edit(lambda cfg: cfg.update(ordinaryNamespacePins={})), "agent-mode-conflict"),
@@ -583,9 +590,9 @@ class Generator(unittest.TestCase):
         for rel, edit, code in cases:
             with self.subTest(rel=rel, code=code):
                 path = self.root / rel
-                original = path.read_text()
-                path.write_text(edit(original))
-                self.assertNotEqual(path.read_text(), original)
+                original = path.read_bytes().decode()
+                path.write_bytes(edit(original).encode())
+                self.assertNotEqual(path.read_bytes().decode(), original)
                 try:
                     self.assertEqual(self.refusal(second, tag="s"), code)
                     before = self.snapshot()
@@ -595,7 +602,7 @@ class Generator(unittest.TestCase):
                     self.assertEqual(self.snapshot(), before)
                     self.assertIn(f"agent tree: {code}", gen.check(self.root)[1])
                 finally:
-                    path.write_text(original)
+                    path.write_bytes(original.encode())
         self.assertEqual(gen.check(self.root)[1], [])
 
     def test_operator_configmaps(self):
@@ -719,6 +726,11 @@ class Generator(unittest.TestCase):
             (self.root / gen.AGENT / name).write_text(written[name])
             self.assertEqual(self.refusal(c), code, name)
             (self.root / gen.AGENT / name).write_text(texts[name])
+        # The enrollment tree with CRLF line endings: refused, not rewritten.
+        rbac = self.root / gen.AGENT / "rbac.yaml"
+        rbac.write_bytes(texts["rbac.yaml"].replace("\n", "\r\n").encode())
+        self.assertEqual(self.refusal(c), "agent-one-time-layout:rbac.yaml")
+        rbac.write_text(texts["rbac.yaml"])
         # Another layout of the enrollment file the structure goes into: refused, not guessed.
         deployment = self.root / gen.AGENT / "deployment.yaml"
         deployment.write_text(texts["deployment.yaml"].replace(

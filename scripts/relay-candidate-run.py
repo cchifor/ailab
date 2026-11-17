@@ -636,14 +636,15 @@ def agent_objects(texts: dict, code: str = "agent-one-time-yaml") -> dict:
 
 
 def one_time_parts(objects: dict) -> dict:
-    """Every trace of the one-time objects in the agent YAML files, wherever it sits: a mount or volume
-    named candidate, at a candidate path or of a run's control ConfigMap; the two namespaces in the
-    cluster-UID read; a slot NetworkPolicy or Secret rule; an egress rule beyond the chart's three or on
-    the journal's address or port (KeyError/ValueError when a file lacks the object it belongs in)."""
+    """Every trace of the one-time objects in the agent YAML files, wherever it sits: a mount (in any
+    container) or volume named candidate, at a candidate path or of a run's control ConfigMap; the two
+    namespaces in the cluster-UID read; a slot NetworkPolicy or Secret rule; an egress rule beyond the
+    chart's three or on the journal's address or port (KeyError/ValueError when a file lacks the object
+    it belongs in)."""
     ns, slot = CONTROL_NAMESPACE, EXECUTION_NAMESPACE
     spec = objects["deployment.yaml"][("Deployment", ns, AGENT_NAME)]["spec"]["template"]["spec"]
-    [agent] = [c for c in spec["containers"] if c["name"] == "agent"]
-    mounts = [m for m in agent.get("volumeMounts", [])
+    containers = [*spec["containers"], *(spec.get("initContainers") or [])]
+    mounts = [m for c in containers for m in c.get("volumeMounts") or []
               if m.get("name") == "candidate" or m.get("mountPath") in AGENT_PATHS.values()]
     volumes = [v for v in spec.get("volumes", []) if v.get("name") == "candidate" or str(
         (v.get("configMap") or {}).get("name", "")).startswith("relay-candidate-control-")]
@@ -731,8 +732,10 @@ def control_configmap(text: str) -> str:
 
 
 def read_agent(repo: Path) -> dict:
+    """The agent files' exact text: decoded bytes, line endings untranslated (the comparisons are byte for
+    byte, so a CRLF file is refused, never rewritten)."""
     try:
-        return {name: (repo / AGENT / name).read_text(encoding="utf-8") for name in ONE_TIME_FILES}
+        return {name: (repo / AGENT / name).read_bytes().decode("utf-8") for name in ONE_TIME_FILES}
     except (OSError, UnicodeDecodeError):
         refuse("agent-unreadable")
 
