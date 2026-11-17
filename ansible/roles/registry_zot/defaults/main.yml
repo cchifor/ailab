@@ -52,7 +52,6 @@ registry_zot_scoped_push_users:
   # registry_zot_strive_ci_build_keep_recent below.
   - user: "strive-ci-push"
     repositories: "strive/ci-build/**"
-    password_optional: true        # until registry_scoped_push_passwords has 'strive-ci-push'
 
 # Web-UI SSO via Authelia (zot-native OIDC). Docker push (ci/htpasswd) + anonymous pull are
 # UNAFFECTED — only the browser UI gains a "Login with Authelia" button. The plaintext client
