@@ -266,9 +266,12 @@ variable "runner_nodes" {
     # block_set_io_throttle; no restart, as when relay-worker-1's throttle was removed in #1706).
     # Do NOT set 0 to remove one: the validation above rejects it.
     "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1", memory_floating_mib = 14336, disk_write_mibps = 30, disk_write_iops = 1000 } # floor: see ci-runner-4
-    # D1d (2026-11-17 20:29Z): node2 runners back to 30 MiB/s after a cp2 stall-minute (fsync p99 4.46 s at 20:27Z,
-    # node2 NVMe 79% busy) under 45, per the pre-agreed D1d rollback rule. Raise again only after a clean night, one
-    # node at a time, in daytime; compare cp2 stall-minutes against node2 job failures.
+    # Cost of 30 MiB/s (why D1c, #1838, raised node2 to 45 at ~19:45Z on 2026-11-17): a workbricks stack Postgres on
+    # ci-runner-5 crashed into recovery (io pressure full avg10 85%, no OOM), cold workbricks jobs spend 8-14 min
+    # writing, and I/O-heavy suites time out (relay release/holder tests, 21 suite timeouts on ci-runner-10).
+    # Rolled back to 30 at 20:29Z (#1840) by the D1d rule "any cp2 minute with etcd WAL fsync p99 > 1 s -> node2 back
+    # to 30": cp2 hit 4.46 s at 20:27Z (node2 NVMe 79% busy). Raise again only after a clean night, one node at a
+    # time, in daytime, comparing cp2 stall-minutes against node2 job failures.
     "ci-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "ci-runner-2", disk_write_mibps = 30, disk_write_iops = 1000 } # write cap: D1, above ci-runner-1
     "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3" }
     # ci-runner-4 and ci-runner-9 (both ai-node1): floor 14 GiB, raised live 2026-11-16 (owner-approved).
