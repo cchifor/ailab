@@ -643,7 +643,11 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
     they held 20.1 GB on ci-runner-9, 20.5 GB on ci-runner-10 and 5.7 GB on ci-runner-6, and
     ci-runner-5 had two running for 14h. That space pushed the runners into full cache wipes.
   - **The metric.** The cleanup counts as leaked a `buildx_buildkit_*_state` volume no container uses,
-    or a `buildx_buildkit_*` container 12h or older, with its own state volume.
+    or a `buildx_buildkit_*` container whose own state volume BuildKit has not written for 12h.
+    - Inactivity, not age: a builder that later jobs reuse by name (`rmv-builder` on ci-runner-9) can be
+      weeks old and busy.
+    - "Written" means the newest mtime of BuildKit's `*.db` files in the volume's first three levels, or
+      the volume directory itself. That is cheap and bounded, with no walk of the snapshots.
     - It writes `gitea_runner_buildx_leaked_bytes` and `gitea_runner_buildx_leaked_builders` every tick,
       to `gitea_runner_buildx_leak.prom`.
     - A docker or `du` call that fails or times out writes nothing, so the last value stays.
@@ -652,9 +656,14 @@ as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of t
     10-minute drain, and nothing stops another start. Two review rounds on ailab #1832 ended in that
     owner decision.
   - **Reap them by hand**, with `scripts/ci-runner-buildx-reap.sh` (used on ci-runner-5/-6/-9/-10 on
-    2026-11-17; 64 GB freed). The script:
-    - refuses unless `gitea-act-runner` has no child processes across 3 reads, 1 s apart;
-    - removes builder containers 6h or older, then every builder volume no container uses;
+    2026-11-17, 64 GB freed; hardened after review). The script:
+    - refuses unless `gitea-act-runner` has no child processes across 3 reads, 1 s apart. A probe that
+      fails counts as busy: only `pgrep` exit 1 means idle;
+    - removes builder containers 6h or older, then every builder state volume no container uses;
+    - only touches the exact names the metric uses (`buildx_buildkit_<name>`,
+      `buildx_buildkit_<name>_state`);
+    - skips, and never removes, anything it cannot read: a failed `docker inspect`, an empty or
+      unparseable creation time, or unreadable volume users;
     - re-reads the idle check before each removal.
 
     1. List first (read-only): `ssh ubuntu@<ip> 'sudo bash -s list' < scripts/ci-runner-buildx-reap.sh`.

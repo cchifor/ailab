@@ -210,3 +210,21 @@ tests:
             exp_annotations:
               summary: CI runner 192.168.0.31:9100 holds 20GiB in leaked buildx builders
               description: 'Builders that cancelled or killed jobs left behind on 192.168.0.31:9100 hold this much disk, and nothing reclaims them (gitea_runner_buildx_leaked_builders says how many). Reap them by hand on an idle runner: docs/runbooks/ci-runners.md, Troubleshooting, "Leaked buildx builders".'
+  - interval: 1m
+    name: no leaked-bytes series (a runner without the new script) does not warn
+    input_series:
+      - series: gitea_runner_buildx_leaked_builders{job="ci-runner-node", instance="192.168.0.31:9100"}
+        values: 5+0x120
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: CIRunnerLeakedBuildxBuilders
+        exp_alerts: []
+  - interval: 1m
+    name: leaked bytes from another job (a cloud runner) do not raise the on-prem alert
+    input_series:
+      - series: gitea_runner_buildx_leaked_bytes{job="ci-runner-cloud", instance="192.168.0.35:9100"}
+        values: 21474836480+0x120
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: CIRunnerLeakedBuildxBuilders
+        exp_alerts: []

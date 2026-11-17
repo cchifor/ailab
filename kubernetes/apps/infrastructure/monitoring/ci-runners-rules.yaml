@@ -214,7 +214,7 @@ spec:
               status gitea-act-runner` and `journalctl -u gitea-act-runner -t gitea-runner-cleanup`.
         # Leaked buildx builders (2026-11-17): the containers and _state volumes that a cancelled or killed
         # job's setup-buildx-action leaves behind. gitea-runner-cleanup.sh MEASURES them (a _state volume no
-        # container uses, or a builder container 12h or older) and never removes them: it has no
+        # container uses, or a builder whose state BuildKit has not written for 12h) and never removes them: it has no
         # job-admission guarantee to do that safely. 20.1 GB sat on ci-runner-9 and 20.5 GB on ci-runner-10,
         # and that space pushed both into full cache wipes. A failed read keeps the last value, so a broken
         # read neither raises nor clears this.

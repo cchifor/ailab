@@ -138,8 +138,8 @@ TARGET_KEEP_CRITICAL_H="${GITEA_CLEANUP_TARGET_KEEP_CRITICAL_H:-24}" # at/over C
 TARGET_MIN_FREE_MB="${GITEA_CLEANUP_TARGET_MIN_FREE_MB:-1024}" # below this much to gain, the runner is not held
 BUILDKIT_DB="${GITEA_CLEANUP_BUILDKIT_DB:-/var/lib/docker/buildkit/cache.db}" # its size goes in the beacon
 # Leaked buildx builders (a read-only metric, see write_buildx_leak_metric): a builder container counts as
-# leaked once it is this old (12h, against a 3h job timeout).
-BUILDX_LEAK_AGE_SEC="${GITEA_CLEANUP_BUILDX_LEAK_AGE_SEC:-43200}"
+# leaked once BuildKit has written nothing to its state volume for this long (12h, against a 3h job timeout).
+BUILDX_LEAK_IDLE_SEC="${GITEA_CLEANUP_BUILDX_LEAK_IDLE_SEC:-43200}"
 
 # (No docker CLI -> exit 0 happens at the start of section 0, AFTER the runner recovery, which needs
 # only systemctl: a heal that left the runner stopped must still be recovered without docker.)
@@ -363,45 +363,64 @@ write_heal_beacon() { # <dangling_record 0|1>
 # Removing one safely needs a job-admission guarantee this script does not have (a build can attach
 # between any check and the removal), so the cleanup only MEASURES them, and CIRunnerLeakedBuildxBuilders
 # sends an operator to the idle-only manual reap in docs/runbooks/ci-runners.md.
-# Leaked = a buildx_buildkit_*_state volume no container uses, or a buildx_buildkit_* container at least
-# BUILDX_LEAK_AGE_SEC old (with its own state volume). Written to its own file every tick; a read that
-# fails or times out writes NOTHING, so the last value stays, as the heal beacon does.
+# Leaked = EITHER a buildx_buildkit_*_state volume no container uses, OR a buildx_buildkit_* container
+# whose own state volume shows no BuildKit write for BUILDX_LEAK_IDLE_SEC. Not the container's age: a
+# builder that later jobs reuse by name (rmv-builder on ci-runner-9) can be weeks old and in use, and a
+# build writes BuildKit's bbolt databases (cache.db, history.db, runc-overlayfs/metadata_v2.db, ...), so
+# their newest mtime is the builder's last activity. A container with no state volume is not counted.
+# Written to its own file every tick; a read that fails or times out writes NOTHING, so the last value
+# stays, as the heal beacon does.
 BUILDX_LEAK_FILE="$TEXTFILE_DIR/gitea_runner_buildx_leak.prom"
-# Bytes the volume <v> holds on disk; non-zero when unreadable.
-buildx_volume_bytes() {
-  local mp b
-  mp="$(timeout 30 docker volume inspect -f '{{.Mountpoint}}' "$1" 2>/dev/null)" && [ -n "$mp" ] || return 1
-  b="$(timeout 120 du -sxB1 "$mp" 2>/dev/null | cut -f1)" && is_num "$b" || return 1
+# The mountpoint of volume <v>; non-zero when unreadable.
+buildx_volume_dir() {
+  local mp
+  mp="$(timeout 30 docker volume inspect -f '{{.Mountpoint}}' "$1" 2>/dev/null)" && [ -n "$mp" ] && [ -d "$mp" ] || return 1
+  printf '%s' "$mp"
+}
+# Bytes the directory <dir> holds on disk; non-zero when unreadable.
+buildx_dir_bytes() {
+  local b
+  b="$(timeout 120 du -sxB1 "$1" 2>/dev/null | cut -f1)" && is_num "$b" || return 1
   printf '%s' "$b"
+}
+# Epoch seconds of BuildKit's last write in the state dir <dir>: the newest mtime among the *.db files in
+# its first three levels and the dir itself (so a dir with no database still has an answer). Bounded and
+# cheap: no walk of the snapshots. Non-zero when unreadable.
+buildx_last_write() {
+  local dbs root newest
+  dbs="$(timeout 30 find "$1" -maxdepth 3 -type f -name '*.db' -printf '%T@\n' 2>/dev/null)" || return 1
+  root="$(stat -c %Y "$1" 2>/dev/null)" && is_num "$root" || return 1
+  newest="$(printf '%s\n%s\n' "$dbs" "$root" | sed 's/\..*$//' | sort -n | tail -n 1)"
+  is_num "$newest" || return 1
+  printf '%s' "$newest"
 }
 write_buildx_leak_metric() {
   [ "$BEACON" = 1 ] && [ -d "$TEXTFILE_DIR" ] || return 0
-  local age_max ids cid meta name created mounts t v b bytes=0 count=0 tmp vols
-  age_max="$BUILDX_LEAK_AGE_SEC"; is_num "$age_max" && [ "$age_max" -gt 0 ] || age_max=43200
+  local idle_max ids cid meta name mounts v mp t b bytes=0 count=0 tmp vols
+  idle_max="$BUILDX_LEAK_IDLE_SEC"; is_num "$idle_max" && [ "$idle_max" -gt 0 ] || idle_max=43200
   ids="$(timeout 30 docker ps -aq --filter name=buildx_buildkit_ 2>/dev/null)" \
     || { log "buildx leak metric: cannot list containers -> not updated"; return 0; }
   for cid in $ids; do
-    meta="$(timeout 30 docker inspect -f '{{.Name}}|{{.Created}}|{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$cid" 2>/dev/null)" \
+    meta="$(timeout 30 docker inspect -f '{{.Name}}|{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$cid" 2>/dev/null)" \
       || { log "buildx leak metric: cannot inspect $cid -> not updated"; return 0; }
-    IFS='|' read -r name created mounts <<< "$meta"
+    IFS='|' read -r name mounts <<< "$meta"
     # The name filter is a substring match; this is the exact shape.
     grep -qE '^/buildx_buildkit_[A-Za-z0-9][A-Za-z0-9_.-]*$' <<< "$name" || continue
-    # Not `date -d ''`, which is today's midnight.
-    [ -n "$created" ] && t="$(date -d "$created" +%s 2>/dev/null)" && is_num "$t" \
-      || { log "buildx leak metric: $name has no readable creation time -> not updated"; return 0; }
-    [ $(( $(date +%s) - t )) -ge "$age_max" ] || continue
-    count=$(( count + 1 ))
     for v in $mounts; do
       [ "$v" = "buildx_buildkit_${name#/buildx_buildkit_}_state" ] || continue
-      b="$(buildx_volume_bytes "$v")" || { log "buildx leak metric: cannot size $v -> not updated"; return 0; }
-      bytes=$(( bytes + b ))
+      mp="$(buildx_volume_dir "$v")" || { log "buildx leak metric: cannot find $v -> not updated"; return 0; }
+      t="$(buildx_last_write "$mp")" || { log "buildx leak metric: cannot read $v's activity -> not updated"; return 0; }
+      [ $(( $(date +%s) - t )) -ge "$idle_max" ] || continue
+      b="$(buildx_dir_bytes "$mp")" || { log "buildx leak metric: cannot size $v -> not updated"; return 0; }
+      count=$(( count + 1 )); bytes=$(( bytes + b ))
     done
   done
   vols="$(timeout 30 docker volume ls -q --filter dangling=true --filter name=buildx_buildkit_ 2>/dev/null)" \
     || { log "buildx leak metric: cannot list volumes -> not updated"; return 0; }
   for v in $vols; do
     grep -qE '^buildx_buildkit_[A-Za-z0-9][A-Za-z0-9_.-]*_state$' <<< "$v" || continue
-    b="$(buildx_volume_bytes "$v")" || { log "buildx leak metric: cannot size $v -> not updated"; return 0; }
+    mp="$(buildx_volume_dir "$v")" || { log "buildx leak metric: cannot find $v -> not updated"; return 0; }
+    b="$(buildx_dir_bytes "$mp")" || { log "buildx leak metric: cannot size $v -> not updated"; return 0; }
     count=$(( count + 1 )); bytes=$(( bytes + b ))
   done
   tmp="$(mktemp "$BUILDX_LEAK_FILE.XXXX" 2>/dev/null)" || return 0
