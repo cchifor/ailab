@@ -1073,7 +1073,7 @@ node_ok() {
   prod=$(kubectl --context admin@ai -n relay-budget-authority get pod relay-budget-postgres-0 -o jsonpath='{.spec.nodeName}') &&
   probe=$(kubectl --context admin@ai -n "$PNS" get pod relay-budget-postgres-0 -o jsonpath='{.spec.nodeName}') &&
   ip=$(kubectl --context admin@ai get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}') &&
-  python scripts/node-ssh.py "$host" "qm config $vmid | grep -qx 'name: $node'" &&
+  [ "$(python scripts/node-ssh.py "$host" "qm config $vmid" | sed -n 's/^name: //p')" = "$node" ] &&
   [ "$probe" = "$node" ] && [ -n "$prod" ] && [ "$prod" != "$node" ] && [ "$ip" = "$nodeip" ] &&
   echo "node $node ($ip, vmid $vmid on $host): the probe is here, the production ledger on $prod"
 }
@@ -1261,8 +1261,8 @@ cap probe-c-cut python scripts/node-ssh.py "$host" "nohup sh -c ': $tok; $cut' <
   sleep 2; iptables -w 5 -C $rule 2>/dev/null || { echo NOT-CUT; exit 1; }
   pgrep -f '^sh -c : $tok' >/dev/null || { echo NO-REMOVER; exit 1; }
   echo cut-in-place; date -u +%FT%TZ" &&
-{ sleep 30; cap probe-c-sessions-during sessions_cut; held=$?             # the rule check runs either way
-  sleep 60; cap probe-c-rule python scripts/node-ssh.py "$host" "$check" && [ "$held" -eq 0 ]; } &&
+{ sleep 43; cap probe-c-sessions-during sessions_cut; held=$?             # the rule check runs either way
+  sleep 47; cap probe-c-rule python scripts/node-ssh.py "$host" "$check" && [ "$held" -eq 0 ]; } &&
 probe_after c &&
 cap probe-c-sessions-after sessions_ok
 ```
