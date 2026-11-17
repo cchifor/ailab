@@ -188,6 +188,10 @@ registry_zot_strive_keep_recent: 100
 # them. These are throwaway build outputs, never deployed or pinned: the window only has to outlive
 # one pipeline (smoke pushes, the shards pull), so it is small on purpose.
 registry_zot_strive_ci_build_keep_recent: 10
+# ...OR pushed within this window (zot ORs the rules of one keepTags entry). A count alone can evict
+# a running pipeline's image when a busy repo takes 10 more pushes mid-run; the time floor keeps
+# every ci- tag at least this long. Go duration string, parsed like gcDelay.
+registry_zot_strive_ci_build_keep_within: "24h"
 
 # agentforge/** does NOT all push the same tag shape (verified against the live tag lists AND
 # both engine repos' workflows on 2026-09-02, see docs/decisions/0014-registry-pull-through-cache.md

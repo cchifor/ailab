@@ -103,7 +103,7 @@ prefix (`read`/`create`/`update`, no `delete`), listed in `registry_zot_scoped_p
 |---|---|---|
 | `trueswarm-ci` | `trueswarm/**` | `cchifor/trueswarm` `.gitea/workflows/publish.yml` (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`) |
 | `workbricks-ci` | `workbricks/**` | `cchifor/workbricks` image-publish CI (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`; Workbricks OR-12). The cell pulls anonymously, like every other image; the registry is LAN-only. |
-| `strive-ci-push` | `strive/ci-build/**` | `cchifor/platform` e2e build-once (platform#2823): stack-smoke pushes `strive/ci-build/<image>:ci-<40-hex commit>` and the journey shards pull by digest. Only the 10 most-recently-pushed `ci-` tags per repository are kept (`registry_zot_strive_ci_build_keep_recent`); its retention policy precedes `strive/**`. NOT `strive/ci/**`: those 12 existing platform repos keep their `strive/**` rules. Entry carries `password_optional: true` until its SOPS key exists. |
+| `strive-ci-push` | `strive/ci-build/**` | `cchifor/platform` e2e build-once (platform#2823): stack-smoke pushes `strive/ci-build/<image>:ci-<40-hex commit>` and the journey shards pull by digest. A `ci-` tag is kept while it is among the 10 most recently pushed in its repository OR was pushed within 24h (`registry_zot_strive_ci_build_keep_recent` / `_keep_within`); its retention policy precedes `strive/**`. NOT `strive/ci/**`: those 12 existing platform repos keep their `strive/**` rules. Entry carries `password_optional: true` until its SOPS key exists. |
 
 A logged-in scoped user has **no** rights outside its prefix, not even read: zot's `anonymousPolicy`
 applies only to unauthenticated requests. Use the credential for the push only (platform#2823 writes
@@ -119,7 +119,8 @@ Flux reconciles. Adding a project = a new list entry + a SOPS key + `just regist
 secrets (the role asserts the SOPS key exists before touching the htpasswd). To merge the entry
 before the key exists, mark it `password_optional: true`: the play then skips that user with a
 `SKIPPED` message instead of failing, and REMOVES any htpasswd line it has, so the user cannot log
-in until the key exists. Drop the flag in the change that adds the key. Add the key
+in until the key exists. Drop the flag in the change that adds the key; while both exist, every
+run prints a `STALE FLAG` message. Add the key
 UNDER `registry_scoped_push_passwords` (the file's `encrypted_regex` covers that map; a new
 top-level key would be stored in plaintext).
 
@@ -159,9 +160,11 @@ The store lives on the mp0 data disk; its desired size is `kubernetes/infra/regi
 each more specific one listed before the catch-all it would otherwise fall through to (zot applies
 only the FIRST policy whose glob matches a repo):
 
-- `strive/ci-build/**` (listed before `strive/**`) keeps the
-  `registry_zot_strive_ci_build_keep_recent` (10) most-recently-pushed `ci-<40-hex commit>` tags per
-  repo and prunes every other tag there. These are cchifor/platform's per-pipeline e2e images
+- `strive/ci-build/**` (listed before `strive/**`) keeps a `ci-<40-hex commit>` tag while it is
+  among the `registry_zot_strive_ci_build_keep_recent` (10) most recently pushed in its repo OR was
+  pushed within `registry_zot_strive_ci_build_keep_within` (24h). Both rules sit in ONE keepTags
+  entry, which zot ORs; the time floor stops a burst of pushes evicting a running pipeline's image.
+  Every other tag there is pruned. These are cchifor/platform's per-pipeline e2e images
   (platform#2823); under `strive/**` a `ci-` tag would match no keep pattern and the hourly GC would
   delete it mid-pipeline. Never widen it to `strive/ci/**`: that namespace already holds platform
   repos (`strive/ci/platform-e2e-local`, ...) whose `latest`/`ailab*`/`sha-*` tags rely on

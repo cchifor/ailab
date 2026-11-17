@@ -320,7 +320,10 @@ class RegistryZotScopedPushAccessTest(unittest.TestCase):
 #   pkg/retention/retention.go  getRepoPolicy: the FIRST policy whose repositories doublestar glob
 #     matches wins; getTagPolicy: the FIRST keepTags entry whose patterns match a tag; a tag with no
 #     entry is skipped "(will be gc'ed)"; rules within an entry are OR-ed, and an entry with no rules
-#     keeps every tag it matches.
+#     keeps every tag it matches. getRules turns mostRecentlyPushedCount into NewLatestPush and
+#     pushedWithin (a *time.Duration) into NewDaysPush, and GetRetainedTagsFromMetaDB appends each
+#     rule's retained candidates: "we retain candidates if any of the below rules are met (OR logic
+#     between rules)".
 #   pkg/api/authz.go  can: only the LONGEST matching repositories pattern counts; isPermitted:
 #     anonymousPolicy only when username == "", defaultPolicy only when username != "".
 # https://github.com/project-zot/zot/blob/v2.1.18/pkg/retention/retention.go (and .../v2.1.23/...)
@@ -328,6 +331,13 @@ class RegistryZotScopedPushAccessTest(unittest.TestCase):
 _STRIVE_CI_USER = "strive-ci-push"
 _CI_BUILD_REPOS = "strive/ci-build/**"
 _CI_BUILD_KNOB = "registry_zot_strive_ci_build_keep_recent"
+_CI_BUILD_WITHIN_KNOB = "registry_zot_strive_ci_build_keep_within"
+# The one keepTags entry: 10 most-recently-pushed OR pushed within 24h (zot ORs an entry's rules).
+_CI_BUILD_ENTRY = {
+    "patterns": ["^ci-[0-9a-f]{40}$"],
+    "mostRecentlyPushedCount": 10,
+    "pushedWithin": "24h",
+}
 # The tag platform's build-once step pushes: `ci-<40-hex commit>`.
 _CI_TAG = "ci-" + _FULL_SHA
 # The 12 repositories that ALREADY live under strive/ci/ (registry catalog, 2026-11-17). They keep
@@ -450,8 +460,11 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
         self.defaults = _load_defaults()
         self.policies = json.loads(_render_config())["storage"]["retention"]["policies"]
 
-    def test_knob_defaults_to_10(self):
+    def test_knobs_default_to_10_or_24h(self):
         self.assertEqual(self.defaults[_CI_BUILD_KNOB], 10)
+        self.assertEqual(self.defaults[_CI_BUILD_WITHIN_KNOB], "24h")
+        # A Go duration string (zot decodes it like gcDelay), not a bare number of days.
+        self.assertRegex(self.defaults[_CI_BUILD_WITHIN_KNOB], r"^[0-9]+h$")
 
     def test_ci_build_policy_shape(self):
         policy = self.policies[_policy_index(self.policies, _CI_BUILD_REPOS)]
@@ -460,9 +473,11 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
             {
                 "repositories": [_CI_BUILD_REPOS],
                 "deleteUntagged": True,
-                "keepTags": [
-                    {"patterns": ["^ci-[0-9a-f]{40}$"], "mostRecentlyPushedCount": 10},
-                ],
+                # ONE entry carrying both rules, so zot ORs them: a tag survives if it is among the
+                # 10 most recently pushed OR was pushed within 24h. Split into two entries, the
+                # first would claim every ci- tag (getTagPolicy is first-match) and the second
+                # would never apply.
+                "keepTags": [_CI_BUILD_ENTRY],
             },
         )
 
@@ -516,7 +531,7 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
         for repo in ("strive/ci-build/x", "strive/ci-build/platform-e2e-local", "strive/ci-build/a/b"):
             policy, entry = _keep_entry(self.policies, repo, _CI_TAG)
             self.assertEqual(policy["repositories"], [_CI_BUILD_REPOS], repo)
-            self.assertEqual(entry, {"patterns": ["^ci-[0-9a-f]{40}$"], "mostRecentlyPushedCount": 10})
+            self.assertEqual(entry, _CI_BUILD_ENTRY)
             # Anything else pushed there is pruned on the next GC.
             for other in ("latest", "sha-" + _FULL_SHA, "buildcache"):
                 self.assertIsNone(_keep_entry(self.policies, repo, other)[1], f"{repo}:{other}")
@@ -668,6 +683,7 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
             "Remove the htpasswd line of an optional scoped push user with no SOPS password"
         ]
         self.htpasswd_task = self.tasks["Generate bcrypt htpasswd for the scoped per-project push users"]
+        self.stale_task = self.tasks["Report a stale password_optional flag (the SOPS key now exists)"]
         self.env = jinja2.Environment()
         self.env.filters["bool"] = bool
         self.users = {p["user"]: p for p in _load_defaults()["registry_zot_scoped_push_users"]}
@@ -684,6 +700,7 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
         return {
             "assert_ok": self._eval(self.assert_task["ansible.builtin.assert"]["that"], item, passwords),
             "skip_msg": self._eval(self.skip_task["when"], item, passwords),
+            "stale_msg": self._eval(self.stale_task["when"], item, passwords),
             "remove": self._eval(self.remove_task["when"], item, passwords),
             "write": self._eval(self.htpasswd_task["when"], item, passwords),
         }
@@ -707,20 +724,31 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
         item = self.users[_STRIVE_CI_USER]
         self.assertEqual(
             self._actions(item, {u: "x" for u in self.users}),
-            {"assert_ok": True, "skip_msg": False, "remove": False, "write": True},
+            {"assert_ok": True, "skip_msg": False, "stale_msg": True, "remove": False, "write": True},
         )
         # Run 2: the key is gone again (or never existed) -> no write, and the line from run 1 is
         # REMOVED, so "skipped" really means "cannot log in".
         for passwords in (None, {}, {"trueswarm-ci": "x", "workbricks-ci": "x"}):
             self.assertEqual(
                 self._actions(item, passwords),
-                {"assert_ok": True, "skip_msg": True, "remove": True, "write": False},
+                {"assert_ok": True, "skip_msg": True, "stale_msg": False, "remove": True, "write": False},
             )
 
-    def test_mandatory_users_are_never_removed(self):
+    def test_mandatory_users_are_never_removed_and_never_reported(self):
+        # The SKIPPED and STALE messages are about optional users only; a mandatory user with no key
+        # fails the assert instead.
         for user in ("trueswarm-ci", "workbricks-ci"):
             for passwords in (None, {}, {u: "x" for u in self.users}):
-                self.assertFalse(self._eval(self.remove_task["when"], self.users[user], passwords))
+                for task in (self.remove_task, self.skip_task, self.stale_task):
+                    self.assertFalse(self._eval(task["when"], self.users[user], passwords), task["name"])
+
+    def test_stale_flag_message_fires_only_with_flag_and_key(self):
+        item = self.users[_STRIVE_CI_USER]
+        self.assertTrue(self._eval(self.stale_task["when"], item, {_STRIVE_CI_USER: "x"}))
+        self.assertFalse(self._eval(self.stale_task["when"], item, {}))
+        unflagged = {k: v for k, v in item.items() if k != "password_optional"}
+        self.assertFalse(self._eval(self.stale_task["when"], unflagged, {_STRIVE_CI_USER: "x"}))
+        self.assertIn("STALE FLAG", self.stale_task["ansible.builtin.debug"]["msg"])
 
     def test_remove_task_shape(self):
         module = self.remove_task["community.general.htpasswd"]

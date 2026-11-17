@@ -16,7 +16,7 @@
           "repositories": ["strive/ci-build/**"],
           "deleteUntagged": true,
           "keepTags": [
-            { "patterns": ["^ci-[0-9a-f]{40}$"], "mostRecentlyPushedCount": {{ registry_zot_strive_ci_build_keep_recent }} }
+            { "patterns": ["^ci-[0-9a-f]{40}$"], "mostRecentlyPushedCount": {{ registry_zot_strive_ci_build_keep_recent }}, "pushedWithin": {{ registry_zot_strive_ci_build_keep_within | to_json }} }
           ]
         },
         {
