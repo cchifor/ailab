@@ -636,18 +636,27 @@ def agent_objects(texts: dict, code: str = "agent-one-time-yaml") -> dict:
 
 
 def one_time_parts(objects: dict) -> dict:
-    """Each one-time object as the agent YAML files hold it (KeyError/ValueError when a file lacks the
-    object it belongs in)."""
+    """Every trace of the one-time objects in the agent YAML files, wherever it sits: a mount or volume
+    named candidate, at a candidate path or of a run's control ConfigMap; the two namespaces in the
+    cluster-UID read; a slot NetworkPolicy or Secret rule; an egress rule beyond the chart's three or on
+    the journal's address or port (KeyError/ValueError when a file lacks the object it belongs in)."""
     ns, slot = CONTROL_NAMESPACE, EXECUTION_NAMESPACE
-    deployment = objects["deployment.yaml"][("Deployment", ns, AGENT_NAME)]
-    mounts, volumes = agent_candidate(deployment)
+    spec = objects["deployment.yaml"][("Deployment", ns, AGENT_NAME)]["spec"]["template"]["spec"]
+    [agent] = [c for c in spec["containers"] if c["name"] == "agent"]
+    mounts = [m for m in agent.get("volumeMounts", [])
+              if m.get("name") == "candidate" or m.get("mountPath") in AGENT_PATHS.values()]
+    volumes = [v for v in spec.get("volumes", []) if v.get("name") == "candidate" or str(
+        (v.get("configMap") or {}).get("name", "")).startswith("relay-candidate-control-")]
     [cluster] = objects["rbac.yaml"][("ClusterRole", None, f"{AGENT_NAME}-{ns}-cluster-uid")]["rules"]
     workloads = objects["rbac.yaml"][("Role", slot, f"{AGENT_NAME}-workloads")]["rules"]
     egress = objects["network-policy.yaml"][("NetworkPolicy", ns, AGENT_NAME)]["spec"]["egress"]
+    journal = [r for i, r in enumerate(egress)
+               if i >= 3 or any(port.get("port") == JOURNAL_PORT for port in r.get("ports") or [])
+               or any((peer.get("ipBlock") or {}).get("cidr") in JOURNAL_CIDRS for peer in r.get("to") or [])]
     return {"deployment.yaml": (mounts, volumes),
             "rbac.yaml": ([n for n in cluster["resourceNames"] if n in (ns, slot)],
                           [r for r in workloads if set(r["resources"]) & {"networkpolicies", "secrets"}]),
-            "network-policy.yaml": egress[3:]}
+            "network-policy.yaml": journal}
 
 
 def no_one_time_trace(objects: dict) -> dict:
@@ -753,7 +762,7 @@ def one_time_state(repo: Path, texts: dict) -> tuple[str, dict]:
         return "other-mode", texts
     absent = no_one_time_trace(agent_objects(texts))
     runtime = config.get("candidateRuntime")
-    absent["config.json"] = config["policy"].get("bootstrapSecrets") is False and runtime is None
+    absent["config.json"] = config["policy"].get("bootstrapSecrets") is False and "candidateRuntime" not in config
     if all(absent.values()):
         return "absent", texts
     # Some of it is there: every file must then carry exactly the blocks generate writes, for the one

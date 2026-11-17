@@ -728,6 +728,60 @@ class Generator(unittest.TestCase):
         deployment.write_text(texts["deployment.yaml"])
         self.generate(c)
 
+    def test_any_trace_of_the_structure_is_not_its_absence(self):
+        """A one-time object anywhere in the enrollment files (not only where generate puts it), or a
+        candidateRuntime key of any value, means the structure is not absent: generate, reset and check
+        refuse instead of adding a second copy, repairing it or leaving it behind."""
+        c = campaign(self.root, self.now)
+        texts = agent_texts(self.root)
+        journal = '  - to:\n    - ipBlock: {cidr: "10.96.0.42/32"}\n    ports:\n    - {protocol: TCP, port: 8443}\n'
+        dns_rule = ("  - to:\n    - namespaceSelector:\n        matchLabels:\n          kubernetes.io/metadata.name: kube-system\n"
+                    "      podSelector:\n        matchLabels:\n          k8s-app: kube-dns\n    ports:\n"
+                    "    - {protocol: UDP, port: 53}\n    - {protocol: TCP, port: 53}\n")
+        self.assertEqual(texts["network-policy.yaml"].count(dns_rule), 1)
+        cases = [
+            # The journal rule in place of the DNS rule: still three rules.
+            ("network-policy.yaml", lambda t: t.replace(dns_rule, ""), journal, "agent-one-time-partial"),
+            # A rule on the journal's port, wherever it is.
+            ("network-policy.yaml", lambda t: t.replace("    - {protocol: TCP, port: 443}\n",
+                                                        "    - {protocol: TCP, port: 443}\n    - {protocol: TCP, port: 8443}\n"),
+             None, "agent-one-time-partial"),
+            # A candidate file mounted from a volume of another name.
+            ("deployment.yaml", lambda t: t.replace(
+                "        - {name: kubernetes,",
+                "        - {name: other, mountPath: /run/relay/candidate-trust.json, subPath: config.json, readOnly: true}\n"
+                "        - {name: kubernetes,"), None, "agent-one-time-edited:deployment.yaml"),
+            ("config.json", lambda t: canonical({**AGENT_CONFIG, "candidateRuntime": None}) + "\n", None,
+             "agent-one-time-edited:config.json"),
+            ("config.json", lambda t: canonical({**AGENT_CONFIG, "candidateRuntime": {}}) + "\n", None,
+             "agent-one-time-edited:config.json"),
+        ]
+        for name, edit, append, code in cases:
+            with self.subTest(name=name, code=code):
+                path = self.root / gen.AGENT / name
+                body = edit(texts[name])
+                if append:
+                    body = body.replace("    - {protocol: TCP, port: 443}\n", "    - {protocol: TCP, port: 443}\n" + append)
+                self.assertNotEqual(body, texts[name])
+                path.write_text(body)
+                try:
+                    self.assertEqual(self.refusal(c), code)
+                    with self.assertRaises(gen.Refusal) as caught:
+                        gen.reset_files(self.root)
+                    self.assertEqual(caught.exception.code, code)
+                    self.assertEqual(gen.check(self.root)[1], [f"agent tree: {code}"])
+                    # ... and beside another runtime mode, a conflict.
+                    if name != "config.json":
+                        config = self.root / gen.AGENT / "config.json"
+                        config.write_text(canonical({**AGENT_CONFIG, "podRuntime": {}}) + "\n")
+                        with self.assertRaises(gen.Refusal) as caught:
+                            gen.reset_files(self.root)
+                        self.assertEqual(caught.exception.code, "agent-mode-conflict")
+                        config.write_text(texts["config.json"])
+                finally:
+                    path.write_text(texts[name])
+        self.assertEqual(gen.check(self.root)[1], [])
+
     def test_base_check_is_the_merge_gate(self):
         """S-A: the committed HEAD must be exactly the generator's output on the PR's base."""
         def run_git(*args):
