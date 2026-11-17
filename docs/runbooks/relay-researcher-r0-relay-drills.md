@@ -221,21 +221,25 @@ rcheck() {
            (.[0] as $r | ($r | map({(.metric.__name__ | sub("^relay_control_worker_budget_"; "")): (.value[1] | tonumber)}) | add)
             + {instance: $r[0].metric.instance, at: $r[0].value[0]}) end) end'
 }
-# relay_check <0|1> <epoch seconds>: bounded wait (3 minutes by the clock, each query at most 10 s) for
-# two successive observer checks, both attempted after the given time, with `up`, `authority_started`
-# and `observer_started` 1 and `check_succeeded` equal to the first argument. Returns 0 when seen and
-# captured, 2 at once if a fresh check shows anything else, 1 if no two fresh checks arrive or a capture
-# fails. Each check is one 30 s scrape.
+# relay_check <0|1> <epoch seconds, fractional>: bounded wait (3 minutes by the clock, each query at
+# most 10 s) for two successive observer checks (two scrapes at most 45 s apart, so none was missed in
+# between) with `up`, `authority_started` and `observer_started` 1 and `check_succeeded` equal to the
+# first argument. A check counts only if it was stamped more than 5 s after the given time: the
+# observer stamps a check when it ends, and one check takes at most its 1 s connection and 2 s
+# statement timeouts (Relay budget-observer.ts:25-33, :69-71). Returns 0 when seen and captured, 2 at
+# once if a counted check shows anything else, 1 if no two successive checks arrive or a capture fails.
+# Each check is one 30 s scrape.
 relay_check() {
   local -; set -o pipefail
   local want="$1" since="$2" last= n=0 end=$((SECONDS + 180)) j t
   while [ "$SECONDS" -lt "$end" ]; do
     if j="$(rcheck)" && t="$(jq -er '.check_timestamp_seconds' <<<"$j")" &&
-       jq -e --argjson s "$since" '.check_timestamp_seconds > $s' <<<"$j" >/dev/null && [ "$t" != "$last" ]; then
-      last="$t"
+       jq -e --argjson s "$since" '.check_timestamp_seconds > $s + 5' <<<"$j" >/dev/null && [ "$t" != "$last" ]; then
       if jq -e --argjson w "$want" '.up == 1 and .authority_started == 1 and .observer_started == 1 and .check_succeeded == $w' <<<"$j" >/dev/null; then
         cap relay-check echo "$j" || return 1
-        n=$((n + 1)); [ "$n" -ge 2 ] && return 0
+        # A gap of more than one scrape interval since the previous counted check restarts the count.
+        if [ "$n" -ge 1 ] && jq -e --argjson p "$last" '.check_timestamp_seconds - $p <= 45' <<<"$j" >/dev/null; then n=2; else n=1; fi
+        last="$t"; [ "$n" -ge 2 ] && return 0
       else
         cap relay-check-unexpected echo "$j"; return 2
       fi
@@ -302,10 +306,19 @@ SQL
 - **The signing input** follows campaign §3.0 steps 2-5, with R0's own fresh `runId`, worker and launch
   IDs and session-permit key. R0 sends no prompt; record the text its `promptSha256` was computed from.
   R1's input later differs from R0's only in the fields §3.0 step 5 lists.
-- **The agent stays out.** Verbatim from campaign §3.5 step 1, without its scale to zero (R0's agent
-  values never reach the cluster, so the running agent keeps its current configuration):
-  `flux suspend kustomization relay-researcher-agent -n flux-system`. Then (NEW)
-  `cap agent-before kubectl --context admin@ai -n relay-infra-control get deploy relay-infrastructure-agent -o jsonpath='{.metadata.generation} {.status.readyReplicas}{"\n"}'`.
+- **The agent stays out.** Campaign §3.5 step 1, without its scale to zero (R0's agent values never
+  reach the cluster, so the running agent keeps its current configuration). The default context is a
+  different cluster (checklist, "Rules for every step"), so every `flux` command here names the context
+  (NEW form): `flux --context admin@ai suspend kustomization relay-researcher-agent -n flux-system`.
+  Then (NEW):
+
+  ```sh
+  kubectl --context admin@ai -n flux-system get kustomization relay-researcher-agent -o jsonpath='{.spec.suspend}{"\n"}'   # true
+  cap agent-before kubectl --context admin@ai -n relay-infra-control get deploy relay-infrastructure-agent \
+    -o jsonpath='{.metadata.generation} {.status.readyReplicas}{"\n"}'
+  ```
+
+  Check `spec.suspend` again immediately before the merge (§6.2 step 6).
 
 ### 6.2 Sign and roll the hub (`t_s` to `t_s + 60 min`)
 
@@ -316,15 +329,18 @@ SQL
    branch **without** `--journal-ca` and `--operator-out`. R0 needs no control, trust or pin ConfigMap,
    because its agent half never runs. Paste the summary into the PR body.
 3. **The session-key Secret**: generator runbook §3's first two commands (create, then compare the two
-   hashes), before the merge.
+   hashes), before the merge. That runbook says "`kubectl --context admin@ai` throughout", but its
+   commands omit the flag: add `--context admin@ai` to each `kubectl` that talks to the cluster (the
+   `--dry-run=client` and `--local` stages do not).
 4. **Open the PR** right after signing, labelled `no-automerge` (campaign §2, S-A). Its title names
    R0 as a drill run that is never granted.
 5. **Merge gate**: generator runbook §4a, unchanged. `check --base origin/main --run-digest <R0
    runDigest>` exits 0 with `"firstRun": true` and `"hubReadbackDeadlinePassed": false`. Review every
    `reviewByHand` path: the inclusion line, the activation-gate edit and the agent structure. CI is
    green.
-6. **Merge.** Flux applies the hub half. Optionally, to start it at once (NEW):
-   `flux reconcile source git flux-system -n flux-system && flux reconcile kustomization apps -n flux-system`.
+6. **Merge**, after the `spec.suspend` read of §6.1 shows `true` once more. Flux applies the hub half.
+   Optionally, to start it at once (NEW):
+   `flux --context admin@ai reconcile source git flux-system -n flux-system && flux --context admin@ai reconcile kustomization apps -n flux-system`.
    Flux does not apply the agent half: `relay-researcher-agent` is suspended.
 7. **H7 readback**, H7's list (generator runbook §5, campaign §3.4 step 4), with these forms (NEW):
 
@@ -338,7 +354,7 @@ SQL
    ```
 
 8. **Relay's positive control on B, before the drills.** The gate is open (production), and B is
-   mounted: `since=$(date -u +%s); relay_check 1 "$since"` returns 0. Then
+   mounted: `since=$(date -u +%s.%N); relay_check 1 "$since"` returns 0. Then
    `cap control-allocator-h7 q relay_budget_allocator "SELECT worker_budget.current_epoch('<B instanceId>', '<B recoveryEpoch>', '<B witnessDigest>')"`
    (NEW statement, step 4's `q`) returns `<B recoveryEpoch>`.
 
@@ -374,7 +390,7 @@ are NEW.
      - `cap control-allocator q relay_budget_allocator "<the same statement>"` returns `<B recoveryEpoch>`.
        This is Relay's own login and `clients` row. It rules out the other cause of a 42501: a login
        without a `clients` mapping (Relay `rel:deploy/worker-budget-ledger/001-authority.sql:68-75`).
-     - `since=$(date -u +%s)`.
+     - `since=$(date -u +%s.%N)`.
   3. **Observe Relay.** `relay_check 0 "$since"` returns 0: two successive observer checks after the
      gate was proven open, both failing, with the authority and the observer started. For drill A,
      also `cap refusal-allocator q relay_budget_allocator "SELECT worker_budget.current_epoch('<A instanceId>', '<A recoveryEpoch>', '<A witnessDigest>')"`
@@ -388,7 +404,7 @@ are NEW.
 - **R_R, restore B in Relay and prove it.** "Restoring B", after a drill whose readback passed.
   1. W_R with step 4 = `bao kv put -mount=af relay-budget/witness witness=- < "$ev/witness-B.json"` and
      B's sha256 expected.
-  2. `lwrite open-B`, `plugin true` (`HTTP 200`, `active`), then `since=$(date -u +%s)`.
+  2. `lwrite open-B`, `plugin true` (`HTTP 200`, `active`), then `since=$(date -u +%s.%N)`.
   3. `relay_check 1 "$since"` returns 0: Relay's positive control on B after the drill.
      `cap router-log rlog` shows `available`, and `cap control-allocator …` returns `<B recoveryEpoch>`.
   4. Withdraw: `lwrite withdraw`, then `plugin false`.
@@ -403,6 +419,12 @@ are NEW.
   5. Stop. Go to §10. Re-opening needs the owner's review of the failure.
 
 ## 8. The drills
+
+**Each drill's history comparison.** Before W_R, capture `cap ledger-before-<X> ledger_state` and
+`cap hub-before-<X> hub_counts`, with `<X>` the drill's letter. After its R_R, capture the same two as
+`ledger-after-<X>` and `hub-after-<X>`. The after captures must show the same authority IDs (B's), every
+ledger history count 0, and the same hub counts as the before captures; only `ready` may differ, since
+R_R ends withdrawn. Any other difference is F_R step 3: stop and escalate.
 
 **Drill A (Relay), stale witness.**
 
@@ -468,7 +490,7 @@ are NEW.
 `lwrite open-B`, then `plugin true`. Readback:
 
 - `cap plugins-end plugins` (`active`), and `cap router-log-end rlog` (`available`);
-- `since=$(date -u +%s); relay_check 1 "$since"` returns 0;
+- `since=$(date -u +%s.%N); relay_check 1 "$since"` returns 0;
 - `cap final ledger_state`: B's IDs, `ready = t`, every history count 0;
 - `cap hub-counts-end hub_counts`: equal to §6.1's, R0's `workerId` absent;
 - all five witness hashes are B's.
@@ -478,7 +500,7 @@ are NEW.
 **Abort before the merge** (a pre-check fails, CI is red, `check --base` fails, or `t_s + 60 min` is
 near). Close the PR unmerged and delete the session-key Secret
 (`kubectl --context admin@ai -n relay delete secret relay-worker-candidate-key-<d16>`, NEW). Resume the
-agent (§10 step 4). Nothing on the hub changed, so there is nothing to reset. A new R0 is a new signed
+agent (§10 step 4), and remove the client Pod and the port-forward (§10 step 5). Nothing on the hub changed, so there is nothing to reset. A new R0 is a new signed
 run.
 
 **Abort after the merge** (the H7 readback fails, or is not done by `t_s + 60 min`). Run no drill. Never
@@ -536,8 +558,8 @@ generator runbook describes. All of this section is NEW, except where a line say
    - `cap mounted-relay-reset wsha_relay`: B.
 3. **The session-key Secret.** Once that rollout no longer mounts it (generator runbook, "After the
    campaign"): `kubectl --context admin@ai -n relay delete secret relay-worker-candidate-key-<d16>`.
-4. **The agent.** Verbatim from campaign §3.10 step 8:
-   `flux resume kustomization relay-researcher-agent -n flux-system`. Then `cap agent-after …` with
+4. **The agent.** Campaign §3.10 step 8, with the context named (NEW form):
+   `flux --context admin@ai resume kustomization relay-researcher-agent -n flux-system`. Then `cap agent-after …` with
    §6.1's command: the same generation as `agent-before`, and Ready. The agent never ran R0's values.
 5. **The client Pod.** `kubectl --context admin@ai -n relay-budget-authority delete pod relay-budget-operator-client`
    (checklist step 5). Stop the port-forward: `kill "$r0_prom_pid"`.
@@ -546,7 +568,9 @@ generator runbook describes. All of this section is NEW, except where a line say
    has B's IDs and every history count 0. The gate is as R0 left it:
    - after §8's production re-open, or an abort that ran no drill: `ready = t` and the plugin `active`;
    - after F_R, or a restore left to the reset's rollout (§9): `ready = f` and the plugin `disabled`,
-     until the owner has reviewed the failure and re-opened with §8's commands.
+     until the owner has reviewed the failure and re-opened with §8's commands. Any re-open after the
+     reset skips §8's `relay_check` line, because a hub without candidate files has no observer;
+     Relay's positive control on B is then R1's (§12).
 
    R0 leaves no grant, worker, environment, allocation, budget scope, journal row, Router key or session
    key.
@@ -575,7 +599,9 @@ signed.
 ## 12. What R1 re-checks
 
 R1 is signed fresh after §10's readback and the owner's acceptance of R0. R1's per-run PR is H7's
-inclusion PR again. In R1's H7 readback, before the grant, run R0's §6.2 steps 7 and 8 with R1's pin: the
+inclusion PR again. Before signing R1, set up what these checks need, as R0's §6.1 does: the
+checklist's step 0, 4 and 5 blocks, R0's helpers, the client Pod and the Prometheus port-forward. Remove
+the client Pod and the port-forward once R1's grant decision is made. In R1's H7 readback, before the grant, run R0's §6.2 steps 7 and 8 with R1's pin: the
 H7 list, then Relay's positive control on B (`relay_check 1`, and `current_epoch(<B ids>)` as
 `relay_budget_allocator`). This is R1's pre-grant control that the budget authority Relay just started
 accepts the current witness. If it fails, never grant: abort R1 before the grant. Per O1, it then does
