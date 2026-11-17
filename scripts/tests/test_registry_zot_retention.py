@@ -45,10 +45,11 @@ rather than skipping this test. Assertions:
   5. the strive/** policy is unchanged (still precedes the catch-all, still uses its own pattern)
      and the catch-all itself is unchanged (protects everything else, i.e. the mirror/cache repos).
 
-strive/ci/** (cchifor/platform e2e build-once, platform#2823) adds three classes below: its
-retention policy (first match, ordered before strive/**), the scoped push user `strive-ci-push`
-(read/create/update on strive/ci/** only, no delete anywhere, every other identity's effective
-rights unchanged), and the role's skip-until-the-SOPS-key-exists task logic.
+strive/ci-build/** (cchifor/platform e2e build-once, platform#2823) adds three classes below: its
+retention policy (first match, ordered before strive/**, the existing strive/ci/* repos still under
+strive/**), the scoped push user `strive-ci-push` (read/create/update on strive/ci-build/** only, no
+delete anywhere, every other identity's effective rights unchanged), and the role's
+skip-and-remove-until-the-SOPS-key-exists task logic.
 
 Run:
 
@@ -313,18 +314,45 @@ class RegistryZotScopedPushAccessTest(unittest.TestCase):
                     )
 
 
-# ---- strive/ci/** : cchifor/platform e2e build-once (platform#2823) ----
+# ---- strive/ci-build/** : cchifor/platform e2e build-once (platform#2823) ----
+# zot semantics simulated below were read from the source of BOTH the pinned and the live release
+# (v2.1.23 and v2.1.18 are identical here):
+#   pkg/retention/retention.go  getRepoPolicy: the FIRST policy whose repositories doublestar glob
+#     matches wins; getTagPolicy: the FIRST keepTags entry whose patterns match a tag; a tag with no
+#     entry is skipped "(will be gc'ed)"; rules within an entry are OR-ed, and an entry with no rules
+#     keeps every tag it matches.
+#   pkg/api/authz.go  can: only the LONGEST matching repositories pattern counts; isPermitted:
+#     anonymousPolicy only when username == "", defaultPolicy only when username != "".
+# https://github.com/project-zot/zot/blob/v2.1.18/pkg/retention/retention.go (and .../v2.1.23/...)
 
 _STRIVE_CI_USER = "strive-ci-push"
-_STRIVE_CI_REPOS = "strive/ci/**"
+_CI_BUILD_REPOS = "strive/ci-build/**"
+_CI_BUILD_KNOB = "registry_zot_strive_ci_build_keep_recent"
 # The tag platform's build-once step pushes: `ci-<40-hex commit>`.
 _CI_TAG = "ci-" + _FULL_SHA
-# Repositories that exercise every accessControl / retention pattern in the rendered config,
-# including a prefix look-alike (strive/cix/...) that must NOT fall under strive/ci/**.
-_SAMPLE_REPOS = [
+# The 12 repositories that ALREADY live under strive/ci/ (registry catalog, 2026-11-17). They keep
+# latest/ailab/sha- tags under strive/**, which is why build-once got a new namespace.
+_EXISTING_STRIVE_CI_REPOS = [
+    "strive/ci/platform-app-runner-latest",
+    "strive/ci/platform-digest-test",
+    "strive/ci/platform-doc-search-latest",
     "strive/ci/platform-e2e-local",
-    "strive/ci/nested/image",
-    "strive/cix/foo",
+    "strive/ci/platform-echo-http",
+    "strive/ci/platform-hatchet-init",
+    "strive/ci/platform-integration",
+    "strive/ci/platform-mock-mcp",
+    "strive/ci/platform-mock-mcp-oauth",
+    "strive/ci/platform-mock-model",
+    "strive/ci/platform-sentinel-latest",
+    "strive/ci/platform-stub-oauth",
+]
+# Repositories that exercise every accessControl / retention pattern in the rendered config,
+# including prefix look-alikes that must NOT fall under strive/ci-build/**.
+_SAMPLE_REPOS = _EXISTING_STRIVE_CI_REPOS + [
+    "strive/ci-build/platform-e2e-local",
+    "strive/ci-build/nested/image",
+    "strive/ci-buildx/foo",
+    "strive/ci",
     "strive/platform-api",
     "agentforge/orchestrator",
     "trueswarm/api",
@@ -358,17 +386,22 @@ def _glob(pattern: str) -> "re.Pattern":
 
 
 def _first_retention_policy(policies: list, repo: str) -> dict:
-    # pkg/retention getRepoPolicy: the FIRST policy with a matching repositories glob; not merged.
     for policy in policies:
         if any(_glob(p).match(repo) for p in policy["repositories"]):
             return policy
     raise AssertionError(f"no retention policy matches {repo!r}")
 
 
+def _keep_entry(policies: list, repo: str, tag: str):
+    """(policy, the keepTags entry that governs `tag` in `repo`, or None = deleted on the next GC)."""
+    policy = _first_retention_policy(policies, repo)
+    for entry in policy["keepTags"]:
+        if any(re.search(p, tag) for p in entry["patterns"]):
+            return policy, entry
+    return policy, None
+
+
 def _effective_actions(access: dict, repo: str, user: str = "", groups=()) -> set:
-    """zot pkg/api/authz.go `can`/`isPermitted`: only the LONGEST matching repositories pattern
-    counts; a policy grants by user or group; defaultPolicy applies to any authenticated user;
-    anonymousPolicy ONLY when the username is empty; then the adminPolicy."""
     repos = access["repositories"]
     matching = [p for p in repos if _glob(p).match(repo)]
     actions = set()
@@ -395,23 +428,37 @@ def _without_strive_ci_user(defaults: dict) -> dict:
     }
 
 
-class RegistryZotStriveCiRetentionTest(unittest.TestCase):
-    """strive/ci/** keeps the 10 most-recently-pushed `ci-<40-hex>` tags per repo, and is listed
-    before strive/**, which would otherwise match first and keep no ci- tag at all."""
+_STRIVE_POLICY = {
+    "repositories": ["strive/**"],
+    "deleteUntagged": True,
+    "keepTags": [
+        {"patterns": ["^latest$"]},
+        {"patterns": ["^ailab$"]},
+        {"patterns": ["^ailab-prev\\d*$"]},
+        {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 100},
+        {"patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"]},
+    ],
+}
+
+
+class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
+    """strive/ci-build/** keeps the 10 most-recently-pushed `ci-<40-hex>` tags per repo, is listed
+    before strive/** (which would keep no ci- tag), and leaves the existing strive/ci/* repos under
+    the unchanged strive/** policy."""
 
     def setUp(self):
         self.defaults = _load_defaults()
         self.policies = json.loads(_render_config())["storage"]["retention"]["policies"]
 
     def test_knob_defaults_to_10(self):
-        self.assertEqual(self.defaults["registry_zot_strive_ci_keep_recent"], 10)
+        self.assertEqual(self.defaults[_CI_BUILD_KNOB], 10)
 
-    def test_strive_ci_policy_shape(self):
-        policy = self.policies[_policy_index(self.policies, _STRIVE_CI_REPOS)]
+    def test_ci_build_policy_shape(self):
+        policy = self.policies[_policy_index(self.policies, _CI_BUILD_REPOS)]
         self.assertEqual(
             policy,
             {
-                "repositories": [_STRIVE_CI_REPOS],
+                "repositories": [_CI_BUILD_REPOS],
                 "deleteUntagged": True,
                 "keepTags": [
                     {"patterns": ["^ci-[0-9a-f]{40}$"], "mostRecentlyPushedCount": 10},
@@ -419,8 +466,16 @@ class RegistryZotStriveCiRetentionTest(unittest.TestCase):
             },
         )
 
+    def test_no_policy_targets_strive_ci(self):
+        for policy in self.policies:
+            for pattern in policy["repositories"]:
+                self.assertFalse(
+                    pattern.startswith("strive/ci/") or pattern == "strive/ci",
+                    f"{pattern!r} would shadow strive/** for the existing strive/ci/* repos",
+                )
+
     def test_keep_pattern_matches_only_the_full_commit_tag(self):
-        policy = self.policies[_policy_index(self.policies, _STRIVE_CI_REPOS)]
+        policy = self.policies[_policy_index(self.policies, _CI_BUILD_REPOS)]
         (pattern,) = policy["keepTags"][0]["patterns"]
         rx = re.compile(pattern)
         self.assertTrue(rx.search(_CI_TAG))
@@ -436,16 +491,43 @@ class RegistryZotStriveCiRetentionTest(unittest.TestCase):
         ]:
             self.assertFalse(rx.search(tag), f"{pattern!r} must not keep {tag!r}")
 
-    def test_strive_ci_precedes_strive_and_catchall(self):
-        ci_idx = _policy_index(self.policies, _STRIVE_CI_REPOS)
-        self.assertLess(ci_idx, _policy_index(self.policies, "strive/**"))
-        self.assertLess(ci_idx, _policy_index(self.policies, "**"))
+    def test_ci_build_precedes_strive_and_catchall(self):
+        idx = _policy_index(self.policies, _CI_BUILD_REPOS)
+        self.assertLess(idx, _policy_index(self.policies, "strive/**"))
+        self.assertLess(idx, _policy_index(self.policies, "**"))
+
+    def test_existing_strive_ci_repos_keep_their_strive_rules(self):
+        # Regression for the first draft (strive/ci/**): every existing strive/ci/* repo must still
+        # be governed by the UNCHANGED strive/** policy, so its latest / ailab / ailab-prev /
+        # sha- / ailab-<digest> tags keep the entries they had.
+        for repo in _EXISTING_STRIVE_CI_REPOS:
+            for tag, want in [
+                ("latest", {"patterns": ["^latest$"]}),
+                ("ailab", {"patterns": ["^ailab$"]}),
+                ("ailab-prev2", {"patterns": ["^ailab-prev\\d*$"]}),
+                ("sha-" + _FULL_SHA, {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 100}),
+                ("ailab-" + _FULL_SHA[:12], {"patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"]}),
+            ]:
+                policy, entry = _keep_entry(self.policies, repo, tag)
+                self.assertEqual(policy, _STRIVE_POLICY, f"{repo}:{tag} left strive/**")
+                self.assertEqual(entry, want, f"{repo}:{tag}")
+
+    def test_ci_build_tag_is_governed_by_the_new_policy(self):
+        for repo in ("strive/ci-build/x", "strive/ci-build/platform-e2e-local", "strive/ci-build/a/b"):
+            policy, entry = _keep_entry(self.policies, repo, _CI_TAG)
+            self.assertEqual(policy["repositories"], [_CI_BUILD_REPOS], repo)
+            self.assertEqual(entry, {"patterns": ["^ci-[0-9a-f]{40}$"], "mostRecentlyPushedCount": 10})
+            # Anything else pushed there is pruned on the next GC.
+            for other in ("latest", "sha-" + _FULL_SHA, "buildcache"):
+                self.assertIsNone(_keep_entry(self.policies, repo, other)[1], f"{repo}:{other}")
 
     def test_first_match_routes_each_repo_to_the_intended_policy(self):
         expected = {
-            "strive/ci/platform-e2e-local": _STRIVE_CI_REPOS,
-            "strive/ci/nested/image": _STRIVE_CI_REPOS,
-            "strive/cix/foo": "strive/**",
+            "strive/ci-build/platform-e2e-local": _CI_BUILD_REPOS,
+            "strive/ci-build/nested/image": _CI_BUILD_REPOS,
+            "strive/ci-buildx/foo": "strive/**",
+            "strive/ci/platform-e2e-local": "strive/**",
+            "strive/ci": "strive/**",
             "strive/platform-api": "strive/**",
             "agentforge/orchestrator": "agentforge/**",
             "library/python": "**",
@@ -456,31 +538,17 @@ class RegistryZotStriveCiRetentionTest(unittest.TestCase):
             self.assertEqual(got, [want], f"{repo} must be governed by {want}")
 
     def test_strive_policy_would_drop_a_ci_tag(self):
-        # The reason for the ordering: under strive/** a ci- tag matches no keepTags entry, so zot
-        # deletes it on the next GC run (pkg/retention: "no tag policy found ... will be gc'ed").
-        strive = self.policies[_policy_index(self.policies, "strive/**")]
-        patterns = [p for entry in strive["keepTags"] for p in entry["patterns"]]
-        self.assertFalse(any(re.search(p, _CI_TAG) for p in patterns), patterns)
+        # The reason for the ordering: under strive/** a ci- tag matches no keepTags entry.
+        policy, entry = _keep_entry(self.policies, "strive/platform-api", _CI_TAG)
+        self.assertEqual(policy, _STRIVE_POLICY)
+        self.assertIsNone(entry)
 
     def test_other_retention_policies_unchanged(self):
-        others = [p for p in self.policies if p["repositories"] != [_STRIVE_CI_REPOS]]
+        others = [p for p in self.policies if p["repositories"] != [_CI_BUILD_REPOS]]
         self.assertEqual(
             [p["repositories"] for p in others], [["strive/**"], ["agentforge/**"], ["**"]]
         )
-        self.assertEqual(
-            others[0],
-            {
-                "repositories": ["strive/**"],
-                "deleteUntagged": True,
-                "keepTags": [
-                    {"patterns": ["^latest$"]},
-                    {"patterns": ["^ailab$"]},
-                    {"patterns": ["^ailab-prev\\d*$"]},
-                    {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 100},
-                    {"patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"]},
-                ],
-            },
-        )
+        self.assertEqual(others[0], _STRIVE_POLICY)
         self.assertEqual(
             others[1],
             {
@@ -501,7 +569,7 @@ class RegistryZotStriveCiRetentionTest(unittest.TestCase):
 
 
 class RegistryZotStriveCiPushAccessTest(unittest.TestCase):
-    """`strive-ci-push`: read/create/update on strive/ci/** and nothing else; every other
+    """`strive-ci-push`: read/create/update on strive/ci-build/** and nothing else; every other
     identity's effective rights are what they were without it."""
 
     def setUp(self):
@@ -510,33 +578,34 @@ class RegistryZotStriveCiPushAccessTest(unittest.TestCase):
         self.access = self.config["http"]["accessControl"]
         self.baseline = json.loads(_render_config(_without_strive_ci_user(self.defaults)))
 
-    def test_user_is_declared_for_strive_ci_only(self):
+    def test_user_is_declared_for_ci_build_only(self):
         entries = [
             p for p in self.defaults["registry_zot_scoped_push_users"] if p["user"] == _STRIVE_CI_USER
         ]
         self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0]["repositories"], _STRIVE_CI_REPOS)
+        self.assertEqual(entries[0]["repositories"], _CI_BUILD_REPOS)
 
-    def test_exact_grant_on_strive_ci(self):
-        entry = self.access["repositories"][_STRIVE_CI_REPOS]
+    def test_exact_grant_on_ci_build(self):
+        entry = self.access["repositories"][_CI_BUILD_REPOS]
         mine = [g for g in entry["policies"] if _STRIVE_CI_USER in g.get("users", [])]
         self.assertEqual(mine, [{"users": [_STRIVE_CI_USER], "actions": ["read", "create", "update"]}])
-        for repo in ("strive/ci/platform-e2e-local", "strive/ci/nested/image"):
+        for repo in ("strive/ci-build/platform-e2e-local", "strive/ci-build/nested/image"):
             self.assertEqual(
                 _effective_actions(self.access, repo, _STRIVE_CI_USER), {"read", "create", "update"}
             )
 
-    def test_no_rights_outside_strive_ci_and_no_delete_anywhere(self):
+    def test_no_rights_outside_ci_build_and_no_delete_anywhere(self):
         for repo in _SAMPLE_REPOS:
             actions = _effective_actions(self.access, repo, _STRIVE_CI_USER)
             self.assertNotIn("delete", actions, repo)
-            if not repo.startswith("strive/ci/"):
-                # Not even read: zot's anonymousPolicy covers only unauthenticated requests.
+            if not repo.startswith("strive/ci-build/"):
+                # Not even read: zot's anonymousPolicy covers only unauthenticated requests. This
+                # includes the existing strive/ci/* repos.
                 self.assertEqual(actions, set(), f"{_STRIVE_CI_USER} must have no rights on {repo}")
         for pattern, entry in self.access["repositories"].items():
             for g in entry["policies"]:
                 if _STRIVE_CI_USER in g.get("users", []):
-                    self.assertEqual(pattern, _STRIVE_CI_REPOS)
+                    self.assertEqual(pattern, _CI_BUILD_REPOS)
                     self.assertNotIn("delete", g["actions"])
             self.assertNotIn("defaultPolicy", entry, "a defaultPolicy would grant every user")
         self.assertNotIn(_STRIVE_CI_USER, self.access.get("adminPolicy", {}).get("users", []))
@@ -560,35 +629,33 @@ class RegistryZotStriveCiPushAccessTest(unittest.TestCase):
                     _effective_actions(before, repo, user, groups),
                     f"{label} on {repo} changed",
                 )
-        # Spot-check the absolute values too, not only "same as the baseline render".
-        self.assertEqual(_effective_actions(self.access, "strive/ci/x", ""), {"read"})
-        self.assertEqual(_effective_actions(self.access, "strive/ci/x", "pull"), {"read"})
-        self.assertEqual(
-            _effective_actions(self.access, "strive/ci/x", "ci"),
-            {"read", "create", "update", "delete"},
-        )
+        # Absolute values too, not only "same as the baseline render".
+        for repo in ("strive/ci-build/x", "strive/ci/platform-e2e-local"):
+            self.assertEqual(_effective_actions(self.access, repo, ""), {"read"})
+            self.assertEqual(_effective_actions(self.access, repo, "pull"), {"read"})
+            self.assertEqual(
+                _effective_actions(self.access, repo, "ci"), {"read", "create", "update", "delete"}
+            )
 
-    def test_only_the_strive_ci_entries_differ_from_the_baseline_render(self):
-        after = json.loads(json.dumps(self.config))
-        del after["http"]["accessControl"]["repositories"][_STRIVE_CI_REPOS]
-        after["storage"]["retention"]["policies"] = [
-            p for p in after["storage"]["retention"]["policies"]
-            if p["repositories"] != [_STRIVE_CI_REPOS]
-        ]
-        # The retention policy renders regardless of the user list, so drop it from both.
-        before = json.loads(json.dumps(self.baseline))
-        before["storage"]["retention"]["policies"] = [
-            p for p in before["storage"]["retention"]["policies"]
-            if p["repositories"] != [_STRIVE_CI_REPOS]
-        ]
-        self.assertEqual(after, before)
-        self.assertNotIn(_STRIVE_CI_REPOS, self.baseline["http"]["accessControl"]["repositories"])
+    def test_only_the_ci_build_entries_differ_from_the_baseline_render(self):
+        def strip(cfg):
+            cfg = json.loads(json.dumps(cfg))
+            cfg["http"]["accessControl"]["repositories"].pop(_CI_BUILD_REPOS, None)
+            cfg["storage"]["retention"]["policies"] = [
+                p for p in cfg["storage"]["retention"]["policies"]
+                if p["repositories"] != [_CI_BUILD_REPOS]
+            ]
+            return cfg
+
+        self.assertEqual(strip(self.config), strip(self.baseline))
+        self.assertNotIn(_CI_BUILD_REPOS, self.baseline["http"]["accessControl"]["repositories"])
 
 
 class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
     """The role reads each scoped password from registry_scoped_push_passwords (SOPS). An entry
-    marked `password_optional` is skipped while its key is absent, so the change can merge before
-    the operator adds the secret; every other entry still fails the play without its key."""
+    marked `password_optional` is skipped while its key is absent, and its htpasswd line removed,
+    so the change can merge before the operator adds the secret; every other entry still fails the
+    play without its key. (Real ansible-core runs of these tasks are in the PR description.)"""
 
     def setUp(self):
         tasks = yaml.safe_load((ROLE_DIR / "tasks" / "main.yml").read_text())
@@ -597,16 +664,29 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
             "Every scoped push user has a password in SOPS (registry_scoped_push_passwords)"
         ]
         self.skip_task = self.tasks["Report scoped push users skipped for want of a SOPS password"]
+        self.remove_task = self.tasks[
+            "Remove the htpasswd line of an optional scoped push user with no SOPS password"
+        ]
         self.htpasswd_task = self.tasks["Generate bcrypt htpasswd for the scoped per-project push users"]
         self.env = jinja2.Environment()
         self.env.filters["bool"] = bool
         self.users = {p["user"]: p for p in _load_defaults()["registry_zot_scoped_push_users"]}
 
-    def _eval(self, expr: str, item: dict, passwords) -> bool:
+    def _eval(self, when, item: dict, passwords) -> bool:
+        # Ansible ANDs a list of `when` conditions.
         ctx = {"item": item}
         if passwords is not None:
             ctx["registry_scoped_push_passwords"] = passwords
-        return bool(self.env.compile_expression(expr)(**ctx))
+        exprs = when if isinstance(when, list) else [when]
+        return all(bool(self.env.compile_expression(e)(**ctx)) for e in exprs)
+
+    def _actions(self, item: dict, passwords) -> dict:
+        return {
+            "assert_ok": self._eval(self.assert_task["ansible.builtin.assert"]["that"], item, passwords),
+            "skip_msg": self._eval(self.skip_task["when"], item, passwords),
+            "remove": self._eval(self.remove_task["when"], item, passwords),
+            "write": self._eval(self.htpasswd_task["when"], item, passwords),
+        }
 
     def test_only_strive_ci_push_is_optional(self):
         optional = [u for u, p in self.users.items() if p.get("password_optional")]
@@ -622,15 +702,35 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
         for item in self.users.values():
             self.assertTrue(self._eval(that, item, present))
 
-    def test_htpasswd_runs_exactly_when_the_key_exists(self):
-        when = self.htpasswd_task["when"]
-        skip_when = self.skip_task["when"]
+    def test_present_key_then_absent_key(self):
+        # Run 1: the operator added the key -> the line is written, nothing removed.
         item = self.users[_STRIVE_CI_USER]
-        for passwords in (None, {}, {"trueswarm-ci": "x"}):
-            self.assertFalse(self._eval(when, item, passwords))
-            self.assertTrue(self._eval(skip_when, item, passwords))
-        self.assertTrue(self._eval(when, item, {_STRIVE_CI_USER: "x"}))
-        self.assertFalse(self._eval(skip_when, item, {_STRIVE_CI_USER: "x"}))
+        self.assertEqual(
+            self._actions(item, {u: "x" for u in self.users}),
+            {"assert_ok": True, "skip_msg": False, "remove": False, "write": True},
+        )
+        # Run 2: the key is gone again (or never existed) -> no write, and the line from run 1 is
+        # REMOVED, so "skipped" really means "cannot log in".
+        for passwords in (None, {}, {"trueswarm-ci": "x", "workbricks-ci": "x"}):
+            self.assertEqual(
+                self._actions(item, passwords),
+                {"assert_ok": True, "skip_msg": True, "remove": True, "write": False},
+            )
+
+    def test_mandatory_users_are_never_removed(self):
+        for user in ("trueswarm-ci", "workbricks-ci"):
+            for passwords in (None, {}, {u: "x" for u in self.users}):
+                self.assertFalse(self._eval(self.remove_task["when"], self.users[user], passwords))
+
+    def test_remove_task_shape(self):
+        module = self.remove_task["community.general.htpasswd"]
+        self.assertEqual(
+            module,
+            {"path": "{{ registry_zot_config_dir }}/htpasswd", "name": "{{ item.user }}", "state": "absent"},
+        )
+        self.assertIs(self.remove_task["no_log"], True)
+        self.assertEqual(self.remove_task["notify"], "restart zot")
+        self.assertEqual(self.remove_task["loop"], "{{ registry_zot_scoped_push_users }}")
 
     def test_password_flow_matches_the_other_scoped_users(self):
         module = self.htpasswd_task["community.general.htpasswd"]
@@ -642,9 +742,9 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
 
     def test_sops_rule_encrypts_the_password_map(self):
         # The key must go UNDER registry_scoped_push_passwords: the file's encrypted_regex covers
-        # that map, and a new top-level key would be written in plaintext.
-        # Both the creation rule AND the encrypted file's own metadata (which `sops edit` keeps)
-        # are checked; reading the metadata decrypts nothing.
+        # that map, and a new top-level key would be written in plaintext. Both the creation rule
+        # AND the encrypted file's own metadata (which `sops edit` keeps) are checked; reading the
+        # metadata decrypts nothing.
         secrets_path = "ansible/secrets/registry.sops.yaml"
         rules = yaml.safe_load((REPO_ROOT / ".sops.yaml").read_text())["creation_rules"]
         rule = next(r for r in rules if re.search(r.get("path_regex", "^$"), secrets_path))
