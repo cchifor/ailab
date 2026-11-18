@@ -1419,8 +1419,8 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
    matching route/bounds and sufficient expiry. The pinned Router's non-allocating preflight
    writes a durable nonce (`5a5181b7:packages/plugins/relay-keys/service.ts:34-50`); the zero-write
    tool therefore reports `router: unavailable` and exits 1. For evidence collection only,
-   `file_b_check --skip-router-preflight-unavailable --json` can exit 0 with `status: ledger-only`
-   and `signingReady: false`. It does not qualify File B or permit signing. The budget section
+   `file_b_check --skip-router-preflight-unavailable --json` exits 2 (evidence collected, not
+   signable) with `status: ledger-only` and `signingReady: false`. It does not qualify File B or permit signing. The budget section
    documents the required Router change and all schema/function source citations.
 4. **The E6 rehearsal**
    ([relay-researcher-qualification-campaign.md](relay-researcher-qualification-campaign.md) §4).

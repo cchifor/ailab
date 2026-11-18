@@ -2,8 +2,10 @@
 """Compare reviewed File B with a fresh, read-only ledger readback.
 
 Python stdlib; psql is needed only for direct connections. No Router request is
-safe under the zero-write contract at the pinned revision. Exit 0 with the
-explicit acknowledgement means ledger-only, never permission to sign a run.
+safe under the zero-write contract at the pinned revision. Verification exits
+2 for acknowledged ledger-only evidence (not signable), 1 for any failure, and
+reserves 0 for both halves passing (currently impossible). --print-ledger-sql
+only prints SQL and exits 0; it performs no verification.
 """
 from __future__ import annotations
 
@@ -66,6 +68,12 @@ class RouterUnavailable(Fail):
     """Only the known absence of a zero-write operation may be acknowledged."""
 
 
+class ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # Reserve exit 2 for ledger-only evidence; do not echo arbitrary argv.
+        raise Fail("arguments: invalid command line; see --help")
+
+
 def positive(value):
     return type(value) is int and 0 < value <= MAX_SAFE
 
@@ -110,10 +118,15 @@ def read_json(path, where):
 
 
 def canonical(value):
-    # ReviewedTokenPolicy has ASCII keys and safe integer numbers only. Sorted
-    # compact JSON matches runtime.ts:22-30, including UTF-8 and lone surrogates
+    # Match runtime.ts:22-30's recursive UTF-16 key ordering. Policy numbers are
+    # safe integers only. Compact JSON preserves UTF-8 and lone surrogates
     # (JSON.stringify's well-formed escaping); never hash the digest itself.
-    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if isinstance(value, list):
+        return "[" + ",".join(canonical(item) for item in value) + "]"
+    if isinstance(value, dict):
+        keys = sorted(value, key=lambda key: key.encode("utf-16-be", "surrogatepass"))
+        return "{" + ",".join(canonical(key) + ":" + canonical(value[key]) for key in keys) + "}"
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
     return "".join(f"\\u{ord(c):04x}" if 0xD800 <= ord(c) <= 0xDFFF else c for c in raw)
 
 
@@ -277,7 +290,7 @@ def read_ledger(dsn):
     env = dsn_environment(dsn)
     try:
         result = subprocess.run(["psql", "-X", "-qAt", "-w", "-v", "ON_ERROR_STOP=1", "-f", "-"],
-                                input=LEDGER_SQL, text=True, capture_output=True, env=env, timeout=15)
+                                input=LEDGER_SQL, text=True, encoding="utf-8", capture_output=True, env=env, timeout=15)
     except subprocess.TimeoutExpired:
         raise Fail("ledger: psql timed out; no readback") from None
     except OSError:
@@ -290,7 +303,7 @@ def read_ledger(dsn):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = ArgumentParser(description=__doc__)
     parser.add_argument("--file-b", help="reviewed JSON envelope (not executable SQL)")
     parser.add_argument("--required-lifetime-seconds", type=int)
     source = parser.add_mutually_exclusive_group()
@@ -300,13 +313,16 @@ def main(argv=None):
     parser.add_argument("--print-ledger-sql", action="store_true", help="print fixed read-only SQL and exit; makes no connection")
     parser.add_argument("--skip-router-preflight-unavailable", action="store_true")
     parser.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
-    if args.print_ledger_sql:
-        sys.stdout.write(LEDGER_SQL)
-        return 0
+    argv = sys.argv[1:] if argv is None else argv
+    json_output = "--json" in argv
     report = {"status": "fail", "signingReady": False, "ledger": {"status": "not-checked"},
               "router": {"status": "not-checked"}}
     try:
+        args = parser.parse_args(argv)
+        json_output = args.json
+        if args.print_ledger_sql:
+            sys.stdout.write(LEDGER_SQL)
+            return 0
         if not args.file_b or args.required_lifetime_seconds is None or not any((args.ledger_dsn_env, args.ledger_dsn_file, args.ledger_json)):
             raise Fail("--file-b, --required-lifetime-seconds and one --ledger-* input are required")
         file_b = read_json(args.file_b, "File B")
@@ -329,14 +345,16 @@ def main(argv=None):
         report["status"] = "ledger-only" if report["router"]["acknowledged"] else "fail"
     except Fail as error:
         report["error"] = str(error)
-    if args.json:
+    except Exception:
+        report["error"] = "File B: unexpected verification error; diagnostics suppressed"
+    if json_output:
         print(json.dumps(report, sort_keys=True))
     else:
         print(f"File B: {report['status']}; ledger={report['ledger']['status']}; signingReady=false")
         if report["ledger"]["status"] == "pass":
             print(f"Exact readback: {report['ledger']['rows']} rows; requiredUntil={report['ledger']['requiredUntil']}")
         print(report.get("error") or report["router"].get("message", "Router not checked"))
-    return 0 if report["status"] == "ledger-only" else 1
+    return 2 if report["status"] == "ledger-only" else 1
 
 
 if __name__ == "__main__":

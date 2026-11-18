@@ -347,11 +347,13 @@ Grounding (fixed revisions, not moving branches):
 through the end of the original worker lifetime, including signing/start delays
 (1..604800 seconds, the ledger preflight's seven-day bound). Use the existing
 step-5 operator socket access; no credentials need to be read or printed here.
+Use a shell with `pipefail` (bash, including 3.2, or zsh); the subshell keeps
+that option local to the helper.
 This is a new read-only command, not authorization to execute it automatically:
 
 ```sh
-file_b_check() {
-  local -; set -o pipefail
+file_b_check() (
+  set -o pipefail
   python3 scripts/relay-worker-budget-file-b-check.py --print-ledger-sql \
     | kubectl --context admin@ai -n relay-budget-authority exec -i relay-budget-postgres-0 -- \
         env PSQL_HISTORY=/dev/null PGCLIENTENCODING=UTF8 psql -X -qAt -w -v ON_ERROR_STOP=1 \
@@ -360,7 +362,7 @@ file_b_check() {
         --file-b "$ev/file-b.json" \
         --required-lifetime-seconds "${FILE_B_REQUIRED_LIFETIME_SECONDS:?set the reviewed remaining lifetime}" \
         --ledger-json - "$@"
-}
+)
 file_b_check --json
 ```
 
@@ -432,9 +434,15 @@ then need a reviewed adapter for that contract; it never guesses an endpoint.
 
 At this pin `file_b_check --json` exits 1, reporting `ledger: pass` if the
 readback passed and `router: unavailable`. For explicit collection of ledger-only
-evidence, `file_b_check --skip-router-preflight-unavailable --json` exits 0 only
+evidence, `file_b_check --skip-router-preflight-unavailable --json` exits 2 only
 when every ledger check passes, reports `status: ledger-only`, and **always**
-`signingReady: false`. Omitting `--json` gives a short human-readable report.
+`signingReady: false`: **evidence collected, not signable**. Verification exit 0
+is reserved for both ledger and Router passing, which is impossible at this pin;
+any failure exits 1, including invalid arguments or an unacknowledged Router gap.
+An evidence collector must deliberately check for exit 2; an `&& sign` chain
+cannot accept ledger-only evidence. The separate `--print-ledger-sql` utility
+exits 0 after printing SQL and performs no verification. Omitting `--json` gives
+a short human-readable report.
 The acknowledgement does not waive the owner's requirement: File B must be
 **committed, read back and qualified by the Router before any candidate run is
 signed (R0 first)**. That requirement remains blocked under the zero-write

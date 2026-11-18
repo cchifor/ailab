@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -19,6 +20,87 @@ check = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(check)
 NOW = 1800000000000
 DSN = "postgresql://reader:private-password@ledger.invalid/relay_budget?sslmode=verify-full"
+
+
+# Golden vectors generated independently from llm-router 5a5181b7:
+# git show 5a5181b7:packages/plugins/worker-budget-authority/runtime.ts
+# copied line 1 (createHash import) and lines 22-30 verbatim into a scratch .ts
+# outside this repo, then called canonical(policy) and tokenPolicyDigest(policy)
+# with Node v22.23.5 using
+# /workspace/c4/relay-pin-c0fe50f0-20261117/node_modules/.bin/tsx.
+# Input was JSON containing these literal fixtures without a digest field.
+# The nested probe deliberately extends the policy only to exercise recursive
+# ordering (including UTF-16 vs code-point order), arrays and integer formatting;
+# it is not a valid ReviewedTokenPolicy and must still fail strict validation.
+ROUTER_POLICY = {
+    "version": 1,
+    "routerReleaseDigest": "1111111111111111111111111111111111111111111111111111111111111111",
+    "adapterDigest": "2222222222222222222222222222222222222222222222222222222222222222",
+    "accountId": "café-東京",
+    "deploymentId": "route-🚀",
+    "model": 'qwen-"quoted"\\path\n\t\b\f\r\x00\x1f\u2028\u2029\ud800',
+    "provider": "local",
+    "providerGeneration": 9007199254740991,
+    "baseUrl": "https://fixture.invalid/v1",
+    "transport": "chat-completions",
+    "maximumInputTokens": 1000000000000,
+    "maximumOutputTokens": 50,
+    "outputIncludesReasoning": True,
+    "usageIncludesAllTokens": True,
+    "qualificationExpiresAt": 1800003600000,
+    "evidenceDigest": "3333333333333333333333333333333333333333333333333333333333333333",
+}
+ROUTER_NESTED_POLICY = dict(ROUTER_POLICY, canonicalProbe={
+    "z": [{"z": 0, "a": -42}, None, False],
+    "\ue000": "BMP",
+    "🚀": "astral",
+    "a": {"10": "ten", "2": "two", "A": "\udfff"},
+})
+ROUTER_POLICY_CANONICAL = (
+    '{"accountId":"café-東京",'
+    '"adapterDigest":"2222222222222222222222222222222222222222222222222222222222222222",'
+    '"baseUrl":"https://fixture.invalid/v1",'
+    '"deploymentId":"route-🚀",'
+    '"evidenceDigest":"3333333333333333333333333333333333333333333333333333333333333333",'
+    '"maximumInputTokens":1000000000000,'
+    '"maximumOutputTokens":50,'
+    '"model":"qwen-\\"quoted\\"\\\\path\\n\\t\\b\\f\\r\\u0000\\u001f\u2028\u2029\\ud800",'
+    '"outputIncludesReasoning":true,'
+    '"provider":"local",'
+    '"providerGeneration":9007199254740991,'
+    '"qualificationExpiresAt":1800003600000,'
+    '"routerReleaseDigest":"1111111111111111111111111111111111111111111111111111111111111111",'
+    '"transport":"chat-completions",'
+    '"usageIncludesAllTokens":true,'
+    '"version":1}'
+)
+ROUTER_POLICY_DIGEST = 'a9d43e3e427d71faddbb722294c8f343bb7f35ef1b532d05361075f9cdfaa552'
+ROUTER_NESTED_CANONICAL = (
+    '{"accountId":"café-東京",'
+    '"adapterDigest":"2222222222222222222222222222222222222222222222222222222222222222",'
+    '"baseUrl":"https://fixture.invalid/v1",'
+    '"canonicalProbe":{"a":{"10":"ten",'
+    '"2":"two",'
+    '"A":"\\udfff"},'
+    '"z":[{"a":-42,'
+    '"z":0},null,false],'
+    '"🚀":"astral",'
+    '"\ue000":"BMP"},'
+    '"deploymentId":"route-🚀",'
+    '"evidenceDigest":"3333333333333333333333333333333333333333333333333333333333333333",'
+    '"maximumInputTokens":1000000000000,'
+    '"maximumOutputTokens":50,'
+    '"model":"qwen-\\"quoted\\"\\\\path\\n\\t\\b\\f\\r\\u0000\\u001f\u2028\u2029\\ud800",'
+    '"outputIncludesReasoning":true,'
+    '"provider":"local",'
+    '"providerGeneration":9007199254740991,'
+    '"qualificationExpiresAt":1800003600000,'
+    '"routerReleaseDigest":"1111111111111111111111111111111111111111111111111111111111111111",'
+    '"transport":"chat-completions",'
+    '"usageIncludesAllTokens":true,'
+    '"version":1}'
+)
+ROUTER_NESTED_DIGEST = 'e88b5bbe1c39a6a704e2f408279eb9555b0a9f3c2a2db8fec5510546007a2852'
 
 
 def fixtures(**changes):
@@ -163,6 +245,19 @@ class LedgerChecks(unittest.TestCase):
 
 
 class PolicyChecks(unittest.TestCase):
+    def test_router_golden_vectors(self):
+        for policy, expected, digest in (
+            (ROUTER_POLICY, ROUTER_POLICY_CANONICAL, ROUTER_POLICY_DIGEST),
+            (ROUTER_NESTED_POLICY, ROUTER_NESTED_CANONICAL, ROUTER_NESTED_DIGEST),
+        ):
+            with self.subTest(digest=digest):
+                self.assertEqual(check.canonical(policy).encode("utf-8"), expected.encode("utf-8"))
+                self.assertEqual(check.policy_digest(policy), digest)
+                self.assertEqual(check.policy_digest(dict(policy, digest=digest)), digest)
+        check.validate_policy(dict(ROUTER_POLICY, digest=ROUTER_POLICY_DIGEST), "golden policy")
+        with self.assertRaisesRegex(check.Fail, "unexpected or missing fields"):
+            check.validate_policy(dict(ROUTER_NESTED_POLICY, digest=ROUTER_NESTED_DIGEST), "nested probe")
+
     def test_invalid_policy_values(self):
         cases = [("version", True), ("routerReleaseDigest", "A" * 64), ("adapterDigest", "bad"),
                  ("evidenceDigest", "bad"), ("accountId", ""), ("deploymentId", "x" * 129),
@@ -209,6 +304,19 @@ class TransportChecks(unittest.TestCase):
         self.assertEqual(kwargs["env"]["PGPASSWORD"], "private-password")
         self.assertEqual(kwargs["env"]["PGSSLMODE"], "verify-full")
         self.assertEqual(kwargs["env"]["PGPASSFILE"], os.devnull)
+        self.assertEqual(kwargs["env"]["PGCLIENTENCODING"], "UTF8")
+        self.assertEqual(kwargs["encoding"], "utf-8")
+
+    def test_psql_utf8_readback_ignores_locale(self):
+        snapshot = fixtures(accountId="café-東京", model="qwen-🚀")[1]
+        payload = json.dumps(snapshot, ensure_ascii=False).encode("utf-8")
+        run_child = subprocess.run
+
+        def fake_psql(argv, **kwargs):
+            return run_child([sys.executable, "-c", "import sys; sys.stdout.buffer.write(" + repr(payload) + ")"], **kwargs)
+
+        with patch("locale.getencoding", return_value="iso8859-1"), patch.object(check.subprocess, "run", side_effect=fake_psql):
+            self.assertEqual(check.read_ledger(DSN), snapshot)
 
     def test_sql_statements_are_read_only_and_have_no_mutating_calls(self):
         # Parse the small fixed SQL subset: quoted strings cannot hide separators.
@@ -263,18 +371,20 @@ class TransportChecks(unittest.TestCase):
 
 
 class CommandChecks(unittest.TestCase):
-    def invoke(self, acknowledge=False, *, snapshot=None):
+    def invoke(self, acknowledge=False, *, snapshot=None, human=False):
         file_b, default_snapshot = fixtures()
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "file-b.json"
             path.write_text(json.dumps(file_b))
-            argv = ["--file-b", str(path), "--required-lifetime-seconds", "60", "--ledger-dsn-env", "FILE_B_TEST_DSN", "--json"]
+            argv = ["--file-b", str(path), "--required-lifetime-seconds", "60", "--ledger-dsn-env", "FILE_B_TEST_DSN"]
+            if not human:
+                argv.append("--json")
             if acknowledge:
                 argv.append("--skip-router-preflight-unavailable")
             out = io.StringIO()
             with patch.dict(os.environ, FILE_B_TEST_DSN=DSN), patch.object(check, "read_ledger", return_value=snapshot or default_snapshot), patch.object(check.time, "time_ns", return_value=NOW * 1000000), contextlib.redirect_stdout(out):
                 rc = check.main(argv)
-            return rc, json.loads(out.getvalue())
+            return rc, out.getvalue() if human else json.loads(out.getvalue())
 
     def test_router_unavailable_without_acknowledgement(self):
         rc, report = self.invoke()
@@ -284,9 +394,9 @@ class CommandChecks(unittest.TestCase):
         self.assertFalse(report["router"]["acknowledged"])
         self.assertFalse(report["signingReady"])
 
-    def test_pass_with_explicit_ledger_only_acknowledgement(self):
+    def test_ledger_only_acknowledgement_exits_two_not_signable(self):
         rc, report = self.invoke(acknowledge=True)
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 2)
         self.assertEqual(report["status"], "ledger-only")
         self.assertTrue(report["router"]["acknowledged"])
         self.assertFalse(report["signingReady"])
@@ -303,6 +413,40 @@ class CommandChecks(unittest.TestCase):
             rc, report = self.invoke(acknowledge=True)
         self.assertEqual(rc, 1)
         self.assertEqual(report["error"], "Router: refused")
+
+    def test_unexpected_errors_are_redacted_and_fail_with_or_without_acknowledgement(self):
+        for stage in ("check_ledger", "check_router"):
+            for kind in (KeyError, TypeError, RuntimeError):
+                for acknowledge in (False, True):
+                    for human in (False, True):
+                        with self.subTest(stage=stage, kind=kind, acknowledge=acknowledge, human=human):
+                            err = io.StringIO()
+                            with patch.object(check, stage, side_effect=kind("private-password")), contextlib.redirect_stderr(err):
+                                rc, report = self.invoke(acknowledge=acknowledge, human=human)
+                            self.assertEqual(rc, 1)
+                            self.assertEqual(err.getvalue(), "")
+                            self.assertNotIn("private-password", str(report))
+                            self.assertNotIn("Traceback", str(report))
+                            message = "File B: unexpected verification error; diagnostics suppressed"
+                            if human:
+                                self.assertIn(message, report)
+                                self.assertIn("File B: fail", report)
+                            else:
+                                self.assertEqual(report["error"], message)
+                                self.assertEqual(report["status"], "fail")
+                                self.assertFalse(report["signingReady"])
+
+    def test_invalid_arguments_exit_one_and_are_redacted(self):
+        for args in (["--unknown=private-password"], ["--required-lifetime-seconds", "private-password"],
+                     ["--file-b"], ["--ledger-json", "-", "--ledger-dsn-env", "private-password"]):
+            with self.subTest(args=args):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = check.main(["--json"] + args)
+                self.assertEqual(rc, 1)
+                self.assertEqual(json.loads(out.getvalue())["error"], "arguments: invalid command line; see --help")
+                self.assertNotIn("private-password", out.getvalue())
+                self.assertEqual(err.getvalue(), "")
 
     def test_print_sql_never_connects(self):
         out = io.StringIO()
@@ -334,7 +478,7 @@ class CommandChecks(unittest.TestCase):
                     out = io.StringIO()
                     with patch.object(check, "read_ledger", return_value=snapshot) as read, patch.object(check.time, "time_ns", return_value=NOW * 1000000), contextlib.redirect_stdout(out):
                         rc = check.main(["--file-b", str(path), "--required-lifetime-seconds", "60", "--skip-router-preflight-unavailable", "--json"] + source)
-                    self.assertEqual(rc, 0)
+                    self.assertEqual(rc, 2)
                     self.assertFalse(json.loads(out.getvalue())["signingReady"])
                     self.assertNotIn("private-password", out.getvalue())
                     if source[0] == "--ledger-dsn-file":
