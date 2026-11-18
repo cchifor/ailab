@@ -30,10 +30,11 @@ on:
       - "ansible/roles/gitea_runner/templates/**"
       - "ansible/roles/gitea_runner/defaults/**"
       # test-fstrim-chunked.sh also checks the fstab regexes in tasks/ and the per-host trim windows
-      # (against the registry LXC trim's timer, which is defined in registry-cache.md).
+      # (against the registry LXC trim's units in registry-cache.md and its script's chunk size).
       - "ansible/roles/gitea_runner/tasks/**"
       - "ansible/host_vars/ci-runner-*.yml"
       - "docs/runbooks/registry-cache.md"
+      - "scripts/lxc-fstrim-chunked.sh"
       - ".gitea/workflows/runner-scripts.yaml"
   push:
     branches: [main]

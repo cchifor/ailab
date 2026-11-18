@@ -382,16 +382,19 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     - ai-node3: ci-runner-3 00:00-01:45, ci-runner-6 01:50-03:35.
   - **Days, and the registry trim on ai-node1.** The node's weekly registry LXC trim
     ([registry-cache.md](registry-cache.md), "Thin-volume trim") starts Sunday 03:30 plus up to 15 min
-    (`RandomizedDelaySec`), then waits out IO pressure per chunk, so it can run for hours. No time window
-    can avoid that, so `gitea_runner_fstrim_days` (weekday numbers 1-7 = Mon-Sun, or `mon`..`sun`; default
+    (`RandomizedDelaySec`), then waits out IO pressure per chunk, so it can run for hours; its unit's
+    `TimeoutStartSec` ends it by 23:36 Sunday, clear of Monday's 00:00 window. No time window can avoid
+    a span like that, so `gitea_runner_fstrim_days` (weekday numbers 1-7 = Mon-Sun, or `mon`..`sun`; default
     every day) is checked at run time before every slice, by the weekday the window **started** (a window
     that wraps midnight belongs to the night it began). ci-runner-9 lists Mon-Sat. ci-runner-1 and -4 end,
     tail included, by 03:15, before the registry trim can start, so they run every day.
   - **The schedule is tested.** `tests/test-fstrim-chunked.sh` reads each runner's node from
     `kubernetes/infra/runners/variables.tf` and the registry timer from registry-cache.md. It fails if a
     window ends after 05:25, two windows on a node overlap (tails included), the cap does not fit a
-    window (23 s per GiB plus pauses), or a window on the registry's node runs on its night after it may
-    start. Moving the registry timer means moving the node1 windows or days too.
+    window (23 s per GiB plus pauses), the registry unit has no deadline or too short a stop time for its
+    in-flight chunk, or a window on the registry's node overlaps the registry trim's span (15 min before
+    its earliest start to 15 min after its deadline-bound latest end, Sunday into Monday included).
+    Moving the registry timer or its deadline means moving the node1 windows or days too.
   - **Each slice** is cut to the budget left (in whole groups), so a run never covers more than the cap,
     and the stop file, the window and the day are checked again right before each FITRIM. The cursor is written
     with an fsync of the file and of its directory, so it survives a power cut (a reboot also resets the

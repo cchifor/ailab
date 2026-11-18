@@ -13,8 +13,9 @@
 # - the lock, the stop file (also one that appears during the idle confirmation), bad settings and a
 #   non-ext4 fs stop it before any trim;
 # - the beacon carries the run's numbers and why it ended;
-# - the per-host schedule: windows end by 05:25, never overlap on a node, fit the cap, and no window on
-#   the registry LXC's node runs on its trim's night after it may start.
+# - the per-host schedule: windows end by 05:25, never overlap on a node, fit the cap, and none on the
+#   registry LXC's node overlaps that trim's deadline-bound span (Sunday into Monday included); fixture
+#   copies of the registry runbook prove each kind of collision is caught.
 #
 # Run: bash ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh   (Linux; needs python3 + PyYAML)
 set -u
@@ -489,12 +490,16 @@ echo "== the per-host schedule: windows end by 05:25, never overlap on a node, f
 #   stay within 05:30 UTC, and before the next window on the same node.
 # - A capped run must fit its own window: the cap at 23 s per GiB (the measured worst) plus, per slice,
 #   the pause and 2 s of idle confirmation.
-# - The registry LXC's weekly trim is a hand-installed timer defined in docs/runbooks/registry-cache.md (its
-#   node from that section's heading). It starts at OnCalendar + up to RandomizedDelaySec and waits out IO
-#   pressure per chunk, so it may still run at any later time that day: from 15 min before its start to
-#   midnight, on its weekday, it conflicts with every window on its node that runs that night (by the
-#   window's start day, gitea_runner_fstrim_days) and has not ended, tail included, before then.
-out="$(python3 - "$REPO" <<'PY'
+# - The registry LXC's weekly trim is a hand-installed timer + oneshot defined in
+#   docs/runbooks/registry-cache.md (its node from that section's heading). It starts at OnCalendar + up to
+#   RandomizedDelaySec + AccuracySec and waits out IO pressure per chunk, so only its deadline ends it: a
+#   oneshot's TimeoutStartSec (RuntimeMaxSec does nothing on a oneshot), then up to TimeoutStopSec, which
+#   must cover an in-flight chunk. Its span, from 15 min before its earliest start to 15 min after that
+#   latest end, may cross midnight; it conflicts with every window on its node, on any day (by the window's
+#   start day, gitea_runner_fstrim_days), that it overlaps, tail included.
+# schedule_check <registry runbook>: one "ok ..." or "BAD ..." line per check. The fixture cases below feed
+# it edited copies of the runbook, to prove each conflict is caught.
+schedule_check() { python3 - "$REPO" "$1" <<'PY'
 import math, pathlib, re, sys, yaml
 repo = pathlib.Path(sys.argv[1])
 tf = (repo / "kubernetes/infra/runners/variables.tf").read_text(encoding="utf-8")
@@ -534,28 +539,85 @@ for node, ws in sorted(spans.items()):
     ws.sort()
     clash = [f"{a[2]}/{b[2]}" for i, a in enumerate(ws) for b in ws[i + 1:] if b[0] < a[1] + TAIL]
     print(("ok " if not clash else "BAD ") + f"{node}: {' '.join(w[2] for w in ws)} do not overlap, tails included {clash or ''}")
-reg = (repo / "docs/runbooks/registry-cache.md").read_text(encoding="utf-8")
+reg = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+def unit(name):  # the body of the `cat > /etc/systemd/system/<name> <<'UNIT'` heredoc
+    m = re.search(r"/" + re.escape(name) + r" <<'UNIT'\n(.*?)^UNIT$", reg, re.M | re.S)
+    return m.group(1) if m else ""
+def key(body, k):
+    m = re.findall(r"^" + k + r"=(.*)$", body, re.M)
+    return m[-1].strip() if m else None
+UNITS = {"": 1, "s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600, "hr": 3600, "d": 86400}
+def span(v, default=None):  # a systemd time span in seconds; None = unset, 0 or infinity = no limit
+    if v is None:
+        return default
+    if v in ("0", "infinity"):
+        return math.inf
+    parts = re.findall(r"(\d+)\s*([a-z]*)\s*", v)
+    if not parts or "".join(n + u for n, u in parts) != v.replace(" ", "") or any(u not in UNITS for _, u in parts):
+        raise ValueError(f"cannot read the time span {v!r}")
+    return sum(int(n) * UNITS[u] for n, u in parts)
 sec = re.search(r"^## Thin-volume trim \(weekly, (ai-node\d+)\)$", reg, re.M)
-blk = reg[reg.find("registry-lxc-fstrim.timer <<"):] if "registry-lxc-fstrim.timer <<" in reg else ""
-cal = re.search(r"^OnCalendar=(?:(\w+) )?\*-\*-\* (\d\d):(\d\d)(?::\d\d)? UTC$", blk, re.M)
-dly = re.search(r"^RandomizedDelaySec=(\d+)min$", blk, re.M)
-print(("ok " if sec and cal and dly else "BAD ") + "the registry trim's node, OnCalendar and RandomizedDelaySec are read from registry-cache.md")
-if sec and cal and dly:
+svc, tmr = unit("registry-lxc-fstrim.service"), unit("registry-lxc-fstrim.timer")
+cal = re.search(r"^OnCalendar=(?:(\w+) )?\*-\*-\* (\d\d):(\d\d)(?::\d\d)? UTC$", tmr, re.M)
+print(("ok " if sec and svc and cal else "BAD ") + "the registry trim's node, service and OnCalendar are read from registry-cache.md")
+if sec and svc and cal:
     rnode, rday = sec.group(1), (daynum(cal.group(1)[:3]) if cal.group(1) else None)
-    busy_from = int(cal.group(2)) * 60 + int(cal.group(3)) - 15
-    print(f"ok the registry trim may hold {rnode} from {hm(busy_from)} UTC to midnight on weekday {rday or 'every day'}"
-          f" (starts {cal.group(2)}:{cal.group(3)} + up to {dly.group(1)} min)")
-    for s, e, h, days in spans.get(rnode, []):
-        runs = rday is None or rday in days
-        clear = not runs or e + TAIL <= busy_from
-        why = "does not run that night" if not runs else f"ends, tail included, by {hm(e + TAIL)}"
-        print(("ok " if clear else "BAD ") + f"{h} ({hm(s)}-{hm(e)}) misses the registry trim: "
-              + (why if clear else f"runs on weekday {rday} until {hm(e + TAIL)}, after {hm(busy_from)}"))
+    delay, accuracy = span(key(tmr, "RandomizedDelaySec"), 0), span(key(tmr, "AccuracySec"), 60)
+    oneshot = key(svc, "Type") == "oneshot"
+    # A oneshot is "activating" for its whole run: RuntimeMaxSec has no effect on it (systemd.service(5)).
+    deadline = span(key(svc, "TimeoutStartSec"), math.inf) if oneshot else span(key(svc, "RuntimeMaxSec"), math.inf)
+    stop = span(key(svc, "TimeoutStopSec"), 90)
+    print(("ok " if deadline != math.inf else "BAD ") + "the registry trim has an overall deadline ("
+          + ("TimeoutStartSec" if oneshot else "RuntimeMaxSec") + f" = {key(svc, 'TimeoutStartSec' if oneshot else 'RuntimeMaxSec')})"
+          + ("" if deadline != math.inf or not oneshot or not key(svc, "RuntimeMaxSec") else "; RuntimeMaxSec does nothing on a oneshot"))
+    lxc = (repo / "scripts/lxc-fstrim-chunked.sh").read_text(encoding="utf-8")
+    chunk_gb = int(re.search(r'^CHUNK_GB="\$\{CHUNK_GB:-(\d+)\}"', lxc, re.M).group(1))
+    pause = int(re.search(r'^PAUSE_S="\$\{PAUSE_S:-(\d+)\}"', lxc, re.M).group(1))
+    inflight = chunk_gb * 23 + pause + 60  # a chunk at the measured worst, its pause, and the unmount
+    print(("ok " if stop >= inflight else "BAD ") + f"TimeoutStopSec ({stop} s) lets an in-flight {chunk_gb} GiB chunk finish ({inflight} s)")
+    if deadline != math.inf:
+        first = int(cal.group(2)) * 60 + int(cal.group(3))
+        busy = (first - 15, first + math.ceil((delay + accuracy + deadline + stop) / 60) + 15)
+        print(f"ok the registry trim may hold {rnode} from {hm(busy[0] % 1440)} to {hm(busy[1] % 1440)}"
+              + (" the next day" if busy[1] >= 1440 else "") + f" on weekday {rday or 'every day'}")
+        NAMESD = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        for s, e, h, days in spans.get(rnode, []):
+            hits = []
+            for rd in ([rday] if rday else range(1, 8)):
+                r0, r1 = (rd - 1) * 1440 + busy[0], (rd - 1) * 1440 + busy[1]
+                for w in (0, 1):  # this week and the next, for a span that crosses Sunday into Monday
+                    for d in days:
+                        a, b = (w * 7 + d - 1) * 1440 + s, (w * 7 + d - 1) * 1440 + e + TAIL
+                        if a < r1 and r0 < b:
+                            hits.append(NAMESD[d - 1])
+            print(("ok " if not hits else "BAD ") + f"{h} ({hm(s)}-{hm(e)}) " + ("misses the registry trim's span"
+                  if not hits else f"overlaps the registry trim's span on {', '.join(sorted(set(hits)))}"))
 PY
-)" || bad "windows: the python check did not run" "$out"
+}
+out="$(schedule_check "$REPO/docs/runbooks/registry-cache.md")" || bad "windows: the python check did not run" "$out"
 while IFS= read -r l; do
   case "$l" in "ok "*) ok "windows: ${l#ok }" ;; *) bad "windows: ${l#BAD }" ;; esac
 done <<< "$out"
+
+echo "== the schedule check catches a registry trim that would collide (fixture copies of registry-cache.md) =="
+fixture() { # <sed program applied inside the registry unit heredocs> -> path of an edited copy
+  sed "/registry-lxc-fstrim\\.[a-z]* <<'UNIT'/,/^UNIT\$/{$1;}" "$REPO/docs/runbooks/registry-cache.md" > "$ROOT/registry.fixture.md"
+  echo "$ROOT/registry.fixture.md"
+}
+expect_bad() { # <label> <sed program> <text a BAD line must contain>
+  local o; o="$(schedule_check "$(fixture "$2")" 2>&1)"
+  if grep -q "^BAD .*$3" <<< "$o"; then ok "fixture: $1"; else bad "fixture: $1" "no 'BAD ...$3' line in: $o"; fi
+}
+expect_bad "a deadline long enough to spill from Sunday into Monday's 00:00 window" \
+  's/^TimeoutStartSec=.*/TimeoutStartSec=21h/' "ci-runner-1 .*overlaps the registry trim's span on Mon"
+expect_bad "no deadline at all (a oneshot's default)" '/^TimeoutStartSec=/d' "has an overall deadline"
+expect_bad "RuntimeMaxSec instead of TimeoutStartSec on a oneshot" \
+  's/^TimeoutStartSec=/RuntimeMaxSec=/' "RuntimeMaxSec does nothing on a oneshot"
+expect_bad "a stop time too short for the in-flight chunk" 's/^TimeoutStopSec=.*/TimeoutStopSec=180/' "TimeoutStopSec"
+expect_bad "the registry trim moved to Saturday, when ci-runner-9 runs" \
+  's/^OnCalendar=Sun /OnCalendar=Sat /' "ci-runner-9 .*overlaps the registry trim's span on Sat"
+o="$(schedule_check "$(fixture 's/^TimeoutStartSec=.*/TimeoutStartSec=19h45min/')" 2>&1)"
+eq "fixture: the shipped deadline itself passes" "" "$(grep '^BAD' <<< "$o")"
 
 echo
 echo "gitea-runner-fstrim-chunked: $PASS passed, $FAIL failed"
