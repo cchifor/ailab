@@ -319,7 +319,8 @@ gitea_runner_cleanup_actcache_max_mb: 1536 # trim the act_runner actions cache a
 # daemon's start-pre budget and took ALL 5 runners offline. 48h >> the 3h job timeout, so a live or
 # recent workspace always has a fresh mtime and is never touched.
 gitea_runner_cleanup_ws_prune_age_h: 48
-# Cargo target sweep (section 6 of the script, 2026-11-08). Under disk pressure, in a confirmed gap and with
+# Cargo target sweep (section 6 of the script, 2026-11-08). Under disk pressure (or, with
+# gitea_runner_cleanup_target_age_sweep, by age alone below it; see below), in a confirmed gap and with
 # the runner held stopped, delete the files in Cargo target dirs under these roots that no build has read
 # for *_keep_h hours (*_keep_critical_h at the critical threshold). A Cargo target dir is a dir with a
 # .rustc_info.json at its root (Cargo writes one into every target dir it uses), at most *_maxdepth levels

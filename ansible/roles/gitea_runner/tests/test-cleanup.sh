@@ -284,7 +284,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     GITEA_CLEANUP_TARGET_KEEP_H="${TKEEP:-72}" GITEA_CLEANUP_TARGET_KEEP_CRITICAL_H="${TKEEPCRIT:-24}" \
     GITEA_CLEANUP_TARGET_MIN_FREE_MB="${TMINFREE:-1024}" GITEA_CLEANUP_BUILDKIT_DB="${BKDB:-/nonexistent/cache.db}" \
     GITEA_CLEANUP_TARGET_AGE_SWEEP="${TAGE:-0}" GITEA_CLEANUP_TARGET_AGE_MIN_FREE_MB="${TAGEMINFREE:-1024}" \
-    GITEA_CLEANUP_TARGET_AGE_EVERY_H="${TAGEEVERY:-6}" GITEA_CLEANUP_TARGET_AGE_STAMP="$WORK/age.stamp" \
+    GITEA_CLEANUP_TARGET_AGE_EVERY_H="${TAGEEVERY:-6}" GITEA_CLEANUP_TARGET_AGE_STAMP="${TAGESTAMP-$WORK/age.stamp}" \
     MOCK_MNT_OPTS="${MOCK_MNT_OPTS:-rw,relatime}" MOCK_MNT_FAIL="${MOCK_MNT_FAIL:-0}" \
     bash "$SCRIPT" ${SCRIPT_ARGS:-} >/dev/null 2>&1 &
   local pid=$! i=0
@@ -1330,6 +1330,12 @@ kept "$T/debug/deps/libold-1.rlib" "T19: inside TARGET_AGE_EVERY_H the age path 
 grep -q "age sweep looked less than 6h ago -> not this tick" "$WORK/logger.log" && ok "T19: ...and says so" || bad "T19: ...and says so"
 TAGE=1 TAGEEVERY=0 TROOTS="$TR" TAGEMINFREE=1 run_case 0 50
 gone "$T/debug/deps/libold-1.rlib" "T19: TARGET_AGE_EVERY_H=0 lifts the cadence limit"
+# The PRODUCTION stamp path (env empty -> the script's default beside HEAL_STATE), with that dir not yet
+# created on a fresh host: the dir is made and the stamp lands there (reviewer-claude, #1857 round 2).
+mk_targets; rm -rf "$WORK/fresh"; TAGESTAMP="" HEALSTATE="$WORK/fresh/heal.state" TAGE=1 TROOTS="$TR" TAGEMINFREE=1024 run_case 0 50
+[ -f "$WORK/fresh/target-age-sweep.stamp" ] && ok "T19: with the stamp env unset it lands beside HEAL_STATE, its dir created" \
+  || bad "T19: default stamp path (want $WORK/fresh/target-age-sweep.stamp)"
+rm -rf "$WORK/fresh"
 # The stamp never limits the pressure path.
 mk_targets; touch "$WORK/age.stamp"; TAGE=1 TROOTS="$TR" TMINFREE=1 run_case 0 85
 gone "$T/debug/deps/libold-1.rlib" "T19: a fresh age stamp does not stop the pressure sweep"

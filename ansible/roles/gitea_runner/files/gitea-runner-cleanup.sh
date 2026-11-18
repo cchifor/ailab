@@ -1194,6 +1194,13 @@ fi
 #      stopped with its drain, the files deleted, and the runner started again. It is held only when at
 #      least TARGET_MIN_FREE_MB would go, so a runner full of something else is not taken out of the pool
 #      every tick for nothing.
+# Write the age-sweep cadence stamp. Its dir may not exist yet on a fresh host (it sits beside HEAL_STATE,
+# which is only created when the heal first persists state), and a silently failed touch would quietly
+# turn the cadence limit off, so create the dir and say so if the write still fails.
+stamp_age() {
+  mkdir -p "$(dirname "$TARGET_AGE_STAMP")" 2>/dev/null
+  touch "$TARGET_AGE_STAMP" 2>/dev/null || log "target sweep: cannot write the age stamp $TARGET_AGE_STAMP -> the cadence limit is off"
+}
 # Cargo target dirs under TARGET_ROOTS, NUL-separated: each dir holding a .rustc_info.json.
 cargo_target_dirs() {
   local root info d opts
@@ -1284,7 +1291,7 @@ if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] 
       for d in "${tdirs[@]}"; do b="$(target_stale_bytes "$d" "$tg_min")"; is_num "$b" && stale=$(( stale + b )); done
       if [ "$stale" -lt $(( tg_floor * 1048576 )) ]; then
         log "target sweep: ${tg_dirs} Cargo target dir(s), ${stale}B unread for ${keep_h}h < ${tg_floor}MB -> runner not held${tg_tag}"
-        [ "$tg_age" -eq 1 ] && { touch "$TARGET_AGE_STAMP" 2>/dev/null || true; }
+        [ "$tg_age" -eq 1 ] && stamp_age
       elif [ "$(state_get runner_held)" = 1 ]; then
         log "target sweep: an earlier runner recovery is still pending -> not this tick"
       elif ! idle_confirmed; then
@@ -1318,7 +1325,7 @@ if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] 
               tg_freed=$(( tg_freed + b ))
               log "target sweep: $d freed ${b}B"
             done
-            [ "$tg_age" -eq 1 ] && { touch "$TARGET_AGE_STAMP" 2>/dev/null || true; }
+            [ "$tg_age" -eq 1 ] && stamp_age
           fi
           heal_release_runner
         fi
