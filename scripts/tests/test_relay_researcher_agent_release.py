@@ -364,8 +364,10 @@ class SyntheticAgentRelease(unittest.TestCase):
         self.assertEqual(self.read(updated, "definition.json").replace(image.encode(), self.release["agentImage"].encode()),
                          self.read(base, "definition.json"))
         s0, s1 = (json.loads(self.read(d, "summary.json")) for d in (base, updated))
+        config = json.loads(self.read(self.agent_dir, FAKE_RECEIPT))["imageConfigDigest"]
         self.assertEqual(s1["agentRelease"], {"tag": FAKE_TAG, "giteaReleaseId": FAKE_RELEASE_ID,
-                                              "sourceCommit": FAKE_SOURCE, "assets": self.agent["assets"]})
+                                              "sourceCommit": FAKE_SOURCE, "assets": self.agent["assets"],
+                                              "agentReceipt": FAKE_RECEIPT, "imageConfigDigest": config})
         self.assertEqual(s1["agentImage"], image)
         self.assertEqual(s1["bindingDigest"], s0["bindingDigest"])
         self.assertEqual(s1["files"]["definition.json"], sha256(self.read(updated, "definition.json")))
@@ -420,6 +422,9 @@ class SyntheticAgentRelease(unittest.TestCase):
         shutil.rmtree(self.tree / I4)
         shutil.copytree(self.updated[1], self.tree / I4)
         env = {k: v for k, v in os.environ.items() if not k.startswith("RELAY_RESEARCHER_")}
+        # test_relay_candidate_run.py renders the chart from a Relay checkout at pins.yaml's sourceCommit:
+        # the one this test generates with (release's commit, which the agent-only update keeps).
+        env["RELAY_CHECKOUT"] = str(self.relay)
         suite = lambda name: run([sys.executable, "-m", "unittest", "discover", "-s", self.tree / "scripts/tests",
                                   "-p", name], env=env)
         # Without the provenance record's update, CI refuses the pin PR (the record states the old agent).
@@ -447,7 +452,13 @@ class SyntheticAgentRelease(unittest.TestCase):
         record = substitute_hashes(record, mapping)
         self.assertNotEqual(record, original)
         (self.tree / PROVENANCE).write_text(record, encoding="utf-8")
-        # Every test runs (none skips: the pins are imported), and passes.
+        # Committed in the copy, the reproduction needs and accepts the agent release's assets.
+        for argv in (["init", "-q"], ["add", "-A"],
+                     ["-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "synthetic agent-only pin"]):
+            done = run(["git", "-C", self.tree, *argv])
+            self.assertEqual(done.returncode, 0, done.stderr)
+        # Every test runs (none skips: the pins are imported, and the copy is a git checkout, which
+        # test_relay_candidate_run.py's R0 state check needs), and passes.
         for name in ("test_relay_researcher_binding.py", "test_relay_researcher_reproduction.py",
                      "test_relay_researcher_installation.py", "test_relay_researcher_hub_upgrade.py",
                      "test_relay_candidate_run.py"):
@@ -455,12 +466,6 @@ class SyntheticAgentRelease(unittest.TestCase):
                 done = suite(name)
                 self.assertEqual((done.returncode, done.stderr.rstrip().splitlines()[-1]), (0, "OK"),
                                  done.stderr[-4000:])
-
-        # Committed in the copy, the reproduction needs and accepts the agent release's assets.
-        for argv in (["init", "-q"], ["add", "-A"],
-                     ["-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", "synthetic agent-only pin"]):
-            done = run(["git", "-C", self.tree, *argv])
-            self.assertEqual(done.returncode, 0, done.stderr)
         reproduce = [sys.executable, self.tree / "scripts/relay-researcher-reproduce.py", "--relay", self.relay,
                      "--assets", self.assets]
         done = run([*reproduce, "--agent-assets", self.agent_dir])
@@ -490,6 +495,10 @@ class SyntheticAgentRelease(unittest.TestCase):
                                                f"{FAKE_RECEIPT} is not the infrastructure-agent publish receipt"),
             "receipt image is not agentImage": (dict(agentImage=f"{REPOSITORY}@sha256:{'7' * 64}"), None,
                                                 "receipt image is not agentRelease.agentImage"),
+            "receipt without a config digest": (dict(receipt=lambda r: r.pop("imageConfigDigest")), None,
+                                                "receipt has no sha256 imageConfigDigest"),
+            "receipt config digest not sha256": (dict(receipt=lambda r: r.update(imageConfigDigest="0" * 64)), None,
+                                                 "receipt has no sha256 imageConfigDigest"),
             "manifest of another version": (dict(manifest=lambda m: m.update(version="v0.10.4")), None,
                                             "manifest.json is not the pinned agentRelease"),
             "manifest version without the v": (dict(manifest=lambda m: m.update(version=FAKE_TAG[1:])), None,

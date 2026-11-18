@@ -51,7 +51,8 @@
  *   template-preparation-input.json  the input of Relay scripts/prepare-worker-templates.ts that
  *                                    seals the same researcher template (for an independent rerun)
  *   summary.json                     the pins, digests and output sha256s (and `agentRelease`, with its
- *                                    tag, Gitea release, sourceCommit and assets, when the inputs pin one)
+ *                                    tag, Gitea release, sourceCommit, assets, the agent receipt's name and
+ *                                    that receipt's imageConfigDigest, when the inputs pin one)
  * Deterministic: identical inputs give byte-identical files. Reads no secret, contacts nothing.
  */
 import { execFileSync } from "node:child_process";
@@ -285,6 +286,7 @@ async function main() {
   // The agent image: release's, or (agent-only update) agentRelease's, verified from ITS assets. Only
   // the image is taken from agentRelease; every runtime value above came from release alone.
   let agentImage = releaseAgentImage;
+  let agentImageConfigDigest: string | undefined;
   if (agentOnly) {
     const agentAssets = verifyAssets(resolve(args["--agent-assets"]!), agentRelease.assets);
     const agentManifest = JSON.parse(agentAssets["manifest.json"]!.toString("utf8"));
@@ -296,7 +298,12 @@ async function main() {
       agentRelease.sourceCommit);
     if (agentOnlyReceipt.publication.image !== agentRelease.agentImage)
       refuse("the agent release's receipt image is not agentRelease.agentImage");
+    // Recorded in summary.json so a registry readback can be checked against committed output alone.
+    if (typeof agentOnlyReceipt.imageConfigDigest !== "string" ||
+        !/^sha256:[0-9a-f]{64}$/.test(agentOnlyReceipt.imageConfigDigest))
+      refuse("the agent release's receipt has no sha256 imageConfigDigest");
     agentImage = agentOnlyReceipt.publication.image;
+    agentImageConfigDigest = agentOnlyReceipt.imageConfigDigest;
   }
 
   // G3 in the published runtime (template binding leaf). Only a rebuilt image can change these.
@@ -422,6 +429,8 @@ async function main() {
         giteaReleaseId: agentRelease.giteaReleaseId,
         sourceCommit: agentRelease.sourceCommit,
         assets: agentRelease.assets,
+        agentReceipt: agentRelease.agentReceipt,
+        imageConfigDigest: agentImageConfigDigest,
       },
     } : {}),
     installationId,

@@ -169,8 +169,13 @@ class Output(unittest.TestCase):
         self.assertLessEqual({"SHA256SUMS", "manifest.json", agent["agentReceipt"]}, set(agent["assets"]))
         self.assertEqual(agent["agentImage"].split("@")[0], release["agentImage"].split("@")[0])
         self.assertRegex(agent["agentImage"], r"@sha256:[0-9a-f]{64}$")
-        self.assertEqual(self.summary["agentRelease"], {k: agent[k] for k in ("tag", "giteaReleaseId", "sourceCommit",
-                                                                            "assets")})
+        recorded = dict(self.summary["agentRelease"])
+        # The receipt's config digest comes from the receipt itself (the generator checks it is sha256),
+        # so a registry readback can be compared with committed output alone.
+        self.assertIn("imageConfigDigest", recorded)
+        self.assertRegex(recorded.pop("imageConfigDigest"), r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(recorded, {k: agent[k] for k in ("tag", "giteaReleaseId", "sourceCommit", "assets",
+                                                          "agentReceipt")})
 
     def test_generator_takes_only_the_agent_image_from_an_agent_release(self):
         # What CI can see of the generator (the agent-release test runs it with a synthetic release):
