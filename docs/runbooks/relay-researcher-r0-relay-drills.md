@@ -21,10 +21,19 @@ Sources, at ailab `main` `8229304e` and Relay `e77bd09a` (the live hub v0.10.4; 
   `scripts/relay-candidate-run.py`;
 - [relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md) H6 and H7.
 
+**Release readback (2026-11-18).** The agent is v0.10.6 (`1599d06e`), from `agentRelease` in
+`docs/relay-workers/researcher-binding-inputs.json`; the runtime, binding and chart stay on `rel:`.
+The agent Pod's `source-commit` annotation still names that runtime commit; use `agentRelease` and
+the image digest to identify the agent build (`kubernetes/apps/relay-researcher/pins/pins.yaml`).
+The in-flight v0.10.7 update is not a new pin here. R0's `agent-before` baseline and §10's comparison
+must refer to the same pinned revision; a later agent release needs its own verified readback.
+The signer and composer come from the separately pinned driver checkout, not `rel:` or `rel4:`
+(campaign §2; both tools exist at audited Relay `origin/main` `83262314`).
+
 ## 1. Purpose and the owner's decision
 
-The budget runbook runs Relay's half of witness drills A-C "when it is included, before Relay's first
-allocation" (`relay-worker-budget-authority.md:418-419`). Relay's budget authority starts only when a
+The budget runbook runs Relay's half of witness drills A-C before Relay's first allocation
+("Drills before production `ready=true`"). Relay's budget authority starts only when a
 profile source exists, which before the release approval is H7's candidate file (Relay
 `rel4:server/main.ts:326-352`; hub runbook H6 and H7), and H7 is included by a signed run's per-run PR.
 R1 is the first allocation. Owner decision, 2026-11-17 (checklist open point 3), word for word:
@@ -50,7 +59,7 @@ confirmation before R0 is signed (§4).
 
 **F1. The pool-readiness listing cannot reach the ledger during the candidate campaign.** The read-only
 preflight the owner named is `GET /api/worker-pools` (operator role, `rel4:server/workers/routes.ts:263-266`;
-the web UI's Create Worker form reads it, `web/src/workers/CreateWorker.tsx:105-106`). For each template,
+the web UI loads it for Create Worker in `rel4:web/src/workers/WorkersPage.tsx:53-61`). For each template,
 `inspectPoolReadiness` first requires the ordinary release qualification registry:
 
 - "Candidate admission cannot replace or supply ordinary release qualification": with a candidate file
@@ -105,7 +114,7 @@ stale A, the parse succeeds and `current_epoch` raises 42501.
 
 **F4. Nothing else touches the ledger in R0.** The authority's refresh loop selects only workers that
 have a budget preparation (`rel4:server/workers/inference/budget-preparation.ts:572-580`), and there is
-none. So the budget runbook's Relay pass, "`worker_budget_ledger_unavailable`, allocation refused"
+none. So the earlier budget runbook's Relay pass, "`worker_budget_ledger_unavailable`, allocation refused"
 (`relay-worker-budget-authority.md:455`), cannot occur: that log line comes from the authority's own
 ledger client (`server/main.ts:343-347`), which only an allocation path or a reached preflight would
 use. R0 must never create one.
@@ -126,6 +135,10 @@ R0 runs **after** H6, the candidate journal and File B are read back (checklist,
 checklist", items 1-3), and **before** R1 (item 5). The E6 rehearsal (item 4) may come before or after
 R0. R0 signs a real run, so File B's `tokenPolicyDigest` must exist first (hub runbook H7: "File B comes
 before any run is signed").
+
+File B's planned pre-signing qualification probe is still a **TOOLING GAP** (budget step 9): F1's
+pool listing cannot perform it, and F2's observer is only a witness/gate check. Resolve that gap
+without granting or creating R0. Drill D's later history comparison is also outside R0's A-C scope.
 
 **The gate during R0.** By then the production gate is open: checklist steps 7 and 8 set `ready=true`
 and enabled the Router plugin, and H6 requires both (`relay-researcher-hub-upgrade.md:324-327`). R0
@@ -154,7 +167,7 @@ Record each on ailab #1753. Without them R0 is not signed.
    the gate was proven open, with `check_succeeded` 0 while `authority_started` and `observer_started`
    are 1; the hub's mounted witness is the drill's; the same-login control on B's IDs succeeds before
    and after. For A, also `current_epoch(<A ids>)` as `relay_budget_allocator` fails with 42501. This
-   replaces the runbook's "`worker_budget_ledger_unavailable`, allocation refused", which needs an
+   replaces the earlier runbook's "`worker_budget_ledger_unavailable`, allocation refused", which needs an
    allocation, as owner decision 4 did for the Router's drills B and C.
 3. **The agent tree.** The generator always writes the agent half, and with the first run onto main's
    enrollment agent tree it also writes the agent's one-time candidate structure (generator runbook,
@@ -340,8 +353,9 @@ SQL
 
 ### 6.2 Sign and roll the hub (`t_s` to `t_s + 60 min`)
 
-1. **Sign** with campaign §3.1's signer command, unchanged. Record `runDigest`, the file `sha256`,
-   `t_s` and `expiresAt`. R0 runs no journal `verify` or `install` (§3.2) and no budget scope (§3.3): it
+1. **Sign** with campaign §3.1's signer command and subject comparison. Record `runDigest`, the file
+   `sha256`, `t_s` and `expiresAt`. Skip that section's final journal `verify` command; R0 runs no
+   journal `verify` or `install` (§3.2) and no budget scope (§3.3): it
    has no session and no allocation.
 2. **Compose and generate**: generator runbook §1 (the composer), then §2's `generate` on the per-run
    branch **without** `--journal-ca` and `--operator-out`. R0 needs no control, trust or pin ConfigMap,
