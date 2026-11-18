@@ -227,16 +227,53 @@ class MainTest(unittest.TestCase):
         self.assertEqual((rc, result["mode"]), (0, "restart"))
         self.assertEqual(json.loads(Path(self.current).read_text())["storage"]["gcDelay"], "1h")
 
-    def test_unproven_reload_fails_and_keeps_going_nowhere(self):
-        self._write(self.current, BASE)
-        self._write(self.candidate, changed(storage__gcDelay="1h"))
+    def _failed_reload(self, candidate):
+        self._write(self.candidate, candidate)
         with mock.patch.object(zca, "main_pid", return_value=4242), \
                 mock.patch.object(zca, "watch_alive", return_value=True), \
                 mock.patch.object(zca, "journal_cursor", return_value="c"), \
                 mock.patch.object(zca, "journal_messages", return_value=[zca.MSG_CHANGED, zca.MSG_FAILED]), \
                 mock.patch.object(zca.time, "sleep"):
-            rc, result = self._run("--wait", "2", "--settle", "0")
+            return self._run("--wait", "2", "--settle", "0")
+
+    def test_unproven_reload_fails_restores_the_previous_bytes_and_keeps_a_marker(self):
+        self._write(self.current, BASE)
+        before = Path(self.current).read_bytes()
+        rc, result = self._failed_reload(changed(storage__gcDelay="1h"))
         self.assertEqual((rc, result["mode"]), (2, "reload"))
+        self.assertEqual(Path(self.current).read_bytes(), before)  # disk matches what zot still runs
+        self.assertTrue(os.path.exists(self.current + ".unconfirmed"))
+
+    def test_after_a_failed_reload_the_next_run_cannot_report_none(self):
+        # Review finding on #1847: a rerun must not treat disk equality as convergence.
+        self._write(self.current, BASE)
+        new = changed(storage__gcDelay="1h")
+        self._failed_reload(new)
+        Path(self.current).write_text(json.dumps(new))  # even if the disk somehow already holds the candidate
+        self._write(self.candidate, new)
+        with mock.patch.object(zca, "main_pid", return_value=0):
+            rc, result = self._run("--dry-run")
+        self.assertEqual((rc, result["mode"]), (0, "restart"))  # no watch -> restart; never "none"
+        with mock.patch.object(zca, "main_pid", return_value=4242), \
+                mock.patch.object(zca, "watch_alive", return_value=True):
+            self._write(self.candidate, new)
+            rc, result = self._run("--dry-run")
+        self.assertEqual((rc, result["mode"]), (0, "reload"))
+        self.assertIn("not confirmed", result["reason"])
+
+    def test_a_proven_reload_clears_the_marker(self):
+        self._write(self.current, BASE)
+        self._failed_reload(changed(storage__gcDelay="1h"))
+        self._write(self.candidate, changed(storage__gcDelay="1h"))
+        with mock.patch.object(zca, "main_pid", return_value=4242), \
+                mock.patch.object(zca, "watch_alive", return_value=True), \
+                mock.patch.object(zca, "journal_cursor", return_value="c"), \
+                mock.patch.object(zca, "journal_messages", return_value=[zca.MSG_CHANGED, zca.MSG_LOADED]), \
+                mock.patch.object(zca, "http_alive", return_value=True), \
+                mock.patch.object(zca.time, "sleep"):
+            rc, result = self._run("--wait", "2", "--settle", "0")
+        self.assertEqual((rc, result["mode"]), (0, "reload"))
+        self.assertFalse(os.path.exists(self.current + ".unconfirmed"))
 
     def test_reload_without_a_loaded_line_is_not_proven(self):
         self._write(self.current, BASE)

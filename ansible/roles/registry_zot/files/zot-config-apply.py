@@ -165,6 +165,16 @@ def write_atomic(path, data, like=None):
         raise
 
 
+def _touch_marker(path):
+    """Root-only marker of an apply that is not proven yet (no secrets in it)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, f"{int(time.time())}\n".encode())
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _run(*cmd):
     return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
 
@@ -258,6 +268,11 @@ def main(argv=None):
             current = json.loads(fh.read())
 
     mode, paths, reason = classify(current, candidate)
+    # An earlier apply that was never proven (failed reload, or the helper was killed mid-apply) leaves this marker.
+    # Disk equality is then NOT convergence: zot may still run an older config, so re-prove the file on disk.
+    marker = args.current + ".unconfirmed"
+    if os.path.exists(marker) and mode == "none":
+        mode, reason = "reload", "a previous apply was not confirmed; re-proving the config on disk"
     if args.dry_run:
         if mode == "reload":
             pid = main_pid(args.unit)
@@ -267,16 +282,25 @@ def main(argv=None):
         print(json.dumps({"mode": mode, "paths": paths, "reason": reason, "dry_run": True}))
         return 0
     if mode == "reload":
+        with open(args.current, "rb") as fh:
+            previous = fh.read()
+        _touch_marker(marker)
         ok, why = apply_reload(args, data)
         if ok is None:  # the watch is gone: a restart is the only way to apply it
             mode, reason = "restart", why
         elif not ok:
-            print(json.dumps({"mode": "reload", "paths": paths, "reason": why}))
+            # Put the previous bytes back so the file again matches what zot most likely runs, and keep the marker:
+            # the next run must not mistake disk equality for convergence.
+            write_in_place(args.current, previous)
+            print(json.dumps({"mode": "reload", "paths": paths,
+                              "reason": why + "; previous config restored on disk, marker kept"}))
             return 2
         else:
             reason = why
     if mode == "restart":
         write_atomic(args.current, data, like=args.current if current is not None else args.candidate)
+    if mode in ("reload", "restart") and os.path.exists(marker):
+        os.unlink(marker)  # proven reload, or the role's restart loads exactly this file
     os.unlink(args.candidate)
     print(json.dumps({"mode": mode, "paths": paths, "reason": reason}))
     return 0
