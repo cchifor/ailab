@@ -397,15 +397,22 @@ gitea_runner_fstrim_timer: gitea-runner-fstrim.timer
 # Night window, HH:MM UTC (quoted: YAML 1.1 reads an unquoted 01:50 as the number 110). The timer starts
 # at *_window_start; the script trims only inside the window, checked before every slice. Override per
 # host (host_vars/ci-runner-N.yml) so runners on the same Proxmox node never trim at the same time.
+# Every window ENDS by 05:25: a slice begun just before the end runs past it, and trimming stops by 05:30.
 gitea_runner_fstrim_window_start: "00:00"
-gitea_runner_fstrim_window_end: "05:30"
+gitea_runner_fstrim_window_end: "05:25"
+# Weekdays the window may run, by the day it STARTS (UTC; 1-7 = Mon-Sun, or mon..sun), checked before
+# every slice. A time window cannot keep a runner off a slot something else holds for an unbounded time:
+# ci-runner-9 skips Sunday, when ai-node1's registry LXC trim runs from 03:30 (host_vars/ci-runner-9.yml).
+gitea_runner_fstrim_days: [mon, tue, wed, thu, fri, sat, sun]
 # GiB per slice, rounded up to whole ext4 block groups (128 MiB here). Small on purpose: a job that starts
 # during a slice shares the drive with that one slice only (~40 s at ~19 s/GB).
 gitea_runner_fstrim_chunk_gb: 2
 # GiB of the filesystem covered per run, never exceeded (the last slice is cut to the budget left, in
-# whole groups). Sized for the per-host windows (1h30-1h45): 64 slices x (~41 s of TRIM + the pause) is
-# ~65 min, leaving 25-40 min for job waits. A 250 GB root takes two nights per pass.
-gitea_runner_fstrim_max_gb_per_run: 128
+# whole groups). Sized for the shortest window, ci-runner-9's 70 min: 48 slices x (~41 s of TRIM at
+# ~19 s/GB + the 20 s pause + 2 s of idle confirmation) is ~50 min (~54 min at the measured worst, 23 s per
+# GiB), leaving the rest for job waits. A 250 GB root takes three nights per pass. tests/test-fstrim-
+# chunked.sh checks that this fits every host's window.
+gitea_runner_fstrim_max_gb_per_run: 96
 gitea_runner_fstrim_pause_s: 20
 # The longest single wait for a running job (checked before each slice) before giving up until the next
 # night. The window closing also ends a wait.

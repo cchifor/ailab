@@ -15,8 +15,9 @@
 # CHUNK_GB rounded up to whole block groups (ext4 keeps the trimmed flag per group), trimmed with
 #   fstrim -v -m 64K -o <offset> -l <length> <mnt>
 # The -m is a CONSTANT on purpose: ext4 retrims every flagged group when -m is smaller than the last one.
-# Before EACH slice, in this order: the stop file, the night window (UTC, may wrap midnight), and the job
-# gate; then the stop file and the window once more, immediately before the FITRIM. After each slice the
+# Before EACH slice, in this order: the stop file, the night window (UTC, may wrap midnight), the day gate
+# (DAYS, by the weekday the window started), and the job gate; then the stop file, the window and the day
+# once more, immediately before the FITRIM. After each slice the
 # byte offset (cursor) is persisted durably, so a run that stops anywhere resumes there next night; at
 # the end of the filesystem it wraps to 0 and counts a completed pass.
 # A run ends when the whole filesystem has been covered once, when less than one block group of the
@@ -30,8 +31,8 @@
 # pool reclaimed them is not visible from the guest: check `lvs` on the Proxmox node.
 #
 # Exit codes:
-#   0   done: the cap or a full pass reached, the window closed, a job outlasted BUSY_WAIT_MAX_S, or
-#       the stop file is present
+#   0   done: the cap or a full pass reached, the window closed, not a night in DAYS, a job outlasted
+#       BUSY_WAIT_MAX_S, or the stop file is present
 #   1   MNT is not a mount point, not ext4, or its geometry is unreadable; or the lock file cannot be opened
 #   2   invalid settings
 #   5   an fstrim failed (the cursor stays at that slice)
@@ -48,9 +49,12 @@ ENV_FILE="${GITEA_FSTRIM_ENV_FILE:-/etc/gitea-runner-fstrim.env}"
 # templates/gitea-runner-fstrim.env.j2); tests/test-fstrim-chunked.sh checks that.
 SERVICE="${GITEA_RUNNER_SERVICE:-gitea-act-runner.service}"
 WINDOW_START="${GITEA_FSTRIM_WINDOW_START:-00:00}"      # HH:MM UTC; the run trims only inside the window
-WINDOW_END="${GITEA_FSTRIM_WINDOW_END:-05:30}"          # exclusive; END < START wraps midnight
+WINDOW_END="${GITEA_FSTRIM_WINDOW_END:-05:25}"          # exclusive; END < START wraps midnight
+# Weekdays the window may run, keyed on the day the window STARTS (UTC): 1-7 = Mon-Sun, or mon..sun,
+# separated by spaces or commas. A night not listed trims nothing.
+DAYS="${GITEA_FSTRIM_DAYS:-mon tue wed thu fri sat sun}"
 CHUNK_GB="${GITEA_FSTRIM_CHUNK_GB:-2}"                  # GiB per slice, rounded up to whole block groups
-MAX_GB_PER_RUN="${GITEA_FSTRIM_MAX_GB_PER_RUN:-128}"    # GiB of the filesystem covered per run
+MAX_GB_PER_RUN="${GITEA_FSTRIM_MAX_GB_PER_RUN:-96}"     # GiB of the filesystem covered per run
 PAUSE_S="${GITEA_FSTRIM_PAUSE_S:-20}"                   # seconds between slices
 BUSY_WAIT_MAX_S="${GITEA_FSTRIM_BUSY_WAIT_MAX_S:-1800}" # give up for the night after one job wait this long
 TEXTFILE_DIR="${GITEA_FSTRIM_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
@@ -128,6 +132,17 @@ in_window() { # now, as UTC minutes since midnight, in [START, END), wrapping mi
   if [ "$ws" -lt "$we" ]; then [ "$now" -ge "$ws" ] && [ "$now" -lt "$we" ]
   else [ "$now" -ge "$ws" ] || [ "$now" -lt "$we" ]; fi
 }
+# The day gate. A time window alone cannot keep a runner off a slot something else holds for an unbounded
+# time: ai-node1's weekly registry LXC trim starts Sunday 03:30-03:45 and can run long after (it waits out
+# IO pressure per chunk), so ci-runner-9 skips Sundays. Keyed on the ISO weekday (1 = Mon) of the night the
+# window STARTED, UTC: in the after-midnight part of a window that wraps, that is yesterday.
+start_dow() {
+  local t day
+  t="$(now_s)"; day=$(( t / 86400 ))
+  [ "$ws" -gt "$we" ] && [ $(( (t % 86400) / 60 )) -lt "$we" ] && day=$(( day - 1 ))
+  echo $(( (day + 3) % 7 + 1 )) # 1970-01-01, day 0, was a Thursday (4)
+}
+day_ok() { case "$days" in *" $(start_dow) "*) return 0 ;; esac; return 1; }
 
 # Job gate. MIRRORS any_job_running()/idle_confirmed() in gitea-runner-cleanup.sh, deliberately: the
 # same signal (act_runner spawns each job's step processes as children of its MainPID, so "MainPID has
@@ -189,6 +204,19 @@ hhmm "$WINDOW_START" || finish 2 invalid "invalid WINDOW_START='$WINDOW_START' (
 hhmm "$WINDOW_END" || finish 2 invalid "invalid WINDOW_END='$WINDOW_END' (HH:MM, UTC)"
 ws="$(hm_min "$WINDOW_START")"; we="$(hm_min "$WINDOW_END")"
 [ "$ws" -ne "$we" ] || finish 2 invalid "WINDOW_START and WINDOW_END are both $WINDOW_START (an empty window)"
+day_num() {
+  case "${1,,}" in
+    1 | mon) echo 1 ;; 2 | tue) echo 2 ;; 3 | wed) echo 3 ;; 4 | thu) echo 4 ;;
+    5 | fri) echo 5 ;; 6 | sat) echo 6 ;; 7 | sun) echo 7 ;; *) return 1 ;;
+  esac
+}
+days=" "
+read -ra day_words <<< "${DAYS//,/ }"
+for d in "${day_words[@]}"; do
+  n="$(day_num "$d")" || finish 2 invalid "invalid DAYS='$DAYS' ('$d': use 1-7 for Mon-Sun, or mon..sun)"
+  days="$days$n "
+done
+[ "$days" != " " ] || finish 2 invalid "DAYS='$DAYS' lists no day"
 
 # --- one run at a time (a hand run must not double the TRIM load of the timer's run) ------------------
 exec 9>"$LOCK_FILE" || finish 1 lock "cannot open lock file $LOCK_FILE"
@@ -235,11 +263,13 @@ while :; do
   [ "$len" -gt $(( size - range )) ] && len=$(( size - range ))
   stopped && finish 0 stopped "stop file $STOP_FILE present"
   in_window || finish 0 window "outside the window $WINDOW_START-$WINDOW_END UTC"
+  day_ok || finish 0 day "this window started on weekday $(start_dow), not one of DAYS='$DAYS'"
   wait_idle
   # Again, IMMEDIATELY before the FITRIM: a successful idle confirmation takes seconds, and the window
   # can close or a stop request arrive during it.
   stopped && finish 0 stopped "stop file $STOP_FILE present (appeared while confirming idle)"
   in_window || finish 0 window "the window $WINDOW_START-$WINDOW_END UTC closed while confirming idle"
+  day_ok || finish 0 day "this window started on weekday $(start_dow), not one of DAYS='$DAYS'"
   if ! run_child fstrim -v -m "$MINLEN" -o "$off" -l "$len" "$MNT" > "$outf" 2>&1; then
     finish 5 fstrim_failed "fstrim failed at off=$off len=$len: $(cat "$outf" 2>/dev/null)"
   fi

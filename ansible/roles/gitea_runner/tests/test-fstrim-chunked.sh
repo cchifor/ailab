@@ -8,12 +8,13 @@
 # - every block of the fs is covered, from ext4's geometry, in slices of whole block groups, with -m 64K;
 # - progress persists per slice (fsynced: file, then directory), resumes, wraps at the end and counts passes;
 # - nothing is trimmed outside the window (also one that wraps midnight, and also when the idle confirmation
-#   ends past it), beyond the cap (slices are cut to it), or while a job runs (the cleanup's act_runner
-#   signal), and a long job ends the night's run;
+#   ends past it), on a night not in DAYS (by the weekday the window started), beyond the cap (slices are
+#   cut to it), or while a job runs (the cleanup's act_runner signal), and a long job ends the night's run;
 # - the lock, the stop file (also one that appears during the idle confirmation), bad settings and a
 #   non-ext4 fs stop it before any trim;
 # - the beacon carries the run's numbers and why it ended;
-# - the per-host windows never overlap on a node, nor the registry trim's slot on ai-node1.
+# - the per-host schedule: windows end by 05:25, never overlap on a node, fit the cap, and no window on
+#   the registry LXC's node runs on its trim's night after it may start.
 #
 # Run: bash ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh   (Linux; needs python3 + PyYAML)
 set -u
@@ -113,7 +114,9 @@ chmod +x "$BIN"/*
 
 GiB=1073741824
 SIZE=$(( 9 * GiB + 64 * 1048576 ))   # 9 GiB + 64 MiB of ext4 blocks: the last 2 GiB slice is short
-at() { "$REAL_DATE" -u -d "2026-11-18 $1" +%s > "$CTL/clock"; }   # set the fake clock (UTC)
+# Set the fake clock (UTC): at <HH:MM:SS> [<date>]. The default date, 2026-11-18, is a Wednesday;
+# 2026-11-20 is a Friday, -21 a Saturday, -22 a Sunday, -23 a Monday.
+at() { "$REAL_DATE" -u -d "${2:-2026-11-18} $1" +%s > "$CTL/clock"; }
 new_case() {
   export CTL="$ROOT/ctl.$1"; rm -rf "$CTL"; mkdir -p "$CTL/state" "$CTL/textfile"
   echo ext4 > "$CTL/fstype"
@@ -265,6 +268,32 @@ eq "MainPID 0: pgrep is never asked about pid 0" 0 "$(cat "$CTL/pgrep_n" 2>/dev/
 new_case busyclose; at 05:29:50; echo busy > "$CTL/pgrep_after"; run GITEA_FSTRIM_BUSY_WAIT_MAX_S=1800
 eq "the window closing ends a job wait" window "$(reason)"
 
+echo "== the day gate: DAYS, keyed on the weekday the window STARTED =="
+NOSUN="GITEA_FSTRIM_DAYS=mon tue wed thu fri sat"
+new_case sunday; at 04:20:00 2026-11-22; run "$NOSUN" GITEA_FSTRIM_WINDOW_START=04:15 GITEA_FSTRIM_WINDOW_END=05:25
+eq "a Sunday night not in DAYS: exit 0" 0 "$(rc)"
+eq "a Sunday night not in DAYS: nothing trimmed" 0 "$(calls fstrim_calls)"
+eq "a Sunday night not in DAYS: reason" day "$(reason)"
+new_case monday; at 04:20:00 2026-11-23; run "$NOSUN" GITEA_FSTRIM_WINDOW_START=04:15 GITEA_FSTRIM_WINDOW_END=05:25
+eq "the Monday night after it trims" 5 "$(calls fstrim_calls)"
+for spec in "1,2,3,4,5,6" "Mon, TUE,wed thu,Fri SAT"; do
+  new_case "daysform$spec"; at 04:20:00 2026-11-22; run "GITEA_FSTRIM_DAYS=$spec"
+  eq "DAYS='$spec' (numbers or names, any case, commas or spaces): no Sunday" day "$(reason)"
+done
+new_case dayswed; at 00:10:00; run "GITEA_FSTRIM_DAYS=3"
+eq "DAYS=3 on a Wednesday trims" 5 "$(calls fstrim_calls)"
+# A window that wraps midnight belongs to the night it STARTED: with DAYS=sat, 23:30-01:00 runs from
+# Saturday 23:30 to Sunday 01:00, and not from Sunday 23:30 or in the small hours of Saturday.
+WRAP="GITEA_FSTRIM_WINDOW_START=23:30 GITEA_FSTRIM_WINDOW_END=01:00"
+for c in "23:45:00 2026-11-21 5 Saturday-23:45" "00:30:00 2026-11-22 5 Sunday-00:30-after-a-Saturday-start" \
+         "23:45:00 2026-11-22 0 Sunday-23:45" "00:30:00 2026-11-21 0 Saturday-00:30-after-a-Friday-start"; do
+  set -- $c
+  new_case "wrapday$4"; at "$1" "$2"; run GITEA_FSTRIM_DAYS=sat $WRAP
+  eq "DAYS=sat, window 23:30-01:00, ${4//-/ }: slices" "$3" "$(calls fstrim_calls)"
+done
+new_case daymid; at 23:59:59 2026-11-21; run GITEA_FSTRIM_DAYS=sat $WRAP GITEA_FSTRIM_MAX_GB_PER_RUN=2
+eq "DAYS=sat: an idle confirmation that crosses into Sunday stays on Saturday's night" 1 "$(calls fstrim_calls)"
+
 echo "== the stop file =="
 new_case stop; touch "$CTL/stop"; run
 eq "present at start: exit 0" 0 "$(rc)"
@@ -297,8 +326,9 @@ echo "== invalid settings: exit 2 before anything is read or trimmed =="
 for b in GITEA_FSTRIM_CHUNK_GB=0 GITEA_FSTRIM_CHUNK_GB=x GITEA_FSTRIM_CHUNK_GB=65 GITEA_FSTRIM_MAX_GB_PER_RUN=0 \
          GITEA_FSTRIM_MAX_GB_PER_RUN=1 GITEA_FSTRIM_PAUSE_S=-1 GITEA_FSTRIM_PAUSE_S=1.5 GITEA_FSTRIM_BUSY_WAIT_MAX_S=abc \
          GITEA_FSTRIM_WINDOW_START=24:00 GITEA_FSTRIM_WINDOW_START=5:30 GITEA_FSTRIM_WINDOW_END=05:60 \
-         "GITEA_FSTRIM_WINDOW_END=00:00"; do
-  new_case "set${b#GITEA_FSTRIM_}"; run "$b"
+         "GITEA_FSTRIM_WINDOW_END=00:00" GITEA_FSTRIM_DAYS=8 GITEA_FSTRIM_DAYS=0 "GITEA_FSTRIM_DAYS=mon funday" \
+         "GITEA_FSTRIM_DAYS=, ," "GITEA_FSTRIM_DAYS=*"; do
+  new_case "set$(printf '%s' "${b#GITEA_FSTRIM_}" | tr -c 'A-Za-z0-9_=' '_')"; run "$b"
   eq "$b -> exit 2" 2 "$(rc)"
   eq "$b -> nothing trimmed, geometry not read" "0 0" "$(calls fstrim_calls) $(calls tune2fs_calls)"
   eq "$b -> reason" invalid "$(reason)"
@@ -381,14 +411,17 @@ eq "no temp files left behind" 1 "$(ls "$CTL/textfile" | wc -l | tr -d ' ')"
 
 echo "== the script's defaults equal the role defaults that ship (as test-cleanup.sh [M] does) =="
 # Every case above runs without the env file, so the script's fallbacks are what they test. Each line of
-# the env template must be exactly one {{ var }} (optionally quoted), and its role default must equal the
-# script's ${NAME:-default}.
+# the env template must be exactly one {{ var }} or {{ var | join(' ') }} (optionally quoted), and its
+# role default, rendered the same way, must equal the script's ${NAME:-default}.
 DEFAULTS_YML="$ROLE/defaults/main.yml"; ENV_TMPL="$ROLE/templates/gitea-runner-fstrim.env.j2"
-role_default() { python3 - "$DEFAULTS_YML" "$1" <<'PY'
+role_default() { python3 - "$DEFAULTS_YML" "$1" "${2:-}" <<'PY'
 import sys, yaml
 d = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 v = d.get(sys.argv[2])
-print("" if v is None else v)
+if sys.argv[3] == "join":
+    print(" ".join(map(str, v)) if isinstance(v, list) else "NOT-A-LIST")
+else:
+    print("" if v is None else v)
 PY
 }
 script_default() { sed -n "s/.*\${$1:-\([^}]*\)}.*/\1/p" "$SCRIPT" | head -1; }
@@ -396,12 +429,15 @@ checked=0
 while IFS= read -r ln; do
   case "$ln" in \#* | '') continue ;; esac
   name="${ln%%=*}"; val="${ln#*=}"; val="${val#\"}"; val="${val%\"}"
-  var="$(printf '%s' "$val" | sed -n 's/^{{ \([a-z0-9_]*\) }}$/\1/p')"
+  var="$(printf '%s' "$val" | sed -n 's/^{{ \([a-z0-9_]*\) }}$/\1/p')"; how=""
+  if [ -z "$var" ]; then
+    var="$(printf '%s' "$val" | sed -n "s/^{{ \([a-z0-9_]*\) | join(' ') }}\$/\1/p")"; how="join"
+  fi
   checked=$((checked + 1))
-  if [ -z "$var" ]; then bad "M: $name renders '$val', not a single {{ var }}"; continue; fi
-  eq "M: $name = $var" "$(role_default "$var")" "$(script_default "$name")"
+  if [ -z "$var" ]; then bad "M: $name renders '$val', not a single {{ var }} or {{ var | join(' ') }}"; continue; fi
+  eq "M: $name = $var${how:+ | $how}" "$(role_default "$var" "$how")" "$(script_default "$name")"
 done < "$ENV_TMPL"
-[ "$checked" -ge 8 ] && ok "M: $checked knobs checked" || bad "M: only $checked knobs found in $ENV_TMPL"
+[ "$checked" -ge 9 ] && ok "M: $checked knobs checked" || bad "M: only $checked knobs found in $ENV_TMPL"
 eq "M: the env file path" "$(role_default gitea_runner_fstrim_env)" "$(script_default GITEA_FSTRIM_ENV_FILE)"
 eq "M: the role ships both switches off" "False False" \
   "$(role_default gitea_runner_fstrim_enabled) $(role_default gitea_runner_root_nodiscard)"
@@ -447,14 +483,19 @@ while IFS= read -r l; do
   case "$l" in "ok "*) ok "fstab: ${l#ok }" ;; *) bad "fstab: ${l#BAD }" ;; esac
 done <<< "$out"
 
-echo "== the per-host windows: inside 00:00-06:00 UTC, never overlapping on one Proxmox node, clear of the registry trim =="
-# The node of each runner comes from the runners' tofu (kubernetes/infra/runners/variables.tf). ai-node1 also
-# runs the registry LXC's weekly trim, a hand-installed timer defined in docs/runbooks/registry-cache.md: its
-# start window (OnCalendar + RandomizedDelaySec), with 15 min of margin before and 30 after, counts as an
-# occupied slot on EVERY day (the runners avoid it by schedule, not by day-of-week logic). A runner's window
-# must end 5 min before the next slot starts: a slice begun just before its END runs past it.
+echo "== the per-host schedule: windows end by 05:25, never overlap on a node, fit the cap, and miss the registry trim =="
+# The node of each runner comes from the runners' tofu (kubernetes/infra/runners/variables.tf).
+# - A slice begun just before a window's END runs past it, so each window has a 5-min tail: the tail must
+#   stay within 05:30 UTC, and before the next window on the same node.
+# - A capped run must fit its own window: the cap at 23 s per GiB (the measured worst) plus, per slice,
+#   the pause and 2 s of idle confirmation.
+# - The registry LXC's weekly trim is a hand-installed timer defined in docs/runbooks/registry-cache.md (its
+#   node from that section's heading). It starts at OnCalendar + up to RandomizedDelaySec and waits out IO
+#   pressure per chunk, so it may still run at any later time that day: from 15 min before its start to
+#   midnight, on its weekday, it conflicts with every window on its node that runs that night (by the
+#   window's start day, gitea_runner_fstrim_days) and has not ended, tail included, before then.
 out="$(python3 - "$REPO" <<'PY'
-import pathlib, re, sys, yaml
+import math, pathlib, re, sys, yaml
 repo = pathlib.Path(sys.argv[1])
 tf = (repo / "kubernetes/infra/runners/variables.tf").read_text(encoding="utf-8")
 nodes = dict(re.findall(r'^\s*"(ci-runner-\d+)"\s*=\s*\{\s*node_name\s*=\s*"([^"]+)"', tf, re.M))
@@ -462,32 +503,54 @@ inv = (repo / "inventory/hosts.yml").read_text(encoding="utf-8")
 group = re.search(r"^    gitea_runners:\n(.*?)(?=^    \S)", inv, re.M | re.S).group(1)
 hosts = re.findall(r"^        (ci-runner-\d+):", group, re.M)
 print(("ok " if len(hosts) >= 8 else "BAD ") + "gitea_runners hosts found: " + " ".join(hosts))
+load = lambda p: (yaml.safe_load((repo / p).read_text(encoding="utf-8")) or {}) if (repo / p).exists() else {}
+base = dict(load("ansible/roles/gitea_runner/defaults/main.yml")); base.update(load("ansible/group_vars/gitea_runners.yml"))
+NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+def daynum(x):
+    s = str(x).strip().lower()
+    return int(s) if s in ("1", "2", "3", "4", "5", "6", "7") else (NAMES.index(s) + 1 if s in NAMES else None)
 mins = lambda s: int(s[:2]) * 60 + int(s[3:])
+hm = lambda m: f"{m // 60:02d}:{m % 60:02d}"
+TAIL, CUTOFF = 5, mins("05:30")
 spans = {}
 for h in hosts:
-    hv = repo / "ansible/host_vars" / (h + ".yml")
-    v = yaml.safe_load(hv.read_text(encoding="utf-8")) if hv.exists() else {}
+    v = dict(base); v.update(load(f"ansible/host_vars/{h}.yml"))
     s, e = v.get("gitea_runner_fstrim_window_start"), v.get("gitea_runner_fstrim_window_end")
     good = isinstance(s, str) and isinstance(e, str) and re.fullmatch(r"\d\d:\d\d", s) and re.fullmatch(r"\d\d:\d\d", e) \
-        and 0 <= mins(s) < mins(e) <= mins("06:00")
-    print(("ok " if good else "BAD ") + f"{h} window {s!r}-{e!r} is a quoted HH:MM span inside 00:00-06:00")
+        and 0 <= mins(s) < mins(e) and mins(e) + TAIL <= CUTOFF
+    print(("ok " if good else "BAD ") + f"{h} window {s!r}-{e!r} is a quoted HH:MM span ending by 05:25 (its tail by 05:30)")
     print(("ok " if h in nodes else "BAD ") + f"{h} has a node in variables.tf ({nodes.get(h)})")
-    if good and h in nodes:
-        spans.setdefault(nodes[h], []).append((mins(s), mins(e), h, True))
-reg = (repo / "docs/runbooks/registry-cache.md").read_text(encoding="utf-8")
-blk = reg[reg.find("registry-lxc-fstrim.timer <<"):] if "registry-lxc-fstrim.timer <<" in reg else ""
-cal = re.search(r"^OnCalendar=\S+ \*-\*-\* (\d\d):(\d\d)(?::\d\d)? UTC$", blk, re.M)
-dly = re.search(r"^RandomizedDelaySec=(\d+)min$", blk, re.M)
-print(("ok " if cal and dly else "BAD ") + "the registry trim timer (OnCalendar, RandomizedDelaySec) is read from registry-cache.md")
-if cal and dly:
-    rs = int(cal.group(1)) * 60 + int(cal.group(2))
-    slot = (rs - 15, rs + int(dly.group(1)) + 30, "registry-lxc-fstrim", False)
-    print(f"ok ai-node1 keeps {slot[0] // 60:02d}:{slot[0] % 60:02d}-{slot[1] // 60:02d}:{slot[1] % 60:02d} free for the registry trim")
-    spans.setdefault("ai-node1", []).append(slot)
+    raw = v.get("gitea_runner_fstrim_days")
+    days = [daynum(d) for d in raw] if isinstance(raw, list) else []
+    okd = bool(days) and None not in days
+    print(("ok " if okd else "BAD ") + f"{h} days {raw} are weekdays")
+    if not (good and okd and h in nodes):
+        continue
+    cap, chunk, pause = (int(v[k]) for k in ("gitea_runner_fstrim_max_gb_per_run", "gitea_runner_fstrim_chunk_gb", "gitea_runner_fstrim_pause_s"))
+    need, have = cap * 23 + math.ceil(cap / chunk) * (pause + 2), (mins(e) - mins(s)) * 60
+    print(("ok " if need <= have else "BAD ") + f"{h}: a capped run ({cap} GiB, {need // 60} min at worst) fits its {have // 60}-min window")
+    spans.setdefault(nodes[h], []).append((mins(s), mins(e), h, set(days)))
 for node, ws in sorted(spans.items()):
     ws.sort()
-    clash = [f"{a[2]}/{b[2]}" for i, a in enumerate(ws) for b in ws[i + 1:] if b[0] < a[1] + (5 if a[3] else 0)]
-    print(("ok " if not clash else "BAD ") + f"{node}: {' '.join(w[2] for w in ws)} do not overlap {clash or ''}")
+    clash = [f"{a[2]}/{b[2]}" for i, a in enumerate(ws) for b in ws[i + 1:] if b[0] < a[1] + TAIL]
+    print(("ok " if not clash else "BAD ") + f"{node}: {' '.join(w[2] for w in ws)} do not overlap, tails included {clash or ''}")
+reg = (repo / "docs/runbooks/registry-cache.md").read_text(encoding="utf-8")
+sec = re.search(r"^## Thin-volume trim \(weekly, (ai-node\d+)\)$", reg, re.M)
+blk = reg[reg.find("registry-lxc-fstrim.timer <<"):] if "registry-lxc-fstrim.timer <<" in reg else ""
+cal = re.search(r"^OnCalendar=(?:(\w+) )?\*-\*-\* (\d\d):(\d\d)(?::\d\d)? UTC$", blk, re.M)
+dly = re.search(r"^RandomizedDelaySec=(\d+)min$", blk, re.M)
+print(("ok " if sec and cal and dly else "BAD ") + "the registry trim's node, OnCalendar and RandomizedDelaySec are read from registry-cache.md")
+if sec and cal and dly:
+    rnode, rday = sec.group(1), (daynum(cal.group(1)[:3]) if cal.group(1) else None)
+    busy_from = int(cal.group(2)) * 60 + int(cal.group(3)) - 15
+    print(f"ok the registry trim may hold {rnode} from {hm(busy_from)} UTC to midnight on weekday {rday or 'every day'}"
+          f" (starts {cal.group(2)}:{cal.group(3)} + up to {dly.group(1)} min)")
+    for s, e, h, days in spans.get(rnode, []):
+        runs = rday is None or rday in days
+        clear = not runs or e + TAIL <= busy_from
+        why = "does not run that night" if not runs else f"ends, tail included, by {hm(e + TAIL)}"
+        print(("ok " if clear else "BAD ") + f"{h} ({hm(s)}-{hm(e)}) misses the registry trim: "
+              + (why if clear else f"runs on weekday {rday} until {hm(e + TAIL)}, after {hm(busy_from)}"))
 PY
 )" || bad "windows: the python check did not run" "$out"
 while IFS= read -r l; do
