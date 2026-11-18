@@ -86,6 +86,31 @@ secrets. Check mode is not entirely side-effect free: it installs the helper and
 throwaway candidate. The live `config.json` is never touched. Do not run two registry plays at once: the helper
 serializes its own steps, but zot restarts (handlers) run outside its lock.
 
+### Dropping orphaned referrers (`deleteReferrers`)
+
+`registry_zot_strive_delete_referrers_repos` lists the repos whose retention also deletes **orphaned referrers**:
+buildx attestation manifests whose subject image retention already deleted (55-77% of every strive repo's
+manifests on 2026-11-18; they bloat zot's metaDB, which every restart rebuilds). zot v2.1.18's GC deletes a
+referrer when its `subject` is not a TOP-LEVEL `index.json` entry, without recursing into indexes, and without
+consulting `keepTags`. So, for every repo before it goes on the list:
+
+1. Run `scripts/zot-referrer-orphan-check.py <repo>...` on the registry LXC (usage in its header). It must report
+   `"safe": true` (`nested_not_top == 0`, `tagged_orphans == 0`); it exits 1 otherwise.
+2. Note one kept tag's index digest and its platform manifests, and their `GET /v2/<repo>/referrers/<digest>`.
+3. Apply (a reload, no restart). After the next GC cycle (`gcInterval` 1h), the orphan count should drop. Step 2's
+   referrers must be unchanged. Watch, per 1-min sample:
+   - ai-node1 host writes, `rate(node_disk_written_bytes_total{device="nvme0n1"}[1m])`;
+   - cp1 WAL fsync p99.
+   **Abort when** node1 writes stay above 150 MiB/s for 3 consecutive samples, or cp1 fsync p99 is above 1 s for 2
+   consecutive samples.
+   **Abort** = remove the repo from the list and apply. Then VERIFY that the reload took: the play's `Report how the
+   zot config was applied` shows `mode: reload`, and the live config.json no longer lists the repo. zot only stops
+   between GC passes, so a pass already running finishes its repo. If the disabling apply fails or is `blocked` (the
+   helper then restores the previous bytes, i.e. the canary stays ENABLED), **escalate**: `systemctl stop zot` on
+   the LXC. That is an outage, but it ends GC at once. Then apply with `-e registry_zot_config_allow_restart=true`
+   in a quiet window. Deletions already done are orphans and cannot be restored.
+4. Widen to `["strive/**"]` only after a clean canary.
+
 **Everything else the role converges still restarts zot**: htpasswd lines, certs, sync credentials, the unit and
 the binary. Batch those changes into one apply, in a quiet window.
 

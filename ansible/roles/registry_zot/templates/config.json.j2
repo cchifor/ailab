@@ -1,3 +1,13 @@
+{#- The strive/** keepTags, shared by strive/** and the deleteReferrers canary below so the two can never drift. #}
+{%- macro strive_keep_tags() -%}
+          "keepTags": [
+            { "patterns": ["^latest$"] },
+            { "patterns": ["^ailab$"] },
+            { "patterns": ["^ailab-prev\\d*$"] },
+            { "patterns": ["^sha-.*"], "mostRecentlyPushedCount": {{ registry_zot_strive_keep_recent }} },
+            { "patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"] }
+          ]
+{%- endmacro %}
 {
   "distSpecVersion": "1.1.0",
   "storage": {
@@ -19,16 +29,25 @@
             { "patterns": ["^ci-[0-9a-f]{40}$"], "mostRecentlyPushedCount": {{ registry_zot_strive_ci_build_keep_recent }}, "pushedWithin": {{ registry_zot_strive_ci_build_keep_within | to_json }} }
           ]
         },
+{%- set strive_referrers_all = 'strive/**' in registry_zot_strive_delete_referrers_repos %}
+{%- if registry_zot_strive_delete_referrers_repos | length > 0 and not strive_referrers_all %}
+{#- deleteReferrers canary (defaults: registry_zot_strive_delete_referrers_repos): strive/**'s exact rules plus
+    deleteReferrers, listed after strive/ci-build/** and before strive/**, so it claims only the listed repos.
+    Widening to "strive/**" instead sets deleteReferrers on the strive/** policy itself (no canary). #}
+        {
+          "repositories": {{ registry_zot_strive_delete_referrers_repos | to_json }},
+          "deleteUntagged": true,
+          "deleteReferrers": true,
+          {{ strive_keep_tags() }}
+        },
+{%- endif %}
         {
           "repositories": ["strive/**"],
           "deleteUntagged": true,
-          "keepTags": [
-            { "patterns": ["^latest$"] },
-            { "patterns": ["^ailab$"] },
-            { "patterns": ["^ailab-prev\\d*$"] },
-            { "patterns": ["^sha-.*"], "mostRecentlyPushedCount": {{ registry_zot_strive_keep_recent }} },
-            { "patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"] }
-          ]
+{%- if strive_referrers_all %}
+          "deleteReferrers": true,
+{%- endif %}
+          {{ strive_keep_tags() }}
         },
         {
           "repositories": ["agentforge/**"],
