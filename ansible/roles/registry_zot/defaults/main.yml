@@ -185,6 +185,15 @@ registry_zot_config_allow_restart: false
 # causing registry-404 ImagePullBackOff on every reschedule (2026-06-28 incident).
 registry_zot_strive_keep_recent: 100
 
+# Repos (zot globs) whose retention also drops ORPHANED REFERRERS: buildx attestation manifests whose subject
+# image retention already deleted (deleteReferrers; zot GC removes a referrer whose subject is no longer in the
+# repo's index.json, pkg/storage/gc/gc.go removeReferrer). On 2026-11-18 they were 55-77% of every strive repo's
+# manifests (strive/web 1246 of 2300) and dominate zot's metaDB, which every restart rebuilds (19 min). Each listed
+# glob gets its own policy, rendered BEFORE strive/** with the SAME keepTags (one macro) plus deleteReferrers, so
+# only referrers change. Canary first (one repo; measure one GC cycle: zot writes, cp1 fsync), then widen to
+# ["strive/**"]. The change is reload-safe (files/zot-config-apply.py): no restart.
+registry_zot_strive_delete_referrers_repos: ["strive/web"]
+
 # strive/ci-build/** holds cchifor/platform's per-commit e2e images (`ci-<40-hex commit>`, pushed by
 # strive-ci-push above). Its policy is listed BEFORE strive/** in config.json.j2: zot applies only
 # the FIRST policy whose repositories glob matches a repo, and under strive/** a ci- tag matches no
