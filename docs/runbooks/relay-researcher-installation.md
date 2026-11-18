@@ -826,6 +826,32 @@ so this one takeover is as slow as a T1 one; later ones are back to 22-31 s. Rea
 `15` and `{"leaseDurationSeconds":15,"renewDeadlineSeconds":10,"retryPeriodSeconds":2}`. Run the
 committed-state tests and the reproduction on the revert, as for any change to these files (I5).
 
+**Order for a timing change.** `check` compares the committed config with the overlaid bundle. So when
+the overlay itself changes (introducing T1, or reverting it), run `prepare` → `import --chart` →
+`check --chart` → the 4-argument reproduce. For any later update under an unchanged overlay, including
+an agent-only update, the I5 order (`check` before `import`) still works.
+
+**Ship gates (operator decision 2026-11-18; all four).**
+1. The agent release that ships with T1 has been reviewed independently, with its image provenance,
+   its reproduction and the chart rendering verified.
+2. Relay's deterministic leadership tests pass at 30/20/2: an 8.2 s stall, the 20 s expiry,
+   delayed and late responses, a stale epoch, mixed 15/30 timings, and 30→15 rollback.
+3. The hub-timeout and alert audits above are complete.
+4. No v0.10.7 regression up to ship time: no leadership loss that v0.10.7 should have survived.
+   A leader-stall loss makes T1 urgent but waives none of gates 1–3.
+
+**After the rollout.** The readbacks above, plus: the Lease shows exactly one transition, and the fence
+UID is unchanged. Hold other changes for 4 h with zero unexpected losses.
+
+**Rollback triggers** (revert the overlay through GitOps; keep the identity and the fence):
+- `lease-taken` or `lease-holder-reused`;
+- a hub epoch conflict or any stale-epoch admission (halt immediately);
+- a config or provenance mismatch;
+- a handover over 60 s while the API is healthy;
+- 24 h of losses not below the v0.10.7 baseline.
+
+Persistent disk stalls alone do not justify a rollback.
+
 ## Qualification stage (owner decision G3)
 
 The enrollment stage ends here. These steps move the slot to the internal TLS endpoints before any

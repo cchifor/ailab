@@ -3,7 +3,9 @@
 Step I5 of `docs/runbooks/relay-researcher-installation.md` commits the two files that
 `scripts/relay-researcher-bundle.py import` wrote from the I4 bundle:
 `kubernetes/apps/relay-researcher/pins/pins.yaml` and `kubernetes/apps/relay-researcher/agent/config.json`.
-Neither is hand-edited. `config.json` is the importer's canonical compact JSON, byte for byte. This
+Neither is hand-edited. `config.json` is the importer's canonical compact JSON, byte for byte. Its
+`leadership` block is the reviewed T1 overlay (`LEADERSHIP_OVERLAY` in `scripts/relay-researcher-bundle.py`),
+which the importer applies over the prepared 15/10/2 after verifying the bundle. This
 table ties every filled value to its source, so the policy can be audited without re-running the
 tools.
 
@@ -31,6 +33,7 @@ Agent-only update (`agentRelease`, owner decisions 2026-11-17 and 2026-11-18): G
 | `config.json` `policy.installation.resourceCeiling`, `maxLeaseSeconds`, `maxLifetimeSeconds`, `allowedEgressDestinations` | 2000m / 4096 MiB / 10240 MiB scratch / 512 processes, 900 s, 28800 s, `[]` | owner decision G4 ("Template and ceilings" in the runbook), from `researcher-installation-definition.json` |
 | `config.json` `policy.installation.allowedRegistries` | `["registry.chifor.me"]` | `researcher-installation-definition.json` |
 | `config.json` `policy.podTiers` | `sandboxed-pod` / `relay-gvisor` | owner decision D2, from the binding's placements |
+| `config.json` `leadership` | `leaseDurationSeconds` 30, `renewDeadlineSeconds` 20, `retryPeriodSeconds` 2 | T1, the operator's decision 2026-11-18 (headless; cross-reviewed). This is `LEADERSHIP_OVERLAY` in `scripts/relay-researcher-bundle.py`, applied by `import` over the runtime-prepared 15/10/2 (`c0fe50f0:packages/infrastructure-agent/installation-preparation.ts:192-196`). The bundle's per-file hashes are verified first, and the policy and binding digests don't cover timing, so they are unchanged. Remove it once the runtime renders timing from the definition |
 
 Reproduce it: the I4 commands in the runbook. The generator's output equals
 `docs/relay-workers/researcher-i4/` (`diff -r` empty), and `import` from the resulting bundle rewrites

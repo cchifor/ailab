@@ -10,8 +10,10 @@ kind: Kustomization
 # only after the operator has read back that stage's containment and denial (runbook step I6).
 #
 # config.json is the expected 31-agent-config.json with OPERATOR-FILLS leaves. The operator replaces
-# it, byte for byte, with the file Relay's scripts/prepare-pod-installation.ts writes for the approved
-# installation (scripts/relay-researcher-bundle.py import does that and nothing else).
+# it with the file Relay's scripts/prepare-pod-installation.ts writes for the approved installation,
+# byte for byte except the reviewed leadership timing (T1: scripts/relay-researcher-bundle.py
+# LEADERSHIP_OVERLAY, 30/20/2 over the prepared 15/10/2). scripts/relay-researcher-bundle.py import
+# does that and nothing else.
 resources:
 - rbac.yaml
 - deployment.yaml
