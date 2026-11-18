@@ -48,6 +48,8 @@ __pycache__/
 Thumbs.db
 *.log
 .venv/
+.relay-agent-pin-*
+.agent-pin-*
 
 # Scratch files written by the codex review dispatcher into the worktree root.
 codex-prompt.txt

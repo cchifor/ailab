@@ -533,6 +533,22 @@ checkout (HEAD = `release.sourceCommit`), the runtime manifest, receipt and imag
 
 **Commands** (one PR; the I4 Relay checkout and the I4 release assets, unchanged):
 
+Use `python3 scripts/relay-researcher-agent-pin.py --agent-assets /operator/agent-release-assets
+--tag vX.Y.Z --gitea-release-id N --relay /path/to/relay --assets /operator/release-assets` to automate
+the local work in steps 1–4 after downloading the three agent assets and reviewing the compatibility
+preconditions above. Put Node 22.21+ on PATH; the tool uses that Relay checkout's `node_modules/.bin/tsx`
+and the bundle check requires helm and PyYAML. It preserves the inputs file's formatting, validates
+the generated binding and import in a temporary copy, and installs changes only after all checks
+pass. It prints the provenance values and exact existing sentences/rows for the manual step 5;
+registry readback remains an operator check. The manual commands below remain the reference.
+The tool refuses a tag older than the current `agentRelease.tag`; re-running the current tag is
+allowed. For an intentional rollback, pass `--allow-downgrade` and review its warning; the agent
+must still be newer than `release.tag`. Step 2 lists which of the three assets were cross-checked
+against `SHA256SUMS`, or `none` when it lists only other release artifacts. Installation stages
+and fsyncs replacements and backups beside their destinations before any atomic replacement.
+On failure it attempts every required restoration; if a restoration fails, the error names the
+affected file and its retained backup for manual recovery.
+
 ```sh
 # 1. The agent release's assets, into a NEW empty directory (private release: your own token).
 #    Record each sha256 and the receipt's publication.image; read the image manifest back from the

@@ -189,7 +189,10 @@ class ReproduceArguments(unittest.TestCase):
             relay = Path(tmp) / "relay"
             (relay / "node_modules/.bin").mkdir(parents=True)
             (relay / "node_modules/.bin/tsx").write_text("", encoding="utf-8")
-            with mock.patch.object(script, "export", export), contextlib.redirect_stdout(io.StringIO()):
+            # Stop after argument validation regardless of whether TMPDIR is inside a git worktree.
+            with mock.patch.object(script, "export", export), \
+                    mock.patch.object(script, "run", side_effect=script.Difference("fixture checkout")), \
+                    contextlib.redirect_stdout(io.StringIO()):
                 try:
                     script.reproduce(relay, Path(tmp), "HEAD", agent_assets)
                 except script.Difference as error:
