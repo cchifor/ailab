@@ -15,7 +15,7 @@ Code references:
 | `rel:` | Relay v0.10.3 `c0fe50f0` | agent, runtime, the journal/budget/policy operator CLIs; the hub except its candidate loader |
 | `rel4:` | Relay v0.10.4 `e77bd09a` (release PR #526, Gitea release v0.10.4) | the hub image: `rel:` plus the fraction-safe candidate loader (§8 G0); worker images stay v0.10.3 |
 | `main:` | Relay `origin/main` `eb9b1f07` (fetched 2026-11-18; E1, the O8 SQL, R7's Secret hold #536 and the composer #533 merged) | the ceremony tools, drivers and converters |
-| `ailab:` | ailab `319fc3b2` | the hub rollout/backup and Flux installation manifests |
+| `ailab:` | ailab `main` `1ec34ae6` (the cited files are unchanged by this runbook) | the hub rollout/backup and Flux installation manifests |
 | `h4:` | `relay-researcher-hub-upgrade.md` at ailab `e5a2f3b9` | File B before H7 |
 
 Pin one driver checkout for the whole campaign and its conversion (`main:scripts/qualification/README.md`:
