@@ -137,14 +137,66 @@
   notify: restart zot
 
 # ---- Registry config + auth ----
-- name: Deploy zot config.json
+# config.json is applied by files/zot-config-apply.py, NOT by a template + `restart zot`: a restart re-parses the
+# whole store before :443 binds again (2026-11-17: 19 min outage, ~265 GB written to ai-node1). When only
+# reload-safe keys change (the helper's RELOADABLE: retention, gcDelay/gcInterval, accessControl rules) it writes
+# the SAME inode zot watches and proves zot reloaded it (journal line, same PID, /v2/ answers); any other change, a
+# first deploy or a detached watch falls back to an atomic replace + `restart zot`. docs/runbooks/registry-cache.md.
+- name: Install the zot config apply helper
+  ansible.builtin.copy:
+    src: zot-config-apply.py
+    dest: /usr/local/lib/zot-config-apply.py
+    owner: root
+    group: root
+    mode: "0755"
+  check_mode: false # the apply step runs it with --dry-run in check mode, so it must exist
+
+- name: Render the zot config candidate
   ansible.builtin.template:
     src: config.json.j2
-    dest: "{{ registry_zot_config_dir }}/config.json"
+    dest: "{{ registry_zot_config_dir }}/config.json.candidate"
     owner: root
     group: "{{ registry_zot_group }}"
     mode: "0640"
   no_log: true # config.json embeds the OIDC client secret — keep it out of --diff / -v output
+  check_mode: false # a candidate beside the live file is harmless; check mode needs it to classify the change
+  changed_when: false # the apply step below reports the real change
+
+- name: Check whether the zot binary is installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/zot
+  register: registry_zot_binary
+
+- name: Validate the zot config candidate (same loader as `zot serve`)
+  ansible.builtin.command:
+    argv: [/usr/local/bin/zot, verify, "{{ registry_zot_config_dir }}/config.json.candidate"]
+  check_mode: false
+  changed_when: false
+  when: registry_zot_binary.stat.exists
+
+- name: Apply the zot config (reload in place when only reload-safe keys changed)
+  ansible.builtin.command:
+    argv: >-
+      {{ ['python3', '/usr/local/lib/zot-config-apply.py',
+          '--current', registry_zot_config_dir ~ '/config.json',
+          '--candidate', registry_zot_config_dir ~ '/config.json.candidate',
+          '--unit', 'zot.service', '--port', registry_zot_port | string]
+         + (['--dry-run'] if ansible_check_mode else []) }}
+  check_mode: false # in check mode the helper only classifies (--dry-run) and writes nothing
+  register: registry_zot_config_apply
+  changed_when: (registry_zot_config_apply.stdout | from_json).mode != 'none'
+  failed_when: registry_zot_config_apply.rc != 0
+
+- name: Report how the zot config was applied
+  ansible.builtin.debug:
+    msg: "zot config: {{ (registry_zot_config_apply.stdout | from_json) }}"
+  when: (registry_zot_config_apply.stdout | from_json).mode != 'none'
+
+- name: Restart zot when the config change is not reload-safe
+  ansible.builtin.debug:
+    msg: "zot config needs a restart: {{ (registry_zot_config_apply.stdout | from_json).reason }}"
+  when: (registry_zot_config_apply.stdout | from_json).mode == 'restart'
+  changed_when: true
   notify: restart zot
 
 - name: Generate bcrypt htpasswd for the push user
