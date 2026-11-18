@@ -355,6 +355,52 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   `gitea_runner_buildkit_heal.prom` (`dangling_record`, `runner_held`, `heal_last_seconds`, `heals_total`);
   alerts **CIRunnerBuildkitDanglingRecord** (1h) and **CIRunnerBuildkitHealRunnerHeld** (30m). Manual
   recipe in Troubleshooting below.
+- **Thin-pool trim** (`gitea-runner-fstrim-chunked.sh`, nightly `gitea-runner-fstrim.timer`; #1857,
+  2026-11-18). On-prem pool only: `gitea_runner_root_nodiscard` and `gitea_runner_fstrim_enabled` are on in
+  `group_vars/gitea_runners.yml`; the cloud runners keep the role defaults (off).
+  - **Why.** Each runner's root is a 250 GB thin LV on its node's local-lvm (64 KiB chunks, discard passed
+    down to the QLC NVMe that etcd shares). The cloud image mounts `/` with online `discard`. Deleting many
+    small files sends discards too small and scattered to free whole chunks, so the thin LV does not
+    shrink, and under `discard` ext4 never clears a group's "trimmed" flag on a free, so `fstrim` trims
+    0 B. Measured 2026-11-18: the cleanup freed ~50 GB inside ci-runner-1 and its thin LV shrank by 1.2 GB.
+    The stock weekly `fstrim.timer` would trim all of `/` in one ~80-min burst (TRIM costs ~19 s/GB here).
+  - **What the role does.** Drops `discard` from the `LABEL=cloudimg-rootfs` fstab entry (every other
+    option kept; `/etc/fstab` backed up) and remounts `/` `nodiscard` live. Stops and **masks**
+    `fstrim.timer`. Installs a timer that starts the script at the host's window start (UTC,
+    `Persistent=false`). The script trims 2 GiB slices (whole ext4 block groups, constant `-m 64K`) over
+    the whole fs from `tune2fs` geometry, at most 128 GiB per run with 20 s between slices, and saves its
+    byte offset after each slice so the next night resumes there. Before every slice it checks the stop
+    file, the window, and the job gate (the cleanup's signal: children of act_runner's MainPID, idle
+    confirmed over 3 reads). It waits for a running job and gives up for the night after 30 min.
+  - **Windows** (`host_vars/ci-runner-N.yml`; runners on one node never overlap; the role default
+    00:00-05:30 is for a runner without one): 00:00-01:45 ci-runner-1/-2/-3, 01:50-03:35 ci-runner-4/-5/-6,
+    03:40-05:25 ci-runner-9/-10. On Sundays ai-node1's registry LXC trim (03:30Z,
+    [registry-cache.md](registry-cache.md), "Thin-volume trim") overlaps ci-runner-9's slot.
+  - **One reboot per runner, once.** A remount does not clear the trimmed flags `discard` left behind; a
+    fresh mount does. Reboot each runner once while idle (the "Restart a daemon" rules below), after the
+    role has removed `discard` from fstab. Done 2026-11-18 for ci-runner-1/-2/-4/-5/-9/-10, still with
+    `discard` in fstab: that cleared their flags, and only groups trimmed between that reboot and the
+    role's remount stay flagged until a later reboot. **ci-runner-3 and ci-runner-6 still need it.** A
+    runner whose cleanup frees space but whose `submitted_bytes` stays near 0 night after night needs it.
+  - **Check it.**
+    - Beacon `gitea_runner_fstrim.prom`: `last_run_seconds`, `submitted_bytes` (what FITRIM reported, i.e.
+      submitted to the host; whether the thin pool reclaimed it is not visible from the guest),
+      `range_bytes`, `cursor_bytes`, `fs_bytes`, `passes_total`, `exit_code`, `exit_reason{reason=…}`.
+    - Reasons: `cap`, `full` (whole fs covered), `window`, `busy`, `stopped` (all exit 0); `unsupported`
+      or `lock` (1), `invalid` (2), `fstrim_failed` (5), `state` (6, state file not writable), `signal`
+      (143/130). Exit 7 (another run holds `/run/gitea-runner-fstrim.lock`) writes no beacon.
+    - `journalctl -u gitea-runner-fstrim.service`: one `slice off=… trimmed=…` line per slice, then the
+      reason. `cat /var/lib/gitea-runner-fstrim/state` holds `cursor=` and `passes=`.
+    - `findmnt -no OPTIONS /` has no `discard`; `systemctl is-enabled fstrim.timer` says `masked`.
+    - Host side, on the node: `lvs pve | grep vm-<vmid>-` should shrink after a run. For etcd, use the
+      checks in [registry-cache.md](registry-cache.md), "Verify a run, including that it did not hurt etcd".
+  - **Stop it.** For tonight or until removed: `sudo touch /var/lib/gitea-runner-fstrim/stop` (checked
+    before every slice and during job waits; it survives a reboot, so `rm` it to resume). Mid-slice:
+    `sudo systemctl stop gitea-runner-fstrim.service` (the slice in flight is redone next run). For good:
+    `gitea_runner_fstrim_enabled: false`, then `just gitea-runners`; the role stops and disables the timer.
+    `fstrim.timer` stays masked: unmask it by hand only if one weekly burst on the etcd drive is
+    acceptable. `gitea_runner_root_nodiscard: false` does not put `discard` back.
+  - **Rollout:** `just gitea-runners` (the daily fleet converge does not cover the runners).
 - **Manual one-shot:** `ssh ubuntu@<ip> 'sudo systemctl start gitea-runner-cleanup.service'` (idle-guarded;
   a no-op if a job is in flight). Emergency disk relief on an idle runner:
   `sudo docker builder prune -f --filter until=24h; sudo docker image prune -af --filter until=24h`.

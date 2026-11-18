@@ -28,6 +28,15 @@
     enabled: true
     daemon_reload: true
 
+# Re-reads a changed calendar (window start). Restarting a timer never starts its service, and the trim
+# never touches the act_runner daemon or a job.
+- name: Restart gitea fstrim timer
+  ansible.builtin.systemd:
+    name: "{{ gitea_runner_fstrim_timer }}"
+    state: restarted
+    enabled: true
+    daemon_reload: true
+
 # Persistent=true does not fire on a timer's first enable (there is no stamp yet), so without this the
 # first beacon would wait for the next 04:30 or boot and the beacon-missing alerts would fire on a
 # fresh install. It runs on ANY change to the timer unit (a schedule change also verifies at once).

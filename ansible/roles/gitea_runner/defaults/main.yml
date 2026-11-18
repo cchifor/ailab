@@ -372,3 +372,40 @@ gitea_runner_cleanup_heal_cooldown_sec: 21600 # at most one heal per 6h; a recor
 # 0 disables. Needs heal_dangling true; shares its cooldown.
 gitea_runner_cleanup_heal_stuck_ticks: 3
 gitea_runner_cleanup_heal_state: /var/lib/gitea-runner-cleanup/buildkit-heal.state
+
+# ---- thin-pool trim: give freed disk space back to the host (#1857, 2026-11-18) ─────────────────
+# The on-prem runners sit on thin LVs (64 KiB chunks, discard passed down to a QLC NVMe that etcd shares).
+# The cloud image mounts / with online `discard`: deleting many small files sends discards too small and
+# scattered to free whole chunks, and ext4 then keeps those groups flagged as trimmed, so fstrim trims 0 B.
+# Measured 2026-11-18: the thin LV of ci-runner-1 barely moved (170.4 -> 169.2 GB) after the cleanup freed
+# ~50 GB in the guest. Both switches are OFF here and ON for the on-prem pool (group_vars/gitea_runners.yml);
+# the cloud runners share this role and stay off. Runbook: docs/runbooks/ci-runners.md, "Thin-pool trim".
+#
+# Drop `discard` from the root fstab entry (LABEL=cloudimg-rootfs), keeping every other option, and remount
+# / nodiscard live. A remount does NOT clear the trimmed flags already set; one reboot while idle does,
+# once per runner. Turning this off later does not put `discard` back.
+gitea_runner_root_nodiscard: false
+# Nightly chunked trim (files/gitea-runner-fstrim-chunked.sh) instead of the stock weekly fstrim.timer,
+# which is stopped and MASKED while this is on (it would trim all of / in one ~80-min burst). Off = the
+# kill switch: the role stops and disables the nightly timer. The stock timer stays masked; unmask it by
+# hand only if one weekly burst on the etcd drive is acceptable.
+gitea_runner_fstrim_enabled: false
+gitea_runner_fstrim_bin: /usr/local/bin/gitea-runner-fstrim-chunked.sh
+gitea_runner_fstrim_env: /etc/gitea-runner-fstrim.env
+gitea_runner_fstrim_service: gitea-runner-fstrim.service
+gitea_runner_fstrim_timer: gitea-runner-fstrim.timer
+# Night window, HH:MM UTC (quoted: YAML 1.1 reads an unquoted 01:50 as the number 110). The timer starts
+# at *_window_start; the script trims only inside the window, checked before every slice. Override per
+# host (host_vars/ci-runner-N.yml) so runners on the same Proxmox node never trim at the same time.
+gitea_runner_fstrim_window_start: "00:00"
+gitea_runner_fstrim_window_end: "05:30"
+# GiB per slice, rounded up to whole ext4 block groups (128 MiB here). Small on purpose: a job that starts
+# during a slice shares the drive with that one slice only (~40 s at ~19 s/GB).
+gitea_runner_fstrim_chunk_gb: 2
+# GiB of the filesystem covered per run. Sized for the 1h45m per-host windows: 64 slices x (~41 s of TRIM
+# + the pause) is ~65 min, leaving ~40 min for job waits. A 250 GB root takes two nights per pass.
+gitea_runner_fstrim_max_gb_per_run: 128
+gitea_runner_fstrim_pause_s: 20
+# The longest single wait for a running job (checked before each slice) before giving up until the next
+# night. The window closing also ends a wait.
+gitea_runner_fstrim_busy_wait_max_s: 1800

@@ -29,6 +29,9 @@ on:
       - "ansible/roles/gitea_runner/tests/**"
       - "ansible/roles/gitea_runner/templates/**"
       - "ansible/roles/gitea_runner/defaults/**"
+      # test-fstrim-chunked.sh also checks the fstab regexes in tasks/ and the per-host trim windows.
+      - "ansible/roles/gitea_runner/tasks/**"
+      - "ansible/host_vars/ci-runner-*.yml"
       - ".gitea/workflows/runner-scripts.yaml"
   push:
     branches: [main]
@@ -56,6 +59,13 @@ jobs:
         run: |
           set -euo pipefail
           bash ansible/roles/gitea_runner/tests/test-reclaim.sh
+
+      # Mocked fstrim/tune2fs/findmnt/systemctl/pgrep and a fake clock: nothing reaches the host's disk.
+      - name: thin-pool trim behaviour (mocked)
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh
 
       # Fake /proc, cgroup tree, journal, docker, systemctl, logger and kill: this suite runs as the same
       # user act_runner runs as, so a test that reached the host could signal the real daemon. A guard

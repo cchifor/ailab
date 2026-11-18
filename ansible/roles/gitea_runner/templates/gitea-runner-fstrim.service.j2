@@ -1,0 +1,22 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). Oneshot fired by {{ gitea_runner_fstrim_timer }}: the chunked,
+# paced fstrim of / that returns freed blocks to the host's thin pool (#1857). Root, because FITRIM is.
+# The script checks the window, the stop file and the job gate before every slice.
+[Unit]
+Description=Chunked, paced fstrim of / (returns freed blocks to the host thin pool)
+After=local-fs.target
+After={{ gitea_runner_service }}
+
+[Service]
+Type=oneshot
+ExecStart={{ gitea_runner_fstrim_bin }}
+# Sized for the cap, as a backstop (the window normally ends the run first): the cap at a worst-case
+# 30 s/GiB (measured 17-23 s per GiB of range on these QLC drives), one pause per slice, one full job
+# wait, and 10 min of slack. A run killed here loses only its in-flight slice; the cursor is per slice.
+TimeoutStartSec={{ (gitea_runner_fstrim_max_gb_per_run | int) * 30
+  + ((gitea_runner_fstrim_max_gb_per_run | int) // (gitea_runner_fstrim_chunk_gb | int) + 1) * (gitea_runner_fstrim_pause_s | int)
+  + (gitea_runner_fstrim_busy_wait_max_s | int) + 600 }}
+# A `systemctl stop` (SIGTERM) is a clean stop, not a failed unit: ext4 aborts the in-flight FITRIM on a
+# fatal signal and the script records its exit in the beacon.
+SuccessExitStatus=143 130
+Nice=19
+IOSchedulingClass=idle
