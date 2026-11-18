@@ -987,9 +987,12 @@ later roll cannot overwrite it.
   receipts) runs when D is repeated with the Relay-wired drills.
 
 `Worker budget authority available` proves the gate and the witness, not qualification. The Router
-accepts a snapshot with no qualification row (`runtime.ts:20-21`, `:89-96`). The planned proof that the
-Router qualifies File B needs a separate operator preflight; H6's pool-readiness route cannot provide
-it before the ordinary registry exists. See the **TOOLING GAP** in budget step 9.
+accepts a snapshot with no qualification row (`runtime.ts:20-21`, `:89-96`). File B's pre-signing
+check is `file_b_check --json`, defined in the budget runbook's
+[File B pre-signing readback](relay-worker-budget-authority.md#file-b-pre-signing-readback).
+At Router `5a5181b7` the authenticated preflight durably consumes a nonce
+(`packages/plugins/relay-keys/index.ts:23-25`, `service.ts:34-50`), so it cannot be called by a
+zero-write tool. A ledger pass alone does not prove Router qualification.
 
 **Readback, end of step 5.**
 
@@ -1401,7 +1404,24 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
    ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md), "Activation under Flux").
 3. **File B,** budget step 7's `qualifications` row (#1753 comment 124071). It is generated from live
    Router readings taken after the last Router rollout: this checklist's step 5 rolls, or any later
-   Router change.
+   Router change. **File A and File B are separate.** File B must be committed, read back and
+   qualified by the Router **before any candidate run is signed (R0 first)**. Retain the reviewed
+   rows as `$ev/file-b.json`, set `FILE_B_REQUIRED_LIFETIME_SECONDS` to cover the interval from the
+   check through the original worker deadline, and define the exact `file_b_check` socket helper in
+   [budget File B pre-signing readback](relay-worker-budget-authority.md#file-b-pre-signing-readback).
+   Run from this repository root:
+
+   ```sh
+   file_b_check --json
+   ```
+
+   `ledger: pass` means an exact, fresh, complete-table readback, canonical policy digests,
+   matching route/bounds and sufficient expiry. The pinned Router's non-allocating preflight
+   writes a durable nonce (`5a5181b7:packages/plugins/relay-keys/service.ts:34-50`); the zero-write
+   tool therefore reports `router: unavailable` and exits 1. For evidence collection only,
+   `file_b_check --skip-router-preflight-unavailable --json` can exit 0 with `status: ledger-only`
+   and `signingReady: false`. It does not qualify File B or permit signing. The budget section
+   documents the required Router change and all schema/function source citations.
 4. **The E6 rehearsal**
    ([relay-researcher-qualification-campaign.md](relay-researcher-qualification-campaign.md) §4).
 5. **R0, then R1.** R0's per-run PR first includes H7's candidate component for Relay's half of drills
