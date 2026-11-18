@@ -3,7 +3,18 @@
   ansible.builtin.systemd:
     daemon_reload: true
 
+# Handlers run in the order defined here. `restart zot` notifies both: zot restarts first, then the marker of an
+# unproven config apply (files/zot-config-apply.py) is cleared, because the restarted zot loaded exactly the file
+# on disk. If the restart fails, Ansible stops the handlers and the marker stays, so the next run re-proves the
+# config instead of reporting it unchanged.
 - name: restart zot
   ansible.builtin.systemd:
     name: zot.service
     state: restarted
+  listen: restart zot
+
+- name: clear the unconfirmed zot config marker
+  ansible.builtin.file:
+    path: "{{ registry_zot_config_dir }}/config.json.unconfirmed"
+    state: absent
+  listen: restart zot

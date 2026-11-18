@@ -30,7 +30,9 @@ BASE = {
         "gcDelay": "2h",
         "gcInterval": "1h",
         "dedupe": True,
-        "retention": {"dryRun": False, "policies": [{"repositories": ["strive/**"], "deleteUntagged": True}]},
+        "retention": {"dryRun": False, "policies": [
+            {"repositories": ["strive/**"], "deleteUntagged": True,
+             "keepTags": [{"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 100}]}]},
     },
     "http": {
         "address": "0.0.0.0",
@@ -85,6 +87,19 @@ class ClassifyTest(unittest.TestCase):
     def test_retention_change_reloads_while_retention_is_active(self):
         policies = BASE["storage"]["retention"]["policies"] + [{"repositories": ["a/**"], "deleteReferrers": True}]
         self.assertMode(changed(storage__retention__policies=policies), "reload")
+
+    def test_pattern_only_retention_is_not_active(self):
+        # zot v2.1.18 isTagsRetentionEnabled: only count/age keepTags rules turn retention (and its reload) on.
+        pattern_only = changed(storage__retention={"policies": [{"repositories": ["x/**"], "deleteUntagged": True,
+                                                                  "keepTags": [{"patterns": [".*"]}]}]})
+        self.assertFalse(zca._retention_active(pattern_only))
+        policies = pattern_only["storage"]["retention"]["policies"] + [{"repositories": ["y/**"]}]
+        self.assertEqual(zca.classify(pattern_only, changed(storage__retention={"policies": policies}))[0], "restart")
+
+    def test_retention_rules_in_subpaths_count(self):
+        sub = changed(storage__retention={"policies": []},
+                      storage__subPaths={"/a": {"retention": {"policies": [{"keepTags": [{"pushedWithin": "24h"}]}]}}})
+        self.assertTrue(zca._retention_active(sub))
 
     def test_retention_needs_retention_on_both_sides(self):
         no_retention = changed(storage__retention=DELETE)
@@ -162,6 +177,12 @@ class WriteTest(unittest.TestCase):
     def tearDown(self):
         self.dir.cleanup()
 
+    def test_in_place_handles_short_writes(self):
+        real = os.pwrite
+        with mock.patch.object(zca.os, "pwrite", side_effect=lambda fd, data, off: real(fd, data[:3], off)):
+            zca.write_in_place(self.path, b'{"short": "writes"}')
+        self.assertEqual(Path(self.path).read_bytes(), b'{"short": "writes"}')
+
     def test_in_place_keeps_the_inode(self):
         ino = os.stat(self.path).st_ino
         for data in (b'{"a": 1}', b'{"a": "a much longer value than before"}'):
@@ -226,6 +247,15 @@ class MainTest(unittest.TestCase):
             rc, result = self._run()
         self.assertEqual((rc, result["mode"]), (0, "restart"))
         self.assertEqual(json.loads(Path(self.current).read_text())["storage"]["gcDelay"], "1h")
+        self.assertTrue(os.path.exists(self.current + ".unconfirmed"))  # cleared only by the restart handlers
+
+    def test_restart_takes_owner_and_mode_from_the_candidate(self):
+        self._write(self.current, BASE)
+        os.chmod(self.current, 0o644)
+        self._write(self.candidate, changed(http__port="8443"))
+        os.chmod(self.candidate, 0o640)
+        self._run()
+        self.assertEqual(os.stat(self.current).st_mode & 0o7777, 0o640)
 
     def _failed_reload(self, candidate):
         self._write(self.candidate, candidate)
@@ -289,6 +319,33 @@ class MainTest(unittest.TestCase):
         self.assertEqual((rc, result["mode"]), (2, "reload"))
         self.assertIn("pending", result["reason"])
 
+    def test_no_journal_cursor_writes_nothing(self):
+        self._write(self.current, BASE)
+        before = Path(self.current).read_bytes()
+        self._write(self.candidate, changed(storage__gcDelay="1h"))
+        with mock.patch.object(zca, "main_pid", return_value=4242),                 mock.patch.object(zca, "watch_alive", return_value=True),                 mock.patch.object(zca, "journal_cursor", return_value=None):
+            rc, result = self._run("--wait", "2", "--settle", "0")
+        self.assertEqual((rc, result["mode"]), (2, "reload"))
+        self.assertEqual(Path(self.current).read_bytes(), before)
+
+    def test_transient_failed_then_loaded_is_a_success(self):
+        # zot can read the file between pwrite and ftruncate (FAILED), then reload cleanly on the truncate.
+        self._write(self.current, BASE)
+        self._write(self.candidate, changed(storage__gcDelay="1h"))
+        seq = [[zca.MSG_CHANGED, zca.MSG_FAILED],
+               [zca.MSG_CHANGED, zca.MSG_FAILED, zca.MSG_CHANGED, zca.MSG_LOADED]]
+        calls = iter(seq + [seq[-1]] * 50)
+        with mock.patch.object(zca, "main_pid", return_value=4242),                 mock.patch.object(zca, "watch_alive", return_value=True),                 mock.patch.object(zca, "journal_cursor", return_value="c"),                 mock.patch.object(zca, "journal_messages", side_effect=lambda *a: next(calls)),                 mock.patch.object(zca, "http_alive", return_value=True),                 mock.patch.object(zca.time, "sleep"):
+            rc, result = self._run("--wait", "30", "--settle", "0")
+        self.assertEqual((rc, result["mode"]), (0, "reload"))
+
+    def test_restart_keeps_the_marker_for_the_handler(self):
+        self._write(self.current, BASE)
+        self._write(self.candidate, changed(http__port="8443"))
+        rc, result = self._run()
+        self.assertEqual((rc, result["mode"]), (0, "restart"))
+        self.assertTrue(os.path.exists(self.current + ".unconfirmed"))  # `restart zot` handlers clear it
+
     def test_proven_reload(self):
         self._write(self.current, BASE)
         self._write(self.candidate, changed(storage__gcDelay="1h"))
@@ -302,6 +359,7 @@ class MainTest(unittest.TestCase):
             rc, result = self._run("--wait", "2", "--settle", "0")
         self.assertEqual((rc, result["mode"]), (0, "reload"))
         self.assertEqual(os.stat(self.current).st_ino, ino)  # the watched inode survived
+        self.assertFalse(os.path.exists(self.current + ".unconfirmed"))
         self.assertEqual(json.loads(Path(self.current).read_text())["storage"]["gcDelay"], "1h")
 
 
@@ -327,6 +385,17 @@ class TaskWiringTest(unittest.TestCase):
 
     def test_candidate_keeps_secrets_out_of_logs(self):
         self.assertIs(self.tasks["Render the zot config candidate"]["no_log"], True)
+
+    def test_verify_keeps_config_fragments_out_of_logs(self):
+        self.assertIs(self.tasks["Validate the zot config candidate (same loader as `zot serve`)"]["no_log"], True)
+
+    def test_restart_handlers_restart_then_clear_the_marker(self):
+        handlers = yaml.safe_load((ROLE_DIR / "handlers" / "main.yml").read_text())
+        listening = [h for h in handlers if h.get("listen") == "restart zot"]
+        self.assertEqual([h["name"] for h in listening], ["restart zot", "clear the unconfirmed zot config marker"])
+        self.assertEqual(listening[0]["ansible.builtin.systemd"]["state"], "restarted")
+        self.assertEqual(listening[1]["ansible.builtin.file"],
+                         {"path": "{{ registry_zot_config_dir }}/config.json.unconfirmed", "state": "absent"})
 
     def test_only_a_restart_verdict_notifies_restart(self):
         task = self.tasks["Restart zot when the config change is not reload-safe"]

@@ -63,9 +63,22 @@ def diff_paths(old, new, prefix=""):
     return [] if old == new else [prefix or "<root>"]
 
 
+_TAG_RULES = ("mostRecentlyPulledCount", "mostRecentlyPushedCount", "pulledWithin", "pushedWithin")
+
+
 def _retention_active(cfg):
-    retention = (cfg.get("storage") or {}).get("retention") or {}
-    return bool(retention.get("policies"))
+    """zot v2.1.18 `isRetentionEnabledInternal`: some keepTags entry (top-level or a subPath's policies) sets a
+    count or age rule. deleteUntagged/deleteReferrers do not count. UpdateReloadableConfig copies Retention only
+    when this holds for the RUNNING config; a pattern-only policy would 'reload' while retention is ignored."""
+    storage = cfg.get("storage") or {}
+    retentions = [storage.get("retention") or {}]
+    retentions += [(sp or {}).get("retention") or {} for sp in (storage.get("subPaths") or {}).values()]
+    for retention in retentions:
+        for policy in retention.get("policies") or []:
+            for keep in policy.get("keepTags") or []:
+                if any(keep.get(rule) not in (None, 0, "") for rule in _TAG_RULES):
+                    return True
+    return False
 
 
 def classify(current, candidate):
@@ -138,7 +151,12 @@ def write_in_place(path, data):
     """Overwrite `path` keeping its inode (zot's watch). One write at offset 0, then truncate, then fsync."""
     fd = os.open(path, os.O_WRONLY)
     try:
-        os.pwrite(fd, data, 0)
+        done = 0
+        while done < len(data):  # pwrite may write less than asked
+            n = os.pwrite(fd, data[done:], done)
+            if n <= 0:
+                raise OSError(f"short write to {path} at {done}/{len(data)} bytes")
+            done += n
         os.ftruncate(fd, len(data))
         os.fsync(fd)
     finally:
@@ -165,6 +183,13 @@ def write_atomic(path, data, like=None):
         raise
 
 
+def _match_attributes(path, like):
+    """Give `path` the owner/group/mode of `like` (the rendered candidate), so role changes to them converge."""
+    st = os.stat(like)
+    os.chown(path, st.st_uid, st.st_gid)
+    os.chmod(path, st.st_mode & 0o7777)
+
+
 def _touch_marker(path):
     """Root-only marker of an apply that is not proven yet (no secrets in it)."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -185,18 +210,24 @@ def main_pid(unit):
 
 
 def journal_cursor(unit):
-    out = _run("journalctl", "-u", unit, "-n", "0", "--show-cursor", "-q").stdout
-    for line in out.splitlines():
+    """The journal position to read zot's reaction from, or None. Without one, a reload cannot be proven
+    (an older CHANGED/LOADED pair could be mistaken for this one), so the caller must not write."""
+    proc = _run("journalctl", "-u", unit, "-n", "0", "--show-cursor", "-q")
+    if proc.returncode != 0:
+        return None
+    for line in proc.stdout.splitlines():
         if line.startswith("-- cursor: "):
-            return line[len("-- cursor: "):].strip()
+            return line[len("-- cursor: "):].strip() or None
     return None
 
 
 def journal_messages(unit, cursor):
-    args = ["journalctl", "-u", unit, "-o", "cat", "--no-pager"]
-    args += [f"--after-cursor={cursor}"] if cursor else ["--since", "-2min"]
+    """zot's log messages after `cursor` ([] if journalctl fails: the verdict then stays 'none'/'pending')."""
+    proc = _run("journalctl", "-u", unit, "-o", "cat", "--no-pager", f"--after-cursor={cursor}")
+    if proc.returncode != 0:
+        return []
     msgs = []
-    for line in _run(*args).stdout.splitlines():
+    for line in proc.stdout.splitlines():
         try:
             msgs.append(json.loads(line).get("message", ""))
         except ValueError:
@@ -224,18 +255,20 @@ def apply_reload(args, data):
         return None, "zot is not running or no longer watches this config inode (replaced since its start)"
     for attempt in (1, 2):
         cursor = journal_cursor(args.unit)
+        if cursor is None:
+            return False, "cannot read zot's journal position; a reload could not be proven (nothing written)"
         write_in_place(args.current, data)
         deadline = time.time() + args.wait
         verdict = "none"
         while time.time() < deadline:
             time.sleep(1)
             verdict = reload_verdict(journal_messages(args.unit, cursor))
-            if verdict == "failed":
-                break
             if verdict == "ok":
-                time.sleep(args.settle)  # a later event (e.g. our truncate) must also end in LOADED
+                # Settle: a later event (e.g. the truncate after the write) must also end in LOADED. A FAILED is
+                # NOT final either: zot may have read the file between pwrite and ftruncate, then reload cleanly.
+                time.sleep(args.settle)
                 verdict = reload_verdict(journal_messages(args.unit, cursor))
-                if verdict in ("ok", "failed"):
+                if verdict == "ok":
                     break
         if verdict == "ok":
             break
@@ -281,26 +314,34 @@ def main(argv=None):
         os.unlink(args.candidate)
         print(json.dumps({"mode": mode, "paths": paths, "reason": reason, "dry_run": True}))
         return 0
+    if mode in ("reload", "restart"):
+        # Marker first: if anything after this point fails (reload unproven, helper killed, a later task failing
+        # before the role's `restart zot` handler runs), the next run re-proves instead of answering "none".
+        _touch_marker(marker)
     if mode == "reload":
         with open(args.current, "rb") as fh:
             previous = fh.read()
-        _touch_marker(marker)
         ok, why = apply_reload(args, data)
         if ok is None:  # the watch is gone: a restart is the only way to apply it
             mode, reason = "restart", why
         elif not ok:
             # Put the previous bytes back so the file again matches what zot most likely runs, and keep the marker:
             # the next run must not mistake disk equality for convergence.
-            write_in_place(args.current, previous)
+            with open(args.current, "rb") as fh:
+                if fh.read() != previous:
+                    write_in_place(args.current, previous)
             print(json.dumps({"mode": "reload", "paths": paths,
                               "reason": why + "; previous config restored on disk, marker kept"}))
             return 2
         else:
             reason = why
     if mode == "restart":
-        write_atomic(args.current, data, like=args.current if current is not None else args.candidate)
-    if mode in ("reload", "restart") and os.path.exists(marker):
-        os.unlink(marker)  # proven reload, or the role's restart loads exactly this file
+        # The marker STAYS: the role's `restart zot` handler chain removes it only after zot restarted on this file.
+        write_atomic(args.current, data, like=args.candidate)  # the candidate carries the role's owner/mode
+    if mode == "reload":
+        _match_attributes(args.current, args.candidate)  # chown/chmod emit no WRITE: no second reload
+        if os.path.exists(marker):
+            os.unlink(marker)  # proven reload
     os.unlink(args.candidate)
     print(json.dumps({"mode": mode, "paths": paths, "reason": reason}))
     return 0

@@ -55,16 +55,24 @@ So `config.json` is not templated straight into place. The role renders `config.
   FILE and reloads it on an fsnotify WRITE (`pkg/cli/server/config_reloader.go`), copying only some fields
   (`UpdateReloadableConfig`). So the helper writes the SAME inode, then proves the reload: zot logged
   `config file changed, trying to reload config` with no later `failed to reload config`, the PID is unchanged and
-  `/v2/` answers. It retries the write once, and otherwise **fails the play**. zot keeps its old in-memory config,
-  so nothing is half-applied.
+  `/v2/` answers. A FAILED line is not final (zot can read the file between the write and the truncate), so it
+  waits for the last attempt, retries the write once, and otherwise **fails the play**. It then writes the previous
+  bytes back, so the file matches what zot still runs.
 - **restart**: any other difference, a first deploy, or a detached watch. zot ignores rename/remove events, so a
   config.json replaced since zot started (an atomic write, an editor save) is no longer watched. The helper checks
   zot's inotify watches in `/proc/<pid>/fdinfo` against the file's inode. In this case the helper replaces the file
   atomically and the role notifies `restart zot`.
 
+**`config.json.unconfirmed`** (root-only, no secrets) marks an apply that is not proven yet. The helper writes it
+before every reload or restart write. A proven reload removes it; on a restart the `restart zot` handlers remove it
+after zot restarted. While it exists, an unchanged candidate is NOT reported as `none`: the next run re-proves the
+file on disk (an identical in-place rewrite that zot must reload), or restarts if the watch is gone. That covers a
+failed reload, a killed helper, and a play that aborted before its handlers ran.
+
 Run the play with `--check` first. The helper then only classifies (`--dry-run`) and the `Report how the zot
 config was applied` task shows `{"mode": ..., "paths": [...]}`. Key paths only, never values: config.json holds
-secrets.
+secrets. Check mode is not entirely side-effect free: it installs the helper and writes, then removes, a throwaway
+`config.json.candidate`. The live `config.json` is never touched.
 
 **Everything else the role converges still restarts zot**: htpasswd lines, certs, sync credentials, the unit and
 the binary. Batch those changes into one apply, in a quiet window.

@@ -172,6 +172,7 @@
     argv: [/usr/local/bin/zot, verify, "{{ registry_zot_config_dir }}/config.json.candidate"]
   check_mode: false
   changed_when: false
+  no_log: true # its errors can quote config fragments (secrets); on failure run `zot verify` by hand on the host
   when: registry_zot_binary.stat.exists
 
 - name: Apply the zot config (reload in place when only reload-safe keys changed)
@@ -184,18 +185,19 @@
          + (['--dry-run'] if ansible_check_mode else []) }}
   check_mode: false # in check mode the helper only classifies (--dry-run) and writes nothing
   register: registry_zot_config_apply
-  changed_when: (registry_zot_config_apply.stdout | from_json).mode != 'none'
+  # rc first: a crashed helper prints nothing, and from_json on '' would mask the real failure
+  changed_when: registry_zot_config_apply.rc == 0 and (registry_zot_config_apply.stdout | from_json).mode != 'none'
   failed_when: registry_zot_config_apply.rc != 0
 
 - name: Report how the zot config was applied
   ansible.builtin.debug:
     msg: "zot config: {{ (registry_zot_config_apply.stdout | from_json) }}"
-  when: (registry_zot_config_apply.stdout | from_json).mode != 'none'
+  when: registry_zot_config_apply.rc == 0 and (registry_zot_config_apply.stdout | from_json).mode != 'none'
 
 - name: Restart zot when the config change is not reload-safe
   ansible.builtin.debug:
     msg: "zot config needs a restart: {{ (registry_zot_config_apply.stdout | from_json).reason }}"
-  when: (registry_zot_config_apply.stdout | from_json).mode == 'restart'
+  when: registry_zot_config_apply.rc == 0 and (registry_zot_config_apply.stdout | from_json).mode == 'restart'
   changed_when: true
   notify: restart zot
 
