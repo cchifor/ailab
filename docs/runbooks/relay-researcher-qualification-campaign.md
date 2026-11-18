@@ -289,6 +289,17 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
    binding (§8 G0).** **Never create while it is logged:** an
    unrecognized worker takes ordinary admission, and the lifetime can freeze before the refusal
    (`rel:server/workers/service.ts:1543-1570`). Connectors and relay-bus keys answer again.
+5. **The budget path's pre-grant control (R1 onwards).** The hub's isolated budget observer must answer
+   before any grant:
+   - `relay_control_worker_budget_check_succeeded` is 1;
+   - `relay_control_worker_budget_check_timestamp_seconds` is within the last two scrapes (60 s);
+   - `RelayWorkerBudgetCheckFailed` is clear.
+
+   Read it in the same window as R0's ledger-side control as the same login
+   ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md), F2 and §7). The check alone
+   "cannot distinguish refusal from database failure". Pool readiness cannot show the ledger during the
+   campaign (that runbook, F1: every listing reports `runtime-qualification-unavailable`), so this is the
+   only pre-grant view of the budget path. **No grant (§3.6) while the check is 0, stale or alerting.**
 
 ### 3.5 Agent candidate values, agent held disabled
 
