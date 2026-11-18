@@ -162,6 +162,14 @@ registry_zot_local_namespaces:
 registry_zot_sync_dockerhub_user: ""
 registry_zot_sync_credentials_file: "{{ registry_zot_config_dir }}/sync-credentials.json"
 
+# ---- Config apply (files/zot-config-apply.py) ----
+# When a change is reload-safe but zot cannot be reloaded (its watch on config.json is gone, e.g. the file was
+# replaced since zot started, or the live config.json is not valid JSON), the helper FAILS the play instead of
+# restarting: a restart is a 19 min registry outage (2026-11-17). Set true for ONE apply, in a quiet window, to
+# accept that restart: `-e registry_zot_config_allow_restart=true`. Restart-only changes (sync, auth, ports, ...)
+# and a first deploy restart regardless, as before. docs/runbooks/registry-cache.md "Reload or restart".
+registry_zot_config_allow_restart: false
+
 # ---- Retention (storage.retention in config.json.j2) ----
 # Without retention the store grows unbounded (~one sha-<commit> tag per repo per platform main
 # build) and eventually fills the data disk → 100%-full blob-write failures. The strive/** policy
