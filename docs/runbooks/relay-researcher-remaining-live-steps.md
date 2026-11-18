@@ -257,16 +257,18 @@ Also a historical **Kubernetes** write: one `force-sync` annotation on ExternalS
 **Original commands (completed ceremony).** Verbatim from `relay-router-connection.md:221-231`.
 The keys are generated in a private directory and shredded at the end:
 
-```sh
-umask 077; d="$(mktemp -d)"
-openssl genpkey -algorithm ed25519 -out "$d/admin.pem"
-openssl genpkey -algorithm ed25519 -out "$d/reconciler.pem"
-openssl pkey -in "$d/admin.pem" -pubout -out "$d/admin.pub"
-openssl pkey -in "$d/reconciler.pem" -pubout -out "$d/reconciler.pub"
-bao kv put -mount=af relay-router/relay/admin-signer private_key=@"$d/admin.pem"
-bao kv put -mount=af relay-router/relay/reconciler-signer private_key=@"$d/reconciler.pem"
-bao kv put -mount=af relay-router/router/trust admin_public_key=@"$d/admin.pub" reconciler_public_key=@"$d/reconciler.pub"
-shred -u "$d"/*; rmdir "$d"
+```text
+# HISTORICAL RECORD, step 1 DONE. DO NOT RUN: it would generate NEW keys and overwrite the live
+# signer keys and the Router trust document. Every line is commented out so a paste does nothing.
+# umask 077; d="$(mktemp -d)"
+# openssl genpkey -algorithm ed25519 -out "$d/admin.pem"
+# openssl genpkey -algorithm ed25519 -out "$d/reconciler.pem"
+# openssl pkey -in "$d/admin.pem" -pubout -out "$d/admin.pub"
+# openssl pkey -in "$d/reconciler.pem" -pubout -out "$d/reconciler.pub"
+# bao kv put -mount=af relay-router/relay/admin-signer private_key=@"$d/admin.pem"
+# bao kv put -mount=af relay-router/relay/reconciler-signer private_key=@"$d/reconciler.pem"
+# bao kv put -mount=af relay-router/router/trust admin_public_key=@"$d/admin.pub" reconciler_public_key=@"$d/reconciler.pub"
+# shred -u "$d"/*; rmdir "$d"
 ```
 
 **Readback.** First verbatim from `relay-router-connection.md:266-270`. It prints no private material:
@@ -279,12 +281,17 @@ done
 ```
 
 Each role's two fingerprints are equal, and the admin and reconciler fingerprints differ. Record both.
-Then recheck the rendered trust with the read-only commands below. The first line's `force-sync`
-annotation is retained only as historical ceremony record; do not repeat it. This block was NEW
-(not in the runbook):
+Then recheck the rendered trust with the read-only commands below. The ceremony also forced one
+ExternalSecret sync, a write that must not be repeated; it is kept here only as a commented record:
+
+```text
+# HISTORICAL RECORD, step 1 DONE. DO NOT RUN (a Kubernetes write):
+# kubectl --context admin@ai -n llm-router annotate externalsecret llm-router-relay-trust force-sync="$(date +%s)" --overwrite
+```
+
+The read-only recheck. This block was NEW (not in the runbook):
 
 ```sh
-kubectl --context admin@ai -n llm-router annotate externalsecret llm-router-relay-trust force-sync="$(date +%s)" --overwrite
 kubectl --context admin@ai -n llm-router wait --for=condition=Ready externalsecret/llm-router-relay-trust --timeout=3m
 kubectl --context admin@ai -n llm-router get secret llm-router-relay-trust -o json | jq -c '.data | keys'
 trust | jq -c '.issuers[0] | {issuer, keys: [.keys[] | {kid, roles}], tenant: .tenants[0].tenant, routes: .tenants[0].routes, workerBudgets: .tenants[0].workerBudgets}'
