@@ -38,7 +38,7 @@
           "repositories": {{ registry_zot_strive_delete_referrers_repos | to_json }},
           "deleteUntagged": true,
           "deleteReferrers": true,
-{{ strive_keep_tags() }}
+          {{ strive_keep_tags() }}
         },
 {%- endif %}
         {
@@ -47,7 +47,7 @@
 {%- if strive_referrers_all %}
           "deleteReferrers": true,
 {%- endif %}
-{{ strive_keep_tags() }}
+          {{ strive_keep_tags() }}
         },
         {
           "repositories": ["agentforge/**"],

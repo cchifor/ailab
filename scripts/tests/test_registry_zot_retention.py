@@ -586,12 +586,13 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
         self.assertIsNone(entry)
 
     def test_other_retention_policies_unchanged(self):
-        # Ignore the deleteReferrers canary (its own test class below pins it).
-        others = [p for p in self.policies if p["repositories"] != [_CI_BUILD_REPOS] and not p.get("deleteReferrers")]
+        # Ignore the deleteReferrers canary (its own test class below pins it), but not a widened strive/**.
+        others = [p for p in self.policies if p["repositories"] != [_CI_BUILD_REPOS]
+                  and not (p.get("deleteReferrers") and p["repositories"] != ["strive/**"])]
         self.assertEqual(
             [p["repositories"] for p in others], [["strive/**"], ["agentforge/**"], ["**"]]
         )
-        self.assertEqual(others[0], _STRIVE_POLICY)
+        self.assertEqual({k: v for k, v in others[0].items() if k != "deleteReferrers"}, _STRIVE_POLICY)
         self.assertEqual(
             others[1],
             {
