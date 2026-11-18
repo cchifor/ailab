@@ -283,6 +283,7 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     GITEA_CLEANUP_TARGET_ROOTS="${TROOTS-/nonexistent/targets}" GITEA_CLEANUP_TARGET_MAXDEPTH="${TDEPTH:-4}" \
     GITEA_CLEANUP_TARGET_KEEP_H="${TKEEP:-72}" GITEA_CLEANUP_TARGET_KEEP_CRITICAL_H="${TKEEPCRIT:-24}" \
     GITEA_CLEANUP_TARGET_MIN_FREE_MB="${TMINFREE:-1024}" GITEA_CLEANUP_BUILDKIT_DB="${BKDB:-/nonexistent/cache.db}" \
+    GITEA_CLEANUP_TARGET_AGE_SWEEP="${TAGE:-0}" \
     MOCK_MNT_OPTS="${MOCK_MNT_OPTS:-rw,relatime}" MOCK_MNT_FAIL="${MOCK_MNT_FAIL:-0}" \
     bash "$SCRIPT" ${SCRIPT_ARGS:-} >/dev/null 2>&1 &
   local pid=$! i=0
@@ -1303,6 +1304,27 @@ rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; IDLEWAIT=2 BKDB="$BKF" BEACON=1 TE
 rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; BEACON=1 TEXTDIR="$BEACONDIR" run_case 1 50
 [ "$(beacon_field buildkit_db_bytes)" = 0 ] && ok "T18: no cache.db -> 0, not a missing line" || bad "T18: no cache.db (got '$(beacon_field buildkit_db_bytes)')"
 rm -f "$BKF"
+
+# T19: TARGET_AGE_SWEEP=1 sweeps BELOW pressure by age alone, with the same guards (2026-11-18: the 250 GB
+# root disks never reached 75%, so the targets piled up unswept).
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1 run_case 0 50
+gone "$T/debug/deps/libold-1.rlib" "T19: age sweep at 50% deletes a file unread for 5 days"
+kept "$T/debug/deps/libday-3.rlib" "T19: ...keeps one unread for 30h (the 72h window, not the critical 24h)"
+kept "$T/CACHEDIR.TAG" "T19: ...keeps the markers"
+assert_has "systemctl stop gitea-act-runner" "T19: the runner is held for an age sweep too"
+assert_has "systemctl start" "T19: ...and started again"
+grep -q "target sweep: age sweep at disk 50%" "$WORK/logger.log" && ok "T19: the log names the age sweep" || bad "T19: the log names the age sweep"
+# The busy early exit below pressure still wins: a job is running, so nothing is read for deletion.
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1 run_case 1 50
+kept "$T/debug/deps/libold-1.rlib" "T19: busy below pressure -> no age sweep"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T19: busy -> the runner must not be stopped"; else ok "T19: busy -> the runner is not stopped"; fi
+# TARGET_MIN_FREE_MB still decides whether the runner is held.
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1024 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: under TARGET_MIN_FREE_MB the age sweep deletes nothing"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T19: under TARGET_MIN_FREE_MB the runner must not be stopped"; else ok "T19: under TARGET_MIN_FREE_MB the runner is not stopped"; fi
+# A value other than 1 is not "on" (the template only ever renders 1 or 0).
+mk_targets; TAGE=true TROOTS="$TR" TMINFREE=1 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: TARGET_AGE_SWEEP=true (not 1) does not enable it"
 
 echo "[V] leaked buildx builders are MEASURED (read-only metric), never removed"
 # 2026-11-17: builders that cancelled jobs left behind held 20.1 GB on ci-runner-9 and 20.5 GB on

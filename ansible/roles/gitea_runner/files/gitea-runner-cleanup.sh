@@ -136,6 +136,13 @@ TARGET_MAXDEPTH="${GITEA_CLEANUP_TARGET_MAXDEPTH:-4}"          # how deep under 
 TARGET_KEEP_H="${GITEA_CLEANUP_TARGET_KEEP_H:-72}"             # at/over PRESSURE_PCT: files unread this long go
 TARGET_KEEP_CRITICAL_H="${GITEA_CLEANUP_TARGET_KEEP_CRITICAL_H:-24}" # at/over CRITICAL_PCT
 TARGET_MIN_FREE_MB="${GITEA_CLEANUP_TARGET_MIN_FREE_MB:-1024}" # below this much to gain, the runner is not held
+# 1 = also sweep BELOW pressure: age alone (TARGET_KEEP_H) decides, on every idle tick, with the same guards
+# (confirmed gap, runner held and drained, TARGET_MIN_FREE_MB). 0 = only at/over PRESSURE_PCT (the original
+# behaviour). Why it exists: the root disks were grown 120 -> 200 -> 250 GB, so PRESSURE_PCT (75%) now sits
+# ~188 GB up and was never reached; the targets piled up unswept (41 GB on ci-runner-1, 2026-11-18) on a
+# QLC drive whose fill and wear etcd pays for. The docker levers stay disk-gated on purpose: an age sweep
+# rebuilds only what a later build needs, a forced docker prune re-pulls everything (variables.tf).
+TARGET_AGE_SWEEP="${GITEA_CLEANUP_TARGET_AGE_SWEEP:-0}"
 BUILDKIT_DB="${GITEA_CLEANUP_BUILDKIT_DB:-/var/lib/docker/buildkit/cache.db}" # its size goes in the beacon
 # Leaked buildx builders (a read-only metric, see write_buildx_leak_metric): a builder container counts as
 # leaked once BuildKit has written nothing to its state volume for this long (12h, against a 3h job timeout).
@@ -1172,8 +1179,9 @@ fi
 #      its atime is always old, and deleting the marker would stop the next sweep recognising the dir.
 #    * Cargo hard-links artifacts (deps/libx-<hash>.rlib and the uplifted debug/libx.rlib are one inode),
 #      so the estimate counts each inode once and the freed space is read from du, before and after.
-#    * Disk-gated (TARGET_KEEP_H at PRESSURE_PCT, TARGET_KEEP_CRITICAL_H at CRITICAL_PCT) and NEVER on the
-#      mid-job path. Race-free by construction, like the heal in section 0: in a confirmed gap the runner is
+#    * Disk-gated (TARGET_KEEP_H at PRESSURE_PCT, TARGET_KEEP_CRITICAL_H at CRITICAL_PCT), or with
+#      TARGET_AGE_SWEEP=1 age-gated at any disk% (TARGET_KEEP_H; the critical window still needs the physical
+#      CRITICAL_PCT), and NEVER on the mid-job path. Race-free by construction, like the heal in section 0: in a confirmed gap the runner is
 #      HELD (runner_held is persisted first, so a killed run is recovered by the next tick or ExecStopPost),
 #      stopped with its drain, the files deleted, and the runner started again. It is held only when at
 #      least TARGET_MIN_FREE_MB would go, so a runner full of something else is not taken out of the pool
@@ -1239,7 +1247,9 @@ elif [ -n "$TARGET_ROOTS" ]; then
 fi
 if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] && [ "$tg_dirs" -gt 0 ]; then
   pct_tg="$(disk_pct)"; is_num "$pct_tg" || pct_tg=0
-  if [ "$pct_tg" -ge "$PRESSURE_PCT" ]; then
+  tg_why="disk ${pct_tg}% >= ${PRESSURE_PCT}%"
+  [ "$pct_tg" -lt "$PRESSURE_PCT" ] && tg_why="age sweep at disk ${pct_tg}%"
+  if [ "$pct_tg" -ge "$PRESSURE_PCT" ] || [ "$TARGET_AGE_SWEEP" = 1 ]; then
     if ! is_num "$TARGET_MIN_FREE_MB"; then
       log "target sweep: TARGET_MIN_FREE_MB='$TARGET_MIN_FREE_MB' is not a number -> skipped"
     else
@@ -1282,7 +1292,7 @@ if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] 
             esac
           fi
           if [ "$held" -eq 1 ]; then
-            log "target sweep: disk ${pct_tg}%, ${stale}B in ${tg_dirs} Cargo target dir(s) unread for ${keep_h}h, runner held -> deleting"
+            log "target sweep: ${tg_why}, ${stale}B in ${tg_dirs} Cargo target dir(s) unread for ${keep_h}h, runner held -> deleting"
             for d in "${tdirs[@]}"; do
               b="$(target_sweep_dir "$d" "$tg_min")"; is_num "$b" || b=0
               tg_freed=$(( tg_freed + b ))

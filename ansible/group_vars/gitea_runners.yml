@@ -10,3 +10,10 @@ gitea_runner_enabled: true
 # variable RUNNER_LABEL=self-hosted-hv. HOST execution (:host schema) is set in the role defaults.
 gitea_runner_instance_url: https://git.chifor.me
 gitea_runner_label: self-hosted-hv
+
+# Cargo target age sweep (role defaults: gitea_runner_cleanup_target_age_sweep). On-prem only: these runners'
+# 250 GB root disks never reach the 75% pressure line, and their thin LVs sit on the QLC NVMe that each
+# node's etcd member shares (2026-11-18 RCA). The higher floor keeps a runner from being held out of the
+# pool for a small gain now that the sweep can run on any idle tick (pilot: 41 GB freed on ci-runner-1).
+gitea_runner_cleanup_target_age_sweep: true
+gitea_runner_cleanup_target_min_free_mb: 5120
