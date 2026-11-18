@@ -45,19 +45,25 @@ the pin is the gate.
 manifests) and wrote **~265 GB** to ai-node1's worn NVMe, stalling etcd on cp1. Pulls and pushes fail meanwhile.
 Poll `GET https://registry.chifor.me/v2/` for 200 (`systemctl is-active` reports active early).
 
-So `config.json` is not templated straight into place. The role renders `config.json.candidate`, runs
-`zot verify` on it, and hands it to `/usr/local/lib/zot-config-apply.py` (role `files/`), which picks one of:
+So `config.json` is not templated straight into place. Each play renders its OWN candidate,
+`config.json.candidate.<utc>.<random>`, so overlapping plays never share one; an `always:` step removes it. The play
+runs `zot verify` on the candidate and hands it to `/usr/local/lib/zot-config-apply.py` (role `files/`), which picks
+one of:
 
-- **none**: the candidate equals the live config.
+- **none**: the candidate equals the live config (content, owner, group and mode).
+- **attributes**: same content, but a different owner/group/mode. The helper converges them with chown/chmod, which
+  emit no WRITE, so zot does not reload.
 - **reload**: only keys on the helper's `RELOADABLE` allowlist changed. Those are `storage.retention` (while
   retention is already active on both sides), `storage.gcDelay`, `storage.gcInterval` and the
   `http.accessControl` rules (`repositories`, `adminPolicy`, `groups`, `metrics`). zot v2.1.x watches the config
   FILE and reloads it on an fsnotify WRITE (`pkg/cli/server/config_reloader.go`), copying only some fields
-  (`UpdateReloadableConfig`). So the helper writes the SAME inode, then proves the reload: zot logged
-  `config file changed, trying to reload config` with no later `failed to reload config`, the PID is unchanged and
-  `/v2/` answers. A FAILED line is not final (zot can read the file between the write and the truncate), so it
-  waits for the last attempt, retries the write once, and otherwise **fails the play**. It then writes the previous
-  bytes back, so the file matches what zot still runs.
+  (`UpdateReloadableConfig`). So the helper writes the SAME inode, then proves the reload. First it waits until zot
+  has logged no reload line for 3 s, then it takes a journal cursor. After its write, the LAST reload attempt must
+  show `config file changed, trying to reload config` followed by `loaded new configuration settings`, with no
+  `failed to reload config` after it. The PID must be unchanged and `/v2/` must answer. A FAILED line is not final
+  (zot can read the file between the write and the truncate), so the helper waits for the last attempt and retries
+  the write once. Otherwise it **fails the play** and writes the previous bytes back. That restores the file on DISK;
+  whether zot's in-memory config also matches is then unconfirmed, which is what the marker below is for.
 - **restart**: any other difference, or a first deploy. The helper replaces the file atomically and the role
   notifies `restart zot`.
 - **blocked**: a reload-safe change that cannot be reloaded. Either zot no longer watches the file, or the live
@@ -68,15 +74,17 @@ So `config.json` is not templated straight into place. The role renders `config.
   serialized by an flock on `config.json.lock`.
 
 **`config.json.unconfirmed`** (root-only, no secrets) marks an apply that is not proven yet. The helper writes it
-before every reload or restart write. A proven reload removes it; on a restart the `restart zot` handlers remove it
-after zot restarted. While it exists, an unchanged candidate is NOT reported as `none`: the next run re-proves the
+before every reload or restart write, with a per-transaction token. A proven reload removes it. On a restart, the
+`restart zot` handlers remove it after zot restarted, via `zot-config-apply.py --clear-marker <token>` under the
+helper's lock, and only for this play's token. Restarts for other reasons (htpasswd, binary) clear nothing. While it exists, an unchanged candidate is NOT reported as `none`: the next run re-proves the
 file on disk (an identical in-place rewrite that zot must reload), or restarts if the watch is gone. That covers a
 failed reload, a killed helper, and a play that aborted before its handlers ran.
 
 Run the play with `--check` first. The helper then only classifies (`--dry-run`) and the `Report how the zot
 config was applied` task shows `{"mode": ..., "paths": [...]}`. Key paths only, never values: config.json holds
-secrets. Check mode is not entirely side-effect free: it installs the helper and writes, then removes, a throwaway
-`config.json.candidate`. The live `config.json` is never touched.
+secrets. Check mode is not entirely side-effect free: it installs the helper and writes, then removes, this play's
+throwaway candidate. The live `config.json` is never touched. Do not run two registry plays at once: the helper
+serializes its own steps, but zot restarts (handlers) run outside its lock.
 
 **Everything else the role converges still restarts zot**: htpasswd lines, certs, sync credentials, the unit and
 the binary. Batch those changes into one apply, in a quiet window.
