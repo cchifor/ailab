@@ -182,7 +182,8 @@
           '--current', registry_zot_config_dir ~ '/config.json',
           '--candidate', registry_zot_config_dir ~ '/config.json.candidate',
           '--unit', 'zot.service', '--port', registry_zot_port | string]
-         + (['--dry-run'] if ansible_check_mode else []) }}
+         + (['--dry-run'] if ansible_check_mode else [])
+         + (['--allow-restart'] if registry_zot_config_allow_restart | bool else []) }}
   check_mode: false # in check mode the helper only classifies (--dry-run) and writes nothing
   register: registry_zot_config_apply
   # rc first: a crashed helper prints nothing, and from_json on '' would mask the real failure

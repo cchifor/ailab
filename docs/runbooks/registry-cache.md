@@ -58,10 +58,14 @@ So `config.json` is not templated straight into place. The role renders `config.
   `/v2/` answers. A FAILED line is not final (zot can read the file between the write and the truncate), so it
   waits for the last attempt, retries the write once, and otherwise **fails the play**. It then writes the previous
   bytes back, so the file matches what zot still runs.
-- **restart**: any other difference, a first deploy, or a detached watch. zot ignores rename/remove events, so a
-  config.json replaced since zot started (an atomic write, an editor save) is no longer watched. The helper checks
-  zot's inotify watches in `/proc/<pid>/fdinfo` against the file's inode. In this case the helper replaces the file
-  atomically and the role notifies `restart zot`.
+- **restart**: any other difference, or a first deploy. The helper replaces the file atomically and the role
+  notifies `restart zot`.
+- **blocked**: a reload-safe change that cannot be reloaded. Either zot no longer watches the file, or the live
+  config.json is not valid JSON. zot ignores rename/remove events, so a config.json replaced since zot started (an
+  atomic write, an editor save) is no longer watched. The helper checks zot's inotify watches in `/proc/<pid>/fdinfo`
+  against the file's exact (inode, device) identity. Rather than cause a surprise 19 min outage, the play FAILS.
+  Restart zot in a quiet window, or rerun once with `-e registry_zot_config_allow_restart=true`. Applies are
+  serialized by an flock on `config.json.lock`.
 
 **`config.json.unconfirmed`** (root-only, no secrets) marks an apply that is not proven yet. The helper writes it
 before every reload or restart write. A proven reload removes it; on a restart the `restart zot` handlers remove it

@@ -21,6 +21,7 @@ when a reload could not be proven (zot keeps its old in-memory config; the play 
 never values: config.json embeds secrets.
 """
 import argparse
+import fcntl
 import json
 import os
 import ssl
@@ -30,6 +31,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 
 # Dotted key paths whose changes zot v2.1.x applies live (UpdateReloadableConfig). A changed path is reload-safe if it
 # equals one of these or sits below one. Kept minimal on purpose: auth, dedupe, gc on/off, sync, scrub and
@@ -132,13 +134,11 @@ def watched_pairs(pid):
 
 
 def watch_matches(pairs, st_ino, st_dev):
-    """Exact (ino, superblock dev) match. Fallback: exactly ONE watch with this inode number, because on stacked
-    or subvolume filesystems (btrfs, overlayfs) stat's st_dev differs from the s_dev inotify prints, and a false
-    'not watched' would silently turn a reload into the 19 min restart this helper exists to avoid. Proven live
-    on the registry LXC (ext4 on LVM-thin): the exact match holds."""
-    if (st_ino, kernel_sdev(st_dev)) in pairs:
-        return True
-    return sum(1 for ino, _ in pairs if ino == st_ino) == 1
+    """Exact (ino, superblock dev) identity only. An inode number alone is not an identity across filesystems
+    (codex review, #1847). Where stat's st_dev differs from inotify's s_dev (btrfs, overlayfs) this answers
+    False, and the helper then FAILS CLOSED instead of restarting (see --allow-restart). Proven live on the
+    registry LXC (ext4 on LVM-thin, 2026-11-18): the exact match holds."""
+    return (st_ino, kernel_sdev(st_dev)) in pairs
 
 
 def watch_alive(pid, path):
@@ -205,17 +205,47 @@ def _match_attributes(path, like):
 
 
 def _touch_marker(path):
-    """Root-only marker of an apply that is not proven yet (no secrets in it)."""
+    """Root-only marker of an apply that is not proven yet (no secrets in it). Returns this transaction's token."""
+    token = f"{int(time.time())} {uuid.uuid4()}"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.write(fd, f"{int(time.time())}\n".encode())
+        os.write(fd, (token + "\n").encode())
         os.fsync(fd)
     finally:
         os.close(fd)
+    return token
+
+
+def _clear_marker(path, token):
+    """Remove the marker only if it is still this transaction's (applies are serialized; belt and braces)."""
+    try:
+        with open(path) as fh:
+            if fh.read().strip() == token:
+                os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def _lock(path, timeout):
+    """Serialize applies: an exclusive flock held for the whole transaction. Returns the fd, or None on timeout."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+    deadline = time.time() + timeout
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError:
+            if time.time() >= deadline:
+                os.close(fd)
+                return None
+            time.sleep(1)
 
 
 def _run(*cmd):
-    return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    try:
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    except FileNotFoundError:  # e.g. no journalctl: callers treat a non-zero rc as "cannot prove"
+        return subprocess.CompletedProcess(cmd, 127, "", f"{cmd[0]}: not found")
 
 
 def main_pid(unit):
@@ -249,6 +279,20 @@ def journal_messages(unit, cursor):
     return msgs
 
 
+def wait_journal_quiet(unit, quiet=3, timeout=20):
+    """Wait until zot has logged no reload line for `quiet` seconds, so a late line from an earlier reload cannot
+    land after our cursor and be taken as proof of THIS write. Returns False on timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        proc = _run("journalctl", "-u", unit, "-o", "cat", "--no-pager", "--since", f"-{quiet}s")
+        if proc.returncode != 0:
+            return False  # no usable journal: nothing could be proven, so do not write
+        if not any(m in proc.stdout for m in (MSG_CHANGED, MSG_FAILED, MSG_LOADED)):
+            return True
+        time.sleep(1)
+    return False
+
+
 def http_alive(port):
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
@@ -268,10 +312,15 @@ def apply_reload(args, data):
     if not pid or not watch_alive(pid, args.current):
         return None, "zot is not running or no longer watches this config inode (replaced since its start)"
     for attempt in (1, 2):
+        if not wait_journal_quiet(args.unit):
+            return False, "zot kept logging reloads; this write could not be told apart (nothing written)"
         cursor = journal_cursor(args.unit)
         if cursor is None:
             return False, "cannot read zot's journal position; a reload could not be proven (nothing written)"
-        write_in_place(args.current, data)
+        try:
+            write_in_place(args.current, data)
+        except OSError as err:
+            return False, f"writing config.json failed ({err.__class__.__name__})"
         deadline = time.time() + args.wait
         verdict = "none"
         while time.time() < deadline:
@@ -304,15 +353,48 @@ def main(argv=None):
     ap.add_argument("--wait", type=int, default=30, help="seconds to wait for zot's reload log line")
     ap.add_argument("--settle", type=int, default=5, help="seconds to watch for a later failure line")
     ap.add_argument("--dry-run", action="store_true", help="classify only (Ansible check mode); write nothing")
+    ap.add_argument("--allow-restart", action="store_true",
+                    help="permit a restart where a reload was expected but is impossible (detached watch, broken live "
+                         "config). Without it the helper FAILS CLOSED: no surprise 19 min outage")
+    ap.add_argument("--lock-timeout", type=int, default=120)
     args = ap.parse_args(argv)
 
+    if args.dry_run:
+        return _apply(args)
+    lock_fd = _lock(args.current + ".lock", args.lock_timeout)
+    if lock_fd is None:
+        print(json.dumps({"mode": "blocked", "paths": [], "reason": "another config apply holds the lock"}))
+        return 2
+    try:
+        return _apply(args)
+    finally:
+        os.close(lock_fd)  # releases the flock
+
+
+def _blocked(paths, why, dry_run):
+    """A reload was expected but is impossible; without --allow-restart the helper refuses to restart."""
+    out = {"mode": "blocked", "paths": paths,
+           "reason": why + "; rerun with -e registry_zot_config_allow_restart=true to accept a restart (outage)"}
+    if dry_run:
+        out["dry_run"] = True
+    print(json.dumps(out))
+    return 0 if dry_run else 2
+
+
+def _apply(args):
     with open(args.candidate, "rb") as fh:
         data = fh.read()
     candidate = json.loads(data)
     current = None
     if os.path.exists(args.current):
         with open(args.current, "rb") as fh:
-            current = json.loads(fh.read())
+            raw = fh.read()
+        try:
+            current = json.loads(raw)
+        except ValueError:  # an interrupted apply; zot still runs whatever it loaded last
+            if not args.allow_restart:
+                os.unlink(args.candidate)
+                return _blocked([], "the live config.json is not valid JSON", args.dry_run)
 
     mode, paths, reason = classify(current, candidate)
     # An earlier apply that was never proven (failed reload, or the helper was killed mid-apply) leaves this marker.
@@ -321,31 +403,40 @@ def main(argv=None):
     if os.path.exists(marker) and mode == "none":
         mode, reason = "reload", "a previous apply was not confirmed; re-proving the config on disk"
     if args.dry_run:
+        os.unlink(args.candidate)
         if mode == "reload":
             pid = main_pid(args.unit)
             if not pid or not watch_alive(pid, args.current):
-                mode, reason = "restart", "zot is not running or no longer watches this config inode"
-        os.unlink(args.candidate)
+                if not args.allow_restart:
+                    return _blocked(paths, "zot is not running or does not watch this config inode", True)
+                mode, reason = "restart", "zot is not running or does not watch this config inode"
         print(json.dumps({"mode": mode, "paths": paths, "reason": reason, "dry_run": True}))
         return 0
+    token = None
     if mode in ("reload", "restart"):
         # Marker first: if anything after this point fails (reload unproven, helper killed, a later task failing
         # before the role's `restart zot` handler runs), the next run re-proves instead of answering "none".
-        _touch_marker(marker)
+        token = _touch_marker(marker)
     if mode == "reload":
         with open(args.current, "rb") as fh:
             previous = fh.read()
         ok, why = apply_reload(args, data)
-        if ok is None:  # the watch is gone: a restart is the only way to apply it
+        if ok is None:  # the watch is gone: only a restart could apply it
+            if not args.allow_restart:
+                os.unlink(args.candidate)
+                return _blocked(paths, why, False)  # nothing was written; the marker stays for the next run
             mode, reason = "restart", why
         elif not ok:
             # Put the previous bytes back so the file again matches what zot most likely runs, and keep the marker:
             # the next run must not mistake disk equality for convergence.
-            with open(args.current, "rb") as fh:
-                if fh.read() != previous:
-                    write_in_place(args.current, previous)
-            print(json.dumps({"mode": "reload", "paths": paths,
-                              "reason": why + "; previous config restored on disk, marker kept"}))
+            restored = "previous config restored on disk"
+            try:
+                with open(args.current, "rb") as fh:
+                    if fh.read() != previous:
+                        write_in_place(args.current, previous)
+            except OSError as err:
+                restored = f"RESTORE FAILED ({err.__class__.__name__}); fix config.json before rerunning"
+            print(json.dumps({"mode": "reload", "paths": paths, "reason": f"{why}; {restored}, marker kept"}))
             return 2
         else:
             reason = why
@@ -354,8 +445,7 @@ def main(argv=None):
         write_atomic(args.current, data, like=args.candidate)  # the candidate carries the role's owner/mode
     if mode == "reload":
         _match_attributes(args.current, args.candidate)  # chown/chmod emit no WRITE: no second reload
-        if os.path.exists(marker):
-            os.unlink(marker)  # proven reload
+        _clear_marker(marker, token)  # proven reload
     os.unlink(args.candidate)
     print(json.dumps({"mode": mode, "paths": paths, "reason": reason}))
     return 0

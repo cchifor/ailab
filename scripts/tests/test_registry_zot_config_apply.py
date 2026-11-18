@@ -143,15 +143,13 @@ class InotifyTest(unittest.TestCase):
     def test_kernel_sdev(self):
         self.assertEqual(zca.kernel_sdev(os.makedev(0xFC, 0x16)), 0xFC00016)
 
-    def test_watch_matches_exact_and_unique_inode_fallback(self):
+    def test_watch_matches_exact_identity_only(self):
         dev = os.makedev(0xFC, 0x16)
         live = [(0xC002A, 0xFC00016), (0x4037E, 0xFC00016), (0x4037C, 0xFC00016)]  # registry LXC, 2026-11-18
         self.assertTrue(zca.watch_matches(live, 0xC002A, dev))  # exact (ino, s_dev)
         other_dev = os.makedev(0x0, 0x2F)  # btrfs/overlay: st_dev is not the superblock s_dev
-        self.assertTrue(zca.watch_matches(live, 0xC002A, other_dev))  # unique inode number -> still watched
+        self.assertFalse(zca.watch_matches(live, 0xC002A, other_dev))  # no guessing by inode number (fails closed)
         self.assertFalse(zca.watch_matches(live, 0xBEEF, dev))  # replaced file: new inode, not watched
-        ambiguous = live + [(0xC002A, 0x1)]
-        self.assertFalse(zca.watch_matches(ambiguous, 0xC002A, other_dev))  # two candidates: do not guess
 
 
 class ReloadVerdictTest(unittest.TestCase):
@@ -232,7 +230,12 @@ class MainTest(unittest.TestCase):
         before = Path(self.current).read_bytes()
         with mock.patch.object(zca, "main_pid", return_value=0):
             rc, result = self._run("--dry-run")
-        self.assertEqual((rc, result["mode"], result["dry_run"]), (0, "restart", True))
+        self.assertEqual((rc, result["mode"], result["dry_run"]), (0, "blocked", True))
+        self.assertIn("allow_restart", result["reason"])
+        self._write(self.candidate, changed(storage__gcDelay="1h"))
+        with mock.patch.object(zca, "main_pid", return_value=0):
+            rc, result = self._run("--dry-run", "--allow-restart")
+        self.assertEqual((rc, result["mode"]), (0, "restart"))
         self.assertEqual(Path(self.current).read_bytes(), before)
         self.assertFalse(os.path.exists(self.candidate))
 
@@ -249,15 +252,94 @@ class MainTest(unittest.TestCase):
         self.assertEqual((rc, result["mode"]), (0, "restart"))
         self.assertEqual(json.loads(Path(self.current).read_text()), BASE)
 
-    def test_reload_with_a_detached_watch_falls_back_to_restart(self):
+    def test_detached_watch_fails_closed_unless_a_restart_is_allowed(self):
         self._write(self.current, BASE)
+        before = Path(self.current).read_bytes()
         self._write(self.candidate, changed(storage__gcDelay="1h"))
         with mock.patch.object(zca, "main_pid", return_value=4242), \
                 mock.patch.object(zca, "watch_alive", return_value=False):
             rc, result = self._run()
+        self.assertEqual((rc, result["mode"]), (2, "blocked"))  # no surprise 19 min outage
+        self.assertEqual(Path(self.current).read_bytes(), before)  # nothing written
+        self._write(self.candidate, changed(storage__gcDelay="1h"))
+        with mock.patch.object(zca, "main_pid", return_value=4242), \
+                mock.patch.object(zca, "watch_alive", return_value=False):
+            rc, result = self._run("--allow-restart")
         self.assertEqual((rc, result["mode"]), (0, "restart"))
         self.assertEqual(json.loads(Path(self.current).read_text())["storage"]["gcDelay"], "1h")
         self.assertTrue(os.path.exists(self.current + ".unconfirmed"))  # cleared only by the restart handlers
+
+    def test_malformed_live_config_fails_closed_unless_a_restart_is_allowed(self):
+        Path(self.current).write_text('{"storage": {"gcDelay": "2h"')  # an interrupted write
+        self._write(self.candidate, BASE)
+        rc, result = self._run()
+        self.assertEqual((rc, result["mode"]), (2, "blocked"))
+        self._write(self.candidate, BASE)
+        rc, result = self._run("--allow-restart")
+        self.assertEqual((rc, result["mode"]), (0, "restart"))
+        self.assertEqual(json.loads(Path(self.current).read_text()), BASE)
+
+    def test_a_held_lock_blocks_a_second_apply(self):
+        import fcntl
+        self._write(self.current, BASE)
+        self._write(self.candidate, changed(storage__gcDelay="1h"))
+        fd = os.open(self.current + ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            with mock.patch.object(zca.time, "sleep"):
+                rc, result = self._run("--lock-timeout", "0")
+        finally:
+            os.close(fd)
+        self.assertEqual((rc, result["mode"]), (2, "blocked"))
+        self.assertIn("lock", result["reason"])
+
+    def test_a_write_error_restores_and_fails(self):
+        self._write(self.current, BASE)
+        before = Path(self.current).read_bytes()
+        self._write(self.candidate, changed(storage__gcDelay="1h"))
+        real = zca.write_in_place
+        calls = []
+
+        def flaky(path, data):
+            calls.append(data)
+            if len(calls) == 1:
+                real(path, data[:10])  # a partial file, then the error
+                raise OSError("disk went away")
+            real(path, data)
+
+        with mock.patch.object(zca, "main_pid", return_value=4242), \
+                mock.patch.object(zca, "watch_alive", return_value=True), \
+                mock.patch.object(zca, "wait_journal_quiet", return_value=True), \
+                mock.patch.object(zca, "journal_cursor", return_value="c"), \
+                mock.patch.object(zca, "write_in_place", side_effect=flaky):
+            rc, result = self._run()
+        self.assertEqual((rc, result["mode"]), (2, "reload"))
+        self.assertEqual(Path(self.current).read_bytes(), before)  # restored over the partial write
+        self.assertTrue(os.path.exists(self.current + ".unconfirmed"))
+
+    def test_marker_is_cleared_only_by_its_own_transaction(self):
+        marker = self.current + ".unconfirmed"
+        mine = zca._touch_marker(marker)
+        zca._clear_marker(marker, "someone else")
+        self.assertTrue(os.path.exists(marker))
+        zca._clear_marker(marker, mine)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_journal_quiet_fails_fast_without_a_journal(self):
+        with mock.patch.object(zca, "_run", return_value=mock.Mock(returncode=127, stdout="")):
+            self.assertFalse(zca.wait_journal_quiet("zot.service"))
+
+    def test_journal_quiet_waits_out_earlier_reload_lines(self):
+        noisy = mock.Mock(returncode=0, stdout=json.dumps({"message": zca.MSG_LOADED}))
+        quiet = mock.Mock(returncode=0, stdout="")
+        with mock.patch.object(zca, "_run", side_effect=[noisy, noisy, quiet]), \
+                mock.patch.object(zca.time, "sleep"):
+            self.assertTrue(zca.wait_journal_quiet("zot.service"))
+        clock = iter(range(0, 1000, 5))
+        with mock.patch.object(zca, "_run", return_value=noisy), \
+                mock.patch.object(zca.time, "time", side_effect=lambda: next(clock)), \
+                mock.patch.object(zca.time, "sleep"):
+            self.assertFalse(zca.wait_journal_quiet("zot.service", timeout=20))
 
     def test_restart_takes_owner_and_mode_from_the_candidate(self):
         self._write(self.current, BASE)
@@ -271,6 +353,7 @@ class MainTest(unittest.TestCase):
         self._write(self.candidate, candidate)
         with mock.patch.object(zca, "main_pid", return_value=4242), \
                 mock.patch.object(zca, "watch_alive", return_value=True), \
+                mock.patch.object(zca, "wait_journal_quiet", return_value=True), \
                 mock.patch.object(zca, "journal_cursor", return_value="c"), \
                 mock.patch.object(zca, "journal_messages", return_value=[zca.MSG_CHANGED, zca.MSG_FAILED]), \
                 mock.patch.object(zca.time, "sleep"):
@@ -293,7 +376,7 @@ class MainTest(unittest.TestCase):
         self._write(self.candidate, new)
         with mock.patch.object(zca, "main_pid", return_value=0):
             rc, result = self._run("--dry-run")
-        self.assertEqual((rc, result["mode"]), (0, "restart"))  # no watch -> restart; never "none"
+        self.assertEqual((rc, result["mode"]), (0, "blocked"))  # no watch -> blocked (never "none")
         with mock.patch.object(zca, "main_pid", return_value=4242), \
                 mock.patch.object(zca, "watch_alive", return_value=True):
             self._write(self.candidate, new)
@@ -307,6 +390,7 @@ class MainTest(unittest.TestCase):
         self._write(self.candidate, changed(storage__gcDelay="1h"))
         with mock.patch.object(zca, "main_pid", return_value=4242), \
                 mock.patch.object(zca, "watch_alive", return_value=True), \
+                mock.patch.object(zca, "wait_journal_quiet", return_value=True), \
                 mock.patch.object(zca, "journal_cursor", return_value="c"), \
                 mock.patch.object(zca, "journal_messages", return_value=[zca.MSG_CHANGED, zca.MSG_LOADED]), \
                 mock.patch.object(zca, "http_alive", return_value=True), \
@@ -321,6 +405,7 @@ class MainTest(unittest.TestCase):
         clock = iter(range(0, 10_000, 3))
         with mock.patch.object(zca, "main_pid", return_value=4242), \
                 mock.patch.object(zca, "watch_alive", return_value=True), \
+                mock.patch.object(zca, "wait_journal_quiet", return_value=True), \
                 mock.patch.object(zca, "journal_cursor", return_value="c"), \
                 mock.patch.object(zca, "journal_messages", return_value=[zca.MSG_CHANGED]), \
                 mock.patch.object(zca.time, "time", side_effect=lambda: next(clock)), \
@@ -333,7 +418,8 @@ class MainTest(unittest.TestCase):
         self._write(self.current, BASE)
         before = Path(self.current).read_bytes()
         self._write(self.candidate, changed(storage__gcDelay="1h"))
-        with mock.patch.object(zca, "main_pid", return_value=4242),                 mock.patch.object(zca, "watch_alive", return_value=True),                 mock.patch.object(zca, "journal_cursor", return_value=None):
+        with mock.patch.object(zca, "main_pid", return_value=4242),                 mock.patch.object(zca, "watch_alive", return_value=True),                 mock.patch.object(zca, "wait_journal_quiet", return_value=True), \
+                mock.patch.object(zca, "journal_cursor", return_value=None):
             rc, result = self._run("--wait", "2", "--settle", "0")
         self.assertEqual((rc, result["mode"]), (2, "reload"))
         self.assertEqual(Path(self.current).read_bytes(), before)
@@ -345,7 +431,8 @@ class MainTest(unittest.TestCase):
         seq = [[zca.MSG_CHANGED, zca.MSG_FAILED],
                [zca.MSG_CHANGED, zca.MSG_FAILED, zca.MSG_CHANGED, zca.MSG_LOADED]]
         calls = iter(seq + [seq[-1]] * 50)
-        with mock.patch.object(zca, "main_pid", return_value=4242),                 mock.patch.object(zca, "watch_alive", return_value=True),                 mock.patch.object(zca, "journal_cursor", return_value="c"),                 mock.patch.object(zca, "journal_messages", side_effect=lambda *a: next(calls)),                 mock.patch.object(zca, "http_alive", return_value=True),                 mock.patch.object(zca.time, "sleep"):
+        with mock.patch.object(zca, "main_pid", return_value=4242),                 mock.patch.object(zca, "watch_alive", return_value=True),                 mock.patch.object(zca, "wait_journal_quiet", return_value=True), \
+                mock.patch.object(zca, "journal_cursor", return_value="c"),                 mock.patch.object(zca, "journal_messages", side_effect=lambda *a: next(calls)),                 mock.patch.object(zca, "http_alive", return_value=True),                 mock.patch.object(zca.time, "sleep"):
             rc, result = self._run("--wait", "30", "--settle", "0")
         self.assertEqual((rc, result["mode"]), (0, "reload"))
 
@@ -362,6 +449,7 @@ class MainTest(unittest.TestCase):
         ino = os.stat(self.current).st_ino
         with mock.patch.object(zca, "main_pid", return_value=4242), \
                 mock.patch.object(zca, "watch_alive", return_value=True), \
+                mock.patch.object(zca, "wait_journal_quiet", return_value=True), \
                 mock.patch.object(zca, "journal_cursor", return_value="c"), \
                 mock.patch.object(zca, "journal_messages", return_value=[zca.MSG_CHANGED, zca.MSG_LOADED]), \
                 mock.patch.object(zca, "http_alive", return_value=True), \
