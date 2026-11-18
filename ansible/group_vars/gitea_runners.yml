@@ -13,7 +13,8 @@ gitea_runner_label: self-hosted-hv
 
 # Cargo target age sweep (role defaults: gitea_runner_cleanup_target_age_sweep). On-prem only: these runners'
 # 250 GB root disks never reach the 75% pressure line, and their thin LVs sit on the QLC NVMe that each
-# node's etcd member shares (2026-11-18 RCA). The higher floor keeps a runner from being held out of the
-# pool for a small gain now that the sweep can run on any idle tick (pilot: 41 GB freed on ci-runner-1).
+# node's etcd member shares (2026-11-18 RCA). The age path's own 5 GB floor keeps a runner from being held
+# out of the pool for a small gain (pilot: 41 GB freed on ci-runner-1); the pressure and critical paths keep
+# the role's 1 GB floor.
 gitea_runner_cleanup_target_age_sweep: true
-gitea_runner_cleanup_target_min_free_mb: 5120
+gitea_runner_cleanup_target_age_min_free_mb: 5120

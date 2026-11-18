@@ -338,6 +338,11 @@ gitea_runner_cleanup_target_min_free_mb: 1024
 # group_vars/gitea_runners.yml. Why: the root disks grew to 250 GB, so pressure (75%) was never reached and
 # the targets piled up (41 GB on ci-runner-1) on the QLC drive etcd shares. Docker levers stay disk-gated.
 gitea_runner_cleanup_target_age_sweep: false
+# The age path's own floor (MB): below pressure the runner is held only for at least this much. The pressure
+# and critical paths keep gitea_runner_cleanup_target_min_free_mb, where a small gain is what is wanted.
+gitea_runner_cleanup_target_age_min_free_mb: 1024
+# The age path walks the target dirs at most once per this many hours (0 = every idle tick).
+gitea_runner_cleanup_target_age_every_h: 6
 # BuildKit's bbolt metadata file, whose size the beacon publishes (buildkit_db_bytes): it never shrinks.
 gitea_runner_cleanup_buildkit_db: /var/lib/docker/buildkit/cache.db
 # Reap RUNNING containers older than this (seconds). MUST exceed the job timeout (gitea_runner_job_timeout
