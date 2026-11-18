@@ -330,6 +330,14 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
 
 ### 3.6 Grant, then create (`t0`)
 
+**Every run, immediately before the grant:** with the agent at 0 replicas (§3.5), read the installation
+with `scripts/relay-admin-call.py --username <admin> get-installation b380ff7f-0716-478d-8b01-3d39f30e750b`
+and record its `state`, epoch and `fenceObjectUid` in the run log. Require `state` `ready`; otherwise
+**stop: no grant, no create**, and find out why the installation left `ready` (§8 U2). The tool redacts
+`recoveryGeneration`; a stale generation is refused by the hub's create check, which runs before the
+intent is stored (`rel:server/workers/service.ts:1398-1410`) and before the lifetime freeze
+(`rel:server/workers/service.ts:1543-1570`), so it cannot spend the signed run.
+
 With the admin browser session (cookie file mode 0600) and `Origin: https://relay.chifor.me`:
 
 ```sh
@@ -871,6 +879,8 @@ and restart within the timing budget (§8 U12).
    or whether a background heartbeat check moves the installation off `ready`. E6 must read back
    the installation's `ready` state and the same `pending`, unclaimed create throughout the hold,
    then confirm it is offered and executed on restart (§4); shutdown/restart timing remains U12.
+   Every run also reads back `state` `ready` immediately before its grant, and stops if it is not
+   (§3.6), so a state change found in E6 cannot first surface as a spent signed run.
 3. U3 — **UNVERIFIED:** measure E6's S-A rehearsal from PR open through CI green, merge, Flux apply,
    init attempts, Pod Ready and §3.4 readback. Keep the UTC transition log and init-container
    `startedAt`, `finishedAt`, exit codes and restart counts; use the last H-step rollouts as the
