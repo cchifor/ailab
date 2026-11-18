@@ -619,25 +619,27 @@ are as of Relay v0.10.6, from `packages/infrastructure-agent/leadership.ts` and 
   - `lease-renew-refused`;
   - `lease-read-late` and `lease-renew-late`: answered only at or after the deadline.
 - **Failure classes:** `timeout`, `late`, `transport`, `invalid-response`, `local`, `error`, `401`, `403`, `404`, `409`, `429`, `4xx`, `5xx`, `other`.
-- **Loss reasons:**
+- **Loss reasons** (all terminal for this incarnation):
   - `renew-deadline-passed`: no proven renewal within 10 s;
   - `lease-taken`: another holder or Lease UID;
   - `lease-deleted`;
-  - `lease-invalid`;
-  - `lease-write-unverified`;
-  - `lease-holder-reused`;
-  - `lease-response-too-late`;
-  - `lease-state-changed`.
+  - `lease-invalid`: a successful read returned an invalid Lease or the wrong namespace (definitive loss);
+  - `lease-write-unverified`: a successful write response failed Lease validation or showed the wrong namespace, holder or, on renewal, Lease UID (definitive loss);
+  - `lease-holder-reused`: a candidate found its own never-reused holder ID in the Lease, possibly from an acquisition whose outcome was unknown (definitive loss);
+  - `lease-response-too-late`: an acquisition response was processed at or after its round's acceptance deadline (deadline loss);
+  - `lease-state-changed`: a write response arrived for a state this process had already left (definitive local state loss).
 
 Reading an episode:
 
 - **A slow API server** shows `lease_renewal_failed` (`lease-renew-unknown`, `timeout`). Within the 10 s window it is followed by `lease_write_adopted` and/or `lease_renewal_recovered`. That is tolerated, not an incident.
-- **`renew-deadline-passed`** means no Lease request was answered in time for 10 s. On 2026-11-18 at 03:53Z that was an etcd leader stall: reads were held 8-10 s on every apiserver. Look at etcd (WAL fsync, leader changes, apiserver-to-etcd latency), not at the agent. Riding out a stall that long needs longer Lease timings: a Relay preparation change, parked for the owner.
+- **`renew-deadline-passed`** means no renewal was proven within 10 s; timely refusals or repeated conflicts can also cause this. Inspect `lastFailure`, `failureClass`, `lastDuration` and any `inFlight`/`inFlightDuration` first. Investigate etcd (WAL fsync, leader changes, apiserver-to-etcd latency) when those indicate stalled Lease requests. On 2026-11-18 at 03:53Z that was an etcd leader stall: reads were held 8-10 s on every apiserver. Riding out a stall that long needs longer Lease timings: a Relay preparation change, parked for the owner.
 - **`lease-taken`, `lease-deleted` or `lease-holder-reused`** are definitive. Find out who changed or removed the Lease.
 
 The agent's Lease requests are GET and PUT on `leases/relay-infrastructure-agent` and POST on the
 Lease collection (no list or watch). `agent/rbac.yaml` grants exactly `get` and `update` on that
-resourceName and `create` on leases. A `403` in `failureClass` therefore means that RBAC changed.
+resourceName and `create` on leases. For a `403` in `failureClass`, check `agent/rbac.yaml` and the
+RoleBinding first; it does not prove RBAC changed. Also check admission denials, namespace state and
+the requested Lease/namespace.
 
 ## Qualification stage (owner decision G3)
 
