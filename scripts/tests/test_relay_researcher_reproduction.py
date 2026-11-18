@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -95,7 +96,8 @@ class CommittedState(unittest.TestCase):
 
     def expected_import(self) -> dict:
         """agent/config.json as the I5 import writes it for the committed I4 definition, built here from
-        the definition, binding and summary (Relay's AgentConfig for this installation's inputs)."""
+        the definition, binding and summary (Relay's AgentConfig for this installation's inputs), with
+        the bundle tool's leadership overlay in place of the preparation's timing."""
         d = self.definition
         identity = {k: d["identity"][k] for k in ("tenantId", "installationId", "clusterUid", "controlNamespace",
                                                   "installationPublicKey", "fenceObjectUid") if k in d["identity"]}
@@ -108,7 +110,7 @@ class CommittedState(unittest.TestCase):
             "kubernetes": {"origin": d["kubernetesOrigin"], "caFile": "/run/relay/kubernetes/ca.crt",
                            "tokenFile": "/run/relay/kubernetes/token"},
             "identity": identity,
-            "leadership": {"leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2},
+            "leadership": dict(self.bundle.LEADERSHIP_OVERLAY),
             "policy": {
                 "installation": d["installationPolicy"],
                 "executionSlots": d["executionSlots"],
@@ -137,6 +139,22 @@ class CommittedState(unittest.TestCase):
         self.assertEqual(self.config, expected)
         self.assertEqual(self.config_text, json.dumps(expected, sort_keys=True, separators=(",", ":"),
                                                       ensure_ascii=False) + "\n")
+
+    def test_the_reproduction_takes_the_timing_from_the_reproduced_tree(self):
+        """reproduce reads the leadership overlay of the exported tree's bundle script (no option sets
+        it), and a ref from before the overlay has none to report."""
+        script = module("relay_researcher_reproduce", ROOT / "scripts/relay-researcher-reproduce.py")
+        self.assertEqual(script.leadership_overlay(ROOT),
+                         (self.bundle.PREPARED_LEADERSHIP, self.bundle.LEADERSHIP_OVERLAY))
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "scripts").mkdir()
+            (Path(tmp) / "scripts/relay-researcher-bundle.py").write_text("PLACEHOLDER = 'OPERATOR-FILLS'\n")
+            self.assertIsNone(script.leadership_overlay(Path(tmp)))
+        parser_options = re.findall(r'add_argument\("(--[\w-]+)"', (ROOT / "scripts/relay-researcher-reproduce.py")
+                                    .read_text(encoding="utf-8"))
+        self.assertEqual(sorted(parser_options), ["--agent-assets", "--assets", "--ref", "--relay"])
+        if self.imported:
+            self.assertEqual(self.config["leadership"], self.bundle.LEADERSHIP_OVERLAY)
 
     def known_digests(self) -> set[str]:
         release, summary = self.inputs["release"], self.summary

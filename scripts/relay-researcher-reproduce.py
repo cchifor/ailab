@@ -28,6 +28,10 @@ neither help nor hurt) and exits 1 on any byte difference. It never touches the 
      exactly the S-A generator's candidate values to the agent config (policy.bootstrapSecrets true,
      the run's candidateRuntime) and render the chart with them, so the committed campaign state is
      reproduced byte for byte too, and any other difference still fails.
+     The leadership timing comes from the exported tree as well: its relay-researcher-bundle.py
+     (LEADERSHIP_OVERLAY, a temporary overlay) requires the bundle to carry exactly the runtime
+     preparation's timing (PREPARED_LEADERSHIP) and imports the overlay's in its place; this script
+     reports both and requires the committed config to carry the overlay. No option changes it.
 
   relay-researcher-reproduce.py --relay <pinned relay checkout> --assets <release-asset dir>
                                 [--agent-assets <agent release-asset dir>] [--ref HEAD]
@@ -123,6 +127,19 @@ def pins_are_placeholders(tree: Path) -> bool:
     return predicate(exported.pins())
 
 
+def leadership_overlay(tree: Path) -> tuple[dict, dict] | None:
+    """(PREPARED_LEADERSHIP, LEADERSHIP_OVERLAY) of the exported tree's bundle script, or None for a
+    ref from before the overlay (its import copies the bundle's timing)."""
+    exported = bundle_module(tree)
+    if not hasattr(exported, "LEADERSHIP_OVERLAY"):
+        return None
+    return exported.PREPARED_LEADERSHIP, exported.LEADERSHIP_OVERLAY
+
+
+def timing(value: dict) -> str:
+    return "/".join(str(value.get(k)) for k in ("leaseDurationSeconds", "renewDeadlineSeconds", "retryPeriodSeconds"))
+
+
 def reproduce(relay: Path, assets: Path, ref: str, agent_assets: Path | None = None) -> list[str]:
     relay, assets = relay.resolve(), assets.resolve()
     agent_assets = agent_assets.resolve() if agent_assets is not None else None
@@ -175,6 +192,16 @@ def reproduce(relay: Path, assets: Path, ref: str, agent_assets: Path | None = N
         run([str(tsx), "scripts/prepare-pod-installation.ts", str(definition), digest, str(bundle)], cwd=relay)
         run([sys.executable, str(tree / "scripts/relay-researcher-bundle.py"), "check", str(bundle), "--chart", str(relay)])
         print("I5: prepare-pod-installation.ts and relay-researcher-bundle.py check --chart pass")
+        overlay = leadership_overlay(tree)
+        if overlay is not None:
+            prepared, leadership = overlay
+            produced = json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8"))["leadership"]
+            committed_timing = json.loads((tree / IMPORTED[1]).read_text(encoding="utf-8")).get("leadership")
+            print(f"I5: leadership overlay of {ref}: the bundle's {timing(produced)} (prepared "
+                  f"{timing(prepared)}) imported as {timing(leadership)}")
+            if produced != prepared or committed_timing != leadership:
+                differences.append(f"I5: leadership: bundle {produced}, committed {committed_timing}; the overlay "
+                                   f"replaces {prepared} with {leadership}")
         if not pins_are_placeholders(tree):
             before = work / "committed"
             for path in IMPORTED:

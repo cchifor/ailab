@@ -391,6 +391,13 @@ class SyntheticAgentRelease(unittest.TestCase):
                          (image, self.release["sourceCommit"]))
         self.assertEqual(self.read(self.updated_bundle, "31-agent-config.json"),
                          self.read(self.base_bundle, "31-agent-config.json"))
+        # Both carry the runtime preparation's own timing, which the bundle tool's overlay replaces.
+        tool = module("relay_researcher_bundle", ROOT / "scripts/relay-researcher-bundle.py")
+        for bundle in (self.base_bundle, self.updated_bundle):
+            self.assertEqual(json.loads(self.read(bundle, "31-agent-config.json"))["leadership"],
+                             tool.PREPARED_LEADERSHIP)
+            self.assertEqual(json.loads(self.read(bundle, "30-agent-values.json"))["leadership"],
+                             {"allowStandby": False, **tool.PREPARED_LEADERSHIP})
 
     def test_4_check_import_and_reproduce_the_agent_only_pin_pr(self):
         self.set_inputs(None)
@@ -408,8 +415,10 @@ class SyntheticAgentRelease(unittest.TestCase):
         (previous,) = re.findall(r'^  agentImage: "([^"]+)"$', pins.decode(), re.M)  # release's, or a real update's
         done = self.bundle_tool("import", self.updated_bundle)
         self.assertEqual(done.returncode, 0, done.stderr)
-        # pins.yaml differs only in agentImage; the agent config is byte-identical.
+        # pins.yaml differs only in agentImage; the agent config is byte-identical, with the overlay's timing.
         self.assertEqual(self.read(self.tree, CONFIG), config)
+        tool = module("relay_researcher_bundle", self.tree / "scripts/relay-researcher-bundle.py")
+        self.assertEqual(json.loads(config)["leadership"], tool.LEADERSHIP_OVERLAY)
         changed = [(a, b) for a, b in zip(pins.decode().splitlines(), self.read(self.tree, PINS).decode().splitlines())
                    if a != b]
         self.assertEqual(changed, [(f'  agentImage: "{previous}"', f'  agentImage: "{self.agent["agentImage"]}"')])

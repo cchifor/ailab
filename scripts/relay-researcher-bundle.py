@@ -31,17 +31,31 @@ installation is exactly what was reviewed here, and then copies the only two thi
          compares every rendered object with the committed mirror. Exit 1 on the first mismatch.
   import <bundle-dir> --chart <relay-checkout>
          Runs check WITH the chart render (required here), then writes the bundle's installationId, agentImage and sourceCommit into
-         kubernetes/apps/relay-researcher/pins/pins.yaml and copies 31-agent-config.json byte for
-         byte to kubernetes/apps/relay-researcher/agent/config.json. It writes nothing else, creates
-         no Kubernetes object and contacts nothing. Review and commit the diff.
+         kubernetes/apps/relay-researcher/pins/pins.yaml and 31-agent-config.json with the leadership
+         timing overlay (below), as canonical JSON, to kubernetes/apps/relay-researcher/agent/config.json
+         (byte for byte the bundle's file when the overlay changes nothing). Its one difference from
+         check: the committed config's leadership may differ from LEADERSHIP_OVERLAY, because writing
+         it is import's job. It writes nothing else, creates no Kubernetes object and contacts nothing.
+         Review and commit the diff.
+
+Leadership timing overlay (TEMPORARY, see LEADERSHIP_OVERLAY): Relay's preparation at the runtime's
+commit takes no timing input and always writes PREPARED_LEADERSHIP (15/10/2) into 30-agent-values.json
+and 31-agent-config.json, two files the bundle's per-file hashes cover. check first verifies the bundle
+exactly as prepared (those hashes, and exactly PREPARED_LEADERSHIP in both files), then replaces those
+three values, and nothing else, with LEADERSHIP_OVERLAY (30/20/2) wherever it compares or renders: the
+config it compares with the committed config.json (committed_config) and imports, and the values it
+renders the chart with (effective_values; allowStandby stays false). check refuses a committed config
+with any other timing. Policy and binding digests do not cover the timing (Relay's localPolicyDigest
+is policy.installation only), so the binding, definition and summary stay byte-identical.
 
 During the researcher qualification campaign (a signed run committed in
 kubernetes/components/relay-worker-candidate/run/), the agent tree carries exactly the S-A
 generator's candidate values on top of the I5 import (scripts/relay-candidate-run.py candidate_config:
 policy.bootstrapSecrets true and the run's candidateRuntime; the chart's candidate mounts, volume,
 reads and journal egress). check compares the committed config with exactly that overlay of the
-bundle's config and renders the chart with the matching candidate values; import then writes the
-overlaid config (canonical JSON), so re-importing never drops a running campaign's values.
+bundle's config, on top of the leadership timing overlay (the two touch disjoint fields), and renders
+the chart with the matching candidate values; import then writes the overlaid config (canonical JSON),
+so re-importing never drops a running campaign's values or the reviewed timing.
 
 Stdlib + PyYAML. Never reads a secret: the bundle is public by construction (no key, no token).
 """
@@ -91,6 +105,23 @@ UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 AGENT_IMAGE = re.compile(r"^registry\.chifor\.me/relay/infrastructure-agent@sha256:[0-9a-f]{64}$")
 CHART_RELEASE = "relay-infrastructure-agent"
+
+# TEMPORARY leadership timing overlay. Remove it (PREPARED_LEADERSHIP, LEADERSHIP_OVERLAY,
+# PREPARED_TIMING, check_prepared_leadership, with_leadership and their callers) once the runtime's
+# preparation renders leadership timing from the installation definition: the reviewed definition then
+# carries the timing and the bundle needs no overlay. Until then the runtime's
+# packages/infrastructure-agent/installation-preparation.ts hardcodes PREPARED_LEADERSHIP; the prepared
+# bundle must carry exactly it (checked before any overlay), and LEADERSHIP_OVERLAY, the single reviewed
+# declaration of the installation's timing, replaces it.
+PREPARED_LEADERSHIP = {"leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2}
+# 30/20/2: a 20 s renew deadline rides out an etcd leader stall like the 8-10 s one of 2026-11-18 03:53Z.
+LEADERSHIP_OVERLAY = {"leaseDurationSeconds": 30, "renewDeadlineSeconds": 20, "retryPeriodSeconds": 2}
+# The two prepared documents that carry the timing; the values add allowStandby (false: one replica).
+PREPARED_TIMING = {"31-agent-config.json": PREPARED_LEADERSHIP,
+                   "30-agent-values.json": {"allowStandby": False, **PREPARED_LEADERSHIP}}
+# Relay AgentConfig.leadership (packages/infrastructure-agent/config.ts) and the chart's agent.validate:
+# integers within these bounds, renewDeadline < leaseDuration and 2 x retryPeriod <= renewDeadline.
+TIMING_BOUNDS = {"leaseDurationSeconds": (10, 120), "renewDeadlineSeconds": (5, 110), "retryPeriodSeconds": (1, 30)}
 
 
 class Mismatch(Exception):
@@ -363,12 +394,51 @@ def committed_agent() -> dict:
     return docs
 
 
+def exact(value) -> str:
+    """A comparison key that keeps JSON types apart (15 is not 15.0, false is not 0)."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def validate_timing(timing, where: str) -> dict:
+    """Leadership timing as Relay's agent and chart accept it, or a Mismatch naming the rule."""
+    if not isinstance(timing, dict) or set(timing) != set(TIMING_BOUNDS):
+        fail(f"{where} must have exactly the keys {sorted(TIMING_BOUNDS)}: {timing!r}")
+    for field, (low, high) in TIMING_BOUNDS.items():
+        if type(timing[field]) is not int or not low <= timing[field] <= high:
+            fail(f"{where}.{field} = {timing[field]!r} is not an integer in {low}..{high}")
+    if timing["renewDeadlineSeconds"] >= timing["leaseDurationSeconds"]:
+        fail(f"{where}: renewDeadlineSeconds must be below leaseDurationSeconds")
+    if 2 * timing["retryPeriodSeconds"] > timing["renewDeadlineSeconds"]:
+        fail(f"{where}: retryPeriodSeconds must be at most half of renewDeadlineSeconds")
+    return dict(timing)
+
+
+def check_prepared_leadership(document: dict, name: str) -> None:
+    """The prepared bundle's own timing, before any overlay: exactly the runtime preparation's
+    PREPARED_LEADERSHIP (values: with allowStandby false). Any other baseline is unreviewed (another
+    preparation, or an edited bundle), so the overlay refuses to replace it."""
+    validate_timing(PREPARED_LEADERSHIP, "PREPARED_LEADERSHIP")
+    if exact(document.get("leadership")) != exact(PREPARED_TIMING[name]):
+        fail(f"{name} leadership = {document.get('leadership')!r}, not the runtime preparation's "
+             f"{PREPARED_TIMING[name]!r} that the leadership overlay replaces")
+
+
+def with_leadership(document: dict, name: str) -> dict:
+    """The one leadership overlay: a copy of the prepared `name` (31-agent-config.json or
+    30-agent-values.json) with exactly its three timing values replaced by LEADERSHIP_OVERLAY."""
+    check_prepared_leadership(document, name)
+    document = copy.deepcopy(document)
+    document["leadership"].update(validate_timing(LEADERSHIP_OVERLAY, "LEADERSHIP_OVERLAY"))
+    return document
+
+
 def check_values(values: dict, definition: dict, agent: dict) -> None:
     ns = definition["identity"]["controlNamespace"]
     deployment = agent[("Deployment", ns, "relay-infrastructure-agent")]
     pod = deployment["spec"]["template"]["spec"]
     (container,) = pod["containers"]
     volumes = {v["name"]: v for v in pod["volumes"]}
+    check_prepared_leadership(values, "30-agent-values.json")  # the chart renders the overlay of exactly it
     expect = {
         "image.reference": (values["image"]["reference"], definition["agentImage"]),
         "controlNamespace": (values["controlNamespace"], ns),
@@ -438,15 +508,33 @@ def campaign_run() -> dict | None:
 
 
 def committed_config(config: dict) -> dict:
-    """What a bundle's agent config is committed as: itself, or during the campaign exactly the
-    generator's candidate_config of it (bootstrapSecrets true and the run's candidateRuntime)."""
+    """What a bundle's agent config is committed as: itself with the leadership overlay, and during
+    the campaign exactly the generator's candidate_config of that (bootstrapSecrets true and the run's
+    candidateRuntime)."""
+    config = with_leadership(config, "31-agent-config.json")
     v = campaign_run()
     return config if v is None else candidate_generator().candidate_config(config, v)
 
 
-def check_config(config: dict, definition: dict) -> None:
+def effective_values(values: dict, agent: dict, ns: str) -> dict:
+    """The chart values that render the committed agent tree: the bundle's values with the leadership
+    overlay, and during the campaign the candidate values on top (candidate_values)."""
+    values = with_leadership(values, "30-agent-values.json")
+    v = campaign_run()
+    return values if v is None else candidate_values(values, v, agent, ns)
+
+
+def check_config(config: dict, definition: dict, importing: bool = False) -> None:
     committed = json.loads((TREE / "agent/config.json").read_text(encoding="utf-8"))
+    check_prepared_leadership(config, "31-agent-config.json")  # as prepared, before the overlay
     config = committed_config(config)
+    # The overlay's timing, or a refusal. import alone may find another one: it writes the overlay's.
+    timing = committed.get("leadership")
+    if not is_placeholder(timing) and exact(timing) != exact(config["leadership"]):
+        if not importing:
+            fail(f"agent/config.json leadership = {timing!r}, not LEADERSHIP_OVERLAY {config['leadership']!r} "
+                 "(relay-researcher-bundle.py import writes it)")
+        committed["leadership"] = config["leadership"]
 
     def walk(expected, actual, path):
         if is_placeholder(expected):
@@ -579,10 +667,8 @@ def chart_compare(chart_root: Path, bundle: Path, definition: dict, agent: dict)
     if dirty:
         fail("--chart checkout has local changes under deploy/infrastructure-agent")
     ns = definition["identity"]["controlNamespace"]
-    values = json.loads((bundle / "30-agent-values.json").read_text(encoding="utf-8"))
+    values = effective_values(json.loads((bundle / "30-agent-values.json").read_text(encoding="utf-8")), agent, ns)
     v = campaign_run()
-    if v is not None:
-        values = candidate_values(values, v, agent, ns)
     with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8") as values_file:
         json.dump(values, values_file)
         values_file.flush()
@@ -593,8 +679,8 @@ def chart_compare(chart_root: Path, bundle: Path, definition: dict, agent: dict)
     config_key = ("ConfigMap", ns, "relay-infrastructure-agent-config")
     chart_config = json.loads(docs.pop(config_key)["data"]["config.json"])
     if chart_config != committed_config(json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8"))):
-        fail("the chart's rendered config.json differs from 31-agent-config.json"
-             + (" with the campaign's candidate values" if v is not None else ""))
+        fail("the chart's rendered config.json differs from 31-agent-config.json with the leadership overlay"
+             + (" and the campaign's candidate values" if v is not None else ""))
     committed = copy.deepcopy(agent)
     committed.pop(("CiliumNetworkPolicy", ns, "relay-infrastructure-agent-api-egress"))  # ailab addition
     committed.pop(("NetworkPolicy", ns, "relay-infrastructure-agent-journal-egress"))  # ailab addition (U9)
@@ -608,7 +694,7 @@ def chart_compare(chart_root: Path, bundle: Path, definition: dict, agent: dict)
     compare_objects("chart render", list(docs.values()), list(committed.values()))
 
 
-def check(bundle: Path, chart: Path | None) -> dict:
+def check(bundle: Path, chart: Path | None, importing: bool = False) -> dict:
     manifest = json.loads((bundle / "bundle-manifest.json").read_text(encoding="utf-8"))
     if manifest.get("kind") != "relay-installation-preparation-bundle" or manifest.get("workloadCreationEnabled"):
         fail("bundle-manifest.json is not an enrollment-only installation bundle")
@@ -647,9 +733,15 @@ def check(bundle: Path, chart: Path | None) -> dict:
 
     agent = committed_agent()
     values = json.loads((bundle / "30-agent-values.json").read_text(encoding="utf-8"))
-    config = json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8"))
+    config_text = (bundle / "31-agent-config.json").read_text(encoding="utf-8")
+    config = json.loads(config_text)
+    # The prepared bundle as Relay wrote it (its hashes are verified above), before any overlay:
+    # canonical, as import re-serializes it; check_values and check_config require the preparation's
+    # own timing before they apply the leadership overlay.
+    if config_text != candidate_generator().canonical(config) + "\n":
+        fail("31-agent-config.json is not Relay canonical JSON")
     check_values(values, definition, agent)
-    check_config(config, definition)
+    check_config(config, definition, importing)
     check_policy(config, values, definition, report)
     if chart is not None:
         chart_compare(chart, bundle, definition, agent)
@@ -669,6 +761,13 @@ def write_pins(definition: dict) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def imported_config(bundle: Path) -> bytes:
+    """agent/config.json as import writes it: the bundle's config with the leadership overlay (and the
+    campaign's values during the campaign), canonical JSON. check() has verified the bundle."""
+    config = json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8"))
+    return (candidate_generator().canonical(committed_config(config)) + "\n").encode("utf-8")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -680,18 +779,18 @@ def main(argv: list[str] | None = None) -> int:
                         help="exact pinned Relay checkout to render the chart from")
     args = parser.parse_args(argv)
     try:
-        definition = check(args.bundle, args.chart)
+        definition = check(args.bundle, args.chart, importing=args.command == "import")
         if args.command == "import":
-            write_pins(definition)
             target = TREE / "agent/config.json"
-            data = (args.bundle / "31-agent-config.json").read_bytes()
-            if campaign_run() is not None:
-                gen = candidate_generator()
-                data = (gen.canonical(committed_config(json.loads(data))) + "\n").encode("utf-8")
+            data = imported_config(args.bundle)
+            before = json.loads(target.read_text(encoding="utf-8")).get("leadership")
+            write_pins(definition)
             with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as tmp:
                 tmp.write(data)
             shutil.move(tmp.name, target)
-            print("imported: pins/pins.yaml and agent/config.json; review and commit the diff")
+            after = json.loads(data)["leadership"]
+            print("imported: pins/pins.yaml and agent/config.json; review and commit the diff"
+                  + (f" (leadership {before} -> {after})" if exact(before) != exact(after) else ""))
         else:
             print("bundle matches the reviewed installation"
                   + ("" if pins_filled(pins()) else "; pins are not filled yet (run import)"))

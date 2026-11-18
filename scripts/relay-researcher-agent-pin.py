@@ -6,11 +6,18 @@ and the existing bundle tool (PyYAML and helm required).
 All generation and import checks run in a private temporary copy inside this tree;
 only validated inputs, I4 output and the agentImage pin are installed. No downloads,
 credentials or live operations. Provenance prose is printed for manual review.
+
+The import must leave agent/config.json byte-identical, and that config must carry exactly the bundle
+tool's (temporary) leadership timing overlay, LEADERSHIP_OVERLAY of scripts/relay-researcher-bundle.py:
+the bundle tool replaces the prepared bundle's timing with it on every import, so an agent-only update
+keeps it. A change of the overlay itself is not an agent-only update: land it first with the bundle
+tool's import (its check refuses a config.json without the overlay's timing, and so does this tool).
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -26,6 +33,8 @@ INPUTS = "docs/relay-workers/researcher-binding-inputs.json"
 I4 = "docs/relay-workers/researcher-i4"
 TREE = "kubernetes/apps/relay-researcher"
 PINS = f"{TREE}/pins/pins.yaml"
+CONFIG = f"{TREE}/agent/config.json"
+BUNDLE_TOOL = "scripts/relay-researcher-bundle.py"
 PROVENANCE = "docs/relay-workers/researcher-i5-provenance.md"
 I4_FILES = {"binding.json", "definition.json", "summary.json", "template-preparation-input.json"}
 # Explicit public inputs of the generator, bundle checker and its campaign overlay.
@@ -276,7 +285,18 @@ def check_i4(before: dict[str, bytes], after: dict[str, bytes], agent: dict, con
             "I4 summary changed beyond agentRelease, agentImage and definition hash (including bindingDigest)")
 
 
-def check_import(before: dict[str, bytes], after: dict[str, bytes], image: str) -> None:
+def leadership_overlay(tree: Path) -> dict:
+    """LEADERSHIP_OVERLAY of the bundle tool that ran in `tree` (the staged copy): the timing its import
+    writes into agent/config.json in place of the prepared bundle's."""
+    spec = importlib.util.spec_from_file_location("relay_researcher_bundle_staged", tree / BUNDLE_TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    overlay = getattr(module, "LEADERSHIP_OVERLAY", None)
+    require(isinstance(overlay, dict) and overlay, f"{BUNDLE_TOOL} declares no LEADERSHIP_OVERLAY")
+    return overlay
+
+
+def check_import(before: dict[str, bytes], after: dict[str, bytes], image: str, leadership: dict) -> None:
     try:
         import yaml
     except ImportError as error:
@@ -284,6 +304,7 @@ def check_import(before: dict[str, bytes], after: dict[str, bytes], image: str) 
 
     require(set(before) == set(after), "import changed the installation file set")
     require(PINS in before, "installation is missing pins.yaml")
+    require(CONFIG in before, "installation is missing agent/config.json")
 
     def pins(body):
         text = body.decode("utf-8")
@@ -312,6 +333,10 @@ def check_import(before: dict[str, bytes], after: dict[str, bytes], image: str) 
     for name in before:
         if name != PINS:
             require(after[name] == before[name], f"import changed {name} beyond pins.yaml's agentImage scalar")
+    # The unchanged config carries exactly the bundle tool's leadership overlay (JSON types included).
+    timing = field(object_json(after[CONFIG]), "leadership", dict, "agent/config.json")
+    require(json.dumps(timing, sort_keys=True) == json.dumps(leadership, sort_keys=True),
+            f"agent/config.json leadership {timing} is not the bundle tool's LEADERSHIP_OVERLAY {leadership}")
 
 
 def provenance_report(text: str, agent: dict, config: str, runtime: dict) -> str:
@@ -443,7 +468,8 @@ def pin(relay: Path, assets: Path, agent_assets: Path, tag: str, release_id: int
         check_i4(before, after, agent, config)
         shutil.rmtree(tree / I4)
         shutil.copytree(generated, tree / I4)
-        print("5/6 Prepare bundle, check --chart, import; require only the agentImage pin to change", flush=True)
+        print("5/6 Prepare bundle, check --chart, import; require only the agentImage pin to change and "
+              "the config to keep the leadership overlay", flush=True)
         # Relay requires the definition's immediate parent to be private (0700).
         private = work / "in"
         private.mkdir(mode=0o700)
@@ -456,7 +482,7 @@ def pin(relay: Path, assets: Path, agent_assets: Path, tag: str, release_id: int
         for command in ("check", "import"):
             run([sys.executable, tree / "scripts/relay-researcher-bundle.py", command, bundle, "--chart", relay],
                 cwd=work, env=env)
-        check_import(before_import, snapshot(tree, [TREE]), agent["agentImage"])
+        check_import(before_import, snapshot(tree, [TREE]), agent["agentImage"], leadership_overlay(tree))
         require(snapshot(ROOT, STAGED) == original, "inputs changed during verification; retry from a stable tree")
         replacements = {INPUTS: rewritten, **{f"{I4}/{name}": body for name, body in after.items()},
                         PINS: (tree / PINS).read_bytes()}
