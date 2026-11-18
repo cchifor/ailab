@@ -12,13 +12,14 @@ just registry                                      # converge the registry_zot r
 just ping-registry                                 # connectivity check
 ```
 
-The `sync` config is rendered into `/etc/zot/config.json`; a change triggers the `restart zot` handler.
+The `sync` config is rendered into `/etc/zot/config.json`; a change to it restarts zot (sync is not on the
+reload allowlist, see "Reload or restart" below).
 
 ### Applying a config change (pin the live binary)
 
 There is no config-only apply: `registry.yml` always runs the WHOLE role. Besides `config.json`,
 it converges the htpasswd lines, the certs, the sync upstream credentials and the systemd unit, and
-a change to any of them restarts zot. Its `get_url` task also converges `/usr/local/bin/zot` to
+a change to any of those restarts zot (a config.json change may reload instead, see "Reload or restart"). Its `get_url` task also converges `/usr/local/bin/zot` to
 `registry_zot_version` (the renovate pin in defaults), and the live binary can lag it (2026-11-17:
 live `v2.1.18`, pin `v2.1.23`). For a config or auth change, pin the version that is running:
 
@@ -37,11 +38,56 @@ restart from it. It still runs, and it would replace the binary (and restart zot
 those attributes differed, so confirm `zot -v` first. The role has no task-level switch to skip it;
 the pin is the gate.
 
-**Any change the role makes restarts zot** (`restart zot` handler: config, htpasswd, certs, sync
-credentials, unit) = a registry outage while zot
-re-parses the store before binding :443 (40 s warm, up to ~8 min cold). Pulls and pushes fail
-meanwhile. Poll `GET https://registry.chifor.me/v2/` for 200 (`systemctl is-active` reports active
-early). Batch changes into one apply where possible.
+### Reload or restart
+
+**A zot restart is an outage, and an expensive one.** zot re-parses the whole store into its BoltDB metaDB
+(`/var/lib/registry/store/meta.db`) before it binds :443. On 2026-11-17 that took **19 min** (161 repos, ~45.6k
+manifests) and wrote **~265 GB** to ai-node1's worn NVMe, stalling etcd on cp1. Pulls and pushes fail meanwhile.
+Poll `GET https://registry.chifor.me/v2/` for 200 (`systemctl is-active` reports active early).
+
+So `config.json` is not templated straight into place. Each play renders its OWN candidate,
+`config.json.candidate.<utc>.<random>`, so overlapping plays never share one; an `always:` step removes it. The play
+runs `zot verify` on the candidate and hands it to `/usr/local/lib/zot-config-apply.py` (role `files/`), which picks
+one of:
+
+- **none**: the candidate equals the live config (content, owner, group and mode).
+- **attributes**: same content, but a different owner/group/mode. The helper converges them with chown/chmod, which
+  emit no WRITE, so zot does not reload.
+- **reload**: only keys on the helper's `RELOADABLE` allowlist changed. Those are `storage.retention` (while
+  retention is already active on both sides), `storage.gcDelay`, `storage.gcInterval` and the
+  `http.accessControl` rules (`repositories`, `adminPolicy`, `groups`, `metrics`). zot v2.1.x watches the config
+  FILE and reloads it on an fsnotify WRITE (`pkg/cli/server/config_reloader.go`), copying only some fields
+  (`UpdateReloadableConfig`). So the helper writes the SAME inode, then proves the reload. First it waits until zot
+  has logged no reload line for 3 s, then it takes a journal cursor. After its write, the LAST reload attempt must
+  show `config file changed, trying to reload config` followed by `loaded new configuration settings`, with no
+  `failed to reload config` after it. The PID must be unchanged and `/v2/` must answer. A FAILED line is not final
+  (zot can read the file between the write and the truncate), so the helper waits for the last attempt and retries
+  the write once. Otherwise it **fails the play** and writes the previous bytes back. That restores the file on DISK;
+  whether zot's in-memory config also matches is then unconfirmed, which is what the marker below is for.
+- **restart**: any other difference, or a first deploy. The helper replaces the file atomically and the role
+  notifies `restart zot`.
+- **blocked**: a reload-safe change that cannot be reloaded. Either zot no longer watches the file, or the live
+  config.json is not valid JSON. zot ignores rename/remove events, so a config.json replaced since zot started (an
+  atomic write, an editor save) is no longer watched. The helper checks zot's inotify watches in `/proc/<pid>/fdinfo`
+  against the file's exact (inode, device) identity. Rather than cause a surprise 19 min outage, the play FAILS.
+  Restart zot in a quiet window, or rerun once with `-e registry_zot_config_allow_restart=true`. Applies are
+  serialized by an flock on `config.json.lock`.
+
+**`config.json.unconfirmed`** (root-only, no secrets) marks an apply that is not proven yet. The helper writes it
+before every reload or restart write, with a per-transaction token. A proven reload removes it. On a restart, the
+`restart zot` handlers remove it after zot restarted, via `zot-config-apply.py --clear-marker <token>` under the
+helper's lock, and only for this play's token. Restarts for other reasons (htpasswd, binary) clear nothing. While it exists, an unchanged candidate is NOT reported as `none`: the next run re-proves the
+file on disk (an identical in-place rewrite that zot must reload), or restarts if the watch is gone. That covers a
+failed reload, a killed helper, and a play that aborted before its handlers ran.
+
+Run the play with `--check` first. The helper then only classifies (`--dry-run`) and the `Report how the zot
+config was applied` task shows `{"mode": ..., "paths": [...]}`. Key paths only, never values: config.json holds
+secrets. Check mode is not entirely side-effect free: it installs the helper and writes, then removes, this play's
+throwaway candidate. The live `config.json` is never touched. Do not run two registry plays at once: the helper
+serializes its own steps, but zot restarts (handlers) run outside its lock.
+
+**Everything else the role converges still restarts zot**: htpasswd lines, certs, sync credentials, the unit and
+the binary. Batch those changes into one apply, in a quiet window.
 
 ## Enable Docker Hub upstream auth (recommended)
 
