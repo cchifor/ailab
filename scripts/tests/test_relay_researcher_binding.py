@@ -172,6 +172,7 @@ class Output(unittest.TestCase):
         recorded = dict(self.summary["agentRelease"])
         # The receipt's config digest comes from the receipt itself (the generator checks it is sha256),
         # so a registry readback can be compared with committed output alone.
+        self.assertIn("imageConfigDigest", recorded)
         self.assertRegex(recorded.pop("imageConfigDigest"), r"^sha256:[0-9a-f]{64}$")
         self.assertEqual(recorded, {k: agent[k] for k in ("tag", "giteaReleaseId", "sourceCommit", "assets",
                                                           "agentReceipt")})

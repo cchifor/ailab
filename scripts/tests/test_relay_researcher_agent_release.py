@@ -424,7 +424,7 @@ class SyntheticAgentRelease(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if not k.startswith("RELAY_RESEARCHER_")}
         # test_relay_candidate_run.py renders the chart from a Relay checkout at pins.yaml's sourceCommit:
         # the one this test generates with (release's commit, which the agent-only update keeps).
-        env.setdefault("RELAY_CHECKOUT", str(self.relay))
+        env["RELAY_CHECKOUT"] = str(self.relay)
         suite = lambda name: run([sys.executable, "-m", "unittest", "discover", "-s", self.tree / "scripts/tests",
                                   "-p", name], env=env)
         # Without the provenance record's update, CI refuses the pin PR (the record states the old agent).
