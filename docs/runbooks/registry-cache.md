@@ -86,6 +86,23 @@ secrets. Check mode is not entirely side-effect free: it installs the helper and
 throwaway candidate. The live `config.json` is never touched. Do not run two registry plays at once: the helper
 serializes its own steps, but zot restarts (handlers) run outside its lock.
 
+### Dropping orphaned referrers (`deleteReferrers`)
+
+`registry_zot_strive_delete_referrers_repos` lists the repos whose retention also deletes **orphaned referrers**:
+buildx attestation manifests whose subject image retention already deleted (55-77% of every strive repo's
+manifests on 2026-11-18; they bloat zot's metaDB, which every restart rebuilds). zot v2.1.18's GC deletes a
+referrer when its `subject` is not a TOP-LEVEL `index.json` entry, without recursing into indexes, and without
+consulting `keepTags`. So, for every repo before it goes on the list:
+
+1. Run `scripts/zot-referrer-orphan-check.py <repo>...` on the registry LXC (usage in its header). It must report
+   `"safe": true` (`nested_not_top == 0`, `tagged_orphans == 0`); it exits 1 otherwise.
+2. Note one kept tag's index digest and its platform manifests, and their `GET /v2/<repo>/referrers/<digest>`.
+3. Apply (a reload, no restart). After the next GC cycle (`gcInterval` 1h), the orphan count should drop. Step 2's
+   referrers must be unchanged. Watch ai-node1 writes and cp1 fsync: abort if node1 stays over 150 MiB/s, or cp1's
+   fsync p99 is over 1 s for 2 consecutive minutes. Abort = remove the repo from the list (reload). It stops further
+   deletions; the ones done are orphans and cannot be restored.
+4. Widen to `["strive/**"]` only after a clean canary.
+
 **Everything else the role converges still restarts zot**: htpasswd lines, certs, sync credentials, the unit and
 the binary. Batch those changes into one apply, in a quiet window.
 

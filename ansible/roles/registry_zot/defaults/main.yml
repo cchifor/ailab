@@ -192,6 +192,9 @@ registry_zot_strive_keep_recent: 100
 # glob gets its own policy, rendered BEFORE strive/** with the SAME keepTags (one macro) plus deleteReferrers, so
 # only referrers change. Canary first (one repo; measure one GC cycle: zot writes, cp1 fsync), then widen to
 # ["strive/**"]. The change is reload-safe (files/zot-config-apply.py): no restart.
+# BEFORE adding a repo here, run scripts/zot-referrer-orphan-check.py on it: zot's GC checks a referrer's subject
+# against TOP-LEVEL index.json entries only and ignores keepTags, so the check must report nested_not_top == 0 and
+# tagged_orphans == 0 (2026-11-18: strive/web, strive/sentinel, strive/knowledge all safe).
 registry_zot_strive_delete_referrers_repos: ["strive/web"]
 
 # strive/ci-build/** holds cchifor/platform's per-commit e2e images (`ci-<40-hex commit>`, pushed by
