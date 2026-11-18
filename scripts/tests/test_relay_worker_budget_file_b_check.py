@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import locale
 import os
 from pathlib import Path
 import re
@@ -315,7 +316,11 @@ class TransportChecks(unittest.TestCase):
         def fake_psql(argv, **kwargs):
             return run_child([sys.executable, "-c", "import sys; sys.stdout.buffer.write(" + repr(payload) + ")"], **kwargs)
 
-        with patch("locale.getencoding", return_value="iso8859-1"), patch.object(check.subprocess, "run", side_effect=fake_psql):
+        # A Latin-1 locale must not affect the explicit UTF-8 decode. Patch both locale hooks
+        # (getencoding exists only on Python 3.11+, so create it where missing).
+        with patch.object(locale, "getencoding", create=True, return_value="iso8859-1"), \
+                patch.object(locale, "getpreferredencoding", return_value="iso8859-1"), \
+                patch.object(check.subprocess, "run", side_effect=fake_psql):
             self.assertEqual(check.read_ledger(DSN), snapshot)
 
     def test_sql_statements_are_read_only_and_have_no_mutating_calls(self):
