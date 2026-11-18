@@ -326,6 +326,11 @@ UNIT
 systemctl daemon-reload && systemctl enable --now registry-lxc-fstrim.timer
 ```
 
+ai-node1's CI runners trim their own disks nightly and keep **03:15-04:15 UTC free every day** for this
+timer ([ci-runners.md](ci-runners.md), "Thin-pool trim"). Moving it means moving their windows too;
+`ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh` reads the `OnCalendar` and
+`RandomizedDelaySec` above and fails if they collide.
+
 **Verify a run, including that it did not hurt etcd.** A trim is a discard burst on the same drive as
 cp1's etcd WAL.
 - `journalctl -u registry-lxc-fstrim`: one line per chunk, then `end: trimmed_total=<bytes> pool=<%>`.

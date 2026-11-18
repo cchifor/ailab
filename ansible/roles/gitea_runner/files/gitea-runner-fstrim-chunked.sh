@@ -16,9 +16,12 @@
 #   fstrim -v -m 64K -o <offset> -l <length> <mnt>
 # The -m is a CONSTANT on purpose: ext4 retrims every flagged group when -m is smaller than the last one.
 # Before EACH slice, in this order: the stop file, the night window (UTC, may wrap midnight), and the job
-# gate. After each slice the byte offset (cursor) is persisted, so a run that stops anywhere resumes
-# there next night; at the end of the filesystem it wraps to 0 and counts a completed pass.
-# A run ends when it has covered MAX_GB_PER_RUN, or the whole filesystem once, or the window closes.
+# gate; then the stop file and the window once more, immediately before the FITRIM. After each slice the
+# byte offset (cursor) is persisted durably, so a run that stops anywhere resumes there next night; at
+# the end of the filesystem it wraps to 0 and counts a completed pass.
+# A run ends when the whole filesystem has been covered once, when less than one block group of the
+# MAX_GB_PER_RUN budget is left (a slice is cut to the budget, in whole groups: the cap is never
+# exceeded), or when the window closes.
 #
 # A job can still start during a slice. That is why the slices are small (2 GiB, ~40 s): a TRIM slows
 # the job's disk for at most one slice, and deletes nothing.
@@ -32,7 +35,7 @@
 #   1   MNT is not a mount point, not ext4, or its geometry is unreadable; or the lock file cannot be opened
 #   2   invalid settings
 #   5   an fstrim failed (the cursor stays at that slice)
-#   6   the state file cannot be written (nothing is trimmed without a place to record progress)
+#   6   the state file cannot be written or synced (nothing is trimmed without a durable record of progress)
 #   7   another run holds the lock (no beacon is written: that run owns it)
 #   143/130  SIGTERM/SIGINT (the in-flight slice is not counted; it is redone next time)
 set -uo pipefail
@@ -101,14 +104,21 @@ on_signal() { # <rc> <signal name>
   finish "$1" signal "stopped by $2"
 }
 
-# State: key=value lines, digits only. Parsed, never sourced; rewritten atomically.
+# State: key=value lines, digits only. Parsed, never sourced; rewritten atomically AND durably.
+# Surviving a power loss is about durability, not just atomicity: the rename alone is atomic, but without
+# an fsync of the new file (before the rename) and of its directory (after it), an abrupt reboot can drop
+# the update. That would cost real TRIM time, because a reboot also resets ext4's trimmed flags: the next
+# run would redo full slices from the stale cursor. `sync FILE` / `sync DIR` (coreutils) fsync just those.
 state_get() { sed -n "s/^$1=\([0-9]*\)$/\1/p" "$STATE_FILE" 2>/dev/null | tail -1; }
 write_state() { # <cursor> <passes>
-  local tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || return 1
+  local tmp dir
+  dir="$(dirname "$STATE_FILE")"
+  mkdir -p "$dir" 2>/dev/null || return 1
   tmp="$(mktemp "$STATE_FILE.XXXX" 2>/dev/null)" || return 1
   printf 'cursor=%s\npasses=%s\n' "$1" "$2" > "$tmp" || { rm -f "$tmp"; return 1; }
+  sync "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$STATE_FILE" || { rm -f "$tmp"; return 1; }
+  sync "$dir" || return 1
 }
 
 stopped() { [ -e "$STOP_FILE" ]; }
@@ -201,24 +211,35 @@ size=$(( blocks * bsize ))
 group=$(( bpg * bsize ))  # groups start at block 0 on every ext4 with blocks above 1 KiB, as here
 slice=$(( (CHUNK_GB * GiB + group - 1) / group * group ))
 cap=$(( MAX_GB_PER_RUN * GiB ))
+[ "$cap" -ge "$group" ] || finish 2 invalid "MAX_GB_PER_RUN=$MAX_GB_PER_RUN is below one block group ($group bytes)"
 
 # A cursor that does not fit this filesystem (a rebuilt or resized disk, a hand edit) restarts the pass.
 if [ "$cursor" -ge "$size" ] || [ $(( cursor % group )) -ne 0 ] || [ "$cursor" != "${c_raw:-0}" ]; then
   log "cursor '${c_raw}' does not fit this filesystem (size $size, group $group) - restarting the pass at 0"
   cursor=0
 fi
-write_state "$cursor" "$passes" || finish 6 state "cannot write $STATE_FILE - not trimming without a place to record progress"
+write_state "$cursor" "$passes" || finish 6 state "cannot write or sync $STATE_FILE - not trimming without a durable record of progress"
 outf="$STATE_FILE.fstrim-out" # fstrim's output, per slice (it runs as a tracked child, see run_child)
 
 log "start: $src size=$size group=$group slice=$slice cap=$cap window=$WINDOW_START-$WINDOW_END UTC cursor=$cursor passes=$passes"
 while :; do
-  [ "$range" -ge "$cap" ] && finish 0 cap "covered MAX_GB_PER_RUN=${MAX_GB_PER_RUN} GiB"
+  # The slice: never past the cap (the budget left, rounded DOWN to whole groups; under one group left
+  # ends the run), never past the fs end, and never back over this run's own start after a wrap
+  # (size - range is then the group-aligned distance to it).
   [ "$range" -ge "$size" ] && finish 0 full "covered the whole filesystem once"
+  budget=$(( (cap - range) / group * group ))
+  [ "$budget" -ge "$group" ] || finish 0 cap "covered MAX_GB_PER_RUN=${MAX_GB_PER_RUN} GiB (less than one block group left)"
+  off="$cursor"; len="$slice"
+  [ "$len" -gt "$budget" ] && len="$budget"
+  [ $(( off + len )) -gt "$size" ] && len=$(( size - off ))
+  [ "$len" -gt $(( size - range )) ] && len=$(( size - range ))
   stopped && finish 0 stopped "stop file $STOP_FILE present"
   in_window || finish 0 window "outside the window $WINDOW_START-$WINDOW_END UTC"
   wait_idle
-  off="$cursor"; len="$slice"
-  [ $(( off + len )) -gt "$size" ] && len=$(( size - off ))
+  # Again, IMMEDIATELY before the FITRIM: a successful idle confirmation takes seconds, and the window
+  # can close or a stop request arrive during it.
+  stopped && finish 0 stopped "stop file $STOP_FILE present (appeared while confirming idle)"
+  in_window || finish 0 window "the window $WINDOW_START-$WINDOW_END UTC closed while confirming idle"
   if ! run_child fstrim -v -m "$MINLEN" -o "$off" -l "$len" "$MNT" > "$outf" 2>&1; then
     finish 5 fstrim_failed "fstrim failed at off=$off len=$len: $(cat "$outf" 2>/dev/null)"
   fi
@@ -228,8 +249,8 @@ while :; do
   submitted=$(( submitted + bytes )); range=$(( range + len ))
   next=$(( off + len )); np="$passes"
   if [ "$next" -ge "$size" ]; then next=0; np=$(( passes + 1 )); fi
-  write_state "$next" "$np" || finish 6 state "cannot write $STATE_FILE after the slice at $off"
+  write_state "$next" "$np" || finish 6 state "cannot write or sync $STATE_FILE after the slice at $off"
   cursor="$next"; passes="$np"
   log "slice off=$off len=$len waited=${waited}s trimmed=$bytes next=$cursor passes=$passes"
-  [ "$range" -lt "$cap" ] && [ "$range" -lt "$size" ] && run_child sleep "$PAUSE_S"
+  [ "$range" -lt "$size" ] && [ $(( (cap - range) / group )) -ge 1 ] && run_child sleep "$PAUSE_S"
 done

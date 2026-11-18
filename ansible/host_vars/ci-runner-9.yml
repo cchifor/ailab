@@ -1,5 +1,7 @@
 ---
-# Thin-pool trim window, UTC (#1857). ai-node1 slots: ci-runner-1 00:00-01:45, ci-runner-4 01:50-03:35,
-# ci-runner-9 03:40-05:25. Runners on one node share its NVMe with etcd, so their windows must not overlap.
-gitea_runner_fstrim_window_start: "03:40"
-gitea_runner_fstrim_window_end: "05:25"
+# Thin-pool trim window, UTC (#1857). ai-node1 slots: ci-runner-1 00:00-01:30, ci-runner-4 01:35-03:10,
+# ci-runner-9 04:15-05:55. 03:15-04:15 stays free EVERY day for the registry LXC's weekly trim on this node
+# (Sun 03:30 + up to 15 min delay; docs/runbooks/registry-cache.md). Runners on one node share its NVMe
+# with etcd, so their windows must not overlap.
+gitea_runner_fstrim_window_start: "04:15"
+gitea_runner_fstrim_window_end: "05:55"

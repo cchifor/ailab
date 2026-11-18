@@ -6,11 +6,14 @@
 # `date +%s` is a FAKE CLOCK ($CTL/clock): sleep and fstrim advance it, so the window and the job waits are
 # deterministic and take no real time. The invariants:
 # - every block of the fs is covered, from ext4's geometry, in slices of whole block groups, with -m 64K;
-# - progress persists per slice, resumes, wraps at the end and counts passes;
-# - nothing is trimmed outside the window (also one that wraps midnight), past the cap, or while a job runs
-#   (the cleanup's act_runner signal), and a long job ends the night's run;
-# - the lock, the stop file, bad settings and a non-ext4 fs stop it before any trim;
-# - the beacon carries the run's numbers and why it ended.
+# - progress persists per slice (fsynced: file, then directory), resumes, wraps at the end and counts passes;
+# - nothing is trimmed outside the window (also one that wraps midnight, and also when the idle confirmation
+#   ends past it), beyond the cap (slices are cut to it), or while a job runs (the cleanup's act_runner
+#   signal), and a long job ends the night's run;
+# - the lock, the stop file (also one that appears during the idle confirmation), bad settings and a
+#   non-ext4 fs stop it before any trim;
+# - the beacon carries the run's numbers and why it ended;
+# - the per-host windows never overlap on a node, nor the registry trim's slot on ai-node1.
 #
 # Run: bash ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh   (Linux; needs python3 + PyYAML)
 set -u
@@ -89,6 +92,17 @@ echo $(( $(cat "$CTL/clock") + ${1%%.*} )) > "$CTL/clock"
 if [ -f "$CTL/stop_after" ] && [ "$n" -ge "$(cat "$CTL/stop_after")" ]; then touch "$CTL/stop"; fi
 exit 0
 STUB
+cat > "$BIN/sync" <<'STUB'
+#!/usr/bin/env bash
+# sync FILE|DIR (an fsync of just that): logged, with what the state file held at that moment, so a case
+# can tell a sync of the temp file BEFORE the rename from one of the directory after it. Fails (an fsync
+# error) from call $CTL/sync_fail_on on.
+echo "$*" >> "$CTL/sync_calls"
+n=$(wc -l < "$CTL/sync_calls")
+if [ -f "$CTL/sync_fail_on" ] && [ "$n" -ge "$(cat "$CTL/sync_fail_on")" ]; then exit 1; fi
+echo "$(tr '\n' ' ' < "$CTL/state/state" 2>/dev/null)" >> "$CTL/sync_seen"
+exit 0
+STUB
 cat > "$BIN/date" <<'STUB'
 #!/usr/bin/env bash
 # The fake clock for `date +%s`; everything else (the log timestamps) is the real date.
@@ -154,13 +168,44 @@ eq "ends on the cap" cap "$(reason)"
 eq "cursor saved after the last slice" $((8 * GiB)) "$(st cursor)"
 eq "no pass yet" 2 "$(st passes)"
 rm -f "$CTL/fstrim_calls"; run GITEA_FSTRIM_MAX_GB_PER_RUN=4
-eq "next run: the short last slice, then wraps to 0 and 2 GiB" \
-  "$((8 * GiB)) 0 $((2 * GiB))" "$(awk '{ print $5 }' "$CTL/fstrim_calls" | tr '\n' ' ' | sed 's/ $//')"
+# The fs ends 64 MiB into a group: the short last slice (1 GiB + 64 MiB), the wrap, a 2 GiB slice, then
+# the 960 MiB of budget left rounded DOWN to 7 groups (896 MiB). 64 MiB is left: under one group, so it stops.
+MiB=1048576; G=$(( 128 * MiB ))
+eq "next run: the short last slice, the wrap, then slices cut to the budget left" \
+  "$((8 * GiB))/$((SIZE - 8 * GiB)) 0/$((2 * GiB)) $((2 * GiB))/$((7 * G))" \
+  "$(awk '{ print $5 "/" $7 }' "$CTL/fstrim_calls" | tr '\n' ' ' | sed 's/ $//')"
 eq "pass counted at the wrap" 3 "$(st passes)"
-eq "cursor after the wrap" $((4 * GiB)) "$(st cursor)"
+eq "cursor after the wrap: group-aligned" $((2 * GiB + 7 * G)) "$(st cursor)"
 eq "beacon: passes" 3 "$(beacon passes_total)"
-eq "beacon: cursor" $((4 * GiB)) "$(beacon cursor_bytes)"
-eq "beacon: range covered this run" $(( SIZE - 8 * GiB + 4 * GiB )) "$(beacon range_bytes)"
+eq "beacon: cursor" $((2 * GiB + 7 * G)) "$(beacon cursor_bytes)"
+eq "beacon: range covered this run is under the 4 GiB cap" $(( SIZE - 8 * GiB + 2 * GiB + 7 * G )) "$(beacon range_bytes)"
+eq "ends on the cap" cap "$(reason)"
+
+echo "== a run that starts mid-filesystem covers it exactly once, stopping at its own start =="
+new_case once; printf 'cursor=%s\npasses=0\n' $((3 * GiB)) > "$CTL/state/state"; run
+eq "the last slice ends at the run's start (3 GiB), not a 2 GiB slice past it" \
+  "-v -m 64K -o $((2 * GiB)) -l $((1 * GiB)) /" "$(tail -1 "$CTL/fstrim_calls")"
+eq "the whole fs, once" "$SIZE" "$(beacon range_bytes)"
+eq "cursor back at the start" $((3 * GiB)) "$(st cursor)"
+eq "reason" full "$(reason)"
+
+echo "== the cap is never exceeded, whatever the chunk, cap and group size =="
+# <blocks per group> <CHUNK_GB> <MAX_GB_PER_RUN>, on a 20 GiB fs: 128 MiB and 96 MiB groups, chunks that do
+# and do not divide the cap, and a chunk that is not a whole number of groups.
+for combo in "32768 3 4" "32768 4 6" "24576 2 5" "24576 3 7" "24576 5 5"; do
+  set -- $combo
+  new_case "cap$1-$2-$3"; echo "$1" > "$CTL/bpg"; echo $(( 20 * GiB / 4096 )) > "$CTL/blocks"
+  run GITEA_FSTRIM_CHUNK_GB="$2" GITEA_FSTRIM_MAX_GB_PER_RUN="$3"
+  grp=$(( $1 * 4096 )); cap=$(( $3 * GiB )); r="$(beacon range_bytes)"
+  if [ -n "$r" ] && [ "$r" -le "$cap" ] && [ "$r" -gt $(( cap - grp )) ]; then
+    ok "groups $(( grp / MiB )) MiB, chunk $2, cap $3: covered $r <= cap $cap (within one group of it)"
+  else
+    bad "groups $(( grp / MiB )) MiB, chunk $2, cap $3: covered '$r' against cap $cap" "$(cat "$CTL/fstrim_calls")"
+  fi
+  odd="$(awk -v g="$grp" '{ if ($5 % g || $7 % g) print }' "$CTL/fstrim_calls")"
+  eq "groups $(( grp / MiB )) MiB, chunk $2, cap $3: every offset and length is whole groups" "" "$odd"
+  eq "groups $(( grp / MiB )) MiB, chunk $2, cap $3: reason" cap "$(reason)"
+done
 
 echo "== a cursor that does not fit this filesystem restarts the pass at 0 =="
 for c in 12345 $((20 * GiB)); do
@@ -189,6 +234,15 @@ eq "closes mid-run: exit 0" 0 "$(rc)"
 eq "closes mid-run: the slices begun inside the window ran" 3 "$(calls fstrim_calls)"
 eq "closes mid-run: reason" window "$(reason)"
 eq "closes mid-run: progress saved for tomorrow" $((6 * GiB)) "$(st cursor)"
+# Inside at 05:29:59; the idle confirmation (3 reads, 2 s) succeeds at 05:30:01, past END: no FITRIM.
+new_case confirmpast; at 05:29:59; run
+eq "confirmation ends past END: nothing trimmed" 0 "$(calls fstrim_calls)"
+eq "confirmation ends past END: reason" window "$(reason)"
+eq "confirmation ends past END: the confirmation itself succeeded" 3 "$(cat "$CTL/pgrep_n")"
+new_case confirmpastwrap; at 00:59:59; run GITEA_FSTRIM_WINDOW_START=23:30 GITEA_FSTRIM_WINDOW_END=01:00
+eq "same, in a window that wraps midnight (23:30-01:00 at 00:59:59)" "0 window" "$(calls fstrim_calls) $(reason)"
+new_case confirmwrapin; at 23:59:59; run GITEA_FSTRIM_WINDOW_START=23:30 GITEA_FSTRIM_WINDOW_END=01:00 GITEA_FSTRIM_MAX_GB_PER_RUN=2
+eq "a confirmation that crosses midnight inside a wrapping window still trims" 1 "$(calls fstrim_calls)"
 
 echo "== the job gate (the cleanup's act_runner signal) =="
 new_case busywait; printf 'busy\nbusy\nbusy\nbusy\nbusy\n' > "$CTL/pgrep_seq"; run
@@ -219,6 +273,10 @@ eq "present at start: reason" stopped "$(reason)"
 new_case stopwait; echo busy > "$CTL/pgrep_after"; echo 3 > "$CTL/stop_after"; run
 eq "appears during a job wait: stops" stopped "$(reason)"
 eq "appears during a job wait: nothing trimmed" 0 "$(calls fstrim_calls)"
+new_case stopconfirm; echo 1 > "$CTL/stop_after"; run   # sleep 1 is inside a confirmation that then succeeds
+eq "appears during a SUCCESSFUL idle confirmation: nothing trimmed" 0 "$(calls fstrim_calls)"
+eq "appears during a successful idle confirmation: reason" stopped "$(reason)"
+eq "appears during a successful idle confirmation: the confirmation did succeed" 3 "$(cat "$CTL/pgrep_n")"
 new_case stopbetween; echo 3 > "$CTL/stop_after"; run   # sleeps 1-2 confirm idle, 3 is the pause after slice 1
 eq "appears between slices: one slice, then stops" 1 "$(calls fstrim_calls)"
 eq "appears between slices: progress saved" $((2 * GiB)) "$(st cursor)"
@@ -270,6 +328,27 @@ has "logs fstrim's error" "Input/output error" "$(cat "$CTL/out")"
 new_case nostate; touch "$CTL/afile"; run GITEA_FSTRIM_STATE_FILE="$CTL/afile/state"
 eq "state not writable -> exit 6" 6 "$(rc)"
 eq "state not writable -> nothing trimmed" 0 "$(calls fstrim_calls)"
+
+echo "== the cursor is durable: the new file is fsynced before the rename, its directory after =="
+# A rename is atomic but not durable: a power cut can still lose it, and a reboot also resets ext4's trimmed
+# flags, so a lost cursor means re-trimming full slices. Calls: the start-of-run write (1-2), slice 1 (3-4).
+new_case durable; run GITEA_FSTRIM_MAX_GB_PER_RUN=2
+eq "two syncs per state write" 4 "$(calls sync_calls)"
+tmpre="^$CTL/state/state\\.[A-Za-z0-9]{4}\$"
+grep -qE "$tmpre" <<< "$(nth sync_calls 3)" && ok "slice 1: the temp file is synced first ($(nth sync_calls 3))" \
+  || bad "slice 1: the temp file is synced first" "got: $(nth sync_calls 3)"
+eq "slice 1: the state file still held the OLD cursor when the temp file was synced" "cursor=0 passes=0 " "$(nth sync_seen 3)"
+eq "slice 1: then the directory, after the rename" "$CTL/state" "$(nth sync_calls 4)"
+eq "slice 1: by then it held the new cursor" "cursor=$((2 * GiB)) passes=0 " "$(nth sync_seen 4)"
+new_case syncfail0; echo 1 > "$CTL/sync_fail_on"; run
+eq "an fsync error on the first write -> exit 6, nothing trimmed" "6 0" "$(rc) $(calls fstrim_calls)"
+new_case syncfail3; echo 3 > "$CTL/sync_fail_on"; run
+eq "an fsync error after slice 1 -> exit 6" 6 "$(rc)"
+eq "an fsync error after slice 1: the cursor on disk is the old one" 0 "$(st cursor)"
+eq "an fsync error after slice 1: no temp file left behind" "" "$(find "$CTL/state" -name 'state.????')"
+eq "an fsync error after slice 1: reason" state "$(reason)"
+new_case syncfail4; echo 4 > "$CTL/sync_fail_on"; run
+eq "an fsync error on the directory after the rename -> exit 6" 6 "$(rc)"
 
 echo "== SIGTERM during a slice (systemctl stop): waits for it, records the stop, does not count it =="
 new_case sigterm; touch "$CTL/slow_trim"
@@ -368,8 +447,12 @@ while IFS= read -r l; do
   case "$l" in "ok "*) ok "fstab: ${l#ok }" ;; *) bad "fstab: ${l#BAD }" ;; esac
 done <<< "$out"
 
-echo "== the per-host windows: inside 00:00-05:30 UTC and never overlapping on one Proxmox node =="
-# The node of each runner comes from the runners' tofu (kubernetes/infra/runners/variables.tf).
+echo "== the per-host windows: inside 00:00-06:00 UTC, never overlapping on one Proxmox node, clear of the registry trim =="
+# The node of each runner comes from the runners' tofu (kubernetes/infra/runners/variables.tf). ai-node1 also
+# runs the registry LXC's weekly trim, a hand-installed timer defined in docs/runbooks/registry-cache.md: its
+# start window (OnCalendar + RandomizedDelaySec), with 15 min of margin before and 30 after, counts as an
+# occupied slot on EVERY day (the runners avoid it by schedule, not by day-of-week logic). A runner's window
+# must end 5 min before the next slot starts: a slice begun just before its END runs past it.
 out="$(python3 - "$REPO" <<'PY'
 import pathlib, re, sys, yaml
 repo = pathlib.Path(sys.argv[1])
@@ -386,14 +469,24 @@ for h in hosts:
     v = yaml.safe_load(hv.read_text(encoding="utf-8")) if hv.exists() else {}
     s, e = v.get("gitea_runner_fstrim_window_start"), v.get("gitea_runner_fstrim_window_end")
     good = isinstance(s, str) and isinstance(e, str) and re.fullmatch(r"\d\d:\d\d", s) and re.fullmatch(r"\d\d:\d\d", e) \
-        and 0 <= mins(s) < mins(e) <= mins("05:30")
-    print(("ok " if good else "BAD ") + f"{h} window {s!r}-{e!r} is a quoted HH:MM span inside 00:00-05:30")
+        and 0 <= mins(s) < mins(e) <= mins("06:00")
+    print(("ok " if good else "BAD ") + f"{h} window {s!r}-{e!r} is a quoted HH:MM span inside 00:00-06:00")
     print(("ok " if h in nodes else "BAD ") + f"{h} has a node in variables.tf ({nodes.get(h)})")
     if good and h in nodes:
-        spans.setdefault(nodes[h], []).append((mins(s), mins(e), h))
+        spans.setdefault(nodes[h], []).append((mins(s), mins(e), h, True))
+reg = (repo / "docs/runbooks/registry-cache.md").read_text(encoding="utf-8")
+blk = reg[reg.find("registry-lxc-fstrim.timer <<"):] if "registry-lxc-fstrim.timer <<" in reg else ""
+cal = re.search(r"^OnCalendar=\S+ \*-\*-\* (\d\d):(\d\d)(?::\d\d)? UTC$", blk, re.M)
+dly = re.search(r"^RandomizedDelaySec=(\d+)min$", blk, re.M)
+print(("ok " if cal and dly else "BAD ") + "the registry trim timer (OnCalendar, RandomizedDelaySec) is read from registry-cache.md")
+if cal and dly:
+    rs = int(cal.group(1)) * 60 + int(cal.group(2))
+    slot = (rs - 15, rs + int(dly.group(1)) + 30, "registry-lxc-fstrim", False)
+    print(f"ok ai-node1 keeps {slot[0] // 60:02d}:{slot[0] % 60:02d}-{slot[1] // 60:02d}:{slot[1] % 60:02d} free for the registry trim")
+    spans.setdefault("ai-node1", []).append(slot)
 for node, ws in sorted(spans.items()):
     ws.sort()
-    clash = [f"{a[2]}/{b[2]}" for a, b in zip(ws, ws[1:]) if b[0] < a[1]]
+    clash = [f"{a[2]}/{b[2]}" for i, a in enumerate(ws) for b in ws[i + 1:] if b[0] < a[1] + (5 if a[3] else 0)]
     print(("ok " if not clash else "BAD ") + f"{node}: {' '.join(w[2] for w in ws)} do not overlap {clash or ''}")
 PY
 )" || bad "windows: the python check did not run" "$out"

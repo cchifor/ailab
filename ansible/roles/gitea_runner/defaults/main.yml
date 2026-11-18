@@ -402,8 +402,9 @@ gitea_runner_fstrim_window_end: "05:30"
 # GiB per slice, rounded up to whole ext4 block groups (128 MiB here). Small on purpose: a job that starts
 # during a slice shares the drive with that one slice only (~40 s at ~19 s/GB).
 gitea_runner_fstrim_chunk_gb: 2
-# GiB of the filesystem covered per run. Sized for the 1h45m per-host windows: 64 slices x (~41 s of TRIM
-# + the pause) is ~65 min, leaving ~40 min for job waits. A 250 GB root takes two nights per pass.
+# GiB of the filesystem covered per run, never exceeded (the last slice is cut to the budget left, in
+# whole groups). Sized for the per-host windows (1h30-1h45): 64 slices x (~41 s of TRIM + the pause) is
+# ~65 min, leaving 25-40 min for job waits. A 250 GB root takes two nights per pass.
 gitea_runner_fstrim_max_gb_per_run: 128
 gitea_runner_fstrim_pause_s: 20
 # The longest single wait for a running job (checked before each slice) before giving up until the next

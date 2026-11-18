@@ -372,10 +372,23 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     byte offset after each slice so the next night resumes there. Before every slice it checks the stop
     file, the window, and the job gate (the cleanup's signal: children of act_runner's MainPID, idle
     confirmed over 3 reads). It waits for a running job and gives up for the night after 30 min.
-  - **Windows** (`host_vars/ci-runner-N.yml`; runners on one node never overlap; the role default
-    00:00-05:30 is for a runner without one): 00:00-01:45 ci-runner-1/-2/-3, 01:50-03:35 ci-runner-4/-5/-6,
-    03:40-05:25 ci-runner-9/-10. On Sundays ai-node1's registry LXC trim (03:30Z,
-    [registry-cache.md](registry-cache.md), "Thin-volume trim") overlaps ci-runner-9's slot.
+  - **Windows** (`host_vars/ci-runner-N.yml`; runners on one node never overlap and are 5 min apart, since
+    a slice begun just before the end runs past it; the role default 00:00-05:30 is for a runner without
+    one):
+    - ai-node1: ci-runner-1 00:00-01:30, ci-runner-4 01:35-03:10, ci-runner-9 04:15-05:55. **03:15-04:15
+      stays free every day** for the node's weekly registry LXC trim (`OnCalendar=Sun 03:30 UTC` + up to
+      15 min `RandomizedDelaySec`, [registry-cache.md](registry-cache.md), "Thin-volume trim"), with
+      margin. Scheduling, not day-of-week logic. The gap covers that trim's start, not its whole run:
+      one that outlasts 04:15 still shares the drive with ci-runner-9's slices.
+    - ai-node2: ci-runner-2 00:00-01:45, ci-runner-5 01:50-03:35, ci-runner-10 03:40-05:25.
+    - ai-node3: ci-runner-3 00:00-01:45, ci-runner-6 01:50-03:35.
+    - `tests/test-fstrim-chunked.sh` checks this against each runner's node in
+      `kubernetes/infra/runners/variables.tf` and the registry timer in registry-cache.md. Moving the
+      registry timer means moving the node1 windows too.
+  - **Each slice** is cut to the budget left (in whole groups), so a run never covers more than the cap,
+    and the stop file and the window are checked again right before each FITRIM. The cursor is written
+    with an fsync of the file and of its directory, so it survives a power cut (a reboot also resets the
+    trimmed flags, so a lost cursor would mean re-trimming full slices).
   - **One reboot per runner, once.** A remount does not clear the trimmed flags `discard` left behind; a
     fresh mount does. Reboot each runner once while idle (the "Restart a daemon" rules below), after the
     role has removed `discard` from fstab. Done 2026-11-18 for ci-runner-1/-2/-4/-5/-9/-10, still with
@@ -387,7 +400,7 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
       submitted to the host; whether the thin pool reclaimed it is not visible from the guest),
       `range_bytes`, `cursor_bytes`, `fs_bytes`, `passes_total`, `exit_code`, `exit_reason{reason=…}`.
     - Reasons: `cap`, `full` (whole fs covered), `window`, `busy`, `stopped` (all exit 0); `unsupported`
-      or `lock` (1), `invalid` (2), `fstrim_failed` (5), `state` (6, state file not writable), `signal`
+      or `lock` (1), `invalid` (2), `fstrim_failed` (5), `state` (6, state file not writable or not synced), `signal`
       (143/130). Exit 7 (another run holds `/run/gitea-runner-fstrim.lock`) writes no beacon.
     - `journalctl -u gitea-runner-fstrim.service`: one `slice off=… trimmed=…` line per slice, then the
       reason. `cat /var/lib/gitea-runner-fstrim/state` holds `cursor=` and `passes=`.
