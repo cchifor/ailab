@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-check before enabling or widening zot `deleteReferrers` (registry_zot_strive_delete_referrers_repos).
+r"""Pre-check before enabling or widening zot `deleteReferrers` (registry_zot_strive_delete_referrers_repos).
 
 zot v2.1.18 GC (pkg/storage/gc/gc.go removeReferrer) deletes a referrer when its `subject` digest is not among the
 TOP-LEVEL entries of the repo's index.json (isManifestReferencedInIndex does not recurse into nested indexes), and
@@ -10,9 +10,9 @@ it ignores keepTags for that decision. So deleteReferrers is only safe for a rep
 This walks the store READ-ONLY and exits 1 if either rule is broken for any repo. Run it on the registry LXC
 (node-ssh.py does not forward stdin, so push a temporary copy and remove it):
   B=$(base64 -w0 scripts/zot-referrer-orphan-check.py)
-  python scripts/node-ssh.py 192.168.0.2 "echo $B | base64 -d > /tmp/zroc.py && pct push 5004 /tmp/zroc.py \\
-    /tmp/zroc.py && pct exec 5004 -- python3 /tmp/zroc.py strive/web; rc=\\$?; pct exec 5004 -- rm -f /tmp/zroc.py; \\
-    rm -f /tmp/zroc.py; echo check-rc=\\$rc; exit \\$rc"
+  python scripts/node-ssh.py 192.168.0.2 "echo $B | base64 -d > /tmp/zroc.py && pct push 5004 /tmp/zroc.py \
+    /tmp/zroc.py && pct exec 5004 -- python3 /tmp/zroc.py strive/web; rc=\$?; pct exec 5004 -- rm -f /tmp/zroc.py; \
+    rm -f /tmp/zroc.py; echo check-rc=\$rc; exit \$rc"
 The cleanup must not hide the result: only `check-rc=0` (and every line `"safe": true`) is a pass.
 Default store: /var/lib/registry/store; override with --root.
 """
