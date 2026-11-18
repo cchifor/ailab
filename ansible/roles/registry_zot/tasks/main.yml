@@ -151,56 +151,74 @@
     mode: "0755"
   check_mode: false # the apply step runs it with --dry-run in check mode, so it must exist
 
-- name: Render the zot config candidate
-  ansible.builtin.template:
-    src: config.json.j2
-    dest: "{{ registry_zot_config_dir }}/config.json.candidate"
-    owner: root
-    group: "{{ registry_zot_group }}"
-    mode: "0640"
-  no_log: true # config.json embeds the OIDC client secret — keep it out of --diff / -v output
-  check_mode: false # a candidate beside the live file is harmless; check mode needs it to classify the change
-  changed_when: false # the apply step below reports the real change
+- name: Name this play's zot config candidate (unique, so overlapping plays never share one)
+  ansible.builtin.set_fact:
+    registry_zot_candidate: >-
+      {{ registry_zot_config_dir }}/config.json.candidate.{{ now(utc=true).strftime('%Y%m%d%H%M%S') }}.{{ 999999999 | random }}
 
-- name: Check whether the zot binary is installed
-  ansible.builtin.stat:
-    path: /usr/local/bin/zot
-  register: registry_zot_binary
+- name: Apply the zot config (render, verify, reload in place or restart)
+  block:
+    - name: Render the zot config candidate
+      ansible.builtin.template:
+        src: config.json.j2
+        dest: "{{ registry_zot_candidate }}"
+        owner: root
+        group: "{{ registry_zot_group }}"
+        mode: "0640"
+      no_log: true # config.json embeds the OIDC client secret — keep it out of --diff / -v output
+      check_mode: false # a candidate beside the live file is harmless; check mode needs it to classify the change
+      changed_when: false # the apply step below reports the real change
 
-- name: Validate the zot config candidate (same loader as `zot serve`)
-  ansible.builtin.command:
-    argv: [/usr/local/bin/zot, verify, "{{ registry_zot_config_dir }}/config.json.candidate"]
-  check_mode: false
-  changed_when: false
-  no_log: true # its errors can quote config fragments (secrets); on failure run `zot verify` by hand on the host
-  when: registry_zot_binary.stat.exists
+    - name: Check whether the zot binary is installed
+      ansible.builtin.stat:
+        path: /usr/local/bin/zot
+      register: registry_zot_binary
 
-- name: Apply the zot config (reload in place when only reload-safe keys changed)
-  ansible.builtin.command:
-    argv: >-
-      {{ ['python3', '/usr/local/lib/zot-config-apply.py',
-          '--current', registry_zot_config_dir ~ '/config.json',
-          '--candidate', registry_zot_config_dir ~ '/config.json.candidate',
-          '--unit', 'zot.service', '--port', registry_zot_port | string]
-         + (['--dry-run'] if ansible_check_mode else [])
-         + (['--allow-restart'] if registry_zot_config_allow_restart | bool else []) }}
-  check_mode: false # in check mode the helper only classifies (--dry-run) and writes nothing
-  register: registry_zot_config_apply
-  # rc first: a crashed helper prints nothing, and from_json on '' would mask the real failure
-  changed_when: registry_zot_config_apply.rc == 0 and (registry_zot_config_apply.stdout | from_json).mode != 'none'
-  failed_when: registry_zot_config_apply.rc != 0
+    - name: Validate the zot config candidate (same loader as `zot serve`)
+      ansible.builtin.command:
+        argv: [/usr/local/bin/zot, verify, "{{ registry_zot_candidate }}"]
+      check_mode: false
+      changed_when: false
+      no_log: true # its errors can quote config fragments (secrets); on failure run `zot verify` by hand on the host
+      when: registry_zot_binary.stat.exists
 
-- name: Report how the zot config was applied
-  ansible.builtin.debug:
-    msg: "zot config: {{ (registry_zot_config_apply.stdout | from_json) }}"
-  when: registry_zot_config_apply.rc == 0 and (registry_zot_config_apply.stdout | from_json).mode != 'none'
+    - name: Apply the zot config (reload in place when only reload-safe keys changed)
+      ansible.builtin.command:
+        argv: >-
+          {{ ['python3', '/usr/local/lib/zot-config-apply.py',
+              '--current', registry_zot_config_dir ~ '/config.json',
+              '--candidate', registry_zot_candidate,
+              '--unit', 'zot.service', '--port', registry_zot_port | string]
+             + (['--dry-run'] if ansible_check_mode else [])
+             + (['--allow-restart'] if registry_zot_config_allow_restart | bool else []) }}
+      check_mode: false # in check mode the helper only classifies (--dry-run) and writes nothing
+      register: registry_zot_config_apply
+      # rc first: a crashed helper prints nothing, and from_json on '' would mask the real failure
+      changed_when: registry_zot_config_apply.rc == 0 and (registry_zot_config_apply.stdout | from_json).mode != 'none'
+      failed_when: registry_zot_config_apply.rc != 0
 
-- name: Restart zot when the config change is not reload-safe
-  ansible.builtin.debug:
-    msg: "zot config needs a restart: {{ (registry_zot_config_apply.stdout | from_json).reason }}"
-  when: registry_zot_config_apply.rc == 0 and (registry_zot_config_apply.stdout | from_json).mode == 'restart'
-  changed_when: true
-  notify: restart zot
+    - name: Report how the zot config was applied
+      ansible.builtin.debug:
+        msg: "zot config: {{ (registry_zot_config_apply.stdout | from_json) }}"
+      when: registry_zot_config_apply.rc == 0 and (registry_zot_config_apply.stdout | from_json).mode != 'none'
+
+    - name: Remember this apply's marker token for the restart handlers
+      ansible.builtin.set_fact:
+        registry_zot_apply_token: "{{ (registry_zot_config_apply.stdout | from_json).token | default('') }}"
+      when: registry_zot_config_apply.rc == 0
+
+    - name: Restart zot when the config change is not reload-safe
+      ansible.builtin.debug:
+        msg: "zot config needs a restart: {{ (registry_zot_config_apply.stdout | from_json).reason }}"
+      when: registry_zot_config_apply.rc == 0 and (registry_zot_config_apply.stdout | from_json).mode == 'restart'
+      changed_when: true
+      notify: restart zot
+  always:
+    - name: Remove this play's zot config candidate
+      ansible.builtin.file:
+        path: "{{ registry_zot_candidate }}"
+        state: absent
+      check_mode: false # it was written in check mode too
 
 - name: Generate bcrypt htpasswd for the push user
   community.general.htpasswd:

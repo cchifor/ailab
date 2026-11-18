@@ -443,6 +443,42 @@ class MainTest(unittest.TestCase):
         self.assertEqual((rc, result["mode"]), (0, "restart"))
         self.assertTrue(os.path.exists(self.current + ".unconfirmed"))  # `restart zot` handlers clear it
 
+    def test_restart_reports_its_marker_token(self):
+        self._write(self.current, BASE)
+        self._write(self.candidate, changed(http__port="8443"))
+        rc, result = self._run()
+        self.assertEqual((rc, result["mode"]), (0, "restart"))
+        self.assertEqual(Path(self.current + ".unconfirmed").read_text().strip(), result["token"])
+
+    def test_clear_marker_mode_removes_only_a_matching_token(self):
+        self._write(self.current, BASE)
+        marker = self.current + ".unconfirmed"
+        token = zca._touch_marker(marker)
+        with mock.patch("sys.stdout"):
+            self.assertEqual(zca.main(["--current", self.current, "--candidate", "/dev/null",
+                                       "--clear-marker", "not-mine"]), 0)
+        self.assertTrue(os.path.exists(marker))
+        with mock.patch("sys.stdout"):
+            self.assertEqual(zca.main(["--current", self.current, "--candidate", "/dev/null",
+                                       "--clear-marker", token]), 0)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_unchanged_content_with_wrong_mode_converges_attributes(self):
+        self._write(self.current, BASE)
+        os.chmod(self.current, 0o644)
+        ino = os.stat(self.current).st_ino
+        self._write(self.candidate, BASE)
+        os.chmod(self.candidate, 0o640)
+        rc, result = self._run("--dry-run")
+        self.assertEqual((rc, result["mode"]), (0, "attributes"))
+        self.assertEqual(os.stat(self.current).st_mode & 0o7777, 0o644)  # check mode changes nothing
+        self._write(self.candidate, BASE)
+        os.chmod(self.candidate, 0o640)
+        rc, result = self._run()
+        self.assertEqual((rc, result["mode"]), (0, "attributes"))
+        self.assertEqual(os.stat(self.current).st_mode & 0o7777, 0o640)
+        self.assertEqual(os.stat(self.current).st_ino, ino)  # content untouched, no reload event
+
     def test_proven_reload(self):
         self._write(self.current, BASE)
         self._write(self.candidate, changed(storage__gcDelay="1h"))
@@ -461,9 +497,17 @@ class MainTest(unittest.TestCase):
         self.assertEqual(json.loads(Path(self.current).read_text())["storage"]["gcDelay"], "1h")
 
 
+def _flatten(tasks):
+    for task in tasks:
+        yield task
+        for key in ("block", "rescue", "always"):
+            yield from _flatten(task.get(key) or [])
+
+
 class TaskWiringTest(unittest.TestCase):
     def setUp(self):
-        tasks = yaml.safe_load((ROLE_DIR / "tasks" / "main.yml").read_text())
+        self.raw = yaml.safe_load((ROLE_DIR / "tasks" / "main.yml").read_text())
+        tasks = list(_flatten(self.raw))
         self.names = [t["name"] for t in tasks]
         self.tasks = {t["name"]: t for t in tasks}
 
@@ -473,7 +517,9 @@ class TaskWiringTest(unittest.TestCase):
             self.assertFalse(str(tpl.get("dest", "")).endswith("/config.json"), task["name"])
 
     def test_candidate_render_validate_apply_restart_in_order(self):
-        order = ["Install the zot config apply helper", "Render the zot config candidate",
+        order = ["Install the zot config apply helper",
+                 "Name this play's zot config candidate (unique, so overlapping plays never share one)",
+                 "Render the zot config candidate",
                  "Validate the zot config candidate (same loader as `zot serve`)",
                  "Apply the zot config (reload in place when only reload-safe keys changed)",
                  "Restart zot when the config change is not reload-safe"]
@@ -487,13 +533,24 @@ class TaskWiringTest(unittest.TestCase):
     def test_verify_keeps_config_fragments_out_of_logs(self):
         self.assertIs(self.tasks["Validate the zot config candidate (same loader as `zot serve`)"]["no_log"], True)
 
-    def test_restart_handlers_restart_then_clear_the_marker(self):
+    def test_restart_handlers_restart_then_clear_only_this_plays_marker(self):
         handlers = yaml.safe_load((ROLE_DIR / "handlers" / "main.yml").read_text())
         listening = [h for h in handlers if h.get("listen") == "restart zot"]
         self.assertEqual([h["name"] for h in listening], ["restart zot", "clear the unconfirmed zot config marker"])
         self.assertEqual(listening[0]["ansible.builtin.systemd"]["state"], "restarted")
-        self.assertEqual(listening[1]["ansible.builtin.file"],
-                         {"path": "{{ registry_zot_config_dir }}/config.json.unconfirmed", "state": "absent"})
+        argv = listening[1]["ansible.builtin.command"]["argv"]
+        self.assertIn("--clear-marker", argv)
+        self.assertEqual(argv[argv.index("--clear-marker") + 1], "{{ registry_zot_apply_token }}")
+        self.assertIn("registry_zot_apply_token", listening[1]["when"])
+
+    def test_candidate_is_unique_per_play_and_always_removed(self):
+        block = next(t for t in self.raw if t["name"].startswith("Apply the zot config (render"))
+        render = next(t for t in block["block"] if t["name"] == "Render the zot config candidate")
+        self.assertEqual(render["ansible.builtin.template"]["dest"], "{{ registry_zot_candidate }}")
+        always = block["always"][0]
+        self.assertEqual(always["ansible.builtin.file"], {"path": "{{ registry_zot_candidate }}", "state": "absent"})
+        name_task = self.tasks["Name this play's zot config candidate (unique, so overlapping plays never share one)"]
+        self.assertIn("random", name_task["ansible.builtin.set_fact"]["registry_zot_candidate"])
 
     def test_only_a_restart_verdict_notifies_restart(self):
         task = self.tasks["Restart zot when the config change is not reload-safe"]

@@ -3,10 +3,11 @@
   ansible.builtin.systemd:
     daemon_reload: true
 
-# Handlers run in the order defined here. `restart zot` notifies both: zot restarts first, then the marker of an
-# unproven config apply (files/zot-config-apply.py) is cleared, because the restarted zot loaded exactly the file
-# on disk. If the restart fails, Ansible stops the handlers and the marker stays, so the next run re-proves the
-# config instead of reporting it unchanged.
+# Handlers run in the order defined here. `restart zot` notifies both: zot restarts first, then THIS play's
+# unproven-apply marker (files/zot-config-apply.py) is cleared, under the helper's lock and only if it still holds
+# this play's token, because the restarted zot loaded the file this play wrote. Restarts for other reasons (htpasswd,
+# binary) clear nothing; an overlapping play's marker survives. If the restart fails, Ansible stops the handlers
+# and the marker stays, so the next run re-proves the config instead of reporting it unchanged.
 - name: restart zot
   ansible.builtin.systemd:
     name: zot.service
@@ -14,7 +15,16 @@
   listen: restart zot
 
 - name: clear the unconfirmed zot config marker
-  ansible.builtin.file:
-    path: "{{ registry_zot_config_dir }}/config.json.unconfirmed"
-    state: absent
+  ansible.builtin.command:
+    argv:
+      - python3
+      - /usr/local/lib/zot-config-apply.py
+      - --current
+      - "{{ registry_zot_config_dir }}/config.json"
+      - --candidate
+      - /dev/null
+      - --clear-marker
+      - "{{ registry_zot_apply_token }}"
+  when: registry_zot_apply_token | default('') | length > 0
+  changed_when: true
   listen: restart zot

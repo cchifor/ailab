@@ -197,6 +197,11 @@ def write_atomic(path, data, like=None):
         raise
 
 
+def _attributes_differ(path, like):
+    a, b = os.stat(path), os.stat(like)
+    return (a.st_uid, a.st_gid, a.st_mode & 0o7777) != (b.st_uid, b.st_gid, b.st_mode & 0o7777)
+
+
 def _match_attributes(path, like):
     """Give `path` the owner/group/mode of `like` (the rendered candidate), so role changes to them converge."""
     st = os.stat(like)
@@ -357,7 +362,21 @@ def main(argv=None):
                     help="permit a restart where a reload was expected but is impossible (detached watch, broken live "
                          "config). Without it the helper FAILS CLOSED: no surprise 19 min outage")
     ap.add_argument("--lock-timeout", type=int, default=120)
+    ap.add_argument("--clear-marker", metavar="TOKEN",
+                    help="(restart handlers) under the lock, remove the marker only if it still holds TOKEN")
     args = ap.parse_args(argv)
+
+    if args.clear_marker:
+        lock_fd = _lock(args.current + ".lock", args.lock_timeout)
+        if lock_fd is None:
+            print(json.dumps({"mode": "blocked", "reason": "another config apply holds the lock"}))
+            return 2
+        try:
+            _clear_marker(args.current + ".unconfirmed", args.clear_marker)
+        finally:
+            os.close(lock_fd)
+        print(json.dumps({"mode": "cleared"}))
+        return 0
 
     if args.dry_run:
         return _apply(args)
@@ -402,6 +421,9 @@ def _apply(args):
     marker = args.current + ".unconfirmed"
     if os.path.exists(marker) and mode == "none":
         mode, reason = "reload", "a previous apply was not confirmed; re-proving the config on disk"
+    if mode == "none" and _attributes_differ(args.current, args.candidate):
+        # Same content, wrong owner/group/mode: converge them. chown/chmod emit no WRITE, so zot does not reload.
+        mode, reason = "attributes", "owner/group/mode differ from the rendered candidate"
     if args.dry_run:
         os.unlink(args.candidate)
         if mode == "reload":
@@ -443,11 +465,15 @@ def _apply(args):
     if mode == "restart":
         # The marker STAYS: the role's `restart zot` handler chain removes it only after zot restarted on this file.
         write_atomic(args.current, data, like=args.candidate)  # the candidate carries the role's owner/mode
-    if mode == "reload":
+    if mode in ("reload", "attributes"):
         _match_attributes(args.current, args.candidate)  # chown/chmod emit no WRITE: no second reload
+    if mode == "reload":
         _clear_marker(marker, token)  # proven reload
     os.unlink(args.candidate)
-    print(json.dumps({"mode": mode, "paths": paths, "reason": reason}))
+    out = {"mode": mode, "paths": paths, "reason": reason}
+    if mode == "restart":
+        out["token"] = token  # the role's restart handlers clear exactly this marker, under the lock
+    print(json.dumps(out))
     return 0
 
 
