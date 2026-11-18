@@ -290,11 +290,15 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
    unrecognized worker takes ordinary admission, and the lifetime can freeze before the refusal
    (`rel:server/workers/service.ts:1543-1570`). Connectors and relay-bus keys answer again.
 5. **The budget path's pre-grant control (R1 onwards).** The hub's isolated budget observer must answer
-   before any grant. Each metric query below must return exactly one series for this hub's observer
-   before its value is read:
+   before any grant:
    - `relay_control_worker_budget_check_succeeded` is 1;
    - `relay_control_worker_budget_check_timestamp_seconds` is within the last 60 s;
-   - `RelayWorkerBudgetCheckFailed` is clear.
+   - `RelayWorkerBudgetCheckFailed` is clear: the `ALERTS{alertname="RelayWorkerBudgetCheckFailed"}`
+     query scoped to this hub's observer returns no firing or pending instance.
+
+   Each of the two metric queries must return exactly one series for this hub's observer before its
+   value is read; zero or several series block the grant. The alert query is the exception: its
+   passing state is no series.
 
    Read it in the same window as R0's ledger-side control as the same login
    ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md), F2 and §7). The check alone
