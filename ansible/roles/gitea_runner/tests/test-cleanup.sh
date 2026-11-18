@@ -1325,6 +1325,13 @@ if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T19: under TARGET_MIN_FRE
 # A value other than 1 is not "on" (the template only ever renders 1 or 0).
 mk_targets; TAGE=true TROOTS="$TR" TMINFREE=1 run_case 0 50
 kept "$T/debug/deps/libold-1.rlib" "T19: TARGET_AGE_SWEEP=true (not 1) does not enable it"
+# The mid-job critical path (busy, no gap) still never sweeps, age sweep or not (codex impl review).
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1 run_case 1 95
+kept "$T/debug/deps/libold-1.rlib" "T19: the mid-job path never deletes Cargo targets with the age sweep on"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T19: the mid-job path must not stop the runner"; else ok "T19: the mid-job path does not stop the runner"; fi
+# A runner that did not stop: nothing is deleted below pressure either.
+mk_targets; MOCK_STOP_FAIL=1 TAGE=1 TROOTS="$TR" TMINFREE=1 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: an age sweep whose runner did not stop deletes nothing"
 
 echo "[V] leaked buildx builders are MEASURED (read-only metric), never removed"
 # 2026-11-17: builders that cancelled jobs left behind held 20.1 GB on ci-runner-9 and 20.5 GB on
