@@ -49,14 +49,18 @@ of those six fields is refused ("Router deployment identity changed; reconcile i
 invalidates the ledger rows below, so it is a **new connection**, not an edit. `name`, the kids and the
 file paths can change without that.
 
-**TLS trust.** The Router origin remains public, but the qualification-stage worker resolves it to
-the in-cluster terminator at `10.96.0.41` through its measured `hostAliases`. Its pinned runtime and
+**TLS trust.** The Router origin is public. On the post-qualification production path, the worker
+side reaches it with the pinned complete Mozilla CA bundle (`https://curl.se/ca/cacert.pem`, SHA-256
+`427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285`, vendored by the researcher
+image; [relay#277 comment 120903](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-120903)).
+This owner-recorded choice still applies. During qualification only, G3's measured `hostAliases`
+resolve the Router origin to the in-cluster terminator at `10.96.0.41`, and the pinned runtime and
 template use the ailab root CA in `/etc/relay/hub-ca.pem`
 (`docs/relay-workers/researcher-runtime-ca.crt`, `researcher-i4/binding.json`; installation Q1-Q5).
-The earlier Mozilla-bundle choice was superseded by G3's internal TLS path. Relay's own process
-still reaches the public Router origin with Node's bundled roots:
+
+Relay's own process keeps Node's bundled roots for the public Router origin:
 `NODE_EXTRA_CA_CERTS` only **adds** `ailab-ca` for the private OpenBao origin. Pinning Relay itself to
-that exact bundle would change trust for all of Relay's outbound TLS and is a separate decision.
+that exact Mozilla bundle would change trust for all of Relay's outbound TLS and is a separate decision.
 
 ## Deployment digest
 

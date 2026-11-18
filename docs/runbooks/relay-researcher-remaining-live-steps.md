@@ -1,6 +1,6 @@
 # Relay researcher: remaining live steps before the first qualification run
 
-Status: **checklist, updated 2026-11-18. Steps 1-2 are DONE; resume at step 3 after step 0's readback.**
+Status: **checklist, updated 2026-11-18. Steps 1-2 are DONE; resume at step 3 after the readbacks in steps 0-2 pass.**
 Merging this file changes nothing live. It puts in execution order
 the owner and operator live steps that are still open between today's state and lifting the hold on
 hub step H6 (ailab #1811). It does not replace the runbooks it cites. Each step is an operator action on
@@ -86,6 +86,7 @@ the other live values below still require that readback.
 **Tags.** Each step has a **Writes** line, naming any write to OpenBao, the budget ledger, Kubernetes
 objects or the Router admin API, and a **Restarts** line, naming every rollout. A `force-sync`
 annotation is a Kubernetes write, and ESO then re-renders the ExternalSecret's Secret.
+For DONE steps 1-2, the Writes/Restarts in the step bodies are historical; only the readbacks are current.
 
 **Owner decisions come first.** The decisions below are recorded in
 [ailab #1820](https://git.chifor.me/cchifor/ailab/issues/1820) and repeated at the end of this file.
@@ -227,8 +228,8 @@ wsha_bao; wsha_secret relay relay-worker-budget; wsha_secret llm-router llm-rout
 ## Step 1. Signer keys and the Router trust document (H5, first half)
 
 **DONE.** Keep the commands below as the original ceremony record; do not generate or overwrite keys
-again. Recheck the public fingerprints and rendered trust, then continue at step 3 after step 2's
-readback.
+again. Recheck the public fingerprints and rendered trust. Resume at step 3 after the readbacks in
+steps 0-2 pass.
 
 **Purpose.** Create the two Ed25519 signer keys that Relay uses, and the document that gives the Router
 their public keys (Router connection step 3, `relay-router-connection.md:219-231`, readback
@@ -236,15 +237,16 @@ their public keys (Router connection step 3, `relay-router-connection.md:219-231
 token, because it assumed this step was already done. It is now complete. The
 escrow token is not minted here, because its 720 h lifetime starts when it is minted. It is step 9.
 
-**Writes:** **OpenBao**, three new documents in KV-v2 mount `af`:
+**Writes (historical; completed):** **OpenBao**, three new documents in KV-v2 mount `af`:
 
 - `relay-router/relay/admin-signer` (field `private_key`);
 - `relay-router/relay/reconciler-signer` (field `private_key`);
 - `relay-router/router/trust` (fields `admin_public_key` and `reconciler_public_key`).
 
-Also **Kubernetes**: one `force-sync` annotation on ExternalSecret `llm-router/llm-router-relay-trust`.
+Also a historical **Kubernetes** write: one `force-sync` annotation on ExternalSecret
+`llm-router/llm-router-relay-trust`.
 
-**Restarts:** none.
+**Restarts (historical):** none.
 
 **Original pre-checks (before the completed ceremony).**
 
@@ -252,8 +254,8 @@ Also **Kubernetes**: one `force-sync` annotation on ExternalSecret `llm-router/l
 - SecretStore `relay/relay-router-store` is Ready, so ESO can reach OpenBao (it uses `ca.crt` of
   `relay-router-openbao-tls`; step 9 has more on that Secret).
 
-**Commands.** Verbatim from `relay-router-connection.md:221-231`. The keys are generated in a private
-directory and shredded at the end:
+**Original commands (completed ceremony).** Verbatim from `relay-router-connection.md:221-231`.
+The keys are generated in a private directory and shredded at the end:
 
 ```sh
 umask 077; d="$(mktemp -d)"
@@ -277,7 +279,9 @@ done
 ```
 
 Each role's two fingerprints are equal, and the admin and reconciler fingerprints differ. Record both.
-Then this block, which is NEW (not in the runbook):
+Then recheck the rendered trust with the read-only commands below. The first line's `force-sync`
+annotation is retained only as historical ceremony record; do not repeat it. This block was NEW
+(not in the runbook):
 
 ```sh
 kubectl --context admin@ai -n llm-router annotate externalsecret llm-router-relay-trust force-sync="$(date +%s)" --overwrite
@@ -304,7 +308,7 @@ Expected:
 
 Router connection step 3 and the template both carry `maxTokens` 7441536 (ailab #1778).
 
-**Stop and rollback.**
+**Original stop and rollback (ceremony record).**
 
 - **A command in the block fails.** Run `shred -u "$d"/*; rmdir "$d"` first, then stop.
 - **A fingerprint or content readback is wrong.** `relay-router-files` cannot have rendered the
@@ -321,7 +325,7 @@ Router connection step 3 and the template both carry `maxTokens` 7441536 (ailab 
 ## Step 2. Router trust inclusion
 
 **DONE.** The component is included. Re-run the readback only; the PR instructions below record the
-completed inclusion and are not a second rollout.
+completed inclusion and are not a second rollout. Resume at step 3 after the readbacks in steps 0-2 pass.
 
 **Purpose.** Load the Relay trust into the Router's `relay-keys` plugin. This is Router connection step
 6 (`relay-router-connection.md:282-297`), and this is where it belongs in the order:
@@ -335,11 +339,12 @@ completed inclusion and are not a second rollout.
 - **Not part of H6.** The H6 PR (#1811) does not include the trust, and no test requires it there. Its
   body says the trust "rides with budget step 8".
 
-**Writes:** one reviewed PR, which Flux applies to `Deployment llm-router/llm-router`.
+**Writes (historical; completed):** one reviewed PR, which Flux applied to
+`Deployment llm-router/llm-router`.
 
-**Restarts:** **the Router** (Recreate: a short outage of all Router traffic).
+**Restarts (historical; completed):** **the Router** (Recreate: a short outage of all Router traffic).
 
-**Pre-checks.**
+**Original pre-checks (before the completed inclusion).**
 
 - `llm-router-relay-trust` reads back as in step 1.
 - **The `clients` row.** Router connection step 6's readback, verbatim:
@@ -372,7 +377,8 @@ completed inclusion and are not a second rollout.
   final Router rollout, before any run is signed. H6 rolls Relay, not the Router; use Router readings
   after step 5's rolls or any later Router change when generating File B.
 
-**The PR.** Add `- ../../../components/llm-router-relay-keys-trust` under `components:` in
+**Original PR (completed inclusion).** Add `- ../../../components/llm-router-relay-keys-trust` under
+`components:` in
 `kubernetes/apps/apps/llm-router/kustomization.yaml`. Amend `scripts/tests/test_relay_v060_activation_gate.py`
 for that component only. Its forbidden list names `llm-router-relay-keys-trust`, and the retired
 bridge's name `llm-router-relay-keys` is a substring of it, so the amended check must still refuse the
@@ -396,8 +402,8 @@ trust | sha256sum                                                        # equal
 wsha_router                                                              # still A
 ```
 
-**Stop and rollback.** Revert the PR (another Router Recreate). Before the Relay connection exists,
-reverting an inclusion PR is enough (`relay-router-connection.md:331-332`).
+**Original stop and rollback (inclusion record).** Revert the PR (another Router Recreate). Before the
+Relay connection exists, reverting an inclusion PR is enough (`relay-router-connection.md:331-332`).
 
 ## Step 3. Control-metrics collector Secrets
 

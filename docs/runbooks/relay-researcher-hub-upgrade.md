@@ -79,9 +79,9 @@ source. The registry stays unknown until the release approval exists (H4b).
 **G1. The first recovery generation comes from a one-shot initializer, never from the fence.** Until
 now the only way to create a `relay_recovery_fences` row was `npm run recovery:fence`
 (`server/agent-sessions/restore-fence.ts`), which on the live hub would revoke every connector, agent
-key, browser session and channel membership. The pinned researcher release therefore ships a new
-command, `recovery:initialize`, shipped in v0.10.3 and the current v0.10.4 hub
-(`scripts/initialize-recovery.ts`, `package.json`; exact invocation in H3). As decided, it:
+key, browser session and channel membership. The pinned hub release (v0.10.4, `e77bd09a`) ships the
+`recovery:initialize` command (`scripts/initialize-recovery.ts`, `package.json`; exact invocation
+in H3). As decided, it:
 
 - refuses if **any** `relay_recovery_fences` row exists, active or not, or any generation-bound
   authority exists (infrastructure installations, worker grants, management credentials, creation
@@ -132,7 +132,8 @@ lifetime 8 h. See [relay-researcher-installation.md](relay-researcher-installati
 - The researcher releases are reviewer-merged and published: the hub receipt matches `relay.yaml`,
   the runtime receipt matches `researcher-binding-inputs.json` `release`, and the agent receipt matches
   its `agentRelease`. These are separate source commits after the hub-only and agent-only updates.
-  The pinned runtime release contains the `recovery:initialize` command (G1) and the
+  The pinned hub release (v0.10.4, `e77bd09a`) contains the `recovery:initialize` command (G1),
+  run from H2's hub image in H3 step 4. The pinned runtime release (v0.10.3, `c0fe50f0`) contains the
   Relay part of G3: `PodRuntimeBinding.hostAliases` rendered and measured, the Router and
   communication CA pins, the candidate journal alias and the hub-partition driver with separate hub
   and Router rules. The runtime is built with `hubCa` = the ailab root CA
@@ -238,9 +239,12 @@ Readback:
    `kubectl --context admin@ai -n relay scale deploy/relay --replicas=0` and wait until no `relay` Pod
    remains. (Installations are off until step 5, so a running hub could not have created
    generation-bound authority; the freeze is about the restart, not about racing the initializer.)
-   The shipped initializer locks the authority tables and allows other clients to stay connected;
-   it does not need the fence's `pg_read_all_stats` grant
-   (`e77bd09a:server/agent-sessions/restore-fence.ts:605-611`).
+   The shipped initializer imports and calls `initializeRecoveryGeneration` from `restore-fence.ts`
+   (`e77bd09a:scripts/initialize-recovery.ts:6-10,87-94`). That helper locks the generation-bound
+   authority tables and allows other clients to stay connected
+   (`e77bd09a:server/agent-sessions/restore-fence.ts:605-609`). Its initialization path does not
+   inspect `pg_stat_activity`, so no `pg_read_all_stats` grant is needed (`restore-fence.ts:546-664`);
+   the other-client inspection belongs to `recovery:fence` (`restore-fence.ts:227-244`, same commit).
 4. **Initialize.** A one-off Pod with the H2 release image, the schema owner from `relay-migrations`
    and the generation file, in namespace `relay`, labelled `app: relay-backup` so the existing
    `relay-backup` NetworkPolicy gives it DNS and PostgreSQL only. The command line is the pinned
