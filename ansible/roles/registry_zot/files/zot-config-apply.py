@@ -116,21 +116,35 @@ def kernel_sdev(st_dev):
     return (os.major(st_dev) << 20) | os.minor(st_dev)
 
 
-def watch_alive(pid, path):
-    """True when process `pid` holds an inotify watch on the inode `path` points at now."""
-    st = os.stat(path)
-    want = (st.st_ino, kernel_sdev(st.st_dev))
+def watched_pairs(pid):
+    """Every (ino, sdev) that process `pid` watches through inotify."""
+    pairs = []
     fd_dir = f"/proc/{pid}/fd"
     for fd in os.listdir(fd_dir):
         try:
             if os.readlink(os.path.join(fd_dir, fd)) != "anon_inode:inotify":
                 continue
             with open(f"/proc/{pid}/fdinfo/{fd}") as fh:
-                if want in parse_inotify_fdinfo(fh.read()):
-                    return True
+                pairs.extend(parse_inotify_fdinfo(fh.read()))
         except OSError:
             continue
-    return False
+    return pairs
+
+
+def watch_matches(pairs, st_ino, st_dev):
+    """Exact (ino, superblock dev) match. Fallback: exactly ONE watch with this inode number, because on stacked
+    or subvolume filesystems (btrfs, overlayfs) stat's st_dev differs from the s_dev inotify prints, and a false
+    'not watched' would silently turn a reload into the 19 min restart this helper exists to avoid. Proven live
+    on the registry LXC (ext4 on LVM-thin): the exact match holds."""
+    if (st_ino, kernel_sdev(st_dev)) in pairs:
+        return True
+    return sum(1 for ino, _ in pairs if ino == st_ino) == 1
+
+
+def watch_alive(pid, path):
+    """True when process `pid` holds an inotify watch on the inode `path` points at now."""
+    st = os.stat(path)
+    return watch_matches(watched_pairs(pid), st.st_ino, st.st_dev)
 
 
 def reload_verdict(messages):

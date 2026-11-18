@@ -143,6 +143,16 @@ class InotifyTest(unittest.TestCase):
     def test_kernel_sdev(self):
         self.assertEqual(zca.kernel_sdev(os.makedev(0xFC, 0x16)), 0xFC00016)
 
+    def test_watch_matches_exact_and_unique_inode_fallback(self):
+        dev = os.makedev(0xFC, 0x16)
+        live = [(0xC002A, 0xFC00016), (0x4037E, 0xFC00016), (0x4037C, 0xFC00016)]  # registry LXC, 2026-11-18
+        self.assertTrue(zca.watch_matches(live, 0xC002A, dev))  # exact (ino, s_dev)
+        other_dev = os.makedev(0x0, 0x2F)  # btrfs/overlay: st_dev is not the superblock s_dev
+        self.assertTrue(zca.watch_matches(live, 0xC002A, other_dev))  # unique inode number -> still watched
+        self.assertFalse(zca.watch_matches(live, 0xBEEF, dev))  # replaced file: new inode, not watched
+        ambiguous = live + [(0xC002A, 0x1)]
+        self.assertFalse(zca.watch_matches(ambiguous, 0xC002A, other_dev))  # two candidates: do not guess
+
 
 class ReloadVerdictTest(unittest.TestCase):
     def test_verdicts(self):
