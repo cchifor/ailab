@@ -34,8 +34,7 @@ the other live values below still require that readback.
   `kubernetes/apps/apps/llm-router/kustomization.yaml` (step 2 DONE).
 - **Installation releases.** The agent is v0.10.6 (`1599d06e`), pinned by `agentRelease` in
   `docs/relay-workers/researcher-binding-inputs.json`; runtime and binding remain v0.10.3 (`c0fe50f0`).
-  The agent-only v0.10.7 update is in flight, not a pin to substitute here. Neither agent update
-  changes the hub's v0.10.4 pin.
+  The agent-only update does not change the hub's v0.10.4 pin.
 - **Ledger.** One `worker_budget.authority` row, `ready=f`. Budget steps 1-7 File A are done: the
   `clients` and `readers` rows (#1753 comment 124073). There is no `qualifications` row: File B comes
   later.

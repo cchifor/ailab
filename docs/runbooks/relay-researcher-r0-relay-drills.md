@@ -25,7 +25,7 @@ Sources, at ailab `main` `8229304e` and Relay `e77bd09a` (the live hub v0.10.4; 
 `docs/relay-workers/researcher-binding-inputs.json`; the runtime, binding and chart stay on `rel:`.
 The agent Pod's `source-commit` annotation still names that runtime commit; use `agentRelease` and
 the image digest to identify the agent build (`kubernetes/apps/relay-researcher/pins/pins.yaml`).
-The in-flight v0.10.7 update is not a new pin here. R0's `agent-before` baseline and §10's comparison
+R0's `agent-before` baseline and §10's comparison
 must refer to the same pinned revision; a later agent release needs its own verified readback.
 The signer and composer come from the separately pinned driver checkout, not `rel:` or `rel4:`
 (campaign §2; both tools exist at audited Relay `origin/main` `83262314`).
@@ -115,7 +115,7 @@ stale A, the parse succeeds and `current_epoch` raises 42501.
 **F4. Nothing else touches the ledger in R0.** The authority's refresh loop selects only workers that
 have a budget preparation (`rel4:server/workers/inference/budget-preparation.ts:572-580`), and there is
 none. So the earlier budget runbook's Relay pass, "`worker_budget_ledger_unavailable`, allocation refused"
-(`relay-worker-budget-authority.md:455`), cannot occur: that log line comes from the authority's own
+(`8229304e:docs/runbooks/relay-worker-budget-authority.md:456`), cannot occur: that log line comes from the authority's own
 ledger client (`server/main.ts:343-347`), which only an allocation path or a reached preflight would
 use. R0 must never create one.
 

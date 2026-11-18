@@ -19,8 +19,8 @@ recheck before acting):
 - the budget client files are mounted (H4a, ailab #1805);
 - the infrastructure agent is now v0.10.6 (`1599d06e`), an agent-only update pinned by
   `docs/relay-workers/researcher-binding-inputs.json` `agentRelease`. Its `release` still pins the
-  runtime and binding to v0.10.3 (`c0fe50f0`); the hub remains v0.10.4. The in-flight v0.10.7 agent
-  update is not a replacement pin until its own reviewed update lands;
+  runtime and binding to v0.10.3 (`c0fe50f0`); the hub remains v0.10.4. A later agent update is not a
+  replacement pin until its own reviewed update lands;
 - no Router connection, no agent control plane, no control monitoring, no candidate files and no profile
   registry yet. H6 is ailab #1811, held while its preconditions are open.
 
@@ -43,8 +43,8 @@ The per-run ceremony for H7's signed candidate runs is [relay-researcher-qualifi
 | `relay-control-monitoring`, `relay-worker-monitoring` (existing) | control metrics and worker alerts | H6 |
 | `relay-worker-candidate` (new) | `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`; the run's document ConfigMap and the key-copy init container; `run/` is generated per signed run ([relay-candidate-run-generator.md](relay-candidate-run-generator.md)) | H7 |
 
-`scripts/tests/test_relay_v060_activation_gate.py` refuses the remaining H6, H7 and H4b components and
-their settings in the live overlay; each step's PR removes exactly its own
+`scripts/tests/test_relay_v060_activation_gate.py` refuses H6's Router connection and agent control plane,
+H7's candidate files and H4b's profile registry in the live overlay (not H6's monitoring components); each step's PR removes exactly its own
 entries from that list. `relay-restore-fencing` stays includable on its own, because
 a restore of the hub needs it with or without installations. `test_relay_researcher_hub_upgrade.py`
 pins each patch, and refuses installations without the recovery generation (one way only), the profile
