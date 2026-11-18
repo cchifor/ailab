@@ -586,11 +586,13 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
         self.assertIsNone(entry)
 
     def test_other_retention_policies_unchanged(self):
-        others = [p for p in self.policies if p["repositories"] != [_CI_BUILD_REPOS]]
+        # Ignore the deleteReferrers canary (its own test class below pins it), but not a widened strive/**.
+        others = [p for p in self.policies if p["repositories"] != [_CI_BUILD_REPOS]
+                  and not (p.get("deleteReferrers") and p["repositories"] != ["strive/**"])]
         self.assertEqual(
             [p["repositories"] for p in others], [["strive/**"], ["agentforge/**"], ["**"]]
         )
-        self.assertEqual(others[0], _STRIVE_POLICY)
+        self.assertEqual({k: v for k, v in others[0].items() if k != "deleteReferrers"}, _STRIVE_POLICY)
         self.assertEqual(
             others[1],
             {
@@ -608,6 +610,84 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
             others[2],
             {"repositories": ["**"], "deleteUntagged": False, "keepTags": [{"patterns": [".*"]}]},
         )
+
+
+_CANARY_KNOB = "registry_zot_strive_delete_referrers_repos"
+
+
+def _policies(repos=None):
+    overrides = None if repos is None else {_CANARY_KNOB: repos}
+    return json.loads(_render_config(overrides))["storage"]["retention"]["policies"]
+
+
+def _load_apply_helper():
+    import importlib.util
+    path = ROLE_DIR / "files" / "zot-config-apply.py"
+    spec = importlib.util.spec_from_file_location("zot_config_apply", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
+    """deleteReferrers drops orphaned buildx attestation referrers (subject already deleted) without changing
+    which TAGS are kept: the canary policy is strive/**'s exact rules plus deleteReferrers, between
+    strive/ci-build/** and strive/**; widening to strive/** puts the flag on strive/** itself."""
+
+    def test_default_is_the_strive_web_canary(self):
+        self.assertEqual(_load_defaults()[_CANARY_KNOB], ["strive/web"])
+
+    def test_canary_sits_between_ci_build_and_strive(self):
+        repos = [p["repositories"] for p in _policies()]
+        self.assertEqual(repos[:3], [[_CI_BUILD_REPOS], ["strive/web"], ["strive/**"]])
+
+    def test_canary_keeps_exactly_what_strive_keeps(self):
+        canary = _first_retention_policy(_policies(), "strive/web")
+        self.assertIs(canary["deleteReferrers"], True)
+        self.assertEqual(canary["keepTags"], _STRIVE_POLICY["keepTags"])
+        self.assertEqual(canary["deleteUntagged"], _STRIVE_POLICY["deleteUntagged"])
+        self.assertEqual(_first_retention_policy(_policies(), "strive/platform-api"), _STRIVE_POLICY)
+
+    def test_tag_decisions_are_identical_inside_and_outside_the_canary(self):
+        pols = _policies()
+        for tag in ("latest", "ailab", "ailab-prev2", "sha-b80a376c", "ailab-0123456789ab", "ci-" + _FULL_SHA, "x"):
+            inside = _keep_entry(pols, "strive/web", tag)[1]
+            outside = _keep_entry(pols, "strive/platform-api", tag)[1]
+            self.assertEqual(inside, outside, tag)
+
+    def test_first_match_routing(self):
+        pols = _policies()
+        expected = {"strive/web": ["strive/web"], "strive/webx": ["strive/**"], "strive/ci-build/a": [_CI_BUILD_REPOS],
+                    "strive/platform-api": ["strive/**"], "agentforge/orchestrator": ["agentforge/**"],
+                    "library/python": ["**"]}
+        for repo, want in expected.items():
+            self.assertEqual(_first_retention_policy(pols, repo)["repositories"], want, repo)
+
+    def test_empty_list_renders_no_canary(self):
+        pols = _policies([])
+        self.assertFalse(any(p.get("deleteReferrers") for p in pols))
+        self.assertEqual([p["repositories"] for p in pols],
+                         [[_CI_BUILD_REPOS], ["strive/**"], ["agentforge/**"], ["**"]])
+
+    def test_widening_sets_the_flag_on_strive_itself(self):
+        pols = _policies(["strive/**"])
+        self.assertEqual([p["repositories"] for p in pols],
+                         [[_CI_BUILD_REPOS], ["strive/**"], ["agentforge/**"], ["**"]])
+        strive = _first_retention_policy(pols, "strive/web")
+        self.assertIs(strive["deleteReferrers"], True)
+        self.assertEqual(strive["keepTags"], _STRIVE_POLICY["keepTags"])
+        self.assertNotIn("deleteReferrers", _first_retention_policy(pols, "strive/ci-build/a"))
+        self.assertNotIn("deleteReferrers", _first_retention_policy(pols, "agentforge/orchestrator"))
+
+    def test_the_change_is_reload_safe(self):
+        # PR 1's helper must classify adding the canary (or widening) as a live reload, not a 19 min restart.
+        helper = _load_apply_helper()
+        before = json.loads(_render_config({_CANARY_KNOB: []}))
+        for repos in (["strive/web"], ["strive/**"]):
+            after = json.loads(_render_config({_CANARY_KNOB: repos}))
+            mode, paths, _ = helper.classify(before, after)
+            self.assertEqual(mode, "reload", (repos, paths))
+            self.assertEqual(paths, ["storage.retention.policies"])
 
 
 class RegistryZotStriveCiPushAccessTest(unittest.TestCase):

@@ -597,6 +597,50 @@ regenerate without `--agent-assets` (the output is the previous one byte for byt
 tests refuse a record that still names the agent release. Then run them and the two-argument
 reproduction.
 
+### The agent's leadership log
+
+The agent (Deployment `relay-infrastructure-agent` in `relay-infra-control`) logs one JSON line per
+leadership event, with enums and counts only. This is what the operator's Lease watch (E4) reads. Names
+are as of Relay v0.10.6, from `packages/infrastructure-agent/leadership.ts` and `daemon.ts` at
+`1599d06e`.
+
+| Event | Meaning |
+| --- | --- |
+| `starting`, `leader_acquired`, `ready` | A new incarnation took the Lease and the installation is `ready` at the next epoch. |
+| `lease_renewal_failed` | A renewal round proved nothing. Leadership continues until the renew deadline, 10 s after the last proven renewal was sent. Fields: `reason`, `failureClass`, `lastDuration`, `failedAttempts`, `sinceRenewMs`. |
+| `lease_write_adopted` | v0.10.6 and later. A later read showed that an earlier renewal whose outcome was unknown did land: it carries that write's random marker (annotation `relay.chifor.me/lease-write`) on a newer Lease version. The deadline moves to that write's send time plus 10 s. `failedAttempts` counts the rounds bridged. |
+| `lease_renewal_recovered` | A renewal was proven again; `failedAttempts` is the number of rounds it bridged. |
+| `admission_halted` with `code: leadership_lost` | Leadership ended. Fields: `reason`; the last failed round's `lastFailure`, `failureClass` and `lastDuration`; `failedAttempts`, `sinceRenewMs`; and `inFlight`/`inFlightDuration` when a Lease request was still outstanding. The process exits; a new incarnation takes over once the old Lease expires (15 s), at epoch + 1. Expect about 25-30 s without admission. |
+
+- **Round reasons** (`lastFailure`, and `reason` of `lease_renewal_failed`):
+  - `lease-renew-unknown`: the PUT got no answer and may have landed;
+  - `lease-read-failed`;
+  - `lease-renew-conflict`: 409, and the re-read still showed this Lease;
+  - `lease-renew-refused`;
+  - `lease-read-late` and `lease-renew-late`: answered only at or after the deadline.
+- **Failure classes:** `timeout`, `late`, `transport`, `invalid-response`, `local`, `error`, `401`, `403`, `404`, `409`, `429`, `4xx`, `5xx`, `other`.
+- **Loss reasons** (all terminal for this incarnation):
+  - `renew-deadline-passed`: no proven renewal within 10 s;
+  - `lease-taken`: another holder or Lease UID;
+  - `lease-deleted`;
+  - `lease-invalid`: a successful read returned an invalid Lease or the wrong namespace (definitive loss);
+  - `lease-write-unverified`: a successful write response failed Lease validation or showed the wrong namespace, holder or, on renewal, Lease UID (definitive loss);
+  - `lease-holder-reused`: a candidate found its own never-reused holder ID in the Lease, possibly from an acquisition whose outcome was unknown (definitive loss);
+  - `lease-response-too-late`: an acquisition response was processed at or after its round's acceptance deadline (deadline loss);
+  - `lease-state-changed`: a write response arrived for a state this process had already left (definitive local state loss).
+
+Reading an episode:
+
+- **A slow API server** shows `lease_renewal_failed` (`lease-renew-unknown`, `timeout`). Within the 10 s window it is followed by `lease_write_adopted` and/or `lease_renewal_recovered`. That is tolerated, not an incident.
+- **`renew-deadline-passed`** means no renewal was proven within 10 s; timely refusals or repeated conflicts can also cause this. Inspect `lastFailure`, `failureClass`, `lastDuration` and any `inFlight`/`inFlightDuration` first. Investigate etcd (WAL fsync, leader changes, apiserver-to-etcd latency) when those indicate stalled Lease requests. On 2026-11-18 at 03:53Z that was an etcd leader stall: reads were held 8-10 s on every apiserver. Riding out a stall that long needs longer Lease timings: a Relay preparation change, parked for the owner.
+- **`lease-taken`, `lease-deleted` or `lease-holder-reused`** are definitive. Find out who changed or removed the Lease.
+
+The agent's Lease requests are GET and PUT on `leases/relay-infrastructure-agent` and POST on the
+Lease collection (no list or watch). `agent/rbac.yaml` grants exactly `get` and `update` on that
+resourceName and `create` on leases. For a `403` in `failureClass`, check `agent/rbac.yaml` and the
+RoleBinding first; it does not prove RBAC changed. Also check admission denials, namespace state and
+the requested Lease/namespace.
+
 ## Qualification stage (owner decision G3)
 
 The enrollment stage ends here. These steps move the slot to the internal TLS endpoints before any
