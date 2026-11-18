@@ -139,8 +139,14 @@ class AgentPin(unittest.TestCase):
             self.assertIn(f"Cross-checked against SHA256SUMS: {expected}\n", output.getvalue())
 
     def test_downgrade_requires_cli_override_and_warns(self):
-        # This release is newer than the runtime, but older than the current agent pin.
-        self.agent["tag"] = self.manifest["version"] = "v0.10.5"
+        # A release newer than the runtime but older than the current agent pin, derived from the
+        # committed inputs so the test survives every agent-only update.
+        pinned = self.inputs["agentRelease"]["tag"]
+        major, minor, patch = pin.version(pinned)
+        older = f"v{major}.{minor}.{patch - 1}"
+        newer = f"v{major}.{minor}.{patch + 1}"
+        self.assertGreater(pin.version(older), pin.version(self.inputs["release"]["tag"]))
+        self.agent["tag"] = self.manifest["version"] = older
         self.write_assets()
         for allow in (False, True):
             stderr = io.StringIO()
@@ -153,13 +159,13 @@ class AgentPin(unittest.TestCase):
                 self.assertEqual(pin.main(self.cli_args() + (["--allow-downgrade"] if allow else [])), 1)
             if allow:
                 rewrite.assert_called_once()
-                self.assertIn("WARNING: --allow-downgrade permits agent downgrade from v0.10.6 to v0.10.5",
+                self.assertIn(f"WARNING: --allow-downgrade permits agent downgrade from {pinned} to {older}",
                               stderr.getvalue())
                 self.assertIn("reached rewrite", stderr.getvalue())
             else:
                 rewrite.assert_not_called()
-                self.assertIn("older than pinned agentRelease.tag v0.10.6", stderr.getvalue())
-        for tag in (self.inputs["agentRelease"]["tag"], "v0.10.7"):
+                self.assertIn(f"older than pinned agentRelease.tag {pinned}", stderr.getvalue())
+        for tag in (pinned, newer):
             with contextlib.redirect_stderr(io.StringIO()) as stderr:
                 pin.check_agent_tag(tag, self.inputs["agentRelease"], allow_downgrade=False)
             self.assertEqual(stderr.getvalue(), "")
