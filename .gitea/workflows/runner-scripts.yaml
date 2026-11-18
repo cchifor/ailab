@@ -29,10 +29,14 @@ on:
       - "ansible/roles/gitea_runner/tests/**"
       - "ansible/roles/gitea_runner/templates/**"
       - "ansible/roles/gitea_runner/defaults/**"
-      # test-fstrim-chunked.sh also checks the fstab regexes in tasks/ and the per-host trim windows
-      # (against the registry LXC trim's units in registry-cache.md and its script's chunk size).
+      # Everything else test-fstrim-chunked.sh reads (grep it for every path it opens when changing it): the
+      # fstab regexes in tasks/, and for the per-host schedule the gitea_runners hosts, their vars and
+      # nodes, and the registry LXC trim's units and script.
       - "ansible/roles/gitea_runner/tasks/**"
       - "ansible/host_vars/ci-runner-*.yml"
+      - "ansible/group_vars/gitea_runners.yml"
+      - "inventory/hosts.yml"
+      - "kubernetes/infra/runners/variables.tf"
       - "docs/runbooks/registry-cache.md"
       - "scripts/lxc-fstrim-chunked.sh"
       - ".gitea/workflows/runner-scripts.yaml"
@@ -40,6 +44,12 @@ on:
     branches: [main]
     paths:
       - "ansible/roles/gitea_runner/**"
+      - "ansible/host_vars/ci-runner-*.yml"
+      - "ansible/group_vars/gitea_runners.yml"
+      - "inventory/hosts.yml"
+      - "kubernetes/infra/runners/variables.tf"
+      - "docs/runbooks/registry-cache.md"
+      - "scripts/lxc-fstrim-chunked.sh"
 
 jobs:
   runner-scripts:

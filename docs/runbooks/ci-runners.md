@@ -373,9 +373,10 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     file, the window, the day gate, and the job gate (the cleanup's signal: children of act_runner's
     MainPID, idle confirmed over 3 reads). It waits for a running job and gives up for the night after
     30 min.
-  - **Windows** (`host_vars/ci-runner-N.yml`, UTC). Every window ends by 05:25: a slice begun just before
-    the end runs past it, and trimming stops by 05:30. Runners on one node never overlap and are 5 min
-    apart. The role default, 00:00-05:25 every day, is for a runner without one.
+  - **Windows** (`host_vars/ci-runner-N.yml`, UTC). A window's tail, how far trimming can run past its
+    end, is the kill allowance below plus one block group, rounded up to minutes (2 min at the defaults).
+    Every window plus its tail ends by 05:30, and windows on one node are at least a tail apart: they end
+    by 05:25 and sit 5 min apart. The role default, 00:00-05:25 every day, is for a runner without one.
     - ai-node1: ci-runner-1 00:00-01:25, ci-runner-4 01:30-03:10, ci-runner-9 04:15-05:25 **except
       Sundays**.
     - ai-node2: ci-runner-2 00:00-01:45, ci-runner-5 01:50-03:35, ci-runner-10 03:40-05:25.
@@ -390,13 +391,20 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     tail included, by 03:15, before the registry trim can start, so they run every day.
   - **The schedule is tested.** `tests/test-fstrim-chunked.sh` reads each runner's node from
     `kubernetes/infra/runners/variables.tf` and the registry timer from registry-cache.md. It fails if a
-    window ends after 05:25, two windows on a node overlap (tails included), the cap does not fit a
-    window (23 s per GiB plus pauses), the registry unit has no deadline or too short a stop time for its
+    window's tail (derived from its kill allowance) runs past 05:30, two windows on a node overlap (tails
+    included), the cap does not fit a window (23 s per GiB plus pauses), the rendered unit's
+    `TimeoutStartSec` does not cover the window, the registry unit has no deadline or too short a stop time for its
     in-flight chunk, or a window on the registry's node overlaps the registry trim's span (15 min before
     its earliest start to 15 min after its deadline-bound latest end, Sunday into Monday included).
     Moving the registry timer or its deadline means moving the node1 windows or days too.
   - **Each slice** is cut to the budget left (in whole groups), so a run never covers more than the cap,
-    and the stop file, the window and the day are checked again right before each FITRIM. The cursor is written
+    and the stop file, the window and the day are checked again right before each FITRIM. It must also
+    END in the window: it is cut to what fits before the end at `gitea_runner_fstrim_sec_per_gb` (30 s per
+    GiB; less than one group ends the run), and fstrim runs under `timeout -s KILL`, which kills a stalled
+    one `gitea_runner_fstrim_kill_allowance_s` (60 s) after the end. ext4 stops a killed FITRIM within
+    about one group; that slice is unconfirmed, so the cursor stays at its start (reason `deadline`). The
+    unit's `TimeoutStartSec` is the window's length plus that allowance plus 10 min, so even a night of
+    many job waits ends with the script's own `window` exit. The cursor is written
     with an fsync of the file and of its directory, so it survives a power cut (a reboot also resets the
     trimmed flags, so a lost cursor would mean re-trimming full slices).
   - **One reboot per runner, once.** A remount does not clear the trimmed flags `discard` left behind; a
@@ -409,8 +417,9 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     - Beacon `gitea_runner_fstrim.prom`: `last_run_seconds`, `submitted_bytes` (what FITRIM reported, i.e.
       submitted to the host; whether the thin pool reclaimed it is not visible from the guest),
       `range_bytes`, `cursor_bytes`, `fs_bytes`, `passes_total`, `exit_code`, `exit_reason{reason=…}`.
-    - Reasons: `cap`, `full` (whole fs covered), `window`, `day` (not a night in its days), `busy`,
-      `stopped` (all exit 0); `unsupported`
+    - Reasons: `cap`, `full` (whole fs covered), `window` (closed, or less than one group fits before its
+      end), `day` (not a night in its days), `busy`, `stopped`, `deadline` (a slice killed past the end;
+      the drive stalled) (all exit 0); `unsupported`
       or `lock` (1), `invalid` (2), `fstrim_failed` (5), `state` (6, state file not writable or not synced), `signal`
       (143/130). Exit 7 (another run holds `/run/gitea-runner-fstrim.lock`) writes no beacon.
     - `journalctl -u gitea-runner-fstrim.service`: one `slice off=… trimmed=…` line per slice, then the

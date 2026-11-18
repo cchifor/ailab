@@ -17,12 +17,14 @@
 # The -m is a CONSTANT on purpose: ext4 retrims every flagged group when -m is smaller than the last one.
 # Before EACH slice, in this order: the stop file, the night window (UTC, may wrap midnight), the day gate
 # (DAYS, by the weekday the window started), and the job gate; then the stop file, the window and the day
-# once more, immediately before the FITRIM. After each slice the
+# once more, immediately before the FITRIM. Each slice must also END inside the window: it is cut to what
+# fits before the END at SEC_PER_GB, and fstrim runs under `timeout -s KILL`, which kills a stalled one
+# KILL_ALLOWANCE_S after the END. After each slice the
 # byte offset (cursor) is persisted durably, so a run that stops anywhere resumes there next night; at
 # the end of the filesystem it wraps to 0 and counts a completed pass.
 # A run ends when the whole filesystem has been covered once, when less than one block group of the
 # MAX_GB_PER_RUN budget is left (a slice is cut to the budget, in whole groups: the cap is never
-# exceeded), or when the window closes.
+# exceeded), when the window closes or less than one group fits before its end, or at the deadline.
 #
 # A job can still start during a slice. That is why the slices are small (2 GiB, ~40 s): a TRIM slows
 # the job's disk for at most one slice, and deletes nothing.
@@ -31,8 +33,9 @@
 # pool reclaimed them is not visible from the guest: check `lvs` on the Proxmox node.
 #
 # Exit codes:
-#   0   done: the cap or a full pass reached, the window closed, not a night in DAYS, a job outlasted
-#       BUSY_WAIT_MAX_S, or the stop file is present
+#   0   done: the cap or a full pass reached, the window closed (or less than one group fits before its
+#       end), not a night in DAYS, a job outlasted BUSY_WAIT_MAX_S, the stop file is present, or a slice
+#       was killed at the window-relative deadline (reason `deadline`; the cursor stays at its start)
 #   1   MNT is not a mount point, not ext4, or its geometry is unreadable; or the lock file cannot be opened
 #   2   invalid settings
 #   5   an fstrim failed (the cursor stays at that slice)
@@ -57,6 +60,12 @@ CHUNK_GB="${GITEA_FSTRIM_CHUNK_GB:-2}"                  # GiB per slice, rounded
 MAX_GB_PER_RUN="${GITEA_FSTRIM_MAX_GB_PER_RUN:-96}"     # GiB of the filesystem covered per run
 PAUSE_S="${GITEA_FSTRIM_PAUSE_S:-20}"                   # seconds between slices
 BUSY_WAIT_MAX_S="${GITEA_FSTRIM_BUSY_WAIT_MAX_S:-1800}" # give up for the night after one job wait this long
+# The window-relative deadline. A slice is cut to what fits before the window END at SEC_PER_GB seconds per
+# GiB (conservative: measured 17-23), and fstrim is SIGKILLed KILL_ALLOWANCE_S after the END if the drive
+# stalls. The allowance (plus one group) is each window's tail: the gap the schedule test requires
+# before the next window on the node.
+SEC_PER_GB="${GITEA_FSTRIM_SEC_PER_GB:-30}"
+KILL_ALLOWANCE_S="${GITEA_FSTRIM_KILL_ALLOWANCE_S:-60}"
 TEXTFILE_DIR="${GITEA_FSTRIM_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 # Not rendered by the role: fixed paths and the cleanup's own idle-confirm cadence.
 MNT="${GITEA_FSTRIM_MOUNT:-/}"
@@ -143,6 +152,14 @@ start_dow() {
   echo $(( (day + 3) % 7 + 1 )) # 1970-01-01, day 0, was a Thursday (4)
 }
 day_ok() { case "$days" in *" $(start_dow) "*) return 0 ;; esac; return 1; }
+# Seconds from now to the window END. Only called inside the window, so a non-positive difference means
+# the END is past midnight (a window that wraps).
+secs_left() {
+  local left
+  left=$(( we * 60 - $(now_s) % 86400 ))
+  [ "$left" -gt 0 ] || left=$(( left + 86400 ))
+  echo "$left"
+}
 
 # Job gate. MIRRORS any_job_running()/idle_confirmed() in gitea-runner-cleanup.sh, deliberately: the
 # same signal (act_runner spawns each job's step processes as children of its MainPID, so "MainPID has
@@ -198,6 +215,8 @@ posint "$MAX_GB_PER_RUN" || finish 2 invalid "invalid MAX_GB_PER_RUN='$MAX_GB_PE
 [ "$MAX_GB_PER_RUN" -ge "$CHUNK_GB" ] || finish 2 invalid "MAX_GB_PER_RUN=$MAX_GB_PER_RUN is below CHUNK_GB=$CHUNK_GB"
 nonneg "$PAUSE_S" || finish 2 invalid "invalid PAUSE_S='$PAUSE_S' (whole seconds, 0 or more)"
 nonneg "$BUSY_WAIT_MAX_S" || finish 2 invalid "invalid BUSY_WAIT_MAX_S='$BUSY_WAIT_MAX_S' (whole seconds, 0 or more)"
+posint "$SEC_PER_GB" || finish 2 invalid "invalid SEC_PER_GB='$SEC_PER_GB' (a positive integer)"
+posint "$KILL_ALLOWANCE_S" || finish 2 invalid "invalid KILL_ALLOWANCE_S='$KILL_ALLOWANCE_S' (a positive integer)"
 posint "$IDLE_POLL_S" || finish 2 invalid "invalid IDLE_POLL_S='$IDLE_POLL_S' (a positive integer)"
 posint "$IDLE_CONFIRM_POLLS" || finish 2 invalid "invalid IDLE_CONFIRM_POLLS='$IDLE_CONFIRM_POLLS' (a positive integer)"
 hhmm "$WINDOW_START" || finish 2 invalid "invalid WINDOW_START='$WINDOW_START' (HH:MM, UTC)"
@@ -270,9 +289,24 @@ while :; do
   stopped && finish 0 stopped "stop file $STOP_FILE present (appeared while confirming idle)"
   in_window || finish 0 window "the window $WINDOW_START-$WINDOW_END UTC closed while confirming idle"
   day_ok || finish 0 day "this window started on weekday $(start_dow), not one of DAYS='$DAYS'"
-  if ! run_child fstrim -v -m "$MINLEN" -o "$off" -l "$len" "$MNT" > "$outf" 2>&1; then
-    finish 5 fstrim_failed "fstrim failed at off=$off len=$len: $(cat "$outf" 2>/dev/null)"
-  fi
+  # The window-relative deadline. The checks above only say the window is OPEN; a slice must also END in
+  # it, or the next runner on this node starts while it runs. So: cut the slice to what fits before the
+  # END at SEC_PER_GB (whole groups; less than one group ends the run), and SIGKILL the fstrim if it is
+  # still running KILL_ALLOWANCE_S after the END (a stalled drive). ext4 checks for a fatal signal while it
+  # walks the groups, so a KILL ends the FITRIM within about one group's discard.
+  left="$(secs_left)"
+  fit=$(( left * GiB / SEC_PER_GB / group * group ))
+  [ "$fit" -ge "$group" ] || finish 0 window "${left}s to the window end: less than one block group fits at ${SEC_PER_GB}s/GiB"
+  [ "$len" -gt "$fit" ] && len="$fit"
+  run_child timeout -s KILL $(( left + KILL_ALLOWANCE_S )) fstrim -v -m "$MINLEN" -o "$off" -l "$len" "$MNT" > "$outf" 2>&1
+  rc=$?
+  # 137: the KILL (timeout re-raises it on itself); 124: timed out, as timeout reports it otherwise. A
+  # killed slice is UNCONFIRMED: the cursor stays at its start, so the next night trims it again.
+  case "$rc" in
+    0) : ;;
+    124 | 137) finish 0 deadline "fstrim at off=$off len=$len was still running $(( left + KILL_ALLOWANCE_S ))s later, ${KILL_ALLOWANCE_S}s past the window end - killed; the cursor stays at $off" ;;
+    *) finish 5 fstrim_failed "fstrim failed at off=$off len=$len: $(cat "$outf" 2>/dev/null)" ;;
+  esac
   out="$(cat "$outf" 2>/dev/null)"
   bytes="$(sed -nE 's/.*\(([0-9]+) bytes\) trimmed.*/\1/p' <<< "$out")"
   is_num "$bytes" || { log "could not read the trimmed bytes from: $out"; bytes=0; }
