@@ -541,6 +541,13 @@ and the bundle check requires helm and PyYAML. It preserves the inputs file's fo
 the generated binding and import in a temporary copy, and installs changes only after all checks
 pass. It prints the provenance values and exact existing sentences/rows for the manual step 5;
 registry readback remains an operator check. The manual commands below remain the reference.
+The tool refuses a tag older than the current `agentRelease.tag`; re-running the current tag is
+allowed. For an intentional rollback, pass `--allow-downgrade` and review its warning; the agent
+must still be newer than `release.tag`. Step 2 lists which of the three assets were cross-checked
+against `SHA256SUMS`, or `none` when it lists only other release artifacts. Installation stages
+and fsyncs replacements and backups beside their destinations before any atomic replacement.
+On failure it attempts every required restoration; if a restoration fails, the error names the
+affected file and its retained backup for manual recovery.
 
 ```sh
 # 1. The agent release's assets, into a NEW empty directory (private release: your own token).
