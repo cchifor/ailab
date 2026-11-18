@@ -98,9 +98,17 @@ consulting `keepTags`. So, for every repo before it goes on the list:
    `"safe": true` (`nested_not_top == 0`, `tagged_orphans == 0`); it exits 1 otherwise.
 2. Note one kept tag's index digest and its platform manifests, and their `GET /v2/<repo>/referrers/<digest>`.
 3. Apply (a reload, no restart). After the next GC cycle (`gcInterval` 1h), the orphan count should drop. Step 2's
-   referrers must be unchanged. Watch ai-node1 writes and cp1 fsync: abort if node1 stays over 150 MiB/s, or cp1's
-   fsync p99 is over 1 s for 2 consecutive minutes. Abort = remove the repo from the list (reload). It stops further
-   deletions; the ones done are orphans and cannot be restored.
+   referrers must be unchanged. Watch, per 1-min sample:
+   - ai-node1 host writes, `rate(node_disk_written_bytes_total{device="nvme0n1"}[1m])`;
+   - cp1 WAL fsync p99.
+   **Abort when** node1 writes stay above 150 MiB/s for 3 consecutive samples, or cp1 fsync p99 is above 1 s for 2
+   consecutive samples.
+   **Abort** = remove the repo from the list and apply. Then VERIFY that the reload took: the play's `Report how the
+   zot config was applied` shows `mode: reload`, and the live config.json no longer lists the repo. zot only stops
+   between GC passes, so a pass already running finishes its repo. If the disabling apply fails or is `blocked` (the
+   helper then restores the previous bytes, i.e. the canary stays ENABLED), **escalate**: `systemctl stop zot` on
+   the LXC. That is an outage, but it ends GC at once. Then apply with `-e registry_zot_config_allow_restart=true`
+   in a quiet window. Deletions already done are orphans and cannot be restored.
 4. Widen to `["strive/**"]` only after a clean canary.
 
 **Everything else the role converges still restarts zot**: htpasswd lines, certs, sync credentials, the unit and

@@ -11,7 +11,9 @@ This walks the store READ-ONLY and exits 1 if either rule is broken for any repo
 (node-ssh.py does not forward stdin, so push a temporary copy and remove it):
   B=$(base64 -w0 scripts/zot-referrer-orphan-check.py)
   python scripts/node-ssh.py 192.168.0.2 "echo $B | base64 -d > /tmp/zroc.py && pct push 5004 /tmp/zroc.py \\
-    /tmp/zroc.py && pct exec 5004 -- python3 /tmp/zroc.py strive/web; pct exec 5004 -- rm -f /tmp/zroc.py; rm -f /tmp/zroc.py"
+    /tmp/zroc.py && pct exec 5004 -- python3 /tmp/zroc.py strive/web; rc=\\$?; pct exec 5004 -- rm -f /tmp/zroc.py; \\
+    rm -f /tmp/zroc.py; echo check-rc=\\$rc; exit \\$rc"
+The cleanup must not hide the result: only `check-rc=0` (and every line `"safe": true`) is a pass.
 Default store: /var/lib/registry/store; override with --root.
 """
 import argparse
@@ -22,9 +24,16 @@ import sys
 TAG = "org.opencontainers.image.ref.name"
 
 
+def is_safe(res):
+    """FAIL CLOSED: safe only with a non-empty index whose every manifest was read, no live child missing from the
+    top level, and no tagged referrer among the would-be-deleted ones."""
+    return (res["manifests"] > 0 and res["unreadable"] == 0 and res["nested_not_top"] == 0
+            and res["tagged_orphans"] == 0)
+
+
 def check_repo(entries, load):
     """Classify one repo. `entries` = index.json `manifests`; `load(digest)` returns the parsed manifest or None.
-    Returns a dict of counts; 'nested_not_top' and 'tagged_orphans' must be 0 for deleteReferrers to be safe."""
+    Returns a dict of counts; see is_safe() for what must hold before deleteReferrers is enabled."""
     top = {m["digest"] for m in entries}
     nested, seen, stack = set(), set(), [m["digest"] for m in entries]
     while stack:
@@ -36,9 +45,13 @@ def check_repo(entries, load):
             nested.add(child["digest"])
             stack.append(child["digest"])
     out = {"manifests": len(entries), "nested_not_top": len(nested - top), "orphans": 0, "tagged_orphans": 0,
-           "kept_referrers": 0}
+           "kept_referrers": 0, "unreadable": 0}
     for m in entries:
-        subject = ((load(m["digest"]) or {}).get("subject") or {}).get("digest")
+        doc = load(m["digest"])
+        if doc is None:  # an unreadable manifest could be a referrer: never treat missing data as safe
+            out["unreadable"] += 1
+            continue
+        subject = (doc.get("subject") or {}).get("digest")
         if not subject:
             continue
         if subject in top:
@@ -58,8 +71,13 @@ def main(argv=None):
     ok = True
     for repo in args.repos:
         base = os.path.join(args.root, repo)
-        with open(os.path.join(base, "index.json")) as fh:
-            entries = json.load(fh).get("manifests", [])
+        try:
+            with open(os.path.join(base, "index.json")) as fh:
+                entries = json.load(fh).get("manifests") or []
+        except (OSError, ValueError) as err:
+            print(json.dumps({"repo": repo, "safe": False, "error": f"index.json unreadable ({err.__class__.__name__})"}))
+            ok = False
+            continue
 
         def load(digest, base=base):
             try:
@@ -69,7 +87,7 @@ def main(argv=None):
                 return None
 
         res = check_repo(entries, load)
-        safe = res["nested_not_top"] == 0 and res["tagged_orphans"] == 0
+        safe = is_safe(res)
         ok = ok and safe
         print(json.dumps({"repo": repo, "safe": safe, **res}))
     return 0 if ok else 1

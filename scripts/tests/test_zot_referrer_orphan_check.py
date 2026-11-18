@@ -37,6 +37,27 @@ class OrphanCheckTest(unittest.TestCase):
         res = run(entries, {"att": {"subject": {"digest": "gone"}}})
         self.assertEqual(res["tagged_orphans"], 1)
 
+    def test_fails_closed_on_missing_data(self):
+        empty = run([], {})
+        self.assertFalse(mod.is_safe(empty))  # an empty or missing manifests list proves nothing
+        unreadable = run([{"digest": "x"}], {})  # the blob could not be read
+        self.assertEqual(unreadable["unreadable"], 1)
+        self.assertFalse(mod.is_safe(unreadable))
+        good = run([{"digest": "img"}], {"img": {"config": {}}})
+        self.assertTrue(mod.is_safe(good))
+
+    def test_main_exits_1_for_an_unreadable_or_empty_index(self):
+        import io, json, tempfile, contextlib
+        with tempfile.TemporaryDirectory() as root:
+            os_repo = Path(root) / "strive" / "x"
+            os_repo.mkdir(parents=True)
+            (os_repo / "index.json").write_text("{}")  # no manifests at all
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = mod.main(["--root", root, "strive/x", "strive/missing"])
+            self.assertEqual(rc, 1)
+            lines = [json.loads(line) for line in out.getvalue().splitlines()]
+            self.assertEqual([line["safe"] for line in lines], [False, False])
+
     def test_nested_indexes_are_walked(self):
         entries = [{"digest": "outer"}, {"digest": "inner"}]
         docs = {"outer": {"manifests": [{"digest": "inner"}]}, "inner": {"manifests": [{"digest": "leaf"}]}}
