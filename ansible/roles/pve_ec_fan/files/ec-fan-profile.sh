@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
-# ec-fan-profile -- put the CPU fans of a Bosgame M5 (ec_su_axb35 driver) on a temperature curve, or hand
-# them back to the EC firmware. Deployed by the pve_ec_fan role as /usr/local/sbin/ec-fan-profile and run
+# ec-fan-profile -- put the CPU fans of a Bosgame M5 (ec_su_axb35 driver) on a temperature curve and the
+# APU in the configured power mode, or hand the fans back to the EC firmware and set the power mode to
+# balanced, the factory EC default. Deployed by the pve_ec_fan role as /usr/local/sbin/ec-fan-profile and run
 # by ec-fan-profile.service:
 #
 #   apply   for each configured fan: write the rampup and rampdown curves, read them back, then set the
 #           mode to curve. Curves first, because switching to curve picks the starting level from the
 #           rampup curve in effect at that moment. A CPU fan NOT in the list goes back to auto, so a fan
 #           dropped from the config is handed back to the firmware (systemd's ExecStop reads the NEW
-#           config, so it cannot be relied on for that). From then on the driver's 1 s worker moves the
-#           level with the EC temperature, so this runs once per module load (ExecStart).
-#   reset   set both CPU fans back to auto, the EC's own curve, whatever the config says (ExecStop:
-#           stopping or disabling the service hands them back to the firmware; a broken config must not
-#           keep them on a curve). Nothing to do when the module is not loaded: unloading it already reset
-#           every fan to auto.
+#           config, so it cannot be relied on for that). Then write the APU power mode. From then on the
+#           driver's 1 s worker moves the level with the EC temperature, so this runs once per module load
+#           (ExecStart).
+#   reset   set both CPU fans back to auto, the EC's own curve, and the APU power mode to balanced, the
+#           AXB35's factory EC default, whatever the config says (ExecStop: stopping or disabling the
+#           service; a broken config must not keep them on the profile). It sets balanced; it does not
+#           restore a mode that was set before the role. Nothing to do when the module is not loaded.
 #   check   compare the live state with the config without writing anything: exit 0 when every
-#           configured fan is in curve mode with the configured curves and every other CPU fan is in
-#           auto, 3 (and the differences on stdout) when not, 1 on a bad config. The role runs it on each
-#           converge and restarts the service on 3: a module reloaded under an active service, a start
-#           that failed at boot, a value written by hand.
+#           configured fan is in curve mode with the configured curves, every other CPU fan is in auto and
+#           the power mode is the configured one; 3 (and the differences on stdout) when not; 1 on a bad
+#           config. The role runs it on each converge and restarts the service on 3: a module reloaded
+#           under an active service, a start that failed at boot, a value written by hand.
 #
 # Only fan1 and fan2, the CPU fans. fan3 is controllable through the driver too, but it is not managed by
 # this role yet: it stays on the EC's own curve (owner decision pending), so it is refused in the config and
@@ -25,18 +27,21 @@
 #
 # Environment (ec-fan-profile.service reads /etc/default/ec-fan-profile, rendered from the role vars):
 #   EC_FAN_FANS            fans to manage, e.g. "1 2"
-#   EC_FAN_RAMPUP_CURVE    five deg C thresholds for levels 1-5, e.g. 35,50,60,68,95 (0-100, rising)
+#   EC_FAN_RAMPUP_CURVE    five deg C thresholds for levels 1-5, e.g. 40,55,80,90,95 (0-100, rising)
 #   EC_FAN_RAMPDOWN_CURVE  five deg C thresholds, each below the rampup value of the same level
+#   EC_FAN_POWER_MODE      APU power mode: quiet, balanced or performance
 #   EC_FAN_SYSFS           the driver's class dir (default /sys/class/ec_su_axb35)
-#   EC_FAN_WAIT_S          seconds apply waits for the fan dirs to appear (default 10)
+#   EC_FAN_WAIT_S          seconds apply waits for the driver's dirs to appear (default 10)
 set -euo pipefail
 
 SYSFS="${EC_FAN_SYSFS:-/sys/class/ec_su_axb35}"
 FANS="${EC_FAN_FANS:-}"
 RAMPUP="${EC_FAN_RAMPUP_CURVE:-}"
 RAMPDOWN="${EC_FAN_RAMPDOWN_CURVE:-}"
+POWER_MODE="${EC_FAN_POWER_MODE:-}"
 WAIT_S="${EC_FAN_WAIT_S:-10}"
 CPU_FANS="1 2"
+EC_DEFAULT_POWER_MODE=balanced # what reset sets: the factory EC default, not a record of the previous mode
 
 log() { echo "ec-fan-profile: $*"; }
 die() {
@@ -83,17 +88,27 @@ check_curves() {
   done
 }
 
-fans_present() {
+# The three values the driver's power_mode store accepts.
+check_power_mode() {
+  case "$POWER_MODE" in
+    quiet | balanced | performance) ;;
+    *) die "EC_FAN_POWER_MODE='$POWER_MODE': need quiet, balanced or performance" ;;
+  esac
+}
+
+driver_present() {
   local f
   for f in $CPU_FANS; do
     [ -e "$SYSFS/fan$f/mode" ] || return 1
   done
+  [ -e "$SYSFS/apu/power_mode" ]
 }
 
 managed() { [[ " $FANS " == *" $1 "* ]]; }
 
-# No trailing newline is needed: at the pin, the driver's mode store compares with sysfs_streq (which
-# ignores one), and its curve store splits on ',' and parses each value with kstrtoint (which accepts one).
+# No trailing newline is needed: at the pin, the driver's mode and power_mode stores compare with
+# sysfs_streq (which ignores one), and its curve store splits on ',' and parses each value with kstrtoint
+# (which accepts one).
 write() { # $1 attribute path, $2 value
   printf '%s' "$2" > "$1" || die "writing '$2' to $1 failed"
   log "${1#"$SYSFS"/} <- $2"
@@ -109,9 +124,10 @@ apply() {
   local f d i
   check_fans
   check_curves
+  check_power_mode
   for ((i = 0; ; i++)); do
-    fans_present && break
-    ((i < WAIT_S)) || die "no fan dirs under $SYSFS after ${WAIT_S}s: is ec_su_axb35 loaded? (lsmod | grep ec_su_axb35)"
+    driver_present && break
+    ((i < WAIT_S)) || die "no fan/apu dirs under $SYSFS after ${WAIT_S}s: is ec_su_axb35 loaded? (lsmod | grep ec_su_axb35)"
     sleep 1
   done
   for f in $FANS; do
@@ -128,25 +144,32 @@ apply() {
     write "$SYSFS/fan$f/mode" auto
     expect "$SYSFS/fan$f/mode" auto
   done
+  write "$SYSFS/apu/power_mode" "$POWER_MODE"
+  expect "$SYSFS/apu/power_mode" "$POWER_MODE"
+}
+
+reset_one() { # $1 attribute path, $2 value; reports instead of exiting, so reset tries everything
+  if [ ! -e "$1" ]; then
+    echo "ec-fan-profile: $1 is missing" >&2
+    return 1
+  elif printf '%s' "$2" > "$1"; then
+    log "${1#"$SYSFS"/} <- $2"
+  else
+    echo "ec-fan-profile: writing $2 to $1 failed" >&2
+    return 1
+  fi
 }
 
 reset() {
   local f rc=0
   if [ ! -d "$SYSFS" ]; then
-    log "$SYSFS is absent (module not loaded): the EC already runs every fan on its own curve"
+    log "$SYSFS is absent (module not loaded): nothing to hand back"
     return 0
   fi
   for f in $CPU_FANS; do
-    if [ ! -e "$SYSFS/fan$f/mode" ]; then
-      echo "ec-fan-profile: $SYSFS/fan$f/mode is missing" >&2
-      rc=1
-    elif printf '%s' auto > "$SYSFS/fan$f/mode"; then
-      log "fan$f/mode <- auto"
-    else
-      echo "ec-fan-profile: writing auto to $SYSFS/fan$f/mode failed" >&2
-      rc=1
-    fi
+    reset_one "$SYSFS/fan$f/mode" auto || rc=1
   done
+  reset_one "$SYSFS/apu/power_mode" "$EC_DEFAULT_POWER_MODE" || rc=1
   return "$rc"
 }
 
@@ -154,6 +177,7 @@ check() {
   local f d want got drift=0
   check_fans
   check_curves
+  check_power_mode
   for f in $CPU_FANS; do
     d="$SYSFS/fan$f"
     if managed "$f"; then
@@ -169,6 +193,11 @@ check() {
       drift=1
     fi
   done
+  got=$(cat "$SYSFS/apu/power_mode" 2> /dev/null || echo missing)
+  if [ "$got" != "$POWER_MODE" ]; then
+    echo "apu: is '$got', want '$POWER_MODE'"
+    drift=1
+  fi
   ((drift == 0)) || exit 3
 }
 

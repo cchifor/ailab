@@ -5,8 +5,11 @@
 # converge/converge.sh: a first --check; apply (the profile runs once); idempotence (changed=0) and --check
 # after apply; a converge with the repo unreachable; a second installed kernel; a curve change next to a
 # failing build for another kernel (the curve is still applied); a fan dropped from the list (back to auto);
-# recovery after a module reload under the active service; refused profiles; disable after an apply that
-# stopped part-way, and re-enable; a re-pin; an edited checkout; and the Secure Boot lockdown refusal.
+# recovery after a module reload under the active service; the APU power mode (applied on start, changed by a
+# converge, balanced again on stop, a bad one refused); refused profiles; disable after an apply that stopped
+# part-way, and re-enable; a re-pin; an edited checkout; another DKMS version of the same source already
+# installed (the upstream install script's); a new pin that does not build (the installed module stays); and
+# the Secure Boot lockdown refusal.
 # The container runs another kernel, so nothing is loaded: the srcversion reload and the live load only run
 # on a host.
 #

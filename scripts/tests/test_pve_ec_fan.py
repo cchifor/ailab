@@ -3,13 +3,15 @@
 Drives the role's real scripts against a fake /sys/class/ec_su_axb35 tree (plain files), and renders its
 real templates with the real role defaults. Pinned here:
 
-  * ec-fan-profile `apply` writes each fan's curves BEFORE mode=curve (the driver picks the starting level
+  * ec-fan-profile `apply` writes each fan's curves BEFORE mode=curve, then the APU power mode (the driver picks the starting level
     from the rampup curve in effect when the mode switches), reads them back, and never touches fan3. fan3
     in the fan list is refused, and so is a curve the driver would step wrongly on (not five rising
     integers 0-100, or a rampdown value not below the rampup value of its level), before anything is
     written. A CPU fan not in the list is put back on auto (a fan dropped from the config);
-  * `reset` (the unit's ExecStop) puts both CPU fans back to auto whatever the config says, never fan3,
-    and does nothing when the module is not loaded (unloading already reset every fan);
+  * `reset` (the unit's ExecStop) puts both CPU fans back to auto and sets the power mode to balanced (the
+    factory EC default) whatever the config says, never touches fan3, and does nothing when the module is not
+    loaded;
+  * a power mode other than quiet, balanced or performance is refused before anything is written;
   * `check` (run by the role on each converge) writes nothing, exits 0 when the live state is the
     profile and 3 when it is not: a configured fan off the curve or on another curve, a dropped fan still
     on a curve, the driver gone;
@@ -42,8 +44,9 @@ PROFILE = ROLE / 'files/ec-fan-profile.sh'
 TEXTFILE = ROLE / 'files/ec-fan-textfile.sh'
 BASH = shutil.which('bash')
 
-UP = '35,50,60,68,95'
-DOWN = '30,45,55,63,90'
+# The role's default curve (the 2026-11-19 quiet one).
+UP = '40,55,80,90,95'
+DOWN = '35,50,75,85,90'
 # The driver's own defaults (src/ec_su_axb35.c at the pin): what a freshly loaded module shows.
 DRIVER_UP = {1: '60,70,83,95,97', 2: '60,70,83,95,97', 3: '20,60,83,95,97'}
 DRIVER_DOWN = {1: '40,50,80,94,96', 2: '40,50,80,94,96', 3: '0,50,80,94,96'}
@@ -92,9 +95,10 @@ class ProfileTests(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.sysfs = FakeSysfs(self.tmp / 'ec_su_axb35')
 
-    def run_profile(self, action, fans='1 2', up=UP, down=DOWN, wait_s='2', timeout=30):
+    def run_profile(self, action, fans='1 2', up=UP, down=DOWN, power='quiet', wait_s='2', timeout=30):
         env = dict(os.environ, EC_FAN_SYSFS=self.sysfs.root.as_posix(), EC_FAN_FANS=fans,
-                   EC_FAN_RAMPUP_CURVE=up, EC_FAN_RAMPDOWN_CURVE=down, EC_FAN_WAIT_S=wait_s)
+                   EC_FAN_RAMPUP_CURVE=up, EC_FAN_RAMPDOWN_CURVE=down, EC_FAN_POWER_MODE=power,
+                   EC_FAN_WAIT_S=wait_s)
         return subprocess.run([BASH, PROFILE.as_posix(), action], env=env, capture_output=True,
                               text=True, timeout=timeout)
 
@@ -103,6 +107,7 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(self.sysfs.get(f'fan{n}/mode'), 'auto')
             self.assertEqual(self.sysfs.get(f'fan{n}/rampup_curve'), DRIVER_UP[n])
             self.assertEqual(self.sysfs.get(f'fan{n}/rampdown_curve'), DRIVER_DOWN[n])
+        self.assertEqual(self.sysfs.get('apu/power_mode'), 'balanced')
         self.assertEqual(self.sysfs.fan3_snapshot(), before3)
 
     def test_apply_puts_the_cpu_fans_on_the_curve(self):
@@ -114,15 +119,35 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(self.sysfs.get(f'fan{n}/rampup_curve'), UP)
             self.assertEqual(self.sysfs.get(f'fan{n}/rampdown_curve'), DOWN)
             self.assertEqual(self.sysfs.get(f'fan{n}/mode'), 'curve')
+        self.assertEqual(self.sysfs.get('apu/power_mode'), 'quiet')
         self.assertEqual(self.sysfs.fan3_snapshot(), before3)
+
+    def test_apply_writes_the_power_mode_it_is_given(self):
+        for mode in ('quiet', 'balanced', 'performance'):
+            with self.subTest(mode=mode):
+                self.sysfs.create(power='performance' if mode != 'performance' else 'quiet')
+                run = self.run_profile('apply', power=mode)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertEqual(self.sysfs.get('apu/power_mode'), mode)
+
+    def test_a_bad_power_mode_is_refused_before_any_write(self):
+        for mode in ('', 'turbo', 'Quiet', 'quiet ', 'auto'):
+            with self.subTest(mode=repr(mode)):
+                self.sysfs.create()
+                before3 = self.sysfs.fan3_snapshot()
+                run = self.run_profile('apply', power=mode)
+                self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+                self.assertIn('EC_FAN_POWER_MODE', run.stderr)
+                self.assert_untouched(before3)
+                self.assertEqual(self.run_profile('check', power=mode).returncode, 1)
 
     def test_apply_writes_the_curves_before_the_mode(self):
         self.sysfs.create()
         run = self.run_profile('apply')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-        writes = re.findall(r'^ec-fan-profile: (fan\d/\w+) <- ', run.stdout, re.M)
+        writes = re.findall(r'^ec-fan-profile: ((?:fan\d|apu)/\w+) <- ', run.stdout, re.M)
         self.assertEqual(writes, ['fan1/rampup_curve', 'fan1/rampdown_curve', 'fan1/mode',
-                                  'fan2/rampup_curve', 'fan2/rampdown_curve', 'fan2/mode'])
+                                  'fan2/rampup_curve', 'fan2/rampdown_curve', 'fan2/mode', 'apu/power_mode'])
 
     def test_apply_is_repeatable(self):
         self.sysfs.create(mode='curve')
@@ -150,10 +175,10 @@ class ProfileTests(unittest.TestCase):
             'above 100': ('35,50,60,68,101', DOWN),
             'leading zero': ('035,50,60,68,95', DOWN),
             'negative': (UP, '-1,45,55,63,90'),
-            'spaces': ('35, 50, 60, 68, 95', DOWN),
+            'spaces': ('40, 55, 80, 90, 95', DOWN),
             'empty': ('', DOWN),
-            'rampdown equal to rampup': (UP, '30,45,60,63,90'),
-            'rampdown above rampup': (UP, '30,45,55,70,90'),
+            'rampdown equal to rampup': (UP, '35,50,80,85,90'),
+            'rampdown above rampup': (UP, '35,50,75,92,94'),
         }
         for name, (up, down) in bad.items():
             with self.subTest(name):
@@ -197,27 +222,41 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(self.sysfs.get('fan1/rampup_curve'), UP)
         self.assertEqual(self.sysfs.get('fan2/mode'), 'auto')
         self.assertEqual(self.sysfs.fan3_snapshot(), before3)
-        writes = re.findall(r'^ec-fan-profile: (fan\d/\w+) <- ', run.stdout, re.M)
-        self.assertEqual(writes, ['fan1/rampup_curve', 'fan1/rampdown_curve', 'fan1/mode', 'fan2/mode'])
+        writes = re.findall(r'^ec-fan-profile: ((?:fan\d|apu)/\w+) <- ', run.stdout, re.M)
+        self.assertEqual(writes, ['fan1/rampup_curve', 'fan1/rampdown_curve', 'fan1/mode', 'fan2/mode',
+                                  'apu/power_mode'])
 
-    def test_reset_hands_both_cpu_fans_back_to_auto_and_never_fan3(self):
-        self.sysfs.create(mode='curve')
+    def test_reset_hands_both_cpu_fans_and_the_power_mode_back_and_never_fan3(self):
+        self.sysfs.create(mode='curve', power='quiet')
         before3 = self.sysfs.fan3_snapshot()
         run = self.run_profile('reset', fans='1')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(self.sysfs.get('fan1/mode'), 'auto')
         self.assertEqual(self.sysfs.get('fan2/mode'), 'auto')
+        self.assertEqual(self.sysfs.get('apu/power_mode'), 'balanced')
         self.assertEqual(self.sysfs.fan3_snapshot(), before3)
 
     def test_reset_ignores_a_broken_config(self):
-        # A broken config must not keep the fans on a curve when the unit is stopped, nor reach fan3.
-        self.sysfs.create(mode='curve')
+        # A broken config must not keep the fans or the APU on the profile when the unit is stopped, nor
+        # reach fan3.
+        self.sysfs.create(mode='curve', power='performance')
         before3 = self.sysfs.fan3_snapshot()
-        run = self.run_profile('reset', fans='1 3', up='nonsense', down='')
+        run = self.run_profile('reset', fans='1 3', up='nonsense', down='', power='turbo')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(self.sysfs.get('fan1/mode'), 'auto')
         self.assertEqual(self.sysfs.get('fan2/mode'), 'auto')
+        self.assertEqual(self.sysfs.get('apu/power_mode'), 'balanced')
         self.assertEqual(self.sysfs.fan3_snapshot(), before3)
+
+    def test_apply_after_reset_runs_the_profile_again(self):
+        # a stop then a start (the role's restart): balanced in between, the configured mode after
+        self.sysfs.create()
+        self.assertEqual(self.run_profile('apply').returncode, 0)
+        self.assertEqual(self.run_profile('reset').returncode, 0)
+        self.assertEqual(self.sysfs.get('apu/power_mode'), 'balanced')
+        self.assertEqual(self.run_profile('apply').returncode, 0)
+        self.assertEqual(self.sysfs.get('apu/power_mode'), 'quiet')
+        self.assertEqual(self.sysfs.get('fan1/mode'), 'curve')
 
     def test_reset_without_the_module_is_a_no_op(self):
         run = self.run_profile('reset')
@@ -245,8 +284,10 @@ class ProfileTests(unittest.TestCase):
             'fresh module': lambda: None,
             'managed fan on auto': lambda: self.sysfs.put('fan2/mode', 'auto'),
             'managed fan on fixed': lambda: self.sysfs.put('fan1/mode', 'fixed'),
-            'another rampup curve': lambda: self.sysfs.put('fan1/rampup_curve', '40,52,62,70,95'),
+            'another rampup curve': lambda: self.sysfs.put('fan1/rampup_curve', '42,57,82,92,96'),
             'another rampdown curve': lambda: self.sysfs.put('fan2/rampdown_curve', '30,45,55,60,90'),
+            'power mode back on balanced': lambda: self.sysfs.put('apu/power_mode', 'balanced'),
+            'power mode on performance': lambda: self.sysfs.put('apu/power_mode', 'performance'),
         }
         for name, change in cases.items():
             with self.subTest(name):
@@ -257,7 +298,7 @@ class ProfileTests(unittest.TestCase):
                 before = self.snapshot()
                 run = self.run_profile('check')
                 self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
-                self.assertRegex(run.stdout, r"^fan[12]: is '")
+                self.assertRegex(run.stdout, r"^(fan[12]|apu): is '")
                 self.assertEqual(self.snapshot(), before)
 
     def test_check_reports_a_dropped_fan_still_on_a_curve(self):
@@ -276,6 +317,7 @@ class ProfileTests(unittest.TestCase):
         self.sysfs.create()
         self.assertEqual(self.run_profile('check', fans='1 3').returncode, 1)
         self.assertEqual(self.run_profile('check', down=UP).returncode, 1)
+        self.assertEqual(self.run_profile('check', power='loud').returncode, 1)
 
     def test_unknown_action(self):
         self.sysfs.create()
@@ -455,8 +497,9 @@ class RoleRenderTests(unittest.TestCase):
         self.assertEqual(ctx['pve_ec_fan_src_dir'], '/usr/src/ec_su_axb35-' + ctx['pve_ec_fan_dkms_version'])
         self.assertEqual(ctx['pve_ec_fan_fans'], [1, 2])
         up, down = ctx['pve_ec_fan_rampup_curve'], ctx['pve_ec_fan_rampdown_curve']
-        self.assertEqual(up, [35, 50, 60, 68, 95])
-        self.assertEqual(down, [30, 45, 55, 63, 90])
+        self.assertEqual(up, [40, 55, 80, 90, 95])
+        self.assertEqual(down, [35, 50, 75, 85, 90])
+        self.assertEqual(ctx['pve_ec_fan_power_mode'], 'quiet')
         for curve in (up, down):
             self.assertEqual(curve, sorted(set(curve)))
         self.assertTrue(all(d < u for d, u in zip(down, up)))
@@ -472,6 +515,7 @@ class RoleRenderTests(unittest.TestCase):
         self.assertIn('EC_FAN_FANS="1 2"\n', config)
         self.assertIn(f'EC_FAN_RAMPUP_CURVE={UP}\n', config)
         self.assertIn(f'EC_FAN_RAMPDOWN_CURVE={DOWN}\n', config)
+        self.assertIn('EC_FAN_POWER_MODE=quiet\n', config)
         if not BASH:
             self.skipTest('bash is required')
         with tempfile.TemporaryDirectory() as tmp:
@@ -486,6 +530,7 @@ class RoleRenderTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             self.assertEqual(sysfs.get('fan1/mode'), 'curve')
             self.assertEqual(sysfs.get('fan2/rampdown_curve'), DOWN)
+            self.assertEqual(sysfs.get('apu/power_mode'), 'quiet')
 
     def test_the_profile_unit_applies_after_the_module_loads_and_resets_on_stop(self):
         lines = unit_lines(render('ec-fan-profile.service.j2'))

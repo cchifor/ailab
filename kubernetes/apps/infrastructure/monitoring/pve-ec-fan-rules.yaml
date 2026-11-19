@@ -4,8 +4,9 @@
 # enabled: switching it off deletes the file, so none of these can fire on a host without the role.
 #
 # ProxmoxCpuFanStalled: fan1 or fan2 (the CPU fans) under 1000 rpm for 5m while the EC reads above 70 C.
-# Above 68 C the curve runs them at 80 % (~4200 rpm), the lowest running level (20 %) is ~1540 rpm, and the
-# firmware curve (auto) spins them at that temperature too, so this is a stalled fan, a loose fan cable, or an
+# Above 70 C the curve runs them at 40 % or more (level 2 from 55 C, ~2650 rpm), the lowest running level
+# (20 %) is ~1540 rpm, and the firmware curve (auto) spins them at that temperature too, so this is a stalled
+# fan, a loose fan cable, or an
 # EC that stopped following the curve. fan3, the small system fan, is left out on purpose: ai-node1's fan3 does
 # not spin even at a fixed 100 % (a known hardware fault: the fan is unplugged or failed), so a fan3 rule would
 # fire there permanently. A per-node fan3 alert is a possible follow-up.
@@ -45,7 +46,7 @@ spec:
             severity: warning
           annotations:
             summary: "Proxmox host {{ $labels.instance }} CPU fan {{ $labels.fan }} at {{ $value }} rpm above 70 C"
-            description: "CPU fan {{ $labels.fan }} on {{ $labels.instance }} has read under 1000 rpm for 5m while the EC temperature is above 70 C, where the curve runs it at 80 % (~4200 rpm). Check on the host: `cat /sys/class/ec_su_axb35/fan{{ $labels.fan }}/{mode,level,rpm}` and `systemctl status ec-fan-profile`. Level 4-5 with a low rpm is the fan or its cable; a low level is the curve: `systemctl restart ec-fan-profile`, or `rmmod ec_su_axb35` to hand the fans back to the firmware. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+            description: "CPU fan {{ $labels.fan }} on {{ $labels.instance }} has read under 1000 rpm for 5m while the EC temperature is above 70 C, where the curve runs it at 40 % or more (~2650 rpm). Check on the host: `cat /sys/class/ec_su_axb35/fan{{ $labels.fan }}/{mode,level,rpm}` and `systemctl status ec-fan-profile`. Level 4-5 with a low rpm is the fan or its cable; a low level is the curve: `systemctl restart ec-fan-profile`, or `rmmod ec_su_axb35` to hand the fans back to the firmware. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
         - alert: ProxmoxEcFanTextfileStale
           expr: time() - ec_fan_textfile_timestamp_seconds{job="proxmox-node"} > 300
           labels:

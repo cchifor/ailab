@@ -230,11 +230,11 @@ just thinpool --limit ai-node1                              # changed=0
 Rollback: `pve_thin_pool_zero: true` in that host's host_vars (or `lvchange --zero y pve/data`).
 Re-enabling does NOT scrub chunks provisioned while zeroing was off.
 
-## EC fan curve (`pve_ec_fan`, ai-node1 and ai-node2 since 2026-11-19)
+## EC fan curve (`pve_ec_fan`, all three ai-nodes since 2026-11-19)
 
 The Bosgame M5's embedded controller (ITE IT5570E on the Sixunited AXB35-02 board) runs the fans on its
 own firmware curve. The `pve_ec_fan` role (`ansible/roles/pve_ec_fan`, defaults hold the why) replaces
-that curve for the two CPU fans:
+that curve for the two CPU fans and sets the APU power mode:
 
 - **Driver:** the out-of-tree `ec_su_axb35` module from github.com/cmetz/ec-su_axb35-linux, pinned to a
   reviewed full commit SHA and built by DKMS (`/usr/src/ec_su_axb35-<version>`, installed under
@@ -247,8 +247,16 @@ that curve for the two CPU fans:
   rampdown curves of each fan in `pve_ec_fan_fans` (fan1 and fan2), then sets it to `curve`. A CPU fan
   dropped from that list goes back to `auto`. From then on the driver re-reads the EC temperature every
   second and moves one level at a time. Stopping the service sets both CPU fans back to `auto`. The
-  default curve is 20 % from 35 C, 40 % from 50, 60 % from 60, 80 % from 68, and 100 % only from 95, with
-  5 C of hysteresis.
+  default is the quiet curve the owner asked for on 2026-11-19 (the fans were too loud): 20 % from 40 C,
+  40 % from 55, 60 % from 80, 80 % from 90, and 100 % from 95, with 5 C of hysteresis. Level 4 only
+  engages from 90 C EC. With it and the quiet power mode, node1/node2 went from EC 85-92 C at level 4-5
+  (4150-4790 rpm) to EC 67-69 C at level 2 (~2650 rpm), NVMe drives at 43-56 C.
+- **APU power mode:** the service writes `pve_ec_fan_power_mode` (default `quiet`; also `balanced`, the
+  AXB35's factory EC default, or `performance`) to `apu/power_mode` on start, and sets `balanced` on stop
+  (it does not restore a mode that was set before the role). Measured on ai-node1 under CI load
+  (2026-11-19): `quiet` caps the APU at 54 W and costs ~16 % clock against `balanced` (82 W), for EC 73 C
+  instead of 86 C, fans at level 2 instead of 3, and ~6 dB less noise; `performance` gains nothing at this
+  load; the NVMe drives are unaffected (the table is in the role defaults).
 - **Converge on the live state:** each converge runs `ec-fan-profile check`, which reads the sysfs, and
   restarts the service when the fans are not on the profile. That covers a module reloaded under the
   active service, a start that failed at boot, and a value written by hand. The role fetches the driver
@@ -261,21 +269,21 @@ that curve for the two CPU fans:
   No alert covers fan3 for that reason; a per-node fan3 alert is a possible follow-up.
 - **Metrics:** `ec-fan-textfile.timer` writes
   `/var/lib/prometheus/node-exporter/ec_fan.prom` every 30 s. It reports `ec_fan_rpm`, `ec_fan_level` and
-  `ec_fan_mode_info` per fan, `ec_fan_managed` per CPU fan, plus `ec_temp_celsius` and
-  `ec_fan_driver_loaded`. The alerts are in `kubernetes/apps/infrastructure/monitoring/pve-ec-fan-rules.yaml`:
+  `ec_fan_mode_info` per fan, `ec_fan_managed` per CPU fan, plus `ec_temp_celsius`,
+  `ec_apu_power_mode_info` and `ec_fan_driver_loaded`. The alerts are in `kubernetes/apps/infrastructure/monitoring/pve-ec-fan-rules.yaml`:
   a CPU fan under 1000 rpm above 70 C, a managed CPU fan not in curve mode for 15 min, the file going stale,
   and the driver not loaded.
 
 **Secure Boot must be off.** The module is unsigned. With Secure Boot on, the Proxmox kernel locks down
-(integrity mode) and refuses it. node1 and node2 have had Secure Boot off (lockdown `none`) since
-2026-11-19. node3 still has it on, so the role's first check fails the play there before anything changes.
+(integrity mode) and refuses it. All three nodes have had Secure Boot off (lockdown `none`) since
+2026-11-19. On a host with it on, the role's first check fails the play before anything changes.
 To add a host: disable Secure Boot in its firmware during a planned host reboot (the drain procedure
 above). Check that `cat /sys/kernel/security/lockdown` shows `[none]`, then set
 `pve_ec_fan_enabled: true` in its host_vars. (Keeping Secure Boot on would need DKMS's signing key,
 `/var/lib/dkms/mok.pub`, enrolled with `mokutil` at the console. The role does not do that, and it
 refuses a Secure Boot host either way.)
 
-One host at a time: ai-node1 (`<host-ip>` 192.168.0.2), then ai-node2 (192.168.0.3).
+One host at a time: ai-node1 (`<host-ip>` 192.168.0.2), ai-node2 (192.168.0.3), ai-node3 (192.168.0.4).
 
 ```bash
 # 0. What the host runs now.
@@ -308,9 +316,11 @@ python scripts/node-ssh.py <host-ip> "cat /var/lib/prometheus/node-exporter/ec_f
 #    the hand checkout left a copy: remove that file, run `depmod`, and converge again.
 ```
 
-**Checking a host:** `cat /sys/class/ec_su_axb35/fan*/rpm` (fan1/fan2 ~1540 rpm at 20 %, ~4200 at 80 %;
+**Checking a host:** `cat /sys/class/ec_su_axb35/fan*/rpm` (fan1/fan2 ~1540 rpm at 20 %, ~2650 at 40 %,
+~4200 at 80 %;
 fan3 on the EC's own curve, ~970 rpm on node2, always 0 on node1 because of its failed fan),
-`cat /sys/class/ec_su_axb35/fan{1,2}/{mode,level}` and `cat /sys/class/ec_su_axb35/temp1/temp`.
+`cat /sys/class/ec_su_axb35/fan{1,2}/{mode,level}`, `cat /sys/class/ec_su_axb35/temp1/temp` and
+`cat /sys/class/ec_su_axb35/apu/power_mode`.
 `journalctl -u ec-fan-profile` shows each write. In Grafana or Prometheus, query `ec_fan_rpm` and
 `ec_temp_celsius` with `job="proxmox-node"`.
 
@@ -319,18 +329,21 @@ fan3 on the EC's own curve, ~970 rpm on node2, always 0 on node1 because of its 
 host's host_vars for one host, or in the role defaults for all. Then run `just ec-fan --limit <host>`.
 The role refuses a curve that breaks those rules, and any fan list other than 1 and 2. A changed config
 restarts `ec-fan-profile`, so the fans are on auto for a moment and then on the new curve. Dropping a fan
-from `pve_ec_fan_fans` puts it back on auto. To try a curve by hand first, write it to
+from `pve_ec_fan_fans` puts it back on auto. The APU power mode is `pve_ec_fan_power_mode` (quiet, balanced
+or performance; the role refuses anything else) and changes the same way. To try a curve by hand first, write it to
 `/sys/class/ec_su_axb35/fan{1,2}/rampup_curve` (and `rampdown_curve`) on the host. The next converge
 (which sees the fans off the profile) or the next reboot puts the role's curve back.
 
 **Rollback:** set `pve_ec_fan_enabled: false` (or delete the line) in host_vars and run
-`just ec-fan --limit <host>`. The role stops `ec-fan-profile` (its stop sets fan1/fan2 to auto). It also
+`just ec-fan --limit <host>`. The role stops `ec-fan-profile` (its stop sets fan1/fan2 to auto and the APU
+power mode to balanced). It also
 stops the metrics timer, unloads the module (which resets all three fans to auto), and removes the units,
 config, scripts, boot load and `ec_fan.prom`, so no alert keeps watching the host. The DKMS build stays;
 to purge it run `dkms remove ec_su_axb35/<version> --all && rm -rf /usr/src/ec_su_axb35-<version>`. For
-an immediate stop on the host, `systemctl stop ec-fan-profile` or `rmmod ec_su_axb35` also hands the fans
-back to the firmware, but the next converge or boot loads the module and the curve again until the role
-is switched off.
+an immediate stop on the host, `systemctl stop ec-fan-profile` hands the fans back to the firmware and
+sets the power mode to balanced, the factory EC default (`rmmod ec_su_axb35` resets the fans but leaves the
+power mode as it was), but the next
+converge or boot loads the module and the profile again until the role is switched off.
 
 **Kernel updates:** the kernel's postinst hook runs DKMS autoinstall, and a converge also builds for every
 installed kernel that has its headers. Before rebooting into a new kernel, check that
@@ -340,14 +353,18 @@ firmware curve (safe), and `ProxmoxEcFanDriverNotLoaded` fires. To fix it, insta
 an opt-in kernel series also needs that series' headers meta package in `pve_ec_fan_packages`.
 
 **A new driver pin:** review the new commit (every `ec_write()` in `src/ec_su_axb35.c`), then set the full
-SHA in `pve_ec_fan_commit`. The converge builds it as a new DKMS version for every installed kernel that
-has its headers, and removes the old version. If the loaded module's srcversion then differs, the role
+SHA in `pve_ec_fan_commit`. The converge builds the new version first; only when that build succeeds does
+it remove every other DKMS version (DKMS will not install a module whose twin is still installed for the
+kernel) and install the new one, so a failed build leaves the previous module installed for the next boot.
+It also builds the new version for every other installed kernel that has its headers. If the loaded
+module's srcversion then differs, the role
 reloads it, so the fans are on auto for a moment. Before converging a new pin, run the Docker converge
 harness against it: `bash ansible/roles/pve_ec_fan/tests/test-converge-docker.sh`. It builds the module
 against the Proxmox headers, with systemd as PID 1 and a fake sysfs. It covers apply (the profile runs
 once), idempotence, `--check`, a converge without the network, a second installed kernel, a curve change
-next to a failing build for another kernel, a dropped fan, recovery after a module reload, refusals,
-disable (also after an apply that stopped part-way), re-pin, and the lockdown refusal.
+next to a failing build for another kernel, a dropped fan, recovery after a module reload, the APU power
+mode, refusals, disable (also after an apply that stopped part-way), re-pin, another DKMS version already
+installed, a new pin that does not build (the installed module stays), and the lockdown refusal.
 
 **Caveat:** the curve runs in the driver, not in the EC. If the host kernel hangs, the EC keeps the last
 level it was given. A clean shutdown or reboot stops `ec-fan-profile` first, so the fans are back on auto
