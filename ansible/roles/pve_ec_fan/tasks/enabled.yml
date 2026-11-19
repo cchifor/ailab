@@ -27,6 +27,13 @@
   loop_control:
     label: "{{ item.key }}"
 
+- name: Check the APU power mode (one of the three the driver accepts)
+  ansible.builtin.assert:
+    that: pve_ec_fan_power_mode in ['quiet', 'balanced', 'performance']
+    fail_msg: >-
+      pve_ec_fan_power_mode={{ pve_ec_fan_power_mode | to_json }}: need quiet, balanced or performance
+    quiet: true
+
 - name: Check each rampdown threshold sits below the rampup threshold of its level
   ansible.builtin.assert:
     that: pve_ec_fan_rampdown_curve[item] < pve_ec_fan_rampup_curve[item]
@@ -158,7 +165,44 @@
   register: pve_ec_fan_dkms_conf
   when: not pve_ec_fan_preview
 
-# ---- 2. DKMS: add, build and install this version for the target kernel ----
+# ---- 2. other versions: out of DKMS and off the disk, BEFORE this version is installed ----
+# Any other ec_su_axb35 version goes: an earlier pin, or an install with the upstream project's script
+# (e.g. 0.0.20260820). The role owns the module's DKMS name on these hosts. First, because DKMS refuses to
+# install a module whose twin from the same source is already installed for the kernel ("already installed
+# (unversioned module)", rc 6; ai-node3, 2026-11-19). A new pin whose build then fails leaves no module
+# installed for the kernel: the loaded one keeps running, the next boot runs on the firmware curve (safe), and
+# ProxmoxEcFanDriverNotLoaded fires.
+- name: Read every DKMS version of the module
+  ansible.builtin.command:
+    argv: [dkms, status, -m, ec_su_axb35]
+  register: pve_ec_fan_dkms_all
+  changed_when: false
+  check_mode: false
+  when: not pve_ec_fan_preview
+
+- name: Remove the other versions from DKMS (every kernel)
+  ansible.builtin.command:
+    argv: [dkms, remove, -m, ec_su_axb35, -v, "{{ item }}", --all]
+  changed_when: true # one run per other version that DKMS still has
+  loop: >-
+    {{ pve_ec_fan_dkms_all.stdout | default('') | regex_findall('(?m)^ec_su_axb35/([^,:]+)')
+       | unique | reject('equalto', pve_ec_fan_dkms_version) | list }}
+  when: not pve_ec_fan_preview
+
+- name: Find the source trees of the other versions
+  ansible.builtin.find:
+    paths: /usr/src
+    patterns: "ec_su_axb35-*"
+    file_type: directory
+  register: pve_ec_fan_old_src
+
+- name: Remove the source trees of the other versions
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ pve_ec_fan_old_src.files | map(attribute='path') | reject('equalto', pve_ec_fan_src_dir) | list }}"
+
+# ---- 3. DKMS: add, build and install this version for the target kernel ----
 - name: Read this version's DKMS state
   ansible.builtin.command:
     argv: [dkms, status, -m, ec_su_axb35, -v, "{{ pve_ec_fan_dkms_version }}", -k, "{{ pve_ec_fan_kernel }}"]
@@ -246,39 +290,6 @@
       copy (it is not this role's), run `depmod {{ pve_ec_fan_kernel }}`, and converge again.
     quiet: true
   when: pve_ec_fan_inspect | bool
-
-# ---- 3. old pins: out of DKMS and off the disk ----
-# Any other ec_su_axb35 version goes: an earlier pin, or a hand install with the upstream DKMS script
-# (version 1.0). The role owns the module's DKMS name on these hosts.
-- name: Read every DKMS version of the module
-  ansible.builtin.command:
-    argv: [dkms, status, -m, ec_su_axb35]
-  register: pve_ec_fan_dkms_all
-  changed_when: false
-  check_mode: false
-  when: not pve_ec_fan_preview
-
-- name: Remove earlier pins from DKMS (every kernel)
-  ansible.builtin.command:
-    argv: [dkms, remove, -m, ec_su_axb35, -v, "{{ item }}", --all]
-  changed_when: true # one run per earlier version that DKMS still has
-  loop: >-
-    {{ pve_ec_fan_dkms_all.stdout | default('') | regex_findall('(?m)^ec_su_axb35/([^,:]+)')
-       | unique | reject('equalto', pve_ec_fan_dkms_version) | list }}
-  when: not pve_ec_fan_preview
-
-- name: Find the source trees of earlier pins
-  ansible.builtin.find:
-    paths: /usr/src
-    patterns: "ec_su_axb35-*"
-    file_type: directory
-  register: pve_ec_fan_old_src
-
-- name: Remove the source trees of earlier pins
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop: "{{ pve_ec_fan_old_src.files | map(attribute='path') | reject('equalto', pve_ec_fan_src_dir) | list }}"
 
 # ---- 4. load it, now and at every boot ----
 - name: Load the module at boot
@@ -405,7 +416,8 @@
 # Converge on the fans' live state, not only on changed files: a module reloaded under the active
 # service, a start that failed at boot (the driver's sysfs not there within 10 s) or a value written by
 # hand all leave the fans off the profile while every file is unchanged. `ec-fan-profile check` reads the
-# sysfs and exits 3 when a configured fan is not on the configured curve or another CPU fan is not on auto.
+# sysfs and exits 3 when a configured fan is not on the configured curve, another CPU fan is not on auto,
+# or the APU power mode is not the configured one.
 - name: Check the CPU fans run the profile
   ansible.builtin.command:
     argv: [/usr/local/sbin/ec-fan-profile, check]
@@ -414,6 +426,7 @@
     EC_FAN_FANS: "{{ pve_ec_fan_fans | join(' ') }}"
     EC_FAN_RAMPUP_CURVE: "{{ pve_ec_fan_rampup_curve | join(',') }}"
     EC_FAN_RAMPDOWN_CURVE: "{{ pve_ec_fan_rampdown_curve | join(',') }}"
+    EC_FAN_POWER_MODE: "{{ pve_ec_fan_power_mode }}"
   register: pve_ec_fan_live
   changed_when: pve_ec_fan_live.rc == 3
   failed_when: pve_ec_fan_live.rc not in [0, 3]

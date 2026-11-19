@@ -49,12 +49,26 @@ pve_ec_fan_fans: [1, 2]
 # 0 is off). The driver moves one level per second: up from level N while temp >= rampup[N+1], down from
 # level N while temp <= rampdown[N]. Each rampdown value must sit below the rampup value of the same level,
 # or the fan oscillates between two levels.
-# This profile (being validated on ai-node1 and ai-node2, 2026-11-19): 20 % from 35 C, 40 % from 50, 60 % from 60, 80 %
-# from 68, 100 % only from 95, each 5 C of hysteresis. It caps the fans at 80 % below 95 C: hwbusters'
-# AXB35 testing found no usable extra airflow above 80 %, and one fan dips at 100 %. Measured on node1:
-# 20 % ~1540 rpm, 80 % ~4200 rpm, 100 % ~4790 rpm.
-pve_ec_fan_rampup_curve: [35, 50, 60, 68, 95]
-pve_ec_fan_rampdown_curve: [30, 45, 55, 63, 90]
+# This profile is the quiet one the owner asked for on 2026-11-19 ("reduce the fans rpm, they are too loud"),
+# set by hand on all three nodes that evening before it became the default: 20 % from 40 C, 40 % from 55,
+# 60 % from 80, 80 % from 90 and 100 % from 95, each 5 C of hysteresis, together with the APU in quiet mode
+# (pve_ec_fan_power_mode below). It trades a little heat for a lot less noise: level 4 (80 %, ~4200 rpm) only
+# engages from 90 C EC. Measured on node1/node2 that evening: from EC 85-92 C at level 4-5 (4150-4790 rpm, on
+# the earlier curve) to EC 67-69 C at level 2 (~2650 rpm) within a minute, with the NVMe drives at 43-56 C,
+# far below the ~78 C that went with the morning's stalls. The earlier profile (35,50,60,68,95 /
+# 30,45,55,63,90) reached 80 % from 68 C. 100 % still waits for 95 C: hwbusters' AXB35 testing found no
+# usable extra airflow above 80 %, and one fan dips at 100 %. Measured on node1: 20 % ~1540 rpm, 40 % ~2650
+# rpm, 80 % ~4200 rpm, 100 % ~4790 rpm.
+pve_ec_fan_rampup_curve: [40, 55, 80, 90, 95]
+pve_ec_fan_rampdown_curve: [35, 50, 75, 85, 90]
+
+# ---- the APU power mode ----
+# The EC's APU power profile (apu/power_mode): quiet, balanced (the EC default, what the BIOS sets) or
+# performance. quiet is the lowest, so the APU makes less heat and the curve stays on its low levels; it is
+# half of the 2026-11-19 quiet setup above. It may cost the iGPU LLM servers some throughput (not measured).
+# ec-fan-profile writes it on start and puts balanced back on stop, so switching the role off restores the
+# firmware behaviour.
+pve_ec_fan_power_mode: quiet
 
 # ---- paths ----
 pve_ec_fan_sysfs: /sys/class/ec_su_axb35

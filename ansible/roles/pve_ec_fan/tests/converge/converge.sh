@@ -86,11 +86,12 @@ eq "modprobe resolves the DKMS build" /lib/modules/$K/updates/dkms/ec_su_axb35.k
 eq "checkout at the pin" "$PIN" "$(git -C /usr/src/ec_su_axb35-$V rev-parse HEAD)"
 eq "modules-load.d" ec_su_axb35 "$(grep -v '^#' /etc/modules-load.d/ec_su_axb35.conf)"
 for n in 1 2; do
-  eq "fan$n rampup" 35,50,60,68,95 "$(cat $F/fan$n/rampup_curve)"
-  eq "fan$n rampdown" 30,45,55,63,90 "$(cat $F/fan$n/rampdown_curve)"
+  eq "fan$n rampup" 40,55,80,90,95 "$(cat $F/fan$n/rampup_curve)"
+  eq "fan$n rampdown" 35,50,75,85,90 "$(cat $F/fan$n/rampdown_curve)"
   eq "fan$n mode" curve "$(cat $F/fan$n/mode)"
 done
 eq "fan3 never written" "$FAN3_PRISTINE" "$(fan3_state)"
+eq "power mode applied on start" quiet "$(cat $F/apu/power_mode)"
 eq "first apply: the profile ran once" 1 "$(journalctl -u ec-fan-profile --no-pager | grep -c 'fan1/mode <- curve')"
 eq "first apply: no auto in between" 0 "$(journalctl -u ec-fan-profile --no-pager | grep -c 'fan1/mode <- auto')"
 eq "profile active" active "$(systemctl is-active ec-fan-profile.service)"
@@ -143,7 +144,7 @@ eq "offline: changed" 0 "$(changed)"
 # ---- a curve change is applied even when a build for ANOTHER kernel then fails ----
 # The handler flush comes before those builds, so the failure there cannot hold back the profile restart.
 BROKEN=9.9.9-ecfan-broken
-CURVE2='{"pve_ec_fan_rampup_curve": [40, 52, 62, 70, 95]}'
+CURVE2='{"pve_ec_fan_rampup_curve": [42, 57, 82, 92, 96]}'
 mkdir -p /lib/modules/$BROKEN/build
 printf 'modules:\n\tfalse\n' > /lib/modules/$BROKEN/build/Makefile
 touch /boot/vmlinuz-$BROKEN
@@ -151,8 +152,8 @@ if run broken-kernel -e pve_ec_fan_enabled=true -e "$CURVE2"; then bad "a failin
 eq "broken kernel: it failed at that build" "TASK [pve_ec_fan : Build and install the module for those kernels too]" \
   "$(grep -E '^TASK' /tmp/run-broken-kernel.log | tail -1 | sed 's/ \**$//')"
 if grep -q 'RUNNING HANDLER \[pve_ec_fan : Restart ec-fan-profile\]' /tmp/run-broken-kernel.log; then ok "broken kernel: the restart handler ran first"; else bad "broken kernel: the restart handler did not run"; fi
-eq "broken kernel: fan1 rampup" 40,52,62,70,95 "$(cat $F/fan1/rampup_curve)"
-eq "broken kernel: fan2 rampup" 40,52,62,70,95 "$(cat $F/fan2/rampup_curve)"
+eq "broken kernel: fan1 rampup" 42,57,82,92,96 "$(cat $F/fan1/rampup_curve)"
+eq "broken kernel: fan2 rampup" 42,57,82,92,96 "$(cat $F/fan2/rampup_curve)"
 eq "broken kernel: fan2 mode" curve "$(cat $F/fan2/mode)"
 rm -rf /lib/modules/$BROKEN /boot/vmlinuz-$BROKEN /var/lib/dkms/ec_su_axb35/$V/$BROKEN
 run broken-gone -e pve_ec_fan_enabled=true -e "$CURVE2" || { bad "converge after removing the broken kernel failed"; show broken-gone; }
@@ -169,7 +170,7 @@ run drop-fan2-again -e pve_ec_fan_enabled=true -e "$CURVE2" -e '{"pve_ec_fan_fan
 eq "drop fan2: next run changed" 0 "$(changed)"
 run fan2-back -e pve_ec_fan_enabled=true -e "$CURVE2" || { bad "adding fan2 back failed"; show fan2-back; }
 eq "fan2 back: fan2 mode" curve "$(cat $F/fan2/mode)"
-eq "fan2 back: fan2 rampup" 40,52,62,70,95 "$(cat $F/fan2/rampup_curve)"
+eq "fan2 back: fan2 rampup" 42,57,82,92,96 "$(cat $F/fan2/rampup_curve)"
 
 # ---- recovery: the module reloaded (rmmod; modprobe) under the still-active service ----
 # A container cannot load the module, so this makes the state a fresh load leaves: every fan on auto with
@@ -180,17 +181,31 @@ mkfake
 run recovery -e pve_ec_fan_enabled=true -e "$CURVE2" || { bad "recovery converge failed"; show recovery; }
 eq "recovery: fan1 mode" curve "$(cat $F/fan1/mode)"
 eq "recovery: fan2 mode" curve "$(cat $F/fan2/mode)"
-eq "recovery: fan1 rampup" 40,52,62,70,95 "$(cat $F/fan1/rampup_curve)"
+eq "recovery: fan1 rampup" 42,57,82,92,96 "$(cat $F/fan1/rampup_curve)"
+eq "recovery: power mode back to quiet" quiet "$(cat $F/apu/power_mode)"
 eq "recovery: fan3 never written" "$FAN3_PRISTINE" "$(fan3_state)"
 run recovery-again -e pve_ec_fan_enabled=true -e "$CURVE2" || bad "converge after recovery failed"
 eq "recovery: next run changed" 0 "$(changed)"
 
+# ---- another power mode is applied by a converge, and the default comes back the same way ----
+run power-performance -e pve_ec_fan_enabled=true -e "$CURVE2" -e pve_ec_fan_power_mode=performance || { bad "power mode change failed"; show power-performance; }
+eq "power mode performance applied" performance "$(cat $F/apu/power_mode)"
+eq "power mode change: config" EC_FAN_POWER_MODE=performance "$(grep '^EC_FAN_POWER_MODE=' /etc/default/ec-fan-profile)"
+run power-quiet -e pve_ec_fan_enabled=true -e "$CURVE2" || { bad "power mode back to quiet failed"; show power-quiet; }
+eq "power mode quiet again" quiet "$(cat $F/apu/power_mode)"
+systemctl start ec-fan-textfile.service
+eq "textfile reports the power mode" 1 "$(grep -c '^ec_apu_power_mode_info{mode="quiet"} 1$' $P)"
+
 # ---- a bad profile is refused before any change ----
 if run fan3 -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_fans": [1, 2, 3]}'; then bad "fans [1,2,3] accepted"; else ok "fans [1,2,3] refused"; fi
-if run hysteresis -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampdown_curve": [30, 45, 60, 63, 90]}'; then bad "rampdown = rampup accepted"; else ok "rampdown = rampup refused"; fi
+if run hysteresis -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampdown_curve": [35, 50, 80, 85, 90]}'; then bad "rampdown = rampup accepted"; else ok "rampdown = rampup refused"; fi
 if run not-rising -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampup_curve": [35, 60, 50, 68, 95]}'; then bad "non-rising curve accepted"; else ok "non-rising curve refused"; fi
 if run strings -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampup_curve": ["35", "50", "60", "68", "95"]}'; then bad "string curve accepted"; else ok "string curve refused"; fi
-eq "refusals left the curve alone" 40,52,62,70,95 "$(cat $F/fan1/rampup_curve)"
+if run bad-power -e pve_ec_fan_enabled=true -e "$CURVE2" -e pve_ec_fan_power_mode=turbo; then bad "power mode turbo accepted"; else ok "power mode turbo refused"; fi
+eq "bad power mode: refused at the role's check" yes "$(grep -q 'pve_ec_fan_power_mode="turbo": need quiet, balanced or performance' /tmp/run-bad-power.log && echo yes || echo no)"
+eq "bad power mode: nothing changed" 0 "$(changed)"
+eq "refusals left the curve alone" 42,57,82,92,96 "$(cat $F/fan1/rampup_curve)"
+eq "refusals left the power mode alone" quiet "$(cat $F/apu/power_mode)"
 eq "fan3 still never written" "$FAN3_PRISTINE" "$(fan3_state)"
 
 # ---- disabling hands the fans back to auto and removes all but the DKMS build ----
@@ -201,6 +216,7 @@ systemctl daemon-reload
 run disable -e pve_ec_fan_enabled=false || { bad "disable failed"; show disable; }
 eq "disable: fan1 mode" auto "$(cat $F/fan1/mode)"
 eq "disable: fan2 mode" auto "$(cat $F/fan2/mode)"
+eq "disable: power mode back to balanced" balanced "$(cat $F/apu/power_mode)"
 eq "disable: fan3 still never written" "$FAN3_PRISTINE" "$(fan3_state)"
 for p in /etc/systemd/system/ec-fan-profile.service /etc/systemd/system/ec-fan-textfile.timer \
   /etc/systemd/system/ec-fan-textfile.service /etc/default/ec-fan-profile /usr/local/sbin/ec-fan-profile \
@@ -229,6 +245,29 @@ eq "edit: checkout clean again" "" "$(git -C /usr/src/ec_su_axb35-$V status --po
 if grep -A2 'TASK \[pve_ec_fan : Drop a build whose source' /tmp/run-tamper.log | grep -q 'changed:'; then ok "edit: stale build dropped and rebuilt"; else bad "edit: no rebuild"; fi
 run tamper-again -e pve_ec_fan_enabled=true || bad "converge after the rebuild failed"
 eq "after the rebuild, the next run changed" 0 "$(changed)"
+
+# ---- another DKMS version of the same source already installed: cleared before the pin is installed ----
+# ai-node3, 2026-11-19: the upstream project's install script had left ec_su_axb35/0.0.20260820 installed for
+# the running kernel, and `dkms install` of the pin failed (rc 6, "already installed (unversioned module)")
+# because the role removed other versions only AFTER installing. Same source, so the same srcversion.
+UPV=0.0.20260820
+dkms remove -m ec_su_axb35 -v "$V" --all > /dev/null
+rm -rf "/usr/src/ec_su_axb35-$V"
+git clone -q /src "/usr/src/ec_su_axb35-$UPV"
+git -C "/usr/src/ec_su_axb35-$UPV" -c advice.detachedHead=false checkout -q "$PIN"
+printf 'PACKAGE_NAME="ec_su_axb35"\nPACKAGE_VERSION="%s"\nBUILT_MODULE_NAME[0]="ec_su_axb35"\nDEST_MODULE_LOCATION[0]="/updates"\nAUTOINSTALL="yes"\n' "$UPV" \
+  > "/usr/src/ec_su_axb35-$UPV/dkms.conf"
+{ dkms add -m ec_su_axb35 -v "$UPV" && dkms build -m ec_su_axb35 -v "$UPV" -k $K && dkms install -m ec_su_axb35 -v "$UPV" -k $K; } > /tmp/upstream-dkms.log 2>&1 ||
+  { bad "could not set up the upstream DKMS install"; tail -20 /tmp/upstream-dkms.log; }
+eq "upstream install in place" "ec_su_axb35/$UPV" "$(versions)"
+eq "upstream install: its .ko is installed" /lib/modules/$K/updates/dkms/ec_su_axb35.ko.xz "$(modinfo -k $K -n ec_su_axb35)"
+run upstream-version -e pve_ec_fan_enabled=true || { bad "converge over an upstream DKMS install failed"; show upstream-version; }
+eq "upstream version: only the pin in DKMS" "ec_su_axb35/$V" "$(versions)"
+eq "upstream version: the pin installed for $K" 1 "$(dkms status -m ec_su_axb35 -v "$V" -k $K | grep -c ': installed')"
+eq "upstream version: its source tree removed" absent "$(exists /usr/src/ec_su_axb35-$UPV)"
+eq "upstream version: modprobe resolves the DKMS build" /lib/modules/$K/updates/dkms/ec_su_axb35.ko.xz "$(modinfo -k $K -n ec_su_axb35)"
+run upstream-version-again -e pve_ec_fan_enabled=true || bad "converge after clearing the upstream version failed"
+eq "upstream version: next run changed" 0 "$(changed)"
 
 # ---- kernel lockdown (Secure Boot) is refused before any change ----
 mount -t tmpfs none /sys/kernel/security
