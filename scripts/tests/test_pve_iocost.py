@@ -99,12 +99,17 @@ class RoleConfig(unittest.TestCase):
         self.assertGreater(float(qos['wpct']), 0)
         self.assertGreaterEqual(float(qos['min']), 25)
 
-    def test_each_node_protects_exactly_its_own_control_plane_vm(self):
+    def test_each_node_names_only_its_own_control_plane_vm(self):
         for host, vm in CP_VMS.items():
             with self.subTest(host=host):
                 hv = yaml.safe_load((ROOT / f'ansible/host_vars/{host}.yml').read_text())
-                self.assertIs(hv['pve_base_iocost_enabled'], True)
                 self.assertEqual(hv['pve_base_iocost_vm_weights'], {vm: 10000})
+
+    def test_only_ai_node1_has_it_on(self):
+        # node3's canary coincided with a cp3 VM I/O freeze; node2 waits for node1's result (host_vars comments).
+        on = {h for h in CP_VMS
+              if yaml.safe_load((ROOT / f'ansible/host_vars/{h}.yml').read_text())['pve_base_iocost_enabled']}
+        self.assertEqual(on, {'ai-node1'})
 
     def test_unit_template_runs_the_helper_on_the_device(self):
         src = (ROLE / 'templates/ailab-iocost.service.j2').read_text()

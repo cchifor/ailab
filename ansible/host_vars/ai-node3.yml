@@ -39,6 +39,9 @@ pve_ec_fan_enabled: true
 # iocost (pve_base, tag iocost; 2026-11-19, owner): this node's Talos control-plane VM (etcd) gets the shared NVMe
 # first while it is saturated (io.weight 10000 against the default 100 of every other cgroup). See
 # roles/pve_base/defaults/main.yml.
-pve_base_iocost_enabled: true
+# OFF: with iocost on (canary ~16:30-16:55Z 2026-11-19) the cp3 VM froze at 16:55Z (77% I/O stall in the
+# guest, no WAL fsync completed for a minute, an etcd election) while this host's drive was healthy, and it recovered
+# the minute iocost was stopped. Cause not yet understood; this drive is the healthy one and gains nothing from it.
+pve_base_iocost_enabled: false
 pve_base_iocost_vm_weights:
   4003: 10000
