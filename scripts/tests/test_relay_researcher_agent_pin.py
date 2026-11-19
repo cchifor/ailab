@@ -37,7 +37,9 @@ class AgentPin(unittest.TestCase):
         self.text = (ROOT / pin.INPUTS).read_bytes().decode("utf-8")
         self.inputs = json.loads(self.text)
         self.agent = copy.deepcopy(self.inputs["agentRelease"])
-        self.agent.update(tag="v0.10.7", giteaReleaseId=999007, sourceCommit="7" * 40,
+        # One patch above the committed pin, so the fixture is never a downgrade after a real pin.
+        major, minor, patch = map(int, self.agent["tag"][1:].split("."))
+        self.agent.update(tag=f"v{major}.{minor}.{patch + 1}", giteaReleaseId=999007, sourceCommit="7" * 40,
                           agentReceipt="worker-image-infrastructure-agent-999007.json",
                           agentImage=self.inputs["release"]["agentImage"].split("@")[0] + "@sha256:" + "7" * 64)
         self.agent["assets"] = {"SHA256SUMS": "1" * 64, "manifest.json": "2" * 64,
@@ -260,7 +262,7 @@ class AgentPin(unittest.TestCase):
             ("platform", lambda r, m: r.update(platform="linux/arm64")),
             ("source", lambda r, m: r.update(sourceCommit="8" * 40)),
             ("invalid source", lambda r, m: (r.update(sourceCommit="bad"), m.update(sourceCommit="bad"))),
-            ("tag mismatch", lambda r, m: m.update(version="v0.10.8")),
+            ("tag mismatch", lambda r, m: m.update(version=self.agent["tag"] + "0")),
             ("missing v", lambda r, m: m.update(version="0.10.7")),
             ("publication", lambda r, m: r.update(publication=[])),
             ("tag image", lambda r, m: r["publication"].update(image="registry.chifor.me/relay/infrastructure-agent:v0.10.7")),

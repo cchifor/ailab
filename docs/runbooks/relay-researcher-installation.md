@@ -670,6 +670,8 @@ ailab overlay that the bundle tooling applies to the agent's config and values o
 and the reproduction. From the merge on, this installation's timing is the overlay's, and
 `agent/config.json` `leadership` records it. The agent's schema already accepts 30/20/2 (lease 10-120,
 renew 5-110, retry 1-30, renew < lease, 2 × retry ≤ renew: `config.ts:127-138`), so Relay changes nothing.
+It ships in ONE PR with the agent-only update to v0.10.8 (the operator's T1 decision; the owner's go on
+2026-11-19), so the merge is a single rollout of the new timing and the new agent image together.
 
 **Why.** On 2026-11-18 the v0.10.6 agent lost leadership 12 times, each on an etcd stall from the
 control-plane nodes' worn NVMe disks (`kubernetes/apps/infrastructure/monitoring/control-plane-storage-rules.yaml`).
@@ -677,7 +679,9 @@ v0.10.7, live since 18:38Z, sends a second identical Lease request on a fresh co
 first is still pending after 1 s (Relay `61c02f76` `packages/infrastructure-agent/leadership.ts:105`).
 That routes around an API server stuck on a stalled etcd follower, and it absorbed its first follower
 stall cleanly. It cannot route around a stalled etcd leader, which every API server waits on: 2 of
-the 12 losses were leader stalls, and the one at 03:53Z held reads 8-10 s on every API server. A 10 s
+the 12 losses were leader stalls, and the one at 03:53Z held reads 8-10 s on every API server. v0.10.7's first loss (2026-11-19
+03:31:57Z) was a leader stall too, on cp3 (fsync p99 1.29 s): its last renewal write landed 9.3 s after the
+round's send, too late for the 10 s deadline, after 43 hedged requests. A 10 s
 renew deadline with a 3 s per-request bound cannot ride that out; 20 s with 6 s can. T1 is not a
 liveness guarantee: a longer stall, or repeated stalls with conflicts, still exhausts 20 s.
 
@@ -691,11 +695,17 @@ liveness guarantee: a longer stall, or repeated stalls with conflicts, still exh
   duration: `leadership.ts:459`).
 - The provenance record names the effective timing and the overlay.
 
-**What does not.** No Relay release: the agent image (v0.10.7, `e72eb7d5…5e98`), the runtime
-(`c0fe50f0`) and the hub (v0.10.4) stay. Timing is in neither the local policy digest (it covers
+**What does not.** The timing needs no Relay release. The same PR carries the agent-only update from
+v0.10.7 (`e72eb7d5…5e98`) to v0.10.8 (`1b17c32f…74a2`; "Agent-only update" above, provenance in
+`docs/relay-workers/researcher-i5-provenance.md`), which changes `pins.yaml` `agentImage`, the inputs'
+`agentRelease` and the agent fields of `definition.json` and `summary.json`, and nothing the timing
+touches. v0.10.8 adds the `lease_request_hedged` event, `hedgedRequests` on `lease_write_adopted` and
+the `lease-write-not-sent` failure reason (Relay `24176e00`); it changes no leadership decision, timing
+or request. The runtime (`c0fe50f0`) and the hub (v0.10.4) stay. Timing is in neither the local policy digest (it covers
 `config.policy.installation` only: Relay `c0fe50f0` `packages/infrastructure-agent/config.ts:255-256`)
-nor `PodRuntimeBinding` (`packages/worker-runtime/binding.ts:163`), so `binding.json`,
-`definition.json`, `summary.json`, the binding and policy digests and `pins.yaml` stay byte-identical,
+nor `PodRuntimeBinding` (`packages/worker-runtime/binding.ts:163`), so the timing leaves `binding.json`,
+`definition.json`, `summary.json`, the binding and policy digests and `pins.yaml` byte-identical (the
+agent pin alone changes the agent fields listed above; the binding and policy digests stay),
 as do RBAC, the NetworkPolicy, the installation identity, the fence and the slot. Qualification
 receipts bind the binding, runtime, image and cluster, so none is invalidated, but none exercised
 30/20/2: a run's record names the effective timing. A later agent-only update keeps the overlay:
@@ -806,8 +816,8 @@ operations stay reserved and are reconciled.
 2. Merge. Flux applies the new config ConfigMap and the Deployment recreates the Pod. The new process
    waits out the old record's 15 s, so this gap is about one 15/10/2 handover.
 3. Readbacks:
-   - exactly one agent Pod Running from the new ReplicaSet, zero restarts, `imageID` still
-     `…@sha256:e72eb7d5…5e98`;
+   - exactly one agent Pod Running from the new ReplicaSet, zero restarts, `imageID`
+     `…@sha256:1b17c32f4743865451a3af936b2acb9ed4765e5baf9cc8535c3607a5040474a2` (v0.10.8);
    - its config:
      `kubectl -n relay-infra-control get cm "$(kubectl -n relay-infra-control get deploy relay-infrastructure-agent -o jsonpath='{.spec.template.spec.volumes[?(@.name=="config")].configMap.name}')" -o jsonpath='{.data.config\.json}' | jq -c .leadership`
      prints `{"leaseDurationSeconds":30,"renewDeadlineSeconds":20,"retryPeriodSeconds":2}`;
@@ -817,11 +827,17 @@ operations stay reserved and are reconciled.
      epoch and incarnation with the fence, recovery and enrollment fields unchanged (as at I10
      step 2);
    - renewals flowing: since `ready`, no `admission_halted` and no `lease_renewal_failed` without a
-     following `lease_renewal_recovered` or `lease_write_adopted`;
+     following `lease_renewal_recovered` or `lease_write_adopted`. v0.10.8 also logs an info-level
+     `lease_request_hedged` (`request` GET or PUT, cumulative `hedgedRequests`) for each second leg,
+     which is expected under a slow API server, and may report `reason: lease-write-not-sent` on a
+     `lease_renewal_failed` whose write never reached the transport;
    - the slot as before the merge.
 
-**Rollback.** Revert the PR, under step 1's conditions. `agent/config.json` returns to its previous
-bytes (Relay's 15/10/2) and the agent rolls once more (Recreate). That restarted process waits the 30 s the old record carries,
+**Rollback.** Revert the PR, under step 1's conditions. This reverts the timing and the v0.10.8 pin
+together: `agent/config.json` returns to its previous bytes (Relay's 15/10/2), `agentImage` to v0.10.7
+`e72eb7d5…5e98`, and the agent rolls once more (Recreate). To roll back only one of them, revert with a
+follow-up PR instead (the agent-only update procedure for the image, the overlay's order below for the
+timing). That restarted process waits the 30 s the old record carries,
 so this one takeover is as slow as a T1 one; later ones are back to 22-31 s. Readbacks as above, with
 `15` and `{"leaseDurationSeconds":15,"renewDeadlineSeconds":10,"retryPeriodSeconds":2}`. Run the
 committed-state tests and the reproduction on the revert, as for any change to these files (I5).
