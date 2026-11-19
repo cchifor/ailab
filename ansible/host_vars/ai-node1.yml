@@ -7,7 +7,9 @@
 pve_thin_pool_zero: false
 
 # EC fan driver + CPU-fan curve (role pve_ec_fan; docs/runbooks/node-maintenance.md "EC fan curve").
-# node1 only, because its Secure Boot is off (since 2026-11-19): the ec_su_axb35 module is unsigned, and
-# a kernel in Secure Boot lockdown refuses it. ai-node2/3 still boot with Secure Boot on; turning this on
-# there fails the play before it changes anything, until Secure Boot is disabled in their firmware.
+# On here and on ai-node2, whose Secure Boot is off (both since 2026-11-19): the ec_su_axb35 module is
+# unsigned, and a kernel in Secure Boot lockdown refuses it. ai-node3 still boots with Secure Boot on; turning
+# this on there fails the play before it changes anything, until Secure Boot is disabled in its firmware.
+# This host's fan3 (the system fan, not managed by the role) reads 0 rpm even at a fixed 100 %: a hardware
+# fault (unplugged or failed), not the driver.
 pve_ec_fan_enabled: true

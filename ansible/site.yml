@@ -5,7 +5,7 @@
 #   just net           # base + net  (tags: base,net)
 #   just node-exporter # host node_exporter for the AI Lab Fleet dashboard (tags: monitoring)
 #   just perf          # pin CPU governor to performance (tags: performance)
-#   just ec-fan        # EC fan driver + CPU-fan curve, ai-node1 only (tags: ec_fan)
+#   just ec-fan        # EC fan driver + CPU-fan curve, ai-node1/2 (tags: ec_fan)
 #   just thinpool      # LVM thin-pool zeroing, OFF on node1/2 only (tags: thinpool)
 #   just autostart     # start onboot LXCs whose NFS bind source was late at boot (tags: autostart)
 #   just mounts        # NFS test mount (tags: mounts)  -- after QNAP export exists
@@ -30,7 +30,7 @@
       when: cpu_performance_enabled | default(true)
 
     # Bosgame M5 EC fan control: the ec_su_axb35 driver (DKMS), a CPU-fan curve, fan/temperature metrics.
-    # ON per host via pve_ec_fan_enabled (ai-node1; Secure Boot must be off). Deliberately not gated here:
+    # ON per host via pve_ec_fan_enabled (ai-node1/2; Secure Boot must be off). Deliberately not gated here:
     # switched off, the role still runs to hand the fans back to the firmware and remove its units.
     # `just ec-fan --limit ai-node1 --check --diff` (docs/runbooks/node-maintenance.md "EC fan curve").
     - role: pve_ec_fan

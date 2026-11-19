@@ -54,7 +54,7 @@ tests:
               summary: "Proxmox host 192.168.0.2:9100 CPU fan 2 at 0 rpm above 70 C"
               description: "CPU fan 2 on 192.168.0.2:9100 has read under 1000 rpm for 5m while the EC temperature is above 70 C, where the curve runs it at 80 % (~4200 rpm). Check on the host: `cat /sys/class/ec_su_axb35/fan2/{mode,level,rpm}` and `systemctl status ec-fan-profile`. Level 4-5 with a low rpm is the fan or its cable; a low level is the curve: `systemctl restart ec-fan-profile`, or `rmmod ec_su_axb35` to hand the fans back to the firmware. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
   - interval: 1m
-    name: fan3 at 0 rpm is normal and never warns, however hot
+    name: fan3 at 0 rpm (ai-node1's known hardware fault) never warns, however hot
     input_series:
       - series: 'ec_fan_rpm{job="proxmox-node", instance="192.168.0.2:9100", fan="3"}'
         values: "0x30"
@@ -205,7 +205,7 @@ tests:
               summary: "Proxmox host 192.168.0.2:9100: CPU fan 2 is in fixed mode, not on the curve"
               description: "ec-fan-profile manages CPU fan 2 on 192.168.0.2:9100, but the driver has reported mode fixed for 15m, so the CPU-fan curve is not running (in auto the firmware curve still cools it). Usually the profile failed at boot or the module was reloaded without a profile restart: check `systemctl status ec-fan-profile` and `journalctl -b -u ec-fan-profile`, then `systemctl restart ec-fan-profile` or converge `just ec-fan --limit <host>` (the converge restarts it when the fans are off the profile). Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
   - interval: 1m
-    name: a fan dropped from the profile (auto by design), fan3 on auto, and a restart blip do not warn
+    name: a fan dropped from the profile (auto by design), fan3 (not managed) on auto, and a restart blip do not warn
     input_series:
       - series: 'ec_fan_mode_info{job="proxmox-node", instance="192.168.0.2:9100", fan="2", mode="auto"}'
         values: "1x30"

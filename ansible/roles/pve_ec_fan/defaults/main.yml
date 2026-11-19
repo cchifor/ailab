@@ -5,7 +5,7 @@
 # fan and temperature readings as node_exporter textfile metrics (ec-fan-textfile.timer, every 30 s).
 # Without the driver the EC runs the fans on its own firmware curve (AUTO).
 #
-# OFF by default; host_vars turns it on per host (ai-node1 since 2026-11-19). The module is NOT signed,
+# OFF by default; host_vars turns it on per host (ai-node1 and ai-node2, 2026-11-19). The module is NOT signed,
 # so a kernel in Secure Boot lockdown refuses it: the role checks that first and fails before it changes
 # anything on such a host. Turned back off, it stops the profile (the CPU fans go back to AUTO), unloads
 # the module and removes its units and metrics file; the DKMS build stays installed.
@@ -38,15 +38,18 @@ pve_ec_fan_packages:
   - "proxmox-headers-{{ pve_ec_fan_kernel }}"
 
 # ---- the CPU-fan curve ----
-# fan1 and fan2 are the CPU fans. fan3, the small system fan, has no known control register: the EC accepts
-# writes to it and ignores them. The role never writes it (the assert below and ec-fan-profile both refuse
-# it) and only monitors it; 0 rpm on fan3 is normal.
+# fan1 and fan2 are the CPU fans, and the only fans this role manages. fan3, the small system fan, IS
+# controllable through the driver too (ai-node2, 2026-11-19: fixed 100 % = 2557 rpm, 20 % = 625, auto =
+# 970; its stock curve is rampup 20,60,83,95,97, rampdown 0,50,80,94,96), but it is not managed by this role
+# yet: it stays on the EC's own curve (owner decision pending). So the role never writes it (the assert below
+# and ec-fan-profile both refuse it in the list) and only reports it. ai-node1's fan3 reads 0 rpm even at a
+# fixed 100 %: that fan is unplugged or failed, a hardware fault unrelated to the driver.
 pve_ec_fan_fans: [1, 2]
 # Five EC temperatures (deg C, integers 0-100, strictly rising) for fan levels 1-5 (20/40/60/80/100 %; level
 # 0 is off). The driver moves one level per second: up from level N while temp >= rampup[N+1], down from
 # level N while temp <= rampdown[N]. Each rampdown value must sit below the rampup value of the same level,
 # or the fan oscillates between two levels.
-# This profile (being validated on ai-node1, 2026-11-19): 20 % from 35 C, 40 % from 50, 60 % from 60, 80 %
+# This profile (being validated on ai-node1 and ai-node2, 2026-11-19): 20 % from 35 C, 40 % from 50, 60 % from 60, 80 %
 # from 68, 100 % only from 95, each 5 C of hysteresis. It caps the fans at 80 % below 95 C: hwbusters'
 # AXB35 testing found no usable extra airflow above 80 %, and one fan dips at 100 %. Measured on node1:
 # 20 % ~1540 rpm, 80 % ~4200 rpm, 100 % ~4790 rpm.

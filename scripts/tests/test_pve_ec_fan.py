@@ -16,8 +16,8 @@ real templates with the real role defaults. Pinned here:
   * ec-fan-textfile reports all three fans, the EC temperature, the power mode and which CPU fans the
     profile manages, counts a value it cannot read instead of publishing it, says driver_loaded 0 without
     the module, and replaces the file in one rename;
-  * the rendered config is one the profile script accepts, the units say what the scripts expect, and only
-    ai-node1 turns the role on.
+  * the rendered config is one the profile script accepts, the units say what the scripts expect, and
+    ai-node1 and ai-node2 turn the role on, ai-node3 does not.
 
 The Docker converge (ansible/roles/pve_ec_fan/tests/test-converge-docker.sh: DKMS against the Proxmox
 headers, systemd, idempotence, --check, recovery, disable) needs the network and is not run here.
@@ -139,7 +139,7 @@ class ProfileTests(unittest.TestCase):
                 run = self.run_profile('apply', fans=fans)
                 self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
                 self.assert_untouched(before3)
-        self.assertIn('fan3 is firmware-controlled', self.run_profile('apply', fans='1 3').stderr)
+        self.assertIn('fan3 is not managed by this role yet', self.run_profile('apply', fans='1 3').stderr)
 
     def test_curves_the_driver_would_misstep_on_are_refused_before_any_write(self):
         bad = {
@@ -517,12 +517,15 @@ class RoleRenderTests(unittest.TestCase):
                          'CLEAN="make KERNEL_BUILD=${kernel_source_dir} clean"'):
             self.assertIn(expected, lines)
 
-    def test_only_ai_node1_turns_it_on(self):
+    def test_ai_node1_and_ai_node2_turn_it_on_and_ai_node3_does_not(self):
+        # node3 still boots with Secure Boot on; node1/2 run the role defaults' curve (no override).
         host_vars = {h: yaml.safe_load((ROOT / f'ansible/host_vars/{h}.yml').read_text()) or {}
                      for h in ('ai-node1', 'ai-node2', 'ai-node3')}
         self.assertIs(host_vars['ai-node1'].get('pve_ec_fan_enabled'), True)
-        self.assertNotIn('pve_ec_fan_enabled', host_vars['ai-node2'])
+        self.assertIs(host_vars['ai-node2'].get('pve_ec_fan_enabled'), True)
         self.assertNotIn('pve_ec_fan_enabled', host_vars['ai-node3'])
+        for h in ('ai-node1', 'ai-node2'):
+            self.assertFalse([k for k in host_vars[h] if k.startswith('pve_ec_fan_') and k != 'pve_ec_fan_enabled'])
 
     def test_site_runs_the_role_ungated_so_switching_it_off_takes_it_down(self):
         play = yaml.safe_load((ROOT / 'ansible/site.yml').read_text())

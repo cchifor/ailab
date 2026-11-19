@@ -6,5 +6,7 @@
 # zeroing ON. Rollout and verification: docs/runbooks/node-maintenance.md "Thin-pool zeroing".
 pve_thin_pool_zero: false
 
-# pve_ec_fan (EC fan curve) stays OFF here: this host boots with Secure Boot on, which refuses the unsigned
-# ec_su_axb35 module. Disable Secure Boot first (docs/runbooks/node-maintenance.md "EC fan curve").
+# EC fan driver + CPU-fan curve (role pve_ec_fan; docs/runbooks/node-maintenance.md "EC fan curve"), the
+# same curve as ai-node1 (the role defaults). Secure Boot disabled here 2026-11-19 (mokutil: disabled,
+# lockdown [none]), which the unsigned ec_su_axb35 module needs.
+pve_ec_fan_enabled: true

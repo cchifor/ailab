@@ -19,8 +19,9 @@
 #           converge and restarts the service on 3: a module reloaded under an active service, a start
 #           that failed at boot, a value written by hand.
 #
-# Only fan1 and fan2, the CPU fans. fan3 has no known control register (the EC accepts writes to it and
-# ignores them), so it is refused in the config and never written, not even by reset.
+# Only fan1 and fan2, the CPU fans. fan3 is controllable through the driver too, but it is not managed by
+# this role yet: it stays on the EC's own curve (owner decision pending), so it is refused in the config and
+# never written, not even by reset.
 #
 # Environment (ec-fan-profile.service reads /etc/default/ec-fan-profile, rendered from the role vars):
 #   EC_FAN_FANS            fans to manage, e.g. "1 2"
@@ -49,7 +50,7 @@ check_fans() {
   for f in $FANS; do
     case "$f" in
       1 | 2) ;;
-      3) die "fan3 is firmware-controlled (no known control register); refusing to write it" ;;
+      3) die "fan3 is not managed by this role yet (it stays on the EC's own curve); refusing to write it" ;;
       *) die "unknown fan '$f': only 1 and 2 (the CPU fans) can be managed" ;;
     esac
   done

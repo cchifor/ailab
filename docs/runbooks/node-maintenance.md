@@ -230,7 +230,7 @@ just thinpool --limit ai-node1                              # changed=0
 Rollback: `pve_thin_pool_zero: true` in that host's host_vars (or `lvchange --zero y pve/data`).
 Re-enabling does NOT scrub chunks provisioned while zeroing was off.
 
-## EC fan curve (`pve_ec_fan`, ai-node1 since 2026-11-19)
+## EC fan curve (`pve_ec_fan`, ai-node1 and ai-node2 since 2026-11-19)
 
 The Bosgame M5's embedded controller (ITE IT5570E on the Sixunited AXB35-02 board) runs the fans on its
 own firmware curve. The `pve_ec_fan` role (`ansible/roles/pve_ec_fan`, defaults hold the why) replaces
@@ -254,8 +254,11 @@ that curve for the two CPU fans:
   active service, a start that failed at boot, and a value written by hand. The role fetches the driver
   source only when the checkout is missing, not at the pin, or edited, so converging a current host does
   not need github.com.
-- **fan3**, the small system fan, is firmware-controlled. It has no known control register, so the role
-  never writes it and only reports it. 0 rpm on fan3 is normal.
+- **fan3**, the small system fan, is controllable through the driver as well (measured on ai-node2: fixed
+  100 % = 2557 rpm, 20 % = 625, auto = 970). It is not managed by this role yet and stays on the EC's own
+  curve (owner decision pending), so the role never writes it and only reports it. ai-node1's fan3 reads
+  0 rpm even at a fixed 100 %: that fan is unplugged or failed, a hardware fault unrelated to the driver.
+  No alert covers fan3 for that reason; a per-node fan3 alert is a possible follow-up.
 - **Metrics:** `ec-fan-textfile.timer` writes
   `/var/lib/prometheus/node-exporter/ec_fan.prom` every 30 s. It reports `ec_fan_rpm`, `ec_fan_level` and
   `ec_fan_mode_info` per fan, `ec_fan_managed` per CPU fan, plus `ec_temp_celsius` and
@@ -264,35 +267,41 @@ that curve for the two CPU fans:
   and the driver not loaded.
 
 **Secure Boot must be off.** The module is unsigned. With Secure Boot on, the Proxmox kernel locks down
-(integrity mode) and refuses it. node1 has had Secure Boot off (lockdown `none`) since 2026-11-19.
-node2/3 still have it on, so the role's first check fails the play there before anything changes. To
-add a host: disable Secure Boot in its firmware during a planned host reboot (the drain procedure
+(integrity mode) and refuses it. node1 and node2 have had Secure Boot off (lockdown `none`) since
+2026-11-19. node3 still has it on, so the role's first check fails the play there before anything changes.
+To add a host: disable Secure Boot in its firmware during a planned host reboot (the drain procedure
 above). Check that `cat /sys/kernel/security/lockdown` shows `[none]`, then set
 `pve_ec_fan_enabled: true` in its host_vars. (Keeping Secure Boot on would need DKMS's signing key,
 `/var/lib/dkms/mok.pub`, enrolled with `mokutil` at the console. The role does not do that, and it
 refuses a Secure Boot host either way.)
 
+One host at a time: ai-node1 (`<host-ip>` 192.168.0.2), then ai-node2 (192.168.0.3).
+
 ```bash
 # 0. What the host runs now.
 #    The role removes every OTHER ec_su_axb35 DKMS version and /usr/src/ec_su_axb35-* tree (an earlier pin,
 #    or a hand install with the upstream DKMS script), so look at what `dkms status` lists first.
-python scripts/node-ssh.py 192.168.0.2 "cat /sys/kernel/security/lockdown; lsmod | grep ec_su_axb35; dkms status 2>&1; grep -rs ec_su_axb35 /etc/modules /etc/modules-load.d; cat /sys/class/ec_su_axb35/fan{1,2}/mode"
+python scripts/node-ssh.py <host-ip> "cat /sys/kernel/security/lockdown; lsmod | grep ec_su_axb35; dkms status 2>&1; dpkg -l dkms git build-essential 'proxmox-headers-*' 2>&1 | grep ^ii; grep -rs ec_su_axb35 /etc/modules /etc/modules-load.d; cat /sys/class/ec_su_axb35/fan{1,2}/mode"
+#    node2 has NO build toolchain, kernel headers or git yet (dpkg lists none): the first apply installs dkms,
+#    build-essential, git, proxmox-default-headers and proxmox-headers-$(uname -r) (plus the newest
+#    headers of the default series, which proxmox-default-headers pulls in) before it builds.
 # 1. Preview. A first --check stops before the DKMS steps: it cannot look at packages it has not installed yet.
-just ec-fan --limit ai-node1 --check --diff
-# 2. FIRST ROLLOUT ON node1 ONLY: the module running there was loaded by hand from /root/ec-su_axb35 (insmod),
-#    not from the DKMS path. Unload it, so the apply loads the DKMS build. Unloading puts all three fans on the
-#    firmware curve (safe) until the apply sets the curve again, a minute or two later. The role also reloads
-#    on its own when the loaded module's srcversion differs from the build (another commit), but a hand build of
-#    the same commit has the same srcversion, and the role leaves that one running.
-python scripts/node-ssh.py 192.168.0.2 "rmmod ec_su_axb35; lsmod | grep -c ec_su_axb35; dmesg | grep ec_su_axb35 | tail -4"
+just ec-fan --limit <host> --check --diff
+# 2. FIRST ROLLOUT ON node1 AND node2: the module running on each was loaded by hand with insmod from
+#    /root/ec-su_axb35/ec_su_axb35.ko (node2's is a copy of node1's build), not from the DKMS path. Unload it, so
+#    the apply loads the DKMS build. Unloading puts all three fans on the firmware curve (safe) until the apply
+#    sets the curve again, a few minutes later on node2 (the packages and the build come first). The role also
+#    reloads on its own when the loaded module's srcversion differs from the build (another commit), but a hand
+#    build of the same commit has the same srcversion, and the role leaves that one running.
+python scripts/node-ssh.py <host-ip> "rmmod ec_su_axb35; lsmod | grep -c ec_su_axb35; dmesg | grep ec_su_axb35 | tail -4"
 #    expect 0 and "fan1/2/3 reset to AUTO mode", "Module unloaded"
 # 3. Apply, then a second run must change nothing.
-just ec-fan --limit ai-node1
-just ec-fan --limit ai-node1                                    # changed=0
+just ec-fan --limit <host>
+just ec-fan --limit <host>                                      # changed=0
 # 4. Verify: the DKMS build is what modprobe resolves and what is loaded, the curve is set, metrics are written.
-python scripts/node-ssh.py 192.168.0.2 "modinfo -n ec_su_axb35; dkms status ec_su_axb35; find /lib/modules/\$(uname -r) -name 'ec_su_axb35.ko*'; cat /sys/module/ec_su_axb35/srcversion; modinfo -F srcversion ec_su_axb35"
-python scripts/node-ssh.py 192.168.0.2 "systemctl is-active ec-fan-profile ec-fan-textfile.timer; cat /sys/class/ec_su_axb35/fan*/rpm; cat /sys/class/ec_su_axb35/fan{1,2}/{mode,level,rampup_curve,rampdown_curve}; cat /sys/class/ec_su_axb35/temp1/temp"
-python scripts/node-ssh.py 192.168.0.2 "cat /var/lib/prometheus/node-exporter/ec_fan.prom"
+python scripts/node-ssh.py <host-ip> "modinfo -n ec_su_axb35; dkms status ec_su_axb35; find /lib/modules/\$(uname -r) -name 'ec_su_axb35.ko*'; cat /sys/module/ec_su_axb35/srcversion; modinfo -F srcversion ec_su_axb35"
+python scripts/node-ssh.py <host-ip> "systemctl is-active ec-fan-profile ec-fan-textfile.timer; cat /sys/class/ec_su_axb35/fan*/rpm; cat /sys/class/ec_su_axb35/fan{1,2}/{mode,level,rampup_curve,rampdown_curve}; cat /sys/class/ec_su_axb35/temp1/temp"
+python scripts/node-ssh.py <host-ip> "cat /var/lib/prometheus/node-exporter/ec_fan.prom"
 #    expect only updates/dkms/ec_su_axb35.ko*, the same srcversion twice, both units active, fan1/fan2
 #    `curve` with the role's curves, and ec_fan_textfile_timestamp_seconds within the last 30 s.
 #    If the role refused with "modinfo resolves ec_su_axb35 ... not the DKMS build", a `make install` from
@@ -300,7 +309,8 @@ python scripts/node-ssh.py 192.168.0.2 "cat /var/lib/prometheus/node-exporter/ec
 ```
 
 **Checking a host:** `cat /sys/class/ec_su_axb35/fan*/rpm` (fan1/fan2 ~1540 rpm at 20 %, ~4200 at 80 %;
-fan3 often 0), `cat /sys/class/ec_su_axb35/fan{1,2}/{mode,level}` and `cat /sys/class/ec_su_axb35/temp1/temp`.
+fan3 on the EC's own curve, ~970 rpm on node2, always 0 on node1 because of its failed fan),
+`cat /sys/class/ec_su_axb35/fan{1,2}/{mode,level}` and `cat /sys/class/ec_su_axb35/temp1/temp`.
 `journalctl -u ec-fan-profile` shows each write. In Grafana or Prometheus, query `ec_fan_rpm` and
 `ec_temp_celsius` with `job="proxmox-node"`.
 
