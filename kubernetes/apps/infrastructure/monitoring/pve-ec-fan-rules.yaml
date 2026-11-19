@@ -6,8 +6,9 @@
 # ProxmoxCpuFanStalled: fan1 or fan2 (the CPU fans) under 1000 rpm for 5m while the EC reads above 70 C.
 # Above 68 C the curve runs them at 80 % (~4200 rpm), the lowest running level (20 %) is ~1540 rpm, and the
 # firmware curve (auto) spins them at that temperature too, so this is a stalled fan, a loose fan cable, or an
-# EC that stopped following the curve. fan3, the small system fan, is left out on purpose: the firmware
-# controls it, and 0 rpm on it is normal.
+# EC that stopped following the curve. fan3, the small system fan, is left out on purpose: ai-node1's fan3 does
+# not spin even at a fixed 100 % (a known hardware fault: the fan is unplugged or failed), so a fan3 rule would
+# fire there permanently. A per-node fan3 alert is a possible follow-up.
 #
 # ProxmoxEcFanTextfileStale: the file has not been rewritten for 5m (the timer stopped, or the script fails).
 # node_exporter keeps serving the last values it read, so the stall alert above would be judging old numbers.
@@ -16,7 +17,8 @@
 # profile's fan list) has not been in curve mode for 15m: ec-fan-profile failed (at boot the driver's sysfs did
 # not appear within its 10 s wait), or the module was reloaded and nothing restarted the profile. The fan is on
 # the firmware curve (auto), which is safe; the CPU-fan curve is not running. A fan dropped from the list is on
-# auto by design and is not alerted on; nor is fan3. 15m rides out a converge's restart and a short hand test.
+# auto by design and is not alerted on; fan3 is not managed by the role. 15m rides out a converge's restart and
+# a short hand test.
 #
 # ProxmoxEcFanDriverNotLoaded: the file is fresh but says the module is not loaded, for 10m: typically a new
 # kernel booted without the module (no headers for it, so DKMS could not build it), or Secure Boot came back on.

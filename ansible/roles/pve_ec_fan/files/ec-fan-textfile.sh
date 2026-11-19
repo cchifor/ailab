@@ -5,7 +5,7 @@
 #
 # Writes <dir>/ec_fan.prom in one rename (a temp file in the same dir; node_exporter reads only *.prom):
 #   ec_fan_driver_loaded               1 when the driver's class dir exists, else 0 and no fan series
-#   ec_fan_rpm{fan}                    fan speed; fan3 reads 0 whenever the firmware stops it (normal)
+#   ec_fan_rpm{fan}                    fan speed, all three fans (ai-node1's fan3 reads 0: a hardware fault)
 #   ec_fan_level{fan}                  0 (off) to 5 (100 %)
 #   ec_fan_mode_info{fan,mode}         1; mode is auto, fixed or curve
 #   ec_fan_managed{fan}                1 for a CPU fan the profile puts on the curve (EC_FAN_FANS), else 0

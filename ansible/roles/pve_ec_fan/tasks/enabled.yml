@@ -1,14 +1,14 @@
 ---
 # ---- 0. refuse before changing anything: a profile that writes fan3 or cannot work, or a kernel that
 #         would not load an unsigned module ----
-- name: Check the managed fans (the CPU fans 1 and 2; fan3 is firmware-controlled)
+- name: Check the managed fans (the CPU fans 1 and 2; fan3 is not managed by this role yet)
   ansible.builtin.assert:
     that:
       - pve_ec_fan_fans | length > 0
       - pve_ec_fan_fans | difference([1, 2]) | length == 0
     fail_msg: >-
-      pve_ec_fan_fans={{ pve_ec_fan_fans | to_json }}: only 1 and 2, the CPU fans. fan3 has no known
-      control register and is never written.
+      pve_ec_fan_fans={{ pve_ec_fan_fans | to_json }}: only 1 and 2, the CPU fans. fan3 is not managed by
+      this role yet (it stays on the EC's own curve) and is never written.
     quiet: true
 
 - name: Check the curves (five integers 0-100, strictly rising)
