@@ -18,13 +18,21 @@ Flux inventory. Merging the activation installs the empty, stopped ledger
 ESO objects for credential delivery, and nothing else: no database, no login
 password, authority row, witness, qualification, consumer or enabled plugin.
 
+**Current state (2026-11-18).** Steps 1-6 and step 7's File A are complete; the activation overlay now
+sets one database replica. Both consumer components are included (H4a and the first part of step 8),
+and the Router trust is included. The remaining step-8 proofs, Router drills A-D and independent
+review precede the production opening; File B follows H6, before any signed run. Resume through
+[relay-researcher-remaining-live-steps.md](relay-researcher-remaining-live-steps.md), whose steps 1-2
+are DONE, using the decisions recorded in [ailab #1820](https://git.chifor.me/cchifor/ailab/issues/1820).
+The table below records the original activation effects, not instructions to initialize again.
+
 | Source | Flux Kustomization | Merge effect |
 | --- | --- | --- |
 | `apps/backup/velero/helmrelease.yaml` | `backup` | Both schedules exclude `relay-budget-authority` |
 | `apps/relay-budget-authority/ledger/` | `relay-budget-authority` (wait, after `qnap-storage`, `cert-manager-config`, `apps`, `backup`) | Base applied, StatefulSet at 0 |
 | `apps/infrastructure/security/openbao/relay-budget-provision-job.yaml` | `openbao` | Policies + k8s-auth roles `af-app-relay-budget`, `af-app-router-budget`; no KV document |
 | `apps/relay-budget-authority/credentials/` | `relay-budget-credentials` (no wait) | SecretStore + ExternalSecret in `relay` and `llm-router`, not Ready until step 6 |
-| `components/relay-worker-budget-client`, `components/llm-router-worker-budget-reader` | none (not included) | Nothing until a later operator PR (see Consumer wiring) |
+| `components/relay-worker-budget-client`, `components/llm-router-worker-budget-reader` | `apps` (now included) | Client/reader files only; authority startup and plugin enablement have separate gates (see Consumer wiring) |
 
 `scripts/tests/test_relay_budget_authority_activation.py` pins these gates.
 
@@ -77,8 +85,9 @@ Relay app migration.
 The source commit is one reviewed pin:
 `RELAY_BUDGET_SOURCE_COMMIT` in
 `kubernetes/optional/relay-budget-authority/initialize/relay-source.env`. It is
-empty until the operator sets the full SHA of the reviewer-merged release commit
-in a reviewed PR. The bundle renderer reads it, and it ships in the script
+now `d1c77f876606976362d70f42973033d31ac913c6`. Its five SQL files are unchanged in the runtime's
+`c0fe50f0` and hub's `e77bd09a`; an agent-only release does not repin the ledger. The bundle renderer
+reads it, and it ships in the script
 ConfigMap, so both standalone Jobs refuse a bundle whose `source-commit` differs
 or a pin that is unset.
 
@@ -91,7 +100,7 @@ default-disabled runtime plugin and qualification-policy schema.
 The commands in this section are **operator-only Kubernetes writes**. A dev-worker
 must prepare/review the PR and evidence; its read-only `platform` credential cannot
 perform this ceremony. Use `--context admin@ai`, never the default home-lab context.
-Do not enable application consumers until every gate below is satisfied.
+Follow Consumer wiring for the early file mounts; the production gate and plugin wait for steps 8-9.
 
 1. Confirm reviewer-merged Relay/router releases, the exact ledger schema, resource
    capacity, `qnap-iscsi` retention, CA readiness, and actual app pod labels. Inspect
@@ -222,10 +231,13 @@ Do not enable application consumers until every gate below is satisfied.
    fixed: `docs/runbooks/relay-router-connection.md` records connection
    `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8` (issuer `relay.chifor.me`) and digest
    `547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad`, and orders
-   these rows within the connection's steps. The UUID is in git before Relay is
-   configured with it, so the `clients` row waits only for its `max_tokens`
-   (8 × (I + 8192), relay#277 comment 120818 D); allocation stays impossible until
-   that row exists.
+   these rows within the connection's steps. The `clients` row now uses `max_tokens` 7441536:
+   8 × (922,000 + 8,192), with I accepted in relay#277 comment 122095 and the matching trust
+   ceiling committed in ailab #1778. It no longer waits for an input-bound decision.
+   **File A and File B are separate.** File A (`clients` and `readers`) is complete. File B
+   (`qualifications`) follows H6 and the final Router rollout, before any candidate run is signed
+   (hub H7; owner decision 2026-11-17, ailab #1820). It is not a prerequisite of trust inclusion or
+   step 9's bootstrap opening.
 8. Include the router reader component (Consumer wiring) so the router's files
    can be verified; the plugin stays disabled.
    Prove TLS hostname verification, TLS-only login, different role permissions,
@@ -258,11 +270,22 @@ Do not enable application consumers until every gate below is satisfied.
    allocating entry point reaches). An enabled plugin without File B therefore
    cannot allocate, and an `available` Router proves availability only (the gate,
    the witness and the reader mapping), never qualification. File B then becomes
-   mandatory: committed, read back and qualified by the Router (H6's preflight,
+   mandatory: committed, read back and qualified by the Router (the preflight planned in
    ailab #1753 comment 124071 §5) **before any candidate run is signed**
    (`relay-researcher-hub-upgrade.md` H7).
 
-   Then enable it through the authenticated admin API:
+   **TOOLING GAP: the File B preflight before signing.** H6 does not expose the promised budget
+   preflight through `GET /api/worker-pools`: ordinary qualification is checked first, so the route
+   cannot reach the ledger or Router during the candidate campaign
+   (`e77bd09a:server/workers/pool-readiness.ts:100-122,157-211`; R0 §2 F1).
+   Neither the ailab operator allowlist (`scripts/relay-admin-call.py`) nor Relay's operator CLIs at
+   `c0fe50f0`, `e77bd09a` or audited `origin/main` (`83262314`) provide this standalone check. A reviewed
+   operator tool must check the exact File B policy digests, route, bounds and required lifetime against the
+   ledger and authenticated Router preflight, without allocating or creating a worker. The observer
+   checks only the witness/gate and cannot substitute. Keep the pre-signing requirement; resolve
+   this gap before R0.
+
+   With the bootstrap gates above satisfied, enable it through the authenticated admin API:
    `POST /admin/v1/plugins/worker-budget-authority` with `{"enabled":true}`. Read
    back `GET /admin/v1/plugins` (state active) and the router log line
    `Worker budget authority available`. No manifest enables it.
@@ -441,8 +464,11 @@ the production opening. That means no Relay router connection or credential
 binding exists yet, so no allocation is possible whatever the gate says.
 - **Why rotation is cheap here.** Rotating the epoch at this point fences no
   allocation, because none exists.
-- **Relay.** The Relay consumer cannot be wired yet (see Consumer wiring). Its
-  half of drills A–C runs when it is included, before Relay's first allocation.
+- **Relay.** H4a already mounts its files, but no profile source starts its budget authority until
+  H7. In this bootstrap window only the Router is rolled; Relay's Secret follows the injections but
+  its Pod keeps A until H6 mounts B. Relay's half of A-C runs in R0, after H6 and File B, before R1's
+  first allocation ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md), including
+  its §4 confirmations). R0 uses observer metrics and same-login controls, with no grant or create.
 - **Drills are not restores.** They inject witness states on purpose; § After
   an OpenBao restore does not apply inside a drill.
 
@@ -452,8 +478,8 @@ negative drill (A–C) therefore re-opens the gate for the drill alone and prove
 it is open, at the moment of the observation:
 
 1. **Install** the drill's witness state using "Changing the witness" steps
-   1–2 and 4–6, **skipping step 3's record entry**. It ends withdrawn, with both
-   consumers rolled onto the drill's file.
+   1–2 and 4–6, **skipping step 3's record entry**. In the bootstrap window it ends withdrawn with
+   only the Router rolled onto the drill's file (checklist step 5); R0 later rolls only Relay.
    - **Drill injections are never issuance entries.** That covers drill A's
      restored A, B's empty witness, C's malformed one and D's rewrite of B. Log
      each one in the drill captures only, never in the offline issuance record.
@@ -463,26 +489,31 @@ it is open, at the moment of the observation:
    - **Why it matters.** The record's latest entry stays the real current
      witness, which step 5 below and the restore procedure re-enter from.
 2. **Re-open for the drill only.** The owner sets `ready=true` and the operator
-   enables the Router plugin. Allocation stays impossible: no Relay connection
-   or binding exists.
+   requests Router plugin enablement (B/C's expected refusal is in step 3). Allocation stays impossible:
+   no Relay connection or credential binding exists.
 3. **Prove the gate is open, immediately before observing.** Capture:
    - `SELECT ready, instance_id, recovery_epoch, witness_digest FROM worker_budget.authority`
      shows `ready = t`;
-   - `GET /admin/v1/plugins` shows `worker-budget-authority` enabled;
+   - `GET /admin/v1/plugins` shows `worker-budget-authority` enabled for A and D. For B and C the
+     accepted bootstrap pass is a refused enable: HTTP 500 `PLUGIN_FAILED`, plugin `disabled`, while
+     the ledger gate is open and the positive control succeeds (ailab #1820, checklist point 4;
+     llm-router `5a5181b7:packages/plugins/worker-budget-authority/index.ts`,
+     `packages/kernel/manager.ts:108-116`);
    - a positive control: `worker_budget.current_epoch(<the record's CURRENT ids>)`
      as `relay_budget_router`, from the operator client Pod, returns the epoch.
 4. **Observe the refusal** (the Pass column). It must name the drill's witness:
-   `current_epoch(<the ids in the MOUNTED file>)` returns SQLSTATE 42501 while
-   step 3's control still succeeds.
+   for A, `current_epoch(<the ids in the MOUNTED file>)` returns SQLSTATE 42501 while
+   step 3's control still succeeds. B and C have no valid mounted IDs to query; their parse refusal
+   and the same-window positive control are the evidence.
 5. **Withdraw** (`ready=false`, plugin disabled). Restore the current witness
    from the record before the next drill.
 
 | Drill | Do | Pass, with the gate open (protocol step 3) |
 | --- | --- | --- |
-| A, stale | Issue A (step 6). Rotate to B: owner updates the row's `recovery_epoch` and `witness_digest`, operator records and writes B ("Changing the witness"). Then restore A in OpenBao (`bao kv rollback -mount=af -version=<A> relay-budget/witness`), force-sync and roll | Router log `Worker budget authority unavailable: …`, still unavailable after waiting ≥20 s. `worker_budget.current_epoch(<A ids>)` as `relay_budget_router` from an operator client Pod returns SQLSTATE 42501. Relay, once wired: `worker_budget_ledger_unavailable`, allocation refused |
-| B, missing | Write an empty `witness` (the only "missing" a running consumer can receive), force-sync and roll. Separately, soft-delete the document (`bao kv delete`) | Empty: Router unavailable, as in A; the positive control still succeeds. Soft-delete: the ExternalSecret goes not Ready while the Secret is retained (ESO Retain), and nothing changes until a deliberate roll |
-| C, malformed | Write JSON that fails the schema (for example `{"version":1}`, or an uppercase digest), force-sync and roll | Router unavailable, as in A |
-| D, older snapshot, unchanged witness | Write B again (a new KV version, same bytes; not a record entry). Roll back to the previous version, force-sync and roll; re-open as in protocol step 2 | What the window can show: the Router is `available`; the authority row is identical before and after; both mounted witness digests equal B and the record's latest entry. No allocation exists in this window, so the history comparison (allocations, `token_limit`, `original_deadline`, `recovery_epoch`, outbox sequences, receipts) runs when D is repeated with the Relay-wired drills, and after any real OpenBao restore |
+| A, stale | Issue A (step 6). Rotate to B: owner updates the row's `recovery_epoch` and `witness_digest`, operator records and writes B ("Changing the witness"). Then restore A in OpenBao (`bao kv rollback -mount=af -version=<A> relay-budget/witness`), force-sync and roll | Router log `Worker budget authority unavailable: …`, still unavailable after waiting ≥20 s. `worker_budget.current_epoch(<A ids>)` as `relay_budget_router` from an operator client Pod returns SQLSTATE 42501. Relay's later observation follows R0 §§7-8; no allocation is attempted |
+| B, missing | Write an empty `witness` (the only "missing" a running consumer can receive), force-sync and roll. Separately, soft-delete the document (`bao kv delete`) | Empty: enable refused as in protocol step 3; the positive control still succeeds. Soft-delete: the ExternalSecret goes not Ready while the Secret is retained (ESO Retain), and nothing changes until a deliberate roll |
+| C, malformed | Write JSON that fails the schema (for example `{"version":1}`, or an uppercase digest), force-sync and roll | Enable refused as in B, with the gate open and positive control succeeding |
+| D, older snapshot, unchanged witness | Write B again (a new KV version, same bytes; not a record entry). Roll back to the previous version, force-sync and roll; re-open as in protocol step 2 | What the window can show: the Router is `available`; the authority row is identical before and after; the Router's mounted witness equals B and the record's latest entry (Relay still mounts A until H6). No allocation exists in this window, so the history comparison (allocations, `token_limit`, `original_deadline`, `recovery_epoch`, outbox sequences, receipts) runs when D is repeated with Relay wired, and after any real OpenBao restore. R0 covers A-C only; the later D repeat still needs an owner-scheduled window |
 
 - **Restoring B.** After A–C, restore B from the record and verify `available`
   before the next drill.

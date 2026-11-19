@@ -10,6 +10,11 @@ replicas, the journal Deployment exists only in the operator's per-run render,
 and the initialization Job is suspended and never included in a continuously
 reconciled resource list.
 
+**State on 2026-11-18.** The activation overlay is included under Flux (ailab #1813), with database
+`replicas: 0` and the protocol Service pinned to `10.96.0.42`. Resume with initialization and the
+separate one-replica change below; do not repeat the free-address check as if the Service were absent.
+Live PVC, certificate and authority readbacks remain operator prerequisites.
+
 The generic Relay installation skill remains infrastructure-neutral. This is an
 ailab deployment prerequisite for its first finite qualification run, not a
 second worker controller or a replacement for the agent's least-privilege RBAC.
@@ -84,10 +89,10 @@ per-run service render (its public ConfigMap, Deployment and client NetworkPolic
 The operator creates the initialization once and applies and scales each run's
 render (qualification campaign runbook, 3.2).
 
-The rollout is two held PRs (label `no-automerge`); the authority ceremony and
-every Secret stay operator actions with no manifest change:
+The rollout has two PRs; the first has merged (ailab #1813), and the one-replica change stays held
+(label `no-automerge`). The authority ceremony and every Secret stay operator actions with no manifest change:
 
-1. **Activation (replicas 0).** Before lifting the hold: step 1's observations,
+1. **Activation (replicas 0), merged.** The original pre-merge checks were step 1's observations,
    then the network plan's read-only check, which must print nothing for
    `10.96.0.42` (`.40` and `.41` print their own Services). After the merge:
    Kustomization Ready, PVC Bound, both Certificates Ready, no database Pod, and
@@ -236,8 +241,9 @@ TLS verification to cover a missed renewal.
 
 The selected Relay image must contain compiled
 `/app/dist/scripts/candidate-journal-service.js` and its production dependencies.
-The current old `v0.9.1` deployment predates these source changes and must not be
-used as a default. There is deliberately no service image default in this bundle.
+The current hub pin is v0.10.4 (`e77bd09a`, `control-plane@sha256:d1482bc1…57a7` in
+`kubernetes/apps/apps/relay/relay.yaml`), whose source includes that service and the Dockerfile's
+compiled scripts. The old v0.9.1 predates it. There is deliberately no service image default in this bundle.
 Require the reviewed publication receipt's digest-only image and source commit;
 inspect the actual compiled image before activation. The Relay Dockerfile compiles
 scripts into `dist` but does not ship these deployment SQL files, which is why the
@@ -313,12 +319,12 @@ check in step Q2 of [relay-researcher-installation.md](relay-researcher-installa
 any other address fails closed.
 
 `spec.clusterIP` is immutable. The pin applies when the Service is created: if
-`kubectl -n relay-candidate-journal get svc relay-candidate-journal` already
+`kubectl --context admin@ai -n relay-candidate-journal get svc relay-candidate-journal` already
 shows another address (a Service created from an earlier render), Flux's apply
 is rejected rather than moving it. Then, with the journal
 Deployment at zero replicas and no run in flight, delete that Service, let Flux
 create it again from `kubernetes/apps/relay-candidate-journal/service.yaml`
-(`flux reconcile kustomization relay-candidate-journal`), and read back
+(`flux --context admin@ai reconcile kustomization relay-candidate-journal -n flux-system`), and read back
 `10.96.0.42`. No Relay binding can have used
 the old address: the alias is only ever `10.96.0.42`, so a binding naming
 anything else is refused by the researcher installation's bundle check
