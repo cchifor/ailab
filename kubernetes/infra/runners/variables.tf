@@ -274,6 +274,14 @@ variable "runner_nodes" {
     # and lifecycle.ignore_changes=[initialization] makes editing `ip` here DOCUMENTATION ONLY — the live
     # IPs were changed in-guest via netplan (see docs/runbooks/ci-runners.md).
     #
+    # 2026-11-19 15:30Z (owner): ai-node1's runners (ci-runner-1/-4/-9) at 120 MiB/s (supersedes the uncapped entry
+    # below). Uncapped, with the fan curve working and the NVMe at ~50-56 C, CI bursts still saturated the shared
+    # drive: ci-runner-9 wrote 186 MiB/s (host IO pressure full 22%) and cp1's etcd WAL fsync p99 hit 8.19 s (the
+    # histogram's top bucket) at 14:50Z and twice at 15:24-15:26Z, 3-4 s at 14:52/15:22; cp1 had 12 minutes over
+    # 0.5 s in the 3 h after the fan fix (4 of them over 2 s). The 15:25Z stall made the Relay infrastructure agent
+    # miss its 20 s renew deadline (leadership lost, no workers running; it restarted and took the lease back).
+    # 120 keeps most of the burst throughput but stops runs at the drive's limit. Applied live (qm set, no restart);
+    # these fields record it, so `tofu plan` is a no-op. The stall budget below still decides between 120 and 60.
     # 2026-11-19 later (owner): ai-node1's runners (ci-runner-1/-4/-9) UNCAPPED. node1's CPU fans now run an
     # aggressive EC curve (ec_su_axb35 driver, Secure Boot off on node1) and its NVMe dropped from 78 C to
     # ~50 C; this morning's 4-8 s cp1 stalls came with the drive above its 86 C warning temperature. The host's
@@ -307,7 +315,7 @@ variable "runner_nodes" {
     # `- speed { ... } -> null` on that runner, and the apply clears it live (QEMU's
     # block_set_io_throttle; no restart, as when relay-worker-1's throttle was removed in #1706).
     # Do NOT set 0 to remove one: the validation above rejects it.
-    "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1", memory_floating_mib = 14336 } # floor: see ci-runner-4
+    "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1", memory_floating_mib = 14336, disk_write_mibps = 120 } # floor: see ci-runner-4; write cap: 120, see the 15:30Z note
     # Cost of 30 MiB/s (why D1c, #1838, raised node2 to 45 at ~19:45Z on 2026-11-17): a workbricks stack Postgres on
     # ci-runner-5 crashed into recovery (io pressure full avg10 85%, no OOM), cold workbricks jobs spend 8-14 min
     # writing, and I/O-heavy suites time out (relay release/holder tests, 21 suite timeouts on ci-runner-10).
@@ -332,8 +340,8 @@ variable "runner_nodes" {
     # Fleet-wide, workbricks' tenants stack lane failed ~30% of runs on runners under 11.4 GiB vs <1% above
     # (dev-worker-2, 179 runs since 11-14); r1's own sample was small (1 failure in 5 runs). All three
     # node1 runners now sit at 14 GiB. Check node1's free memory (`free -g` on the host) before raising more.
-    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336 } # uncapped 2026-11-19, see the note above ci-runner-1
-    "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5", disk_write_mibps = 60 }       # write cap: D1, above ci-runner-1
+    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336, disk_write_mibps = 120 } # write cap: 120, see the 15:30Z note above ci-runner-1
+    "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5", disk_write_mibps = 60 }                               # write cap: D1, above ci-runner-1
     "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6", disk_write_mibps = 60 }
     # ci-runner-7 (vm_id 4107, .29, ai-node3) RETIRED 2026-09-16 — removed from this map so the next
     # apply destroys it. Retired to free ai-node3 for a qwen3.8-27b-ailab instance: the VM held a
@@ -366,7 +374,7 @@ variable "runner_nodes" {
     # .30 returns to the free pool; docs/network-plan.md is the IPAM registry and records it.
     # ci-runner-9 MOVED ai-node2 -> ai-node1 on 2026-09-07 (offline qm migrate) to pull ~10 GiB off
     # ai-node2, which was floor-pinning its dev-workers. Placement here reflects the live estate.
-    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9", memory_floating_mib = 14336 } # floor: see ci-runner-4; uncapped 2026-11-19, see the note above ci-runner-1
-    "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10", disk_write_mibps = 60 }      # write cap: D1, above ci-runner-1
+    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9", memory_floating_mib = 14336, disk_write_mibps = 120 } # floor: see ci-runner-4; write cap: 120, see the 15:30Z note above ci-runner-1
+    "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10", disk_write_mibps = 60 }                              # write cap: D1, above ci-runner-1
   }
 }
