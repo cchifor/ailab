@@ -8,8 +8,9 @@ real templates with the real role defaults. Pinned here:
     in the fan list is refused, and so is a curve the driver would step wrongly on (not five rising
     integers 0-100, or a rampdown value not below the rampup value of its level), before anything is
     written. A CPU fan not in the list is put back on auto (a fan dropped from the config);
-  * `reset` (the unit's ExecStop) puts both CPU fans back to auto and the power mode back to balanced (the
-    EC default) whatever the config says, never touches fan3, and does nothing when the module is not loaded;
+  * `reset` (the unit's ExecStop) puts both CPU fans back to auto and sets the power mode to balanced (the
+    factory EC default) whatever the config says, never touches fan3, and does nothing when the module is not
+    loaded;
   * a power mode other than quiet, balanced or performance is refused before anything is written;
   * `check` (run by the role on each converge) writes nothing, exits 0 when the live state is the
     profile and 3 when it is not: a configured fan off the curve or on another curve, a dropped fan still

@@ -248,8 +248,9 @@ eq "after the rebuild, the next run changed" 0 "$(changed)"
 
 # ---- another DKMS version of the same source already installed: cleared before the pin is installed ----
 # ai-node3, 2026-11-19: the upstream project's install script had left ec_su_axb35/0.0.20260820 installed for
-# the running kernel, and `dkms install` of the pin failed (rc 6, "already installed (unversioned module)")
-# because the role removed other versions only AFTER installing. Same source, so the same srcversion.
+# the running kernel, and `dkms install` of the pin failed (rc 6, "already installed (unversioned module)"):
+# its twin from the same source (the same srcversion) was still installed. The role now builds the pin, then
+# removes the other versions, then installs.
 UPV=0.0.20260820
 dkms remove -m ec_su_axb35 -v "$V" --all > /dev/null
 rm -rf "/usr/src/ec_su_axb35-$V"
@@ -268,6 +269,33 @@ eq "upstream version: its source tree removed" absent "$(exists /usr/src/ec_su_a
 eq "upstream version: modprobe resolves the DKMS build" /lib/modules/$K/updates/dkms/ec_su_axb35.ko.xz "$(modinfo -k $K -n ec_su_axb35)"
 run upstream-version-again -e pve_ec_fan_enabled=true || bad "converge after clearing the upstream version failed"
 eq "upstream version: next run changed" 0 "$(changed)"
+
+# ---- a new pin that does not build fails the play AT THE BUILD, and the installed module stays ----
+# A pin whose build fails (missing headers, upstream breakage) must not have cost the kernel its module:
+# the other versions are removed only after the new pin has built.
+BROKENSRC=/tmp/broken-src
+rm -rf $BROKENSRC
+git clone -q /src $BROKENSRC
+git -C $BROKENSRC -c advice.detachedHead=false checkout -q "$PIN"
+echo '$(error a pin that does not build, made by the converge test)' >> $BROKENSRC/Kbuild
+git -C $BROKENSRC -c user.name=converge -c user.email=converge@example.invalid commit -q -am "test: a pin that does not build"
+BPIN=$(git -C $BROKENSRC rev-parse HEAD)
+BV="1.0+${BPIN:0:7}"
+if run broken-pin -e pve_ec_fan_enabled=true -e pve_ec_fan_repo_url=$BROKENSRC -e pve_ec_fan_commit=$BPIN; then
+  bad "a pin that does not build did not fail the play"
+else
+  ok "a pin that does not build fails the play"
+fi
+eq "broken pin: it failed at the build" "TASK [pve_ec_fan : Build the module for the target kernel]" \
+  "$(grep -E '^TASK' /tmp/run-broken-pin.log | tail -1 | sed 's/ \**$//')"
+eq "broken pin: the previous pin is still installed" 1 "$(dkms status -m ec_su_axb35 -v "$V" -k $K | grep -c ': installed')"
+eq "broken pin: the previous pin's source is still there" present "$(exists /usr/src/ec_su_axb35-$V)"
+eq "broken pin: modprobe still resolves the DKMS build" /lib/modules/$K/updates/dkms/ec_su_axb35.ko.xz "$(modinfo -k $K -n ec_su_axb35)"
+run broken-pin-back -e pve_ec_fan_enabled=true || { bad "converge back to the pin failed"; show broken-pin-back; }
+eq "back on the pin: only the pin in DKMS" "ec_su_axb35/$V" "$(versions)"
+eq "back on the pin: the broken pin's source removed" absent "$(exists /usr/src/ec_su_axb35-$BV)"
+run broken-pin-back-again -e pve_ec_fan_enabled=true || bad "second converge back on the pin failed"
+eq "back on the pin: next run changed" 0 "$(changed)"
 
 # ---- kernel lockdown (Secure Boot) is refused before any change ----
 mount -t tmpfs none /sys/kernel/security

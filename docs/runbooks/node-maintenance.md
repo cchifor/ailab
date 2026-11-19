@@ -251,10 +251,12 @@ that curve for the two CPU fans and sets the APU power mode:
   40 % from 55, 60 % from 80, 80 % from 90, and 100 % from 95, with 5 C of hysteresis. Level 4 only
   engages from 90 C EC. With it and the quiet power mode, node1/node2 went from EC 85-92 C at level 4-5
   (4150-4790 rpm) to EC 67-69 C at level 2 (~2650 rpm), NVMe drives at 43-56 C.
-- **APU power mode:** the service writes `pve_ec_fan_power_mode` (default `quiet`; also `balanced`, the EC
-  default, or `performance`) to `apu/power_mode` on start, and puts `balanced` back on stop, so switching
-  the role off restores the firmware behaviour. `quiet` may cost the iGPU LLM servers some throughput (not
-  measured).
+- **APU power mode:** the service writes `pve_ec_fan_power_mode` (default `quiet`; also `balanced`, the
+  AXB35's factory EC default, or `performance`) to `apu/power_mode` on start, and sets `balanced` on stop
+  (it does not restore a mode that was set before the role). Measured on ai-node1 under CI load
+  (2026-11-19): `quiet` caps the APU at 54 W and costs ~16 % clock against `balanced` (82 W), for EC 73 C
+  instead of 86 C, fans at level 2 instead of 3, and ~6 dB less noise; `performance` gains nothing at this
+  load; the NVMe drives are unaffected (the table is in the role defaults).
 - **Converge on the live state:** each converge runs `ec-fan-profile check`, which reads the sysfs, and
   restarts the service when the fans are not on the profile. That covers a module reloaded under the
   active service, a start that failed at boot, and a value written by hand. The role fetches the driver
@@ -338,8 +340,9 @@ power mode to balanced). It also
 stops the metrics timer, unloads the module (which resets all three fans to auto), and removes the units,
 config, scripts, boot load and `ec_fan.prom`, so no alert keeps watching the host. The DKMS build stays;
 to purge it run `dkms remove ec_su_axb35/<version> --all && rm -rf /usr/src/ec_su_axb35-<version>`. For
-an immediate stop on the host, `systemctl stop ec-fan-profile` hands the fans and the power mode back to
-the firmware (`rmmod ec_su_axb35` resets the fans but leaves the power mode as it was), but the next
+an immediate stop on the host, `systemctl stop ec-fan-profile` hands the fans back to the firmware and
+sets the power mode to balanced, the factory EC default (`rmmod ec_su_axb35` resets the fans but leaves the
+power mode as it was), but the next
 converge or boot loads the module and the profile again until the role is switched off.
 
 **Kernel updates:** the kernel's postinst hook runs DKMS autoinstall, and a converge also builds for every
@@ -350,16 +353,18 @@ firmware curve (safe), and `ProxmoxEcFanDriverNotLoaded` fires. To fix it, insta
 an opt-in kernel series also needs that series' headers meta package in `pve_ec_fan_packages`.
 
 **A new driver pin:** review the new commit (every `ec_write()` in `src/ec_su_axb35.c`), then set the full
-SHA in `pve_ec_fan_commit`. The converge removes every other DKMS version first (DKMS will not install a
-module whose twin is already installed for the kernel), then builds the new version for every installed
-kernel that has its headers. If the loaded module's srcversion then differs, the role
+SHA in `pve_ec_fan_commit`. The converge builds the new version first; only when that build succeeds does
+it remove every other DKMS version (DKMS will not install a module whose twin is still installed for the
+kernel) and install the new one, so a failed build leaves the previous module installed for the next boot.
+It also builds the new version for every other installed kernel that has its headers. If the loaded
+module's srcversion then differs, the role
 reloads it, so the fans are on auto for a moment. Before converging a new pin, run the Docker converge
 harness against it: `bash ansible/roles/pve_ec_fan/tests/test-converge-docker.sh`. It builds the module
 against the Proxmox headers, with systemd as PID 1 and a fake sysfs. It covers apply (the profile runs
 once), idempotence, `--check`, a converge without the network, a second installed kernel, a curve change
 next to a failing build for another kernel, a dropped fan, recovery after a module reload, the APU power
 mode, refusals, disable (also after an apply that stopped part-way), re-pin, another DKMS version already
-installed, and the lockdown refusal.
+installed, a new pin that does not build (the installed module stays), and the lockdown refusal.
 
 **Caveat:** the curve runs in the driver, not in the EC. If the host kernel hangs, the EC keeps the last
 level it was given. A clean shutdown or reboot stops `ec-fan-profile` first, so the fans are back on auto

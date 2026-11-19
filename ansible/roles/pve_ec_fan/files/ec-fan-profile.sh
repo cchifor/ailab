@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ec-fan-profile -- put the CPU fans of a Bosgame M5 (ec_su_axb35 driver) on a temperature curve and the
-# APU in the configured power mode, or hand both back to the EC firmware. Deployed by the pve_ec_fan role as
-# /usr/local/sbin/ec-fan-profile and run by ec-fan-profile.service:
+# APU in the configured power mode, or hand the fans back to the EC firmware and set the power mode to
+# balanced, the factory EC default. Deployed by the pve_ec_fan role as /usr/local/sbin/ec-fan-profile and run
+# by ec-fan-profile.service:
 #
 #   apply   for each configured fan: write the rampup and rampdown curves, read them back, then set the
 #           mode to curve. Curves first, because switching to curve picks the starting level from the
@@ -10,10 +11,10 @@
 #           config, so it cannot be relied on for that). Then write the APU power mode. From then on the
 #           driver's 1 s worker moves the level with the EC temperature, so this runs once per module load
 #           (ExecStart).
-#   reset   set both CPU fans back to auto, the EC's own curve, and the APU power mode back to balanced,
-#           the EC default, whatever the config says (ExecStop: stopping or disabling the service hands
-#           both back to the firmware; a broken config must not keep them on the profile). Nothing to do
-#           when the module is not loaded.
+#   reset   set both CPU fans back to auto, the EC's own curve, and the APU power mode to balanced, the
+#           AXB35's factory EC default, whatever the config says (ExecStop: stopping or disabling the
+#           service; a broken config must not keep them on the profile). It sets balanced; it does not
+#           restore a mode that was set before the role. Nothing to do when the module is not loaded.
 #   check   compare the live state with the config without writing anything: exit 0 when every
 #           configured fan is in curve mode with the configured curves, every other CPU fan is in auto and
 #           the power mode is the configured one; 3 (and the differences on stdout) when not; 1 on a bad
@@ -40,7 +41,7 @@ RAMPDOWN="${EC_FAN_RAMPDOWN_CURVE:-}"
 POWER_MODE="${EC_FAN_POWER_MODE:-}"
 WAIT_S="${EC_FAN_WAIT_S:-10}"
 CPU_FANS="1 2"
-EC_DEFAULT_POWER_MODE=balanced
+EC_DEFAULT_POWER_MODE=balanced # what reset sets: the factory EC default, not a record of the previous mode
 
 log() { echo "ec-fan-profile: $*"; }
 die() {

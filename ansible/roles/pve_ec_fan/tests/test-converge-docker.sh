@@ -8,7 +8,8 @@
 # recovery after a module reload under the active service; the APU power mode (applied on start, changed by a
 # converge, balanced again on stop, a bad one refused); refused profiles; disable after an apply that stopped
 # part-way, and re-enable; a re-pin; an edited checkout; another DKMS version of the same source already
-# installed (the upstream install script's); and the Secure Boot lockdown refusal.
+# installed (the upstream install script's); a new pin that does not build (the installed module stays); and
+# the Secure Boot lockdown refusal.
 # The container runs another kernel, so nothing is loaded: the srcversion reload and the live load only run
 # on a host.
 #

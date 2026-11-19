@@ -63,11 +63,19 @@ pve_ec_fan_rampup_curve: [40, 55, 80, 90, 95]
 pve_ec_fan_rampdown_curve: [35, 50, 75, 85, 90]
 
 # ---- the APU power mode ----
-# The EC's APU power profile (apu/power_mode): quiet, balanced (the EC default, what the BIOS sets) or
+# The EC's APU power profile (apu/power_mode): quiet, balanced (the AXB35's factory EC default) or
 # performance. quiet is the lowest, so the APU makes less heat and the curve stays on its low levels; it is
-# half of the 2026-11-19 quiet setup above. It may cost the iGPU LLM servers some throughput (not measured).
-# ec-fan-profile writes it on start and puts balanced back on stop, so switching the role off restores the
-# firmware behaviour.
+# half of the 2026-11-19 quiet setup above. Measured on ai-node1 under real CI load that evening, with the
+# quiet curve, 2-minute windows:
+#   quiet        54 W (capped)        3850 MHz avg at 43 % busy   EC 73 C   level 2 / 2650 rpm   NVMe 55 C
+#   balanced     82 W                 4570 MHz avg at 32 % busy   EC 86 C   level 3 / 3490 rpm   NVMe 55 C
+#   performance  74 W (cap not hit)   4550 MHz avg at 27 % busy   EC 82 C   level 3 / 3490 rpm   NVMe 52 C
+# So quiet costs ~16 % clock under load; performance gains nothing at this load (CI stays under balanced's
+# limit); quiet is ~6 dB quieter than balanced and ~10 dB quieter than the old 35/50/60/68/95 curve; the
+# drives are unaffected in every mode. Caveat: the load fell during the run (43 % to 27 % busy), which
+# flatters the later modes.
+# ec-fan-profile writes it on start and sets balanced, the factory EC default, on stop. Stopping does not
+# restore a mode that was set before the role (on these hosts that was balanced too).
 pve_ec_fan_power_mode: quiet
 
 # ---- paths ----

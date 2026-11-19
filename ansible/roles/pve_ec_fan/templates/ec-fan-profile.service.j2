@@ -1,6 +1,7 @@
 # Managed by ansible (role: pve_ec_fan). Puts the CPU fans on the curve, and the APU in the power mode, in
 # {{ pve_ec_fan_config }} once the ec_su_axb35 module is loaded; the driver then follows the EC temperature on
-# its own. Stopping or disabling this unit hands both back to the EC firmware (fans auto, power mode balanced).
+# its own. Stopping or disabling this unit hands the fans back to the EC firmware (auto) and sets the power
+# mode to balanced, the factory EC default.
 [Unit]
 Description=EC fan curve for the CPU fans (ec_su_axb35)
 # modules-load.d loads the driver; the script still waits a few seconds for its sysfs dirs.
