@@ -30,5 +30,8 @@ pve_grub_cmdline_linux_default: "quiet thunderbolt.host_reset=false pcie_aspm=of
 # reads rare; k8s CSI is a separate Talos path). See docs/network-plan.md. A QNAP-side TX fix is being
 # researched separately.
 
-# pve_ec_fan (EC fan curve) stays OFF here: this host boots with Secure Boot on, which refuses the unsigned
-# ec_su_axb35 module. Disable Secure Boot first (docs/runbooks/node-maintenance.md "EC fan curve").
+# EC fan driver + CPU-fan curve (role pve_ec_fan; docs/runbooks/node-maintenance.md "EC fan curve"), the
+# same curve as ai-node1/2 (the role defaults). Secure Boot disabled here 2026-11-19 (mokutil: disabled,
+# lockdown [none]), which the unsigned ec_su_axb35 module needs. All three fans verified controllable on this
+# host the same day (fan1/fan2 ~1,500 rpm at 20% and ~4,750 at 100%; fan3 541 / 2,450 rpm, left on the EC curve).
+pve_ec_fan_enabled: true
