@@ -115,6 +115,8 @@ CHART_RELEASE = "relay-infrastructure-agent"
 # declaration of the installation's timing, replaces it.
 PREPARED_LEADERSHIP = {"leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2}
 # 30/20/2: a 20 s renew deadline rides out an etcd leader stall like the 8-10 s one of 2026-11-18 03:53Z.
+# Timing-only rollback (installation runbook, "Lease timing (T1, 30/20/2)"): set this to PREPARED_LEADERSHIP's
+# values and re-import; the tests hold in that state too.
 LEADERSHIP_OVERLAY = {"leaseDurationSeconds": 30, "renewDeadlineSeconds": 20, "retryPeriodSeconds": 2}
 # The two prepared documents that carry the timing; the values add allowStandby (false: one replica).
 PREPARED_TIMING = {"31-agent-config.json": PREPARED_LEADERSHIP,

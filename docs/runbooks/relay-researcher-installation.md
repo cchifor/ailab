@@ -833,14 +833,24 @@ operations stay reserved and are reconciled.
      `lease_renewal_failed` whose write never reached the transport;
    - the slot as before the merge.
 
-**Rollback.** Revert the PR, under step 1's conditions. This reverts the timing and the v0.10.8 pin
-together: `agent/config.json` returns to its previous bytes (Relay's 15/10/2), `agentImage` to v0.10.7
-`e72eb7d5…5e98`, and the agent rolls once more (Recreate). To roll back only one of them, revert with a
-follow-up PR instead (the agent-only update procedure for the image, the overlay's order below for the
-timing). That restarted process waits the 30 s the old record carries,
-so this one takeover is as slow as a T1 one; later ones are back to 22-31 s. Readbacks as above, with
-`15` and `{"leaseDurationSeconds":15,"renewDeadlineSeconds":10,"retryPeriodSeconds":2}`. Run the
-committed-state tests and the reproduction on the revert, as for any change to these files (I5).
+**Rollback** (under step 1's conditions; the operator merges the rollback PR).
+- **Timing (the rollback the triggers below call for).** One PR that sets `LEADERSHIP_OVERLAY` in
+  `scripts/relay-researcher-bundle.py` back to `PREPARED_LEADERSHIP`'s 15/10/2 and re-imports in the
+  order below. Only `agent/config.json` `leadership` changes, back to Relay's 15/10/2. The restart alert
+  `RelayInfrastructureAgentRestarted`, the v0.10.8 agent, the pin tool's overlay guard and the audits
+  all stay, so the window in which the triggers are judged keeps its alert. The committed-state tests
+  pass with the overlay set to 15/10/2, and the import writes exactly those bytes. The agent rolls once
+  (Recreate). That restarted process waits the 30 s the old record carries, so this one takeover is as
+  slow as a T1 one; later ones are back to 22-31 s. Readbacks as above, with `15` and
+  `{"leaseDurationSeconds":15,"renewDeadlineSeconds":10,"retryPeriodSeconds":2}`, and `imageID` still
+  v0.10.8's.
+- **The agent image, if v0.10.8 itself is at fault.** The agent-only update procedure back to v0.10.7
+  (`e72eb7d5…5e98`), with the pin tool's `--allow-downgrade`; the timing stays.
+- **Reverting this whole PR** is the last resort. It rolls back the timing and the pin together, and it
+  also removes the restart alert, the overlay machinery and these audits: re-land the alert at once
+  (`kubernetes/apps/relay-researcher/agent/relay-researcher-rules.yaml` and its promtool tests).
+
+Run the committed-state tests and the reproduction on any of these, as for any change to these files (I5).
 
 **Order for a timing change.** `check` compares the committed config with the overlaid bundle. So when
 the overlay itself changes (introducing T1, or reverting it), run `prepare` → `import --chart` →
@@ -859,7 +869,7 @@ an agent-only update, the I5 order (`check` before `import`) still works.
 **After the rollout.** The readbacks above, plus: the Lease shows exactly one transition, and the fence
 UID is unchanged. Hold other changes for 4 h with zero unexpected losses.
 
-**Rollback triggers** (revert the overlay through GitOps; keep the identity and the fence):
+**Rollback triggers** (the timing-only rollback above, through GitOps; keep the identity and the fence):
 - `lease-taken` or `lease-holder-reused`;
 - a hub epoch conflict or any stale-epoch admission (halt immediately);
 - a config or provenance mismatch;

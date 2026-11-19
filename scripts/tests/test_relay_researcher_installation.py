@@ -48,6 +48,13 @@ UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 # allowStandby false) 30-agent-values.json: it takes no timing input. The bundle tool's leadership
 # overlay replaces it; the synthetic bundles below carry it as the tool does.
 PREPARED_TIMING = {"leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2}
+
+
+def other_timing(overlay: dict) -> dict:
+    """A valid timing that is not the overlay: the prepared one, unless the overlay is set back to it
+    (the runbook's timing-only rollback), then T1's 30/20/2."""
+    return dict(PREPARED_TIMING) if overlay != PREPARED_TIMING else \
+        {"leaseDurationSeconds": 30, "renewDeadlineSeconds": 20, "retryPeriodSeconds": 2}
 LABELS = {
     "app.kubernetes.io/name": "relay-infrastructure-agent",
     "app.kubernetes.io/instance": "relay-infrastructure-agent",
@@ -1056,6 +1063,7 @@ class BundleCheck(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, tmp, True)
         shutil.copytree(TREE, tmp / "tree")
+        self.addCleanup(setattr, module, "TREE", module.TREE)
         module.TREE = tmp / "tree"
         return tmp / "tree"
 
@@ -1075,7 +1083,9 @@ class BundleCheck(unittest.TestCase):
         self.assertEqual(b.PREPARED_LEADERSHIP, PREPARED_TIMING)
         self.assertEqual(config["leadership"], PREPARED_TIMING)
         # Exactly the three values change, in the config and in the chart values (allowStandby stays false).
-        self.assertNotEqual(b.LEADERSHIP_OVERLAY, PREPARED_TIMING)
+        # Any valid timing, the prepared one included: setting the overlay back to 15/10/2 is the
+        # runbook's timing-only rollback, which keeps the restart alert and the rest of T1.
+        self.assertEqual(b.validate_timing(dict(b.LEADERSHIP_OVERLAY), "LEADERSHIP_OVERLAY"), b.LEADERSHIP_OVERLAY)
         self.assertEqual(b.with_leadership(config, "31-agent-config.json"), {**config, "leadership": b.LEADERSHIP_OVERLAY})
         if campaign() is None:
             self.assertEqual(b.committed_config(config), {**config, "leadership": b.LEADERSHIP_OVERLAY})
@@ -1102,6 +1112,8 @@ class BundleCheck(unittest.TestCase):
             "values standby 0": (values, lambda l: l.update(allowStandby=0)),
             "values missing standby": (values, lambda l: l.pop("allowStandby")),
         }
+        if overlay == PREPARED_TIMING:  # timing-only rollback: an overlaid bundle is the prepared one
+            del cases["config already overlaid"], cases["values already overlaid"]
         for name, (target, mutate) in cases.items():
             with self.subTest(name):
                 self.run_check(self.make_bundle(lambda f, t=target, m=mutate: m(f[t]["leadership"])),
@@ -1155,9 +1167,12 @@ class BundleCheck(unittest.TestCase):
             self.skipTest("the committed tree runs a campaign: the campaign case below covers it")
         # Re-import of the committed state: byte-stable, and the committed bytes.
         self.assertEqual(self.import_twice(module, bundle), [committed, committed])
-        # From the preparation's timing (before the overlay landed): check refuses, import writes exactly
-        # the overlay's three values (nothing else), and a re-import keeps them.
-        (tree / "agent/config.json").write_bytes((bundle / "31-agent-config.json").read_bytes())
+        # From another timing (the preparation's before the overlay landed; T1's after a timing-only
+        # rollback): check refuses, import writes exactly the overlay's three values (nothing else), and a
+        # re-import keeps them.
+        start = {**prepared, "leadership": other_timing(module.LEADERSHIP_OVERLAY)}
+        (tree / "agent/config.json").write_text(json.dumps(start, sort_keys=True, separators=(",", ":")) + "\n",
+                                                 encoding="utf-8")
         code, err = self.run_main(module, ["check", bundle])
         self.assertEqual(code, 1)
         self.assertIn("agent/config.json leadership = ", err)

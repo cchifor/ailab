@@ -348,7 +348,11 @@ class AgentPin(unittest.TestCase):
 
         def body(**changes):
             return (json.dumps({**config, **changes}, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        committed, prepared = installation[pin.CONFIG], body(leadership=module.PREPARED_LEADERSHIP)
+        # A valid timing that is not the overlay: the preparation's, unless the overlay is set back to it
+        # (the installation runbook's timing-only rollback), then T1's 30/20/2.
+        other = (module.PREPARED_LEADERSHIP if self.leadership != module.PREPARED_LEADERSHIP
+                 else {"leaseDurationSeconds": 30, "renewDeadlineSeconds": 20, "retryPeriodSeconds": 2})
+        committed, prepared = installation[pin.CONFIG], body(leadership=other)
         floats = body(leadership={k: float(v) for k, v in self.leadership.items()})
         cases = {  # config.json before and after the import
             "the overlay newly imported": (prepared, committed, "import changed"),
