@@ -51,5 +51,12 @@ pve_base_writeback_sysctl:
 # controller off at once. Runbook: docs/runbooks/node-maintenance.md "iocost".
 pve_base_iocost_enabled: false
 pve_base_iocost_device: nvme0n1
+# QoS latency targets. The kernel's auto QoS for this drive sets NONE (rpct=0 wpct=0): iocost then counts the NVMe as
+# saturated only when requests wait for hardware tags, which barely happens, and the auto linear model credits this
+# worn QLC with ~428 MB/s of writes it cannot sustain. So the weights would never apply (node3 canary: vrate 141%).
+# With targets, a p95 read latency over rlat or write latency over wlat (microseconds) lowers the device's overall
+# issue rate (vrate), and only then do the weights below give the etcd VM its share first. min=25: other cgroups
+# keep at least 25% of the model's capacity even while throttled. A starting point; tune from io.stat cost.vrate.
+pve_base_iocost_qos: "rpct=95 rlat=10000 wpct=95 wlat=30000 min=25 max=10000"
 # VM id -> io.weight (1-10000) for that VM's qemu.slice scope. Set per host in host_vars.
 pve_base_iocost_vm_weights: {}

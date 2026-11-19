@@ -231,7 +231,10 @@
     enabled: true
     state: "{{ 'restarted' if (pve_base_iocost_unit is changed) else 'started' }}"
     daemon_reload: true
-  when: pve_base_iocost_enabled | bool
+  # A --check of a first install has no unit file on disk yet (the template task only previewed it).
+  when:
+    - pve_base_iocost_enabled | bool
+    - not (ansible_check_mode and (pve_base_iocost_unit is changed))
   tags: [iocost]
 
 - name: Look for the iocost unit

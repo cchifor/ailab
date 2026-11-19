@@ -43,6 +43,21 @@ class Helper(unittest.TestCase):
         self.assertEqual((self.cgroup / 'io.cost.model').read_text(), '259:0 ctrl=auto\n')
         self.assertEqual((self.cgroup / 'io.cost.qos').read_text(), '259:0 enable=1 ctrl=auto\n')
 
+    def test_enable_with_qos_targets_sets_user_qos(self):
+        r = self.run_helper('enable', 'nvme0n1', 'rpct=95 rlat=10000 wpct=95 wlat=30000 min=25 max=10000')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.cgroup / 'io.cost.model').read_text(), '259:0 ctrl=auto\n')
+        self.assertEqual((self.cgroup / 'io.cost.qos').read_text(),
+                         '259:0 enable=1 ctrl=user rpct=95 rlat=10000 wpct=95 wlat=30000 min=25 max=10000\n')
+
+    def test_refuses_qos_parameters_that_are_not_key_value_words(self):
+        for qos in ('rpct=95;reboot', 'rlat=$(id)', 'RPCT=95', 'rpct=95\nwlat=1', 'min=25 `x`'):
+            with self.subTest(qos=qos):
+                r = self.run_helper('enable', 'nvme0n1', qos)
+                self.assertNotEqual(r.returncode, 0)
+                self.assertEqual((self.cgroup / 'io.cost.qos').read_text(), '')
+                self.assertEqual((self.cgroup / 'io.cost.model').read_text(), '')
+
     def test_disable_turns_qos_off_and_leaves_the_model(self):
         r = self.run_helper('disable', 'nvme0n1')
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -77,6 +92,12 @@ class RoleConfig(unittest.TestCase):
         self.assertIs(d['pve_base_iocost_enabled'], False)
         self.assertEqual(d['pve_base_iocost_device'], 'nvme0n1')
         self.assertEqual(d['pve_base_iocost_vm_weights'], {})
+        # The auto QoS sets no latency targets on this drive, so the weights would never apply: targets are required.
+        qos = dict(kv.split('=') for kv in d['pve_base_iocost_qos'].split())
+        self.assertEqual(set(qos), {'rpct', 'rlat', 'wpct', 'wlat', 'min', 'max'})
+        self.assertGreater(float(qos['rpct']), 0)
+        self.assertGreater(float(qos['wpct']), 0)
+        self.assertGreaterEqual(float(qos['min']), 25)
 
     def test_each_node_protects_exactly_its_own_control_plane_vm(self):
         for host, vm in CP_VMS.items():
@@ -87,8 +108,10 @@ class RoleConfig(unittest.TestCase):
 
     def test_unit_template_runs_the_helper_on_the_device(self):
         src = (ROLE / 'templates/ailab-iocost.service.j2').read_text()
-        out = jinja2.Template(src, undefined=jinja2.StrictUndefined).render(pve_base_iocost_device='nvme0n1')
-        self.assertIn('ExecStart=/usr/local/sbin/ailab-iocost enable nvme0n1', out)
+        out = jinja2.Template(src, undefined=jinja2.StrictUndefined).render(
+            pve_base_iocost_device='nvme0n1', pve_base_iocost_qos='rpct=95 rlat=10000 wpct=95 wlat=30000 min=25 max=10000')
+        self.assertIn('ExecStart=/usr/local/sbin/ailab-iocost enable nvme0n1 '
+                      '"rpct=95 rlat=10000 wpct=95 wlat=30000 min=25 max=10000"', out)
         self.assertIn('ExecStop=/usr/local/sbin/ailab-iocost disable nvme0n1', out)
         self.assertIn('RemainAfterExit=yes', out)
         self.assertIn('WantedBy=multi-user.target', out)

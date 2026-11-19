@@ -7,7 +7,7 @@ Before=pve-guests.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/ailab-iocost enable {{ pve_base_iocost_device }}
+ExecStart=/usr/local/sbin/ailab-iocost enable {{ pve_base_iocost_device }} "{{ pve_base_iocost_qos }}"
 ExecStop=/usr/local/sbin/ailab-iocost disable {{ pve_base_iocost_device }}
 
 [Install]
