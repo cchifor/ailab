@@ -1,0 +1,62 @@
+---
+# Turned off: stop the curve (its ExecStop sets the CPU fans back to auto), stop the metrics, unload the
+# module and remove what enabled.yml installed, the metrics file included, so no alert is left watching a
+# host that no longer reports. The DKMS build and its source stay installed (removing them is a manual
+# step: docs/runbooks/node-maintenance.md "EC fan curve"). Keyed on the profile unit, which is removed
+# last: a host that never had the role skips all of this.
+- name: Look for an installed EC fan profile
+  ansible.builtin.stat:
+    path: /etc/systemd/system/ec-fan-profile.service
+  register: pve_ec_fan_unit
+
+- name: Take down the curve, the metrics and the module
+  when: pve_ec_fan_unit.stat.exists
+  block:
+    # The timer first, then a run it may have started (static unit: stopped, not disabled), so no run
+    # rewrites the metrics file after it is removed below. A unit that is not there (an apply that stopped
+    # between installing the profile unit and the textfile units) is nothing to stop, and must not keep
+    # the teardown from reaching the unload and the file removal.
+    - name: Stop the textfile timer and its service, and the curve (stopping the curve sets the fans to auto)
+      ansible.builtin.systemd:
+        name: "{{ item.name }}"
+        state: stopped
+        enabled: "{{ item.enabled | default(omit) }}"
+      loop:
+        - { name: ec-fan-textfile.timer, enabled: false }
+        - { name: ec-fan-textfile.service }
+        - { name: ec-fan-profile.service, enabled: false }
+      loop_control:
+        label: "{{ item.name }}"
+      register: pve_ec_fan_stop
+      failed_when:
+        - pve_ec_fan_stop is failed
+        - "'Could not find the requested service' not in (pve_ec_fan_stop.msg | default(''))"
+
+    - name: Look for the loaded module
+      ansible.builtin.stat:
+        path: /sys/module/ec_su_axb35
+      register: pve_ec_fan_module
+
+    - name: Unload the module (unloading sets every fan to auto)
+      community.general.modprobe:
+        name: ec_su_axb35
+        state: absent
+      when: pve_ec_fan_module.stat.exists
+
+    - name: Remove the metrics file, the boot load, the config, the scripts and the units
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ pve_ec_fan_textfile_dir }}/ec_fan.prom"
+        - /etc/modules-load.d/ec_su_axb35.conf
+        - "{{ pve_ec_fan_config }}"
+        - /usr/local/sbin/ec-fan-textfile
+        - /usr/local/sbin/ec-fan-profile
+        - /etc/systemd/system/ec-fan-textfile.timer
+        - /etc/systemd/system/ec-fan-textfile.service
+        - /etc/systemd/system/ec-fan-profile.service
+
+    - name: Reload systemd after removing the units
+      ansible.builtin.systemd:
+        daemon_reload: true

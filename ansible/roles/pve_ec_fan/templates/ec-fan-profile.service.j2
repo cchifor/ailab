@@ -1,0 +1,17 @@
+# Managed by ansible (role: pve_ec_fan). Puts the CPU fans on the curve in {{ pve_ec_fan_config }} once the
+# ec_su_axb35 module is loaded; the driver then follows the EC temperature on its own. Stopping or
+# disabling this unit hands the fans back to the EC firmware (auto).
+[Unit]
+Description=EC fan curve for the CPU fans (ec_su_axb35)
+# modules-load.d loads the driver; the script still waits a few seconds for its sysfs dirs.
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile={{ pve_ec_fan_config }}
+ExecStart=/usr/local/sbin/ec-fan-profile apply
+ExecStop=/usr/local/sbin/ec-fan-profile reset
+
+[Install]
+WantedBy=multi-user.target

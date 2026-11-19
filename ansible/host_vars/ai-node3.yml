@@ -29,3 +29,6 @@ pve_grub_cmdline_linux_default: "quiet thunderbolt.host_reset=false pcie_aspm=of
 # is nconnect on the qnap-nfs mount (cluster-wide remount). Impact is low (writes full 10G; host NFS
 # reads rare; k8s CSI is a separate Talos path). See docs/network-plan.md. A QNAP-side TX fix is being
 # researched separately.
+
+# pve_ec_fan (EC fan curve) stays OFF here: this host boots with Secure Boot on, which refuses the unsigned
+# ec_su_axb35 module. Disable Secure Boot first (docs/runbooks/node-maintenance.md "EC fan curve").
