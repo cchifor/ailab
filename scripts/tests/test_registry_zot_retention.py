@@ -629,6 +629,10 @@ def _load_apply_helper():
     return mod
 
 
+# The shipped deleteReferrers list: the strive/web canary plus batch B1 (2026-11-19). One place to update per batch.
+_DEFAULT_REFERRER_REPOS = ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"]
+
+
 class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
     """deleteReferrers drops orphaned buildx attestation referrers (subject already deleted) without changing
     which TAGS are kept: the canary policy is strive/**'s exact rules plus deleteReferrers, between
@@ -636,11 +640,11 @@ class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
 
     def test_default_is_the_canary_plus_batch_b1(self):
         # Widening in batches (2026-11-19): strive/web (canary) + B1. B2-B4 follow, then ["strive/**"].
-        self.assertEqual(_load_defaults()[_CANARY_KNOB], ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"])
+        self.assertEqual(_load_defaults()[_CANARY_KNOB], _DEFAULT_REFERRER_REPOS)
 
     def test_canary_sits_between_ci_build_and_strive(self):
         repos = [p["repositories"] for p in _policies()]
-        self.assertEqual(repos[:3], [[_CI_BUILD_REPOS], ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"], ["strive/**"]])
+        self.assertEqual(repos[:3], [[_CI_BUILD_REPOS], _DEFAULT_REFERRER_REPOS, ["strive/**"]])
 
     def test_canary_keeps_exactly_what_strive_keeps(self):
         canary = _first_retention_policy(_policies(), "strive/web")
@@ -658,7 +662,7 @@ class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
 
     def test_first_match_routing(self):
         pols = _policies()
-        expected = {"strive/web": ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"], "strive/e2e-runner": ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"],
+        expected = {"strive/web": _DEFAULT_REFERRER_REPOS, "strive/e2e-runner": _DEFAULT_REFERRER_REPOS,
                     "strive/profile": ["strive/**"],
                     "strive/webx": ["strive/**"], "strive/ci-build/a": [_CI_BUILD_REPOS],
                     "strive/platform-api": ["strive/**"], "agentforge/orchestrator": ["agentforge/**"],
