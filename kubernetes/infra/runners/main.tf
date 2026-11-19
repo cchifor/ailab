@@ -39,6 +39,12 @@ resource "proxmox_virtual_environment_vm" "runner" {
   }
   stop_on_destroy = true
 
+  # Never reboot a runner from `tofu apply` (bpg's default is true). A disk cache change is pending until
+  # a full stop/start, and an apply that changes every runner's disk would otherwise bounce all of them
+  # at once, killing their jobs. Apply, then drain and restart each runner by hand
+  # (docs/runbooks/ci-runners.md, "Disk cache mode").
+  reboot_after_update = false
+
   cpu {
     cores = var.runner_cores
     type  = "host" # homogeneous CPUs; no live migration (runners are rebuildable)
@@ -64,6 +70,14 @@ resource "proxmox_virtual_environment_vm" "runner" {
     size         = var.runner_rootfs_gb # cloud-init growpart expands the root fs to fill this
     iothread     = true
     discard      = "on"
+
+    # Host cache mode (var.runner_disk_cache; owner decision 2026-11-19, ADR 0042). "unsafe": QEMU
+    # acknowledges the guest's flushes without passing them down, so a runner's fsyncs (test databases,
+    # docker, builds) stop being device-wide FLUSH commands on the NVMe it shares with its node's etcd
+    # member. A HOST crash can lose a runner's recent writes. Accepted because runner disks hold rebuildable
+    # data and no power loss is assumed. QEMU applies a cache change only on a full stop/start
+    # (reboot_after_update above).
+    cache = var.runner_disk_cache
 
     # Optional write cap (runner_nodes[*].disk_write_mibps / disk_write_iops; D1 2026-11-17, see
     # variables.tf). Rendered only when a cap is set, so uncapped runners keep a bare drive line.

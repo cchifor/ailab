@@ -705,6 +705,32 @@ cloudlab, wait > 2 h, `DELETE /api/v1/orgs/cchifor/actions/runners/<id>` (else i
 as `ci-runner-8` did), drop its Endpoints address + IPAM row. The tier: all of the above ×N, remove
 `ci-runners-cloud*.yaml`, the inventory group and playbook, release the IPs.
 
+## Disk cache mode (`cache=unsafe`, ADR 0042)
+
+The on-prem runner root disks run `cache=unsafe` (`var.runner_disk_cache` in `kubernetes/infra/runners`). So do the two
+reviewer VMs, which are out-of-band. QEMU acknowledges the guest's flushes without passing them down, so CI fsyncs stop
+being device FLUSHes on the NVMe the node's etcd member uses. The trade-off: a **host** crash can lose a runner's recent
+writes. Runner disks are rebuildable, and no power loss is assumed.
+
+**Applying a cache change.** QEMU takes it only on a full stop/start, and `reboot_after_update = false` keeps
+`tofu apply` from bouncing every runner at once. So apply, then for **one runner at a time**:
+1. Pause it in Gitea (Disable runner; or the operator's one-shot-token script). Wait until it has no running task.
+2. On its host, run `qm shutdown <vmid> --timeout 300`, then `qm start <vmid>`. A PVE stop/start applies pending
+   changes; an in-guest reboot does not.
+3. Verify that `qm config <vmid> | grep scsi0` shows `cache=unsafe` and that `qm pending <vmid>` has no pending
+   `scsi0`. Then check from the guest that `/` is mounted and the runner service is active.
+4. Resume it in Gitea.
+
+**Reviewers** (4501 reviewer-1 and 4502 reviewer-2, on ai-node3; not in tofu): run
+`qm set <vmid> --scsi0 <its current scsi0 line>,cache=unsafe`, then the same stop/start while it has no review
+running. Copy the current line from `qm config <vmid>`, so nothing else on it changes.
+
+**After a host crash:** a runner whose filesystem shows errors (`dmesg`, `tune2fs -l` "FS Error count") is
+**rebuilt** (tofu plus the gitea_runner role), not repaired.
+
+**Rollback:** set `runner_disk_cache = "none"` (and `cache=none` on the reviewers), then the same drained
+stop/start for each.
+
 ## Day-2
 - **Runner version bump:** set `github_runner_version` (role defaults) → `just runners` (re-extracts;
   the agent also auto-updates on connect).

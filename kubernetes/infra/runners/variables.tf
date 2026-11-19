@@ -113,6 +113,16 @@ variable "runner_memory_floating_mib" {
   type        = number
   default     = 10240 # 10 GiB balloon floor = runner-service MemoryMax cap; was 12288 — see cchifor/platform#620
 }
+variable "runner_disk_cache" {
+  description = "Proxmox/QEMU cache mode for the runner root disks. \"unsafe\" drops guest flushes (ADR 0042); \"none\" is the old O_DIRECT behaviour with flushes passed through."
+  type        = string
+  default     = "unsafe"
+  validation {
+    condition     = contains(["none", "writethrough", "writeback", "directsync", "unsafe"], var.runner_disk_cache)
+    error_message = "runner_disk_cache must be one of none, writethrough, writeback, directsync, unsafe."
+  }
+}
+
 variable "runner_rootfs_gb" {
   description = <<-EOT
     Runner root disk (GB). 250 since 2026-11-17; 200 from 2026-08-12; 120 before.
@@ -258,6 +268,11 @@ variable "runner_nodes" {
     # and lifecycle.ignore_changes=[initialization] makes editing `ip` here DOCUMENTATION ONLY — the live
     # IPs were changed in-guest via netplan (see docs/runbooks/ci-runners.md).
     #
+    # 2026-11-19 (owner): ALL on-prem runners at 60 MiB/s, no IOPS cap, together with cache=unsafe
+    # (var.runner_disk_cache, ADR 0042). At 30 MiB/s, Postgres-heavy suites died on these runners
+    # (workbricks verify: 14/32 failed on node2 and 3/14 on node1 over 48 h, against 0/37 at 60 MiB/s on node3).
+    # Most of the I/O those suites need is fsync, which cache=unsafe takes off the drive. The cap stays
+    # as the host-memory guard: it bounds how fast a runner can dirty host page cache. History below.
     # DISK WRITE CAPS (D1, owner-delegated 2026-11-17): 30 MiB/s, burstable 30, 1000 write IOPS,
     # burstable 1000, on the six ai-node1/ai-node2 runners: ci-runner-1, -4, -9 (ai-node1) and
     # ci-runner-2, -5, -10 (ai-node2). ci-runner-3 and ci-runner-6 (ai-node3) are NOT capped.
@@ -272,14 +287,14 @@ variable "runner_nodes" {
     # `- speed { ... } -> null` on that runner, and the apply clears it live (QEMU's
     # block_set_io_throttle; no restart, as when relay-worker-1's throttle was removed in #1706).
     # Do NOT set 0 to remove one: the validation above rejects it.
-    "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1", memory_floating_mib = 14336, disk_write_mibps = 30, disk_write_iops = 1000 } # floor: see ci-runner-4
+    "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1", memory_floating_mib = 14336, disk_write_mibps = 60 } # floor: see ci-runner-4
     # Cost of 30 MiB/s (why D1c, #1838, raised node2 to 45 at ~19:45Z on 2026-11-17): a workbricks stack Postgres on
     # ci-runner-5 crashed into recovery (io pressure full avg10 85%, no OOM), cold workbricks jobs spend 8-14 min
     # writing, and I/O-heavy suites time out (relay release/holder tests, 21 suite timeouts on ci-runner-10).
     # Rolled back to 30 at 20:29Z (#1840) by the D1d rule "any cp2 minute with etcd WAL fsync p99 > 1 s -> node2 back
     # to 30": cp2 hit 4.46 s at 20:27Z (node2 NVMe 79% busy). Raise again only after a clean night, one node at a
     # time, in daytime, comparing cp2 stall-minutes against node2 job failures.
-    "ci-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "ci-runner-2", disk_write_mibps = 30, disk_write_iops = 1000 } # write cap: D1, above ci-runner-1
+    "ci-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "ci-runner-2", disk_write_mibps = 60 } # write cap: D1, above ci-runner-1
     # D1d rule (2026-11-17 23:08Z): node3 runners capped at 60 MiB/s (no IOPS cap) after cp3 -- the etcd LEADER --
     # hit a 1-min WAL fsync p99 of 0.51 s while these two uncapped runners burst to 109-220 MiB/s; that night the
     # node1 runners were paused in Gitea (cp1 degraded), so CI load shifted here. node3 has the healthiest NVMe
@@ -297,8 +312,8 @@ variable "runner_nodes" {
     # Fleet-wide, workbricks' tenants stack lane failed ~30% of runs on runners under 11.4 GiB vs <1% above
     # (dev-worker-2, 179 runs since 11-14); r1's own sample was small (1 failure in 5 runs). All three
     # node1 runners now sit at 14 GiB. Check node1's free memory (`free -g` on the host) before raising more.
-    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336, disk_write_mibps = 30, disk_write_iops = 1000 } # write cap: D1, above ci-runner-1
-    "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5", disk_write_mibps = 30, disk_write_iops = 1000 }                              # write cap: D1, above ci-runner-1
+    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336, disk_write_mibps = 60 } # write cap: D1, above ci-runner-1
+    "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5", disk_write_mibps = 60 }                              # write cap: D1, above ci-runner-1
     "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6", disk_write_mibps = 60 }
     # ci-runner-7 (vm_id 4107, .29, ai-node3) RETIRED 2026-09-16 — removed from this map so the next
     # apply destroys it. Retired to free ai-node3 for a qwen3.8-27b-ailab instance: the VM held a
@@ -331,7 +346,7 @@ variable "runner_nodes" {
     # .30 returns to the free pool; docs/network-plan.md is the IPAM registry and records it.
     # ci-runner-9 MOVED ai-node2 -> ai-node1 on 2026-09-07 (offline qm migrate) to pull ~10 GiB off
     # ai-node2, which was floor-pinning its dev-workers. Placement here reflects the live estate.
-    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9", memory_floating_mib = 14336, disk_write_mibps = 30, disk_write_iops = 1000 } # floor: see ci-runner-4; write cap: D1, above ci-runner-1
-    "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10", disk_write_mibps = 30, disk_write_iops = 1000 }                             # write cap: D1, above ci-runner-1
+    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9", memory_floating_mib = 14336, disk_write_mibps = 60 } # floor: see ci-runner-4; write cap: D1, above ci-runner-1
+    "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10", disk_write_mibps = 60 }                             # write cap: D1, above ci-runner-1
   }
 }
