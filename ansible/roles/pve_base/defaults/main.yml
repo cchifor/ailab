@@ -30,3 +30,13 @@ pve_grub_cmdline_linux_default: "quiet"
 # pauses briefly. Roll out one host at a time: docs/runbooks/node-maintenance.md "Thin-pool zeroing".
 pve_thin_pool: pve/data
 pve_thin_pool_zero: true
+
+# Host writeback bounds (ADR 0042, 2026-11-19). The CI runner and reviewer disks run cache=unsafe, so their
+# writes land in this host's page cache and the kernel writes them back later. With the stock ratios
+# (dirty 20% / background 10% of available memory, ~20-25 GiB free here) a runner could build a multi-GiB
+# dirty backlog and flush it in one burst onto the NVMe that the node's etcd member shares. Absolute byte
+# limits keep writeback early and small. Setting *_bytes zeroes the matching *_ratio (the kernel keeps one
+# of each pair).
+pve_base_writeback_sysctl:
+  vm.dirty_background_bytes: 268435456 # 256 MiB: background writeback starts here
+  vm.dirty_bytes: 2147483648 # 2 GiB: writers are throttled above this
