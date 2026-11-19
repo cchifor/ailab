@@ -278,7 +278,11 @@ variable "runner_nodes" {
     # aggressive EC curve (ec_su_axb35 driver, Secure Boot off on node1) and its NVMe dropped from 78 C to
     # ~50 C; this morning's 4-8 s cp1 stalls came with the drive above its 86 C warning temperature. The host's
     # writeback bound (2 GiB dirty_bytes, pve_base) still limits how fast they can dirty page cache.
-    # 2026-11-19 (owner): ALL on-prem runners at 60 MiB/s, no IOPS cap, together with cache=unsafe
+    # This depends on the fan curve. The driver and the curve are managed by the pve_ec_fan role (#1869); until it is
+    # applied they are loaded by hand and a reboot loses them. Re-cap trigger: if node1 runs without the curve
+    # (driver not loaded or ec-fan-profile inactive; the role's EcFan* alerts), or its NVMe composite passes 70 C
+    # under load, put ci-runner-1/-4/-9 back to 60 MiB/s until the curve is back. The stall budget below applies too.
+    # 2026-11-19 (owner): ALL on-prem runners at 60 MiB/s (node1's are superseded by the entry above), no IOPS cap, with cache=unsafe
     # (var.runner_disk_cache, ADR 0042). At 30 MiB/s, Postgres-heavy suites died on these runners
     # (workbricks verify: 14/32 failed on node2 and 3/14 on node1 over 48 h, against 0/37 at 60 MiB/s on node3).
     # Most of the I/O those suites need is fsync, which cache=unsafe takes off the drive. The cap stays
@@ -328,7 +332,7 @@ variable "runner_nodes" {
     # Fleet-wide, workbricks' tenants stack lane failed ~30% of runs on runners under 11.4 GiB vs <1% above
     # (dev-worker-2, 179 runs since 11-14); r1's own sample was small (1 failure in 5 runs). All three
     # node1 runners now sit at 14 GiB. Check node1's free memory (`free -g` on the host) before raising more.
-    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336 } # write cap: D1, above ci-runner-1
+    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336 } # uncapped 2026-11-19, see the note above ci-runner-1
     "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5", disk_write_mibps = 60 }       # write cap: D1, above ci-runner-1
     "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6", disk_write_mibps = 60 }
     # ci-runner-7 (vm_id 4107, .29, ai-node3) RETIRED 2026-09-16 — removed from this map so the next
@@ -362,7 +366,7 @@ variable "runner_nodes" {
     # .30 returns to the free pool; docs/network-plan.md is the IPAM registry and records it.
     # ci-runner-9 MOVED ai-node2 -> ai-node1 on 2026-09-07 (offline qm migrate) to pull ~10 GiB off
     # ai-node2, which was floor-pinning its dev-workers. Placement here reflects the live estate.
-    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9", memory_floating_mib = 14336 } # floor: see ci-runner-4; write cap: D1, above ci-runner-1
+    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9", memory_floating_mib = 14336 } # floor: see ci-runner-4; uncapped 2026-11-19, see the note above ci-runner-1
     "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10", disk_write_mibps = 60 }      # write cap: D1, above ci-runner-1
   }
 }
