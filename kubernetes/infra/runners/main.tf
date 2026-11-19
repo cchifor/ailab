@@ -39,11 +39,13 @@ resource "proxmox_virtual_environment_vm" "runner" {
   }
   stop_on_destroy = true
 
-  # Never reboot a runner from `tofu apply` (bpg's default is true). A disk cache change is pending until
-  # a full stop/start, and an apply that changes every runner's disk would otherwise bounce all of them
-  # at once, killing their jobs. Apply, then drain and restart each runner by hand
-  # (docs/runbooks/ci-runners.md, "Disk cache mode").
-  reboot_after_update = false
+  # Never reboot a runner from `tofu apply` by default (bpg's own default is true). A disk cache change is
+  # pending until a full stop/start, and an apply that changes every runner's disk would otherwise bounce all
+  # of them at once, killing their jobs. This holds for EVERY later non-hotpluggable change too (CPU type,
+  # machine, BIOS, disk attributes): after each apply, check `qm pending <vmid>` on every runner and drain +
+  # restart the ones with pending config (docs/runbooks/ci-runners.md, "Disk cache mode"). For a planned
+  # window where bouncing is fine, apply with -var runner_reboot_after_update=true.
+  reboot_after_update = var.runner_reboot_after_update
 
   cpu {
     cores = var.runner_cores

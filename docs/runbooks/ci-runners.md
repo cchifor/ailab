@@ -715,8 +715,9 @@ writes. Runner disks are rebuildable, and no power loss is assumed.
 **Applying a cache change.** QEMU takes it only on a full stop/start, and `reboot_after_update = false` keeps
 `tofu apply` from bouncing every runner at once. So apply, then for **one runner at a time**:
 1. Pause it in Gitea (Disable runner; or the operator's one-shot-token script). Wait until it has no running task.
-2. On its host, run `qm shutdown <vmid> --timeout 300`, then `qm start <vmid>`. A PVE stop/start applies pending
-   changes; an in-guest reboot does not.
+2. On its host, run `qm shutdown <vmid> --timeout 300 --forceStop 1`, then `qm start <vmid>`. `--forceStop` stops a
+   guest that ignores ACPI (a hung docker or a stuck job) after the timeout; without it the VM would stay up on
+   the old cache mode. A PVE stop/start applies pending changes; an in-guest reboot does not.
 3. Verify that `qm config <vmid> | grep scsi0` shows `cache=unsafe` and that `qm pending <vmid>` has no pending
    `scsi0`. Then check from the guest that `/` is mounted and the runner service is active.
 4. Resume it in Gitea.
@@ -734,7 +735,13 @@ esac
 qm set <vmid> --scsi0 "$new"
 ```
 
-Repeating it is a no-op. Then do the same stop/start while the reviewer has no review running.
+Repeating it is a no-op. Check that `qm pending <vmid>` shows the new `scsi0` with `cache=unsafe`. Then do the same
+stop/start while the reviewer has no review running.
+
+**After every `tofu apply` in `kubernetes/infra/runners`:** `reboot_after_update` is false
+(`var.runner_reboot_after_update`), so any non-hotpluggable change stays pending. On each host, run
+`for v in <the node's runner vmids>; do qm pending $v | grep -q '^new' && echo "$v has pending config"; done`, then
+drain and stop/start the runners it lists.
 
 **After a host crash:** a runner whose filesystem shows errors (`dmesg`, `tune2fs -l` "FS Error count") is
 **rebuilt** (tofu plus the gitea_runner role), not repaired.

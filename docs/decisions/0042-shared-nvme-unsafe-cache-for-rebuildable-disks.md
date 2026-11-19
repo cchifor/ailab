@@ -75,7 +75,15 @@ The test Postgres dies when its fsyncs and writes are throttled. The throughput 
   - A runner whose filesystem shows errors after a host crash is rebuilt, not repaired.
 - **Wear.** node1's drive has ~36 TB of rated endurance left, roughly 12 days at the 2026-11-19 node-wide rate.
   - Most of that rate is dev workers and the registry, not CI.
-  - Passing 100% is not failure, but the risk rises. Watch `percentage_used` with `nvme smart-log`.
+  - Passing 100% is not failure, but the risk rises.
+  - **Trigger:** alert `AiNodeNvmeWearHigh` (`kubernetes/apps/infrastructure/monitoring/ci-runners-rules.yaml`) fires
+    when an ai-node drive's `nvme_percentage_used_ratio` reaches 0.95 for 1 h. **Action:** pause that node's CI runners
+    in Gitea, and tell the owner. CI is the one load that can move to another node.
+- **Stall budget** (replaces the D1d "cp2 > 1 s -> back to 30" rule, which no longer points at CI once runner fsyncs
+  stop reaching the drive). If a node's etcd member has **more than 30 minutes a day** with 1-min WAL fsync p99
+  > 0.5 s **on two consecutive days**, that node's runners go back to 30 MiB/s, and the owner is told. The baseline,
+  11-18/19 with caps and pauses, was 18 / 14 / 8 minutes a day. To check:
+  `sum by (instance) (count_over_time((histogram_quantile(0.99, sum by (instance,le) (rate(etcd_disk_wal_fsync_duration_seconds_bucket[1m]))) > 0.5)[24h:1m]))`.
 - **NVMe APST:** a separate change, trialled live on node3 from 2026-11-19 07:26Z.
 - **Rollback:** set `runner_disk_cache = "none"` (and replace `cache=unsafe` with `cache=none` on the reviewers), then
   restart each guest drained. To restore the caps, set the runner's `disk_write_*` fields back.

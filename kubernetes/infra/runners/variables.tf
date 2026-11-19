@@ -113,6 +113,12 @@ variable "runner_memory_floating_mib" {
   type        = number
   default     = 10240 # 10 GiB balloon floor = runner-service MemoryMax cap; was 12288 — see cchifor/platform#620
 }
+variable "runner_reboot_after_update" {
+  description = "Let bpg reboot a runner whose apply left non-hotpluggable config pending. false (default): changes stay pending until the runner is drained and stopped/started by hand (ADR 0042, docs/runbooks/ci-runners.md)."
+  type        = bool
+  default     = false
+}
+
 variable "runner_disk_cache" {
   description = "Proxmox/QEMU cache mode for the runner root disks. \"unsafe\" drops guest flushes (ADR 0042); \"none\" is the old O_DIRECT behaviour with flushes passed through."
   type        = string
@@ -272,7 +278,13 @@ variable "runner_nodes" {
     # (var.runner_disk_cache, ADR 0042). At 30 MiB/s, Postgres-heavy suites died on these runners
     # (workbricks verify: 14/32 failed on node2 and 3/14 on node1 over 48 h, against 0/37 at 60 MiB/s on node3).
     # Most of the I/O those suites need is fsync, which cache=unsafe takes off the drive. The cap stays
-    # as the host-memory guard: it bounds how fast a runner can dirty host page cache. History below.
+    # as the host-memory guard: it bounds how fast a runner can dirty host page cache.
+    # The D1d rollback rule below ("a cp2 minute > 1 s -> node2 back to 30") is RETIRED: with cache=unsafe the
+    # runners' fsyncs no longer reach the drive, so a single slow etcd minute no longer points at CI. It is
+    # REPLACED by a stall budget: if a node's etcd member has more than 30 minutes a day with 1-min WAL fsync
+    # p99 > 0.5 s on two consecutive days (11-18/19 baseline: 18 / 14 / 8 per day), that node's runners go back
+    # to 30 MiB/s and the owner is told. Wear trigger: alert AiNodeNvmeWearHigh (ci-runners-rules.yaml)
+    # pauses that node's runners in Gitea. Both rules are in ADR 0042. History below.
     # DISK WRITE CAPS (D1, owner-delegated 2026-11-17): 30 MiB/s, burstable 30, 1000 write IOPS,
     # burstable 1000, on the six ai-node1/ai-node2 runners: ci-runner-1, -4, -9 (ai-node1) and
     # ci-runner-2, -5, -10 (ai-node2). ci-runner-3 and ci-runner-6 (ai-node3) are NOT capped.

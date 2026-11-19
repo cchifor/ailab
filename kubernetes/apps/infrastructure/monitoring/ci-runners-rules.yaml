@@ -605,3 +605,17 @@ spec:
               of the last three nights: TRIM on the node's NVMe is much slower than the 30 s/GiB the slices
               are sized for, and the cursor is stuck there. Check the node's drive (wear, thermals, other
               discards at that hour) before raising gitea_runner_fstrim_sec_per_gb.
+        # ADR 0042 wear trigger. The ai-node drives are worn QLC NVMe that cannot be replaced (2026-11-19:
+        # 90% / 86% / 56% of rated endurance used). CI is the one load that can move to another node, so the
+        # action at 95% is to pause that node's runners in Gitea and tell the owner. Only the Proxmox nodes'
+        # system drives (job proxmox-node, nvme0n1); the cloud nodes' drives are not part of this decision.
+        - alert: AiNodeNvmeWearHigh
+          expr: nvme_percentage_used_ratio{job="proxmox-node", device="nvme0n1"} >= 0.95
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "ai-node NVMe on {{ $labels.instance }} has used {{ $value | humanizePercentage }} of its rated endurance"
+            description: >-
+              The shared NVMe on {{ $labels.instance }} (etcd, CI runners, dev workers) has passed 95% of its
+              rated write endurance. Per ADR 0042, pause this node's CI runners in Gitea and tell the owner.
+              Passing 100% is not failure, but the risk of the drive going read-only rises.
