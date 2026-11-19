@@ -988,11 +988,12 @@ later roll cannot overwrite it.
 
 `Worker budget authority available` proves the gate and the witness, not qualification. The Router
 accepts a snapshot with no qualification row (`runtime.ts:20-21`, `:89-96`). File B's pre-signing
-check is `file_b_check --json`, defined in the budget runbook's
+check is `file_b_router_check`, defined in the budget runbook's
 [File B pre-signing readback](relay-worker-budget-authority.md#file-b-pre-signing-readback).
 At Router `5a5181b7` the authenticated preflight durably consumes a nonce
-(`packages/plugins/relay-keys/index.ts:23-25`, `service.ts:34-50`), so it cannot be called by a
-zero-write tool. A ledger pass alone does not prove Router qualification.
+(`packages/plugins/relay-keys/index.ts:23-25`, `service.ts:34-50`). The owner accepted that one
+replay-set write on 2026-11-19; the check performs it only behind the explicit `--router-preflight`.
+A ledger pass alone does not prove Router qualification.
 
 **Readback, end of step 5.**
 
@@ -1407,21 +1408,29 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
    Router change. **File A and File B are separate.** File B must be committed, read back and
    qualified by the Router **before any candidate run is signed (R0 first)**. Retain the reviewed
    rows as `$ev/file-b.json`, set `FILE_B_REQUIRED_LIFETIME_SECONDS` to cover the interval from the
-   check through the original worker deadline, and define the exact `file_b_check` socket helper in
+   check through the original worker deadline, set `FILE_B_ROUTER_LIMIT` to the run's
+   `inferenceTokenBudget`, and define the exact `file_b_router_check` helper in
    [budget File B pre-signing readback](relay-worker-budget-authority.md#file-b-pre-signing-readback).
-   Run from this repository root:
+   Run from this repository root, immediately before signing:
 
    ```sh
-   file_b_check --json
+   file_b_router_check
    ```
 
    `ledger: pass` means an exact, fresh, complete-table readback, canonical policy digests,
-   matching route/bounds and sufficient expiry. The pinned Router's non-allocating preflight
-   writes a durable nonce (`5a5181b7:packages/plugins/relay-keys/service.ts:34-50`); the zero-write
-   tool therefore reports `router: unavailable` and exits 1. For evidence collection only,
+   matching route/bounds and sufficient expiry. The Router half is the pinned Router's
+   authenticated, non-allocating preflight, signed as Relay's reconciler with the key piped from
+   `relay/relay-router-files`. It **durably writes one delegation nonce** to the Router's replay set
+   for `relay.chifor.me/00000000-0000-4000-8000-000000000001`
+   (`5a5181b7:packages/plugins/relay-keys/service.ts:34-50`), which the owner accepted on
+   2026-11-19. The tool prints that, and the scope's readiness slots (12 per scope), before and after
+   the call. Only exit 0 (`status: pass`, `signingReady: true`) qualifies File B. Each run writes one
+   nonce: never retry it automatically. The zero-write `file_b_check --json` still reports
+   `router: unavailable` and exits 1, and
    `file_b_check --skip-router-preflight-unavailable --json` exits 2 (evidence collected, not
-   signable) with `status: ledger-only` and `signingReady: false`. It does not qualify File B or permit signing. The budget section
-   documents the required Router change and all schema/function source citations.
+   signable) with `status: ledger-only` and `signingReady: false`; neither qualifies File B or
+   permits signing. The budget section documents the design choice, the inputs and all source
+   citations.
 4. **The E6 rehearsal**
    ([relay-researcher-qualification-campaign.md](relay-researcher-qualification-campaign.md) §4).
 5. **R0, then R1.** R0's per-run PR first includes H7's candidate component for Relay's half of drills

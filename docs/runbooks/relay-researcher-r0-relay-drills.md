@@ -79,16 +79,18 @@ shared 120 requests per minute per issuer and tenant (`rel:deploy/worker-budget-
 `scripts/relay-admin-call.py` (ailab #1799) has no operation for this route anyway: its allowlist is
 `me`, `list-installations`, `get-installation` and `enrollment-token`.
 
-For File B use `file_b_check --json`, the exact operator socket helper in
+For File B use `file_b_router_check`, the exact operator helper in
 [budget File B pre-signing readback](relay-worker-budget-authority.md#file-b-pre-signing-readback),
-from this repository root. It bypasses this listing and performs the full read-only ledger
-comparison. `ledger: pass` proves the reviewed rows, canonical digests, stored route/bounds and
-remaining lifetime match; it does not prove current Router acceptance. At Router `5a5181b7`,
-`worker-budget-preflight` authenticates but durably consumes a nonce before its non-allocating
-check (`packages/plugins/relay-keys/index.ts:23-25`, `service.ts:34-50,69-88`). Under the zero-write
-contract the tool leaves it uncalled, reports `router: unavailable` and exits 1. The explicit
-`--skip-router-preflight-unavailable` flag permits ledger-only evidence collection, always with
-`signingReady: false`; it does not remove the R0 prerequisite.
+from this repository root. It bypasses this listing: it performs the full read-only ledger
+comparison, then one authenticated Router preflight. `ledger: pass` proves the reviewed rows,
+canonical digests, stored route/bounds and remaining lifetime match; the Router proof adds current
+Router acceptance. At Router `5a5181b7`, `worker-budget-preflight` authenticates but durably consumes
+a nonce before its non-allocating check (`packages/plugins/relay-keys/index.ts:23-25`,
+`service.ts:34-50,69-88`). The owner accepted that one replay-set write on 2026-11-19; the tool makes
+it only with the explicit `--router-preflight`, and prints it and the scope's readiness slots before
+and after the call. Without that flag (`file_b_check`) the tool leaves the Router uncalled, reports
+`router: unavailable` and exits 1; `--skip-router-preflight-unavailable` permits ledger-only evidence
+collection, always with `signingReady: false`, and does not satisfy the R0 prerequisite.
 
 **F2. The hub's isolated budget observer does reach the ledger, read-only.** When control metrics are
 configured (H6) and the budget authority has started (H7), the hub opens a separate one-connection pool,
@@ -151,11 +153,12 @@ any candidate run is signed (R0 first)**. With reviewed `$ev/file-b.json` and
 the helper defined in the budget runbook (F1):
 
 ```sh
-file_b_check --json
+file_b_router_check
 ```
 
-Do not sign on a ledger-only result. The Router nonce-write gap described in F1 still blocks this
-prerequisite under the zero-write contract; neither pool readiness nor an `available` log proves it.
+Sign only on its exit 0 (`status: pass`, `signingReady: true`), never on a ledger-only result. It
+writes one Router replay-set nonce per run (F1); run it once, immediately before signing, and never
+retry it automatically. Neither pool readiness nor an `available` log proves Router qualification.
 
 F1's pool listing cannot perform the Router half, and F2's observer is only a witness/gate check.
 Drill D's later history comparison is also outside R0's A-C scope.
@@ -330,8 +333,8 @@ SQL
 
 - **Order (§3).** H6 is read back (hub runbook H6), the candidate journal is on `10.96.0.42`, and File B
   is committed, read back and qualified by the Router, with its `tokenPolicyDigest` recorded.
-  `file_b_check --json` is the readback command (§3); its acknowledged ledger-only result does not
-  satisfy Router qualification. Resolve the zero-write Router gap before signing R0.
+  `file_b_router_check` is the readback command (§3), and only its exit 0 (`signingReady: true`)
+  satisfies Router qualification; an acknowledged ledger-only result from `file_b_check` does not.
 - **Owner confirmations (§4)** are on #1753, and the owner confirms the window.
 - **Production gate.** `cap gate-before ledger_state` shows `ready = t` with B's IDs, and all five
   history counts 0. `cap plugins-before plugins` shows `worker-budget-authority` `active`.
