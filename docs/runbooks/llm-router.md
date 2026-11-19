@@ -1408,9 +1408,18 @@ Nothing else changes: no schema change, no new setting. The `codex` concurrency 
 >   router counts that as non-retryable, so the pool did not fail over and the review attempt failed. It still lists
 >   the model in `allowedModels` and serves `gpt-6-luna`. A target disabled by hand in a managed pool comes back:
 >   the plugin rewrote it at the next revision (2500), so use `exclude`.
->   - **Re-admit it** once that OpenAI organisation can use `gpt-6-astra`: a streamed `gpt-6-astra` probe on
->     `codex-api-1` answers. Then drop it from `exclude` (`configure_pool`, or `PATCH
->     /admin/v1/plugins/smart-pools/config` with the full `values` and `If-Match`).
+>   - **Known router gap (no follow-up issue filed yet):** an upstream 400 that only one account returns for a model
+>     it claims to serve is classed as non-retryable. A pool therefore does not fail over past it: every request
+>     placed on that account fails, and `allowedModels` still lists the model, so routing cannot see the problem.
+>     Any managed pool can hit this at the next model rollout. Before pointing a client at a pool, probe each member
+>     through its own single-account route.
+>   - **Re-admit it** once that OpenAI organisation can use `gpt-6-astra` and this probe (administrator token from
+>     `llm-router/llm-router-auth`) streams `PONG` instead of an `error` chunk:
+>     ```sh
+>     curl -sN https://router.chifor.me/v1/chat/completions -H "Authorization: Bearer $ADMIN" >       -H 'Content-Type: application/json' -H 'X-Router-Route: codex-api-1' >       -d '{"model":"gpt-6-astra","stream":true,"messages":[{"role":"user","content":"Reply with exactly: PONG"}]}'
+>     ```
+>     Then drop it from `exclude` (`configure_pool`, or `PATCH /admin/v1/plugins/smart-pools/config` with the full
+>     `values` and `If-Match`).
 > - **Verified:** 4/4 streamed `gpt-6-astra` requests with the reviewer key were served via `pool-codex-api` by `openai` and `openai-3`.
 >   Real reviews followed within a minute: 4 complete, 8 to 60 s. From 06:09 UTC that day `pool-codex` had deferred
 >   every reviewer request, so the persona had been stalled.
