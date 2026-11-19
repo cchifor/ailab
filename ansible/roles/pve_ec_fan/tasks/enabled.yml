@@ -1,0 +1,420 @@
+---
+# ---- 0. refuse before changing anything: a profile that writes fan3 or cannot work, or a kernel that
+#         would not load an unsigned module ----
+- name: Check the managed fans (the CPU fans 1 and 2; fan3 is firmware-controlled)
+  ansible.builtin.assert:
+    that:
+      - pve_ec_fan_fans | length > 0
+      - pve_ec_fan_fans | difference([1, 2]) | length == 0
+    fail_msg: >-
+      pve_ec_fan_fans={{ pve_ec_fan_fans | to_json }}: only 1 and 2, the CPU fans. fan3 has no known
+      control register and is never written.
+    quiet: true
+
+- name: Check the curves (five integers 0-100, strictly rising)
+  ansible.builtin.assert:
+    that:
+      - item.value | length == 5
+      - item.value | select('integer') | list | length == 5
+      - item.value | min >= 0
+      - item.value | max <= 100
+      - item.value == (item.value | unique | sort)
+    fail_msg: "{{ item.key }}={{ item.value | to_json }}: need five integers 0-100, strictly rising"
+    quiet: true
+  loop: >-
+    {{ {'pve_ec_fan_rampup_curve': pve_ec_fan_rampup_curve,
+        'pve_ec_fan_rampdown_curve': pve_ec_fan_rampdown_curve} | dict2items }}
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Check each rampdown threshold sits below the rampup threshold of its level
+  ansible.builtin.assert:
+    that: pve_ec_fan_rampdown_curve[item] < pve_ec_fan_rampup_curve[item]
+    fail_msg: >-
+      level {{ item + 1 }}: rampdown {{ pve_ec_fan_rampdown_curve[item] }} must be below rampup
+      {{ pve_ec_fan_rampup_curve[item] }}, or the fan oscillates between two levels
+    quiet: true
+  loop: "{{ range(5) | list }}"
+
+# Ubuntu-based Proxmox kernels lock down when Secure Boot is on (CONFIG_LOCK_DOWN_IN_SECURE_BOOT), and
+# lockdown refuses unsigned modules; sig_enforce=Y refuses them too. All three are read, so the play fails
+# HERE, before the packages and the build, rather than leaving a built module that cannot load.
+- name: Read the Secure Boot and kernel lockdown state
+  ansible.builtin.shell: |
+    set -euo pipefail
+    lockdown=absent
+    if [ -r /sys/kernel/security/lockdown ]; then
+      # "[none] integrity confidentiality": the bracketed word is the active mode
+      lockdown=$(sed -n 's/.*\[\([a-z]*\)\].*/\1/p' /sys/kernel/security/lockdown)
+    fi
+    sig_enforce=absent
+    if [ -r /sys/module/module/parameters/sig_enforce ]; then
+      sig_enforce=$(cat /sys/module/module/parameters/sig_enforce)
+    fi
+    # The EFI variable is 4 attribute bytes, then the value: 1 = Secure Boot on.
+    secureboot=absent
+    efivar=/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d0-aa0d-00e098032b8c
+    if [ -r "$efivar" ]; then
+      secureboot=$(od -An -tu1 -j4 -N1 "$efivar" | tr -d ' ')
+    fi
+    echo "lockdown=$lockdown"
+    echo "sig_enforce=$sig_enforce"
+    echo "secureboot=$secureboot"
+  args:
+    executable: /bin/bash
+  register: pve_ec_fan_boot_state
+  changed_when: false
+  check_mode: false
+
+- name: Refuse a kernel that would not load the unsigned module (Secure Boot / lockdown)
+  vars:
+    pve_ec_fan_boot: "{{ dict(pve_ec_fan_boot_state.stdout_lines | map('split', '=')) }}"
+  ansible.builtin.assert:
+    that:
+      - pve_ec_fan_boot.lockdown | default('') in ['none', 'absent']
+      - pve_ec_fan_boot.sig_enforce | default('') != 'Y'
+      - pve_ec_fan_boot.secureboot | default('') != '1'
+    fail_msg: >-
+      {{ inventory_hostname }} ({{ pve_ec_fan_boot_state.stdout_lines | join(', ') }}): the ec_su_axb35
+      module is unsigned and this kernel would refuse it. Disable Secure Boot in the firmware first
+      (docs/runbooks/node-maintenance.md "EC fan curve"). Nothing was changed on this host.
+    quiet: true
+
+# ---- 1. build dependencies and the pinned source ----
+- name: Install DKMS, the build toolchain, git and the kernel headers
+  ansible.builtin.apt:
+    name: "{{ pve_ec_fan_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: pve_ec_fan_pkgs
+
+# force: tracked files are reset to the pin. dkms.conf is untracked, so it stays.
+- name: Fetch the driver source at the pinned commit
+  ansible.builtin.git:
+    repo: "{{ pve_ec_fan_repo_url }}"
+    dest: "{{ pve_ec_fan_src_dir }}"
+    version: "{{ pve_ec_fan_commit }}"
+    force: true
+  register: pve_ec_fan_src
+  # check mode on a host that lacks git or the checkout: nothing below can be previewed yet
+  when: not (ansible_check_mode and pve_ec_fan_pkgs is changed)
+
+# A first --check cannot look at what the apply would install; it stops short of the steps that need it.
+- name: Note whether this is a check-mode preview of a first install
+  ansible.builtin.set_fact:
+    pve_ec_fan_preview: "{{ ansible_check_mode and (pve_ec_fan_pkgs is changed or pve_ec_fan_src is changed) }}"
+
+- name: Check the checkout is the pinned commit
+  ansible.builtin.assert:
+    that: pve_ec_fan_src.after == pve_ec_fan_commit
+    fail_msg: "{{ pve_ec_fan_src_dir }} is at {{ pve_ec_fan_src.after }}, not the pin {{ pve_ec_fan_commit }}"
+    quiet: true
+  when: not pve_ec_fan_preview
+
+- name: Write the DKMS config into the source tree
+  ansible.builtin.template:
+    src: dkms.conf.j2
+    dest: "{{ pve_ec_fan_src_dir }}/dkms.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  register: pve_ec_fan_dkms_conf
+  when: not pve_ec_fan_preview
+
+# ---- 2. DKMS: add, build and install this version for the target kernel ----
+- name: Read this version's DKMS state
+  ansible.builtin.command:
+    argv: [dkms, status, -m, ec_su_axb35, -v, "{{ pve_ec_fan_dkms_version }}", -k, "{{ pve_ec_fan_kernel }}"]
+  register: pve_ec_fan_dkms_status
+  changed_when: false
+  check_mode: false
+  when: not pve_ec_fan_preview
+
+# `dkms status` prints nothing for a version it does not know, "<mod>/<ver>: added" once added, and
+# "<mod>/<ver>, <kernel>, <arch>: built|installed" per kernel after that.
+- name: Work out what DKMS still has to do
+  ansible.builtin.set_fact:
+    pve_ec_fan_dkms_known: "{{ pve_ec_fan_dkms_status.stdout | default('') | trim | length > 0 }}"
+    pve_ec_fan_dkms_stale: "{{ pve_ec_fan_src is changed or pve_ec_fan_dkms_conf is changed }}"
+    pve_ec_fan_dkms_built: >-
+      {{ pve_ec_fan_dkms_status.stdout | default('')
+         is search(', ' ~ (pve_ec_fan_kernel | regex_escape) ~ ', [^:]+: (built|installed)') }}
+    pve_ec_fan_dkms_installed: >-
+      {{ pve_ec_fan_dkms_status.stdout | default('')
+         is search(', ' ~ (pve_ec_fan_kernel | regex_escape) ~ ', [^:]+: installed') }}
+  when: not pve_ec_fan_preview
+
+# A changed checkout or dkms.conf under the same version: remove it from DKMS (every kernel) so the
+# steps below rebuild it from what is on disk now.
+- name: Drop a build whose source or dkms.conf changed
+  ansible.builtin.command:
+    argv: [dkms, remove, -m, ec_su_axb35, -v, "{{ pve_ec_fan_dkms_version }}", --all]
+  changed_when: true # only runs when DKMS needs it (the when below)
+  register: pve_ec_fan_dkms_removed
+  when:
+    - not pve_ec_fan_preview
+    - pve_ec_fan_dkms_stale | bool
+    - pve_ec_fan_dkms_known | bool
+
+- name: Add the source to DKMS
+  ansible.builtin.command:
+    argv: [dkms, add, -m, ec_su_axb35, -v, "{{ pve_ec_fan_dkms_version }}"]
+  changed_when: true # only runs when DKMS needs it (the when below)
+  when:
+    - not pve_ec_fan_preview
+    - not (pve_ec_fan_dkms_known | bool) or pve_ec_fan_dkms_removed is changed
+
+- name: Build the module for the target kernel
+  ansible.builtin.command:
+    argv: [dkms, build, -m, ec_su_axb35, -v, "{{ pve_ec_fan_dkms_version }}", -k, "{{ pve_ec_fan_kernel }}"]
+  changed_when: true # only runs when DKMS needs it (the when below)
+  when:
+    - not pve_ec_fan_preview
+    - not (pve_ec_fan_dkms_built | bool) or pve_ec_fan_dkms_removed is changed
+
+- name: Install the module for the target kernel
+  ansible.builtin.command:
+    argv: [dkms, install, -m, ec_su_axb35, -v, "{{ pve_ec_fan_dkms_version }}", -k, "{{ pve_ec_fan_kernel }}"]
+  changed_when: true # only runs when DKMS needs it (the when below)
+  register: pve_ec_fan_dkms_install
+  when:
+    - not pve_ec_fan_preview
+    - not (pve_ec_fan_dkms_installed | bool) or pve_ec_fan_dkms_removed is changed
+
+# In check mode the steps above only report; the checks below then need a build that is already current.
+- name: Note whether the installed build can be inspected
+  ansible.builtin.set_fact:
+    pve_ec_fan_inspect: >-
+      {{ not pve_ec_fan_preview
+         and (not ansible_check_mode
+              or ((pve_ec_fan_dkms_installed | bool) and not (pve_ec_fan_dkms_stale | bool))) }}
+
+# modprobe takes the first match in depmod's search order; a copy left by a hand `make install` from a
+# checkout would win over (or tie with) the DKMS build.
+- name: Find the module file modprobe resolves for the target kernel
+  ansible.builtin.command:
+    argv: [modinfo, -k, "{{ pve_ec_fan_kernel }}", -n, ec_su_axb35]
+  register: pve_ec_fan_modinfo
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: pve_ec_fan_inspect | bool
+
+- name: Refuse a stray copy that shadows the DKMS build
+  ansible.builtin.assert:
+    that: pve_ec_fan_modinfo.stdout | trim is search('/updates/dkms/ec_su_axb35\.ko(\.(zst|xz|gz))?$')
+    fail_msg: >-
+      modinfo resolves ec_su_axb35 for {{ pve_ec_fan_kernel }} to '{{ pve_ec_fan_modinfo.stdout | trim }}'
+      ({{ pve_ec_fan_modinfo.stderr | trim }}), not the DKMS build under updates/dkms/. Remove the other
+      copy (it is not this role's), run `depmod {{ pve_ec_fan_kernel }}`, and converge again.
+    quiet: true
+  when: pve_ec_fan_inspect | bool
+
+# ---- 3. old pins: out of DKMS and off the disk ----
+# Any other ec_su_axb35 version goes: an earlier pin, or a hand install with the upstream DKMS script
+# (version 1.0). The role owns the module's DKMS name on these hosts.
+- name: Read every DKMS version of the module
+  ansible.builtin.command:
+    argv: [dkms, status, -m, ec_su_axb35]
+  register: pve_ec_fan_dkms_all
+  changed_when: false
+  check_mode: false
+  when: not pve_ec_fan_preview
+
+- name: Remove earlier pins from DKMS (every kernel)
+  ansible.builtin.command:
+    argv: [dkms, remove, -m, ec_su_axb35, -v, "{{ item }}", --all]
+  changed_when: true # one run per earlier version that DKMS still has
+  loop: >-
+    {{ pve_ec_fan_dkms_all.stdout | default('') | regex_findall('(?m)^ec_su_axb35/([^,:]+)')
+       | unique | reject('equalto', pve_ec_fan_dkms_version) | list }}
+  when: not pve_ec_fan_preview
+
+- name: Find the source trees of earlier pins
+  ansible.builtin.find:
+    paths: /usr/src
+    patterns: "ec_su_axb35-*"
+    file_type: directory
+  register: pve_ec_fan_old_src
+
+- name: Remove the source trees of earlier pins
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ pve_ec_fan_old_src.files | map(attribute='path') | reject('equalto', pve_ec_fan_src_dir) | list }}"
+
+# ---- 4. load it, now and at every boot ----
+- name: Load the module at boot
+  ansible.builtin.copy:
+    dest: /etc/modules-load.d/ec_su_axb35.conf
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      # Managed by ansible (role: pve_ec_fan). Bosgame M5 EC driver; ec-fan-profile.service sets the curve.
+      ec_su_axb35
+
+# srcversion hashes the module's source, so it tells a module built from other source (an earlier pin, a
+# hand build of another commit) from this build. A hand build of the same commit has the same srcversion
+# and is left loaded: it is the same code.
+- name: Compare the loaded module with the installed build
+  ansible.builtin.shell: |
+    set -u
+    loaded=no
+    loaded_srcversion=
+    if [ -d /sys/module/ec_su_axb35 ]; then
+      loaded=yes
+      loaded_srcversion=$(cat /sys/module/ec_su_axb35/srcversion 2>/dev/null) || loaded_srcversion=
+    fi
+    installed_srcversion=$(modinfo -k "$KVER" -F srcversion ec_su_axb35 2>/dev/null) || installed_srcversion=
+    echo "loaded=$loaded"
+    echo "loaded_srcversion=$loaded_srcversion"
+    echo "installed_srcversion=$installed_srcversion"
+  args:
+    executable: /bin/bash
+  environment:
+    KVER: "{{ pve_ec_fan_kernel }}"
+  register: pve_ec_fan_loaded_state
+  changed_when: false
+  check_mode: false
+  when:
+    - pve_ec_fan_inspect | bool
+    - pve_ec_fan_kernel == ansible_kernel
+
+- name: Unload a module that is not the installed build (unloading sets all fans to auto)
+  vars:
+    pve_ec_fan_loaded: "{{ dict(pve_ec_fan_loaded_state.stdout_lines | map('split', '=')) }}"
+  community.general.modprobe:
+    name: ec_su_axb35
+    state: absent
+  when:
+    - pve_ec_fan_loaded_state is not skipped
+    - pve_ec_fan_loaded.loaded == 'yes'
+    - pve_ec_fan_loaded.loaded_srcversion | length > 0
+    - pve_ec_fan_loaded.installed_srcversion | length > 0
+    - pve_ec_fan_loaded.loaded_srcversion != pve_ec_fan_loaded.installed_srcversion
+  notify: Restart ec-fan-profile
+
+- name: Load the module now
+  community.general.modprobe:
+    name: ec_su_axb35
+    state: present
+  when:
+    - pve_ec_fan_inspect | bool
+    - pve_ec_fan_kernel == ansible_kernel
+
+# ---- 5. the curve and the metrics ----
+- name: Install the profile script
+  ansible.builtin.copy:
+    src: ec-fan-profile.sh
+    dest: /usr/local/sbin/ec-fan-profile
+    owner: root
+    group: root
+    mode: "0755"
+  register: pve_ec_fan_profile_script
+  notify: Restart ec-fan-profile
+
+- name: Install the textfile script
+  ansible.builtin.copy:
+    src: ec-fan-textfile.sh
+    dest: /usr/local/sbin/ec-fan-textfile
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Render the curve config
+  ansible.builtin.template:
+    src: ec-fan-profile.env.j2
+    dest: "{{ pve_ec_fan_config }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart ec-fan-profile
+
+- name: Install the profile unit
+  ansible.builtin.template:
+    src: ec-fan-profile.service.j2
+    dest: /etc/systemd/system/ec-fan-profile.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: pve_ec_fan_profile_unit
+  notify: Restart ec-fan-profile
+
+# node_exporter's role creates it; the unit's ReadWritePaths= fails the run outright if it is missing.
+- name: Ensure node_exporter's textfile directory exists
+  ansible.builtin.file:
+    path: "{{ pve_ec_fan_textfile_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the textfile unit and timer
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - ec-fan-textfile.service
+    - ec-fan-textfile.timer
+  register: pve_ec_fan_textfile_units
+
+# A unit file that --check did not write cannot be enabled in check mode either.
+- name: Enable and start the curve and the textfile timer
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop:
+    - ec-fan-profile.service
+    - ec-fan-textfile.timer
+  when: >-
+    not (ansible_check_mode
+         and (pve_ec_fan_profile_unit is changed or pve_ec_fan_textfile_units is changed
+              or pve_ec_fan_profile_script is changed))
+
+# ---- 6. the other installed kernels ----
+# A kernel installed AFTER this version was added gets the module from its postinst hook (DKMS
+# AUTOINSTALL). One installed before -- typically the next kernel, waiting for a reboot -- would boot
+# without it (fans on the firmware curve, ProxmoxEcFanDriverNotLoaded), so build for every installed kernel
+# that has its headers. Last, so a failed build for another kernel cannot hold up the running one's curve.
+- name: List the other installed kernels that have their headers
+  ansible.builtin.shell: |
+    set -euo pipefail
+    for d in /lib/modules/*/; do
+      k=$(basename "$d")
+      if [ "$k" != "$KVER" ] && [ -e "/boot/vmlinuz-$k" ] && [ -e "${d}build/Makefile" ]; then
+        echo "$k"
+      fi
+    done
+  args:
+    executable: /bin/bash
+  environment:
+    KVER: "{{ pve_ec_fan_kernel }}"
+  register: pve_ec_fan_other_kernels
+  changed_when: false
+  check_mode: false
+  when: not pve_ec_fan_preview
+
+- name: Read which kernels have this version installed
+  ansible.builtin.command:
+    argv: [dkms, status, -m, ec_su_axb35, -v, "{{ pve_ec_fan_dkms_version }}"]
+  register: pve_ec_fan_dkms_kernels
+  changed_when: false
+  check_mode: false
+  when: not pve_ec_fan_preview
+
+- name: Build and install the module for those kernels too
+  ansible.builtin.command:
+    argv: [dkms, install, -m, ec_su_axb35, -v, "{{ pve_ec_fan_dkms_version }}", -k, "{{ item }}"]
+  changed_when: true # only kernels that do not have it yet
+  loop: >-
+    {{ pve_ec_fan_other_kernels.stdout_lines | default([])
+       | difference(pve_ec_fan_dkms_kernels.stdout | default('')
+                    | regex_findall('(?m)^ec_su_axb35/[^,]+, ([^,]+), [^:]+: installed')) }}
+  when: not pve_ec_fan_preview

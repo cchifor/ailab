@@ -1,0 +1,15 @@
+# Managed by ansible (role: pve_ec_fan). Reads the EC fan/temperature sysfs into node_exporter's textfile
+# directory; run every 30 s by ec-fan-textfile.timer. Read-only on the EC.
+[Unit]
+Description=Publish the EC fan and temperature readings for node_exporter (ec_su_axb35)
+
+[Service]
+Type=oneshot
+Environment=EC_FAN_SYSFS={{ pve_ec_fan_sysfs }}
+Environment=EC_FAN_TEXTFILE_DIR={{ pve_ec_fan_textfile_dir }}
+ExecStart=/usr/local/sbin/ec-fan-textfile
+ProtectSystem=strict
+ReadWritePaths={{ pve_ec_fan_textfile_dir }}
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

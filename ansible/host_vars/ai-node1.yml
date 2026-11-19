@@ -5,3 +5,9 @@
 # pool), so the isolation trade-off in roles/pve_base/defaults/main.yml is accepted. node3 keeps
 # zeroing ON. Rollout and verification: docs/runbooks/node-maintenance.md "Thin-pool zeroing".
 pve_thin_pool_zero: false
+
+# EC fan driver + CPU-fan curve (role pve_ec_fan; docs/runbooks/node-maintenance.md "EC fan curve").
+# node1 only, because its Secure Boot is off (since 2026-11-19): the ec_su_axb35 module is unsigned, and
+# a kernel in Secure Boot lockdown refuses it. ai-node2/3 still boot with Secure Boot on; turning this on
+# there fails the play before it changes anything, until Secure Boot is disabled in their firmware.
+pve_ec_fan_enabled: true

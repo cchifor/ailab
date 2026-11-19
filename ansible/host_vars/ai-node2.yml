@@ -5,3 +5,6 @@
 # pool), so the isolation trade-off in roles/pve_base/defaults/main.yml is accepted. node3 keeps
 # zeroing ON. Rollout and verification: docs/runbooks/node-maintenance.md "Thin-pool zeroing".
 pve_thin_pool_zero: false
+
+# pve_ec_fan (EC fan curve) stays OFF here: this host boots with Secure Boot on, which refuses the unsigned
+# ec_su_axb35 module. Disable Secure Boot first (docs/runbooks/node-maintenance.md "EC fan curve").

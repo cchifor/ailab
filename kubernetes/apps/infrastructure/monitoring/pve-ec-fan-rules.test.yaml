@@ -1,0 +1,187 @@
+# `promtool test rules` fixtures for pve-ec-fan-rules.yaml. Run by scripts/rules-lint.sh on every PR.
+# `rule_files` is the extracted spec name (rules-lint.sh hands promtool each PrometheusRule's `spec:`
+# body under the manifest's basename).
+rule_files:
+  - pve-ec-fan-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------------------- ProxmoxCpuFanStalled
+  - interval: 1m
+    name: a CPU fan under 1000 rpm above 70 C for 5m warns
+    input_series:
+      - series: 'ec_fan_rpm{job="proxmox-node", instance="192.168.0.2:9100", fan="1"}'
+        values: "4200x3 300x20"
+      - series: 'ec_fan_rpm{job="proxmox-node", instance="192.168.0.2:9100", fan="2"}'
+        values: "4200x23"
+      - series: 'ec_temp_celsius{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "75x23"
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: ProxmoxCpuFanStalled
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ProxmoxCpuFanStalled
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: proxmox-node
+              instance: 192.168.0.2:9100
+              fan: "1"
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.2:9100 CPU fan 1 at 300 rpm above 70 C"
+              description: "CPU fan 1 on 192.168.0.2:9100 has read under 1000 rpm for 5m while the EC temperature is above 70 C, where the curve runs it at 80 % (~4200 rpm). Check on the host: `cat /sys/class/ec_su_axb35/fan1/{mode,level,rpm}` and `systemctl status ec-fan-profile`. Level 4-5 with a low rpm is the fan or its cable; a low level is the curve: `systemctl restart ec-fan-profile`, or `rmmod ec_su_axb35` to hand the fans back to the firmware. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+  - interval: 1m
+    name: both CPU fans stopped (0 rpm) above 70 C warn once each
+    input_series:
+      - series: 'ec_fan_rpm{job="proxmox-node", instance="192.168.0.2:9100", fan="1"}'
+        values: "0x20"
+      - series: 'ec_fan_rpm{job="proxmox-node", instance="192.168.0.2:9100", fan="2"}'
+        values: "0x20"
+      - series: 'ec_temp_celsius{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "82x20"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ProxmoxCpuFanStalled
+        exp_alerts:
+          - exp_labels: {severity: warning, job: proxmox-node, instance: 192.168.0.2:9100, fan: "1"}
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.2:9100 CPU fan 1 at 0 rpm above 70 C"
+              description: "CPU fan 1 on 192.168.0.2:9100 has read under 1000 rpm for 5m while the EC temperature is above 70 C, where the curve runs it at 80 % (~4200 rpm). Check on the host: `cat /sys/class/ec_su_axb35/fan1/{mode,level,rpm}` and `systemctl status ec-fan-profile`. Level 4-5 with a low rpm is the fan or its cable; a low level is the curve: `systemctl restart ec-fan-profile`, or `rmmod ec_su_axb35` to hand the fans back to the firmware. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+          - exp_labels: {severity: warning, job: proxmox-node, instance: 192.168.0.2:9100, fan: "2"}
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.2:9100 CPU fan 2 at 0 rpm above 70 C"
+              description: "CPU fan 2 on 192.168.0.2:9100 has read under 1000 rpm for 5m while the EC temperature is above 70 C, where the curve runs it at 80 % (~4200 rpm). Check on the host: `cat /sys/class/ec_su_axb35/fan2/{mode,level,rpm}` and `systemctl status ec-fan-profile`. Level 4-5 with a low rpm is the fan or its cable; a low level is the curve: `systemctl restart ec-fan-profile`, or `rmmod ec_su_axb35` to hand the fans back to the firmware. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+  - interval: 1m
+    name: fan3 at 0 rpm is normal and never warns, however hot
+    input_series:
+      - series: 'ec_fan_rpm{job="proxmox-node", instance="192.168.0.2:9100", fan="3"}'
+        values: "0x30"
+      - series: 'ec_temp_celsius{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "90x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ProxmoxCpuFanStalled
+        exp_alerts: []
+  - interval: 1m
+    name: a slow or stopped CPU fan at 70 C or below does not warn
+    input_series:
+      - series: 'ec_fan_rpm{job="proxmox-node", instance="192.168.0.2:9100", fan="1"}'
+        values: "0x30"
+      - series: 'ec_fan_rpm{job="proxmox-node", instance="192.168.0.2:9100", fan="2"}'
+        values: "900x30"
+      - series: 'ec_temp_celsius{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "70x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ProxmoxCpuFanStalled
+        exp_alerts: []
+  - interval: 1m
+    name: a dip shorter than 5m, and a hot EC on ANOTHER host, do not warn
+    input_series:
+      - series: 'ec_fan_rpm{job="proxmox-node", instance="192.168.0.2:9100", fan="1"}'
+        values: "4200x5 500x3 4200x15"
+      - series: 'ec_temp_celsius{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "75x23"
+      - series: 'ec_fan_rpm{job="proxmox-node", instance="192.168.0.3:9100", fan="1"}'
+        values: "0x23"
+      - series: 'ec_temp_celsius{job="proxmox-node", instance="192.168.0.3:9100"}'
+        values: "50x23"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ProxmoxCpuFanStalled
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ProxmoxCpuFanStalled
+        exp_alerts: []
+  - interval: 1m
+    name: another job's copy of the series does not warn
+    input_series:
+      - series: 'ec_fan_rpm{job="ai-llm-node", instance="192.168.0.45:9100", fan="1"}'
+        values: "0x20"
+      - series: 'ec_temp_celsius{job="ai-llm-node", instance="192.168.0.45:9100"}'
+        values: "85x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ProxmoxCpuFanStalled
+        exp_alerts: []
+
+  # -------------------------------------------------------------- ProxmoxEcFanTextfileStale
+  # promtool's clock starts at 0, so a timestamp series rising 60 per 1m step is a file rewritten on time.
+  - interval: 1m
+    name: a file that stops being rewritten warns once it is over 5m old
+    input_series:
+      - series: 'ec_fan_textfile_timestamp_seconds{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "0+60x10 600x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ProxmoxEcFanTextfileStale
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ProxmoxEcFanTextfileStale
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: ProxmoxEcFanTextfileStale
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: proxmox-node
+              instance: 192.168.0.2:9100
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.2:9100: EC fan metrics not updated for 6m 0s"
+              description: "ec-fan-textfile has not rewritten ec_fan.prom on 192.168.0.2:9100 for over 5m, so the fan and temperature series are the last values node_exporter read and the CPU-fan stall alert is judging old numbers. Check `systemctl status ec-fan-textfile.timer ec-fan-textfile.service` and `journalctl -u ec-fan-textfile`. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+  - interval: 1m
+    name: a file rewritten every 30 s never warns
+    input_series:
+      - series: 'ec_fan_textfile_timestamp_seconds{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "0+60x40"
+    alert_rule_test:
+      - eval_time: 39m
+        alertname: ProxmoxEcFanTextfileStale
+        exp_alerts: []
+  - interval: 1m
+    name: a host without the role (no series) never warns
+    input_series:
+      - series: 'node_load1{job="proxmox-node", instance="192.168.0.3:9100"}'
+        values: "1x40"
+    alert_rule_test:
+      - eval_time: 39m
+        alertname: ProxmoxEcFanTextfileStale
+        exp_alerts: []
+      - eval_time: 39m
+        alertname: ProxmoxEcFanDriverNotLoaded
+        exp_alerts: []
+      - eval_time: 39m
+        alertname: ProxmoxCpuFanStalled
+        exp_alerts: []
+
+  # ------------------------------------------------------------- ProxmoxEcFanDriverNotLoaded
+  - interval: 1m
+    name: a fresh file saying the module is not loaded warns after 10m
+    input_series:
+      - series: 'ec_fan_driver_loaded{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "1x5 0x20"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: ProxmoxEcFanDriverNotLoaded
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: ProxmoxEcFanDriverNotLoaded
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: proxmox-node
+              instance: 192.168.0.2:9100
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.2:9100: ec_su_axb35 is not loaded, the CPU-fan curve is off"
+              description: "The EC fan driver has not been loaded on 192.168.0.2:9100 for 10m. The fans run on the firmware curve, which is safe, but the CPU-fan curve is off and there are no fan rpm series to alert on. Usually a new kernel booted without the module: check `dkms status ec_su_axb35`, `dpkg -l proxmox-headers-$(uname -r)` and `journalctl -b -u systemd-modules-load -u ec-fan-profile`, then converge `just ec-fan --limit <host>`. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+  - interval: 1m
+    name: a module reload shorter than 10m does not warn
+    input_series:
+      - series: 'ec_fan_driver_loaded{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "1x5 0x2 1x20"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ProxmoxEcFanDriverNotLoaded
+        exp_alerts: []

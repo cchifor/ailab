@@ -1,0 +1,10 @@
+---
+# Stop (fans to auto) then start (curves, then mode=curve): picks up a new curve, a new script, or a
+# module that was just reloaded and so came back with the driver's default curves in auto.
+- name: Restart ec-fan-profile
+  ansible.builtin.systemd:
+    name: ec-fan-profile.service
+    state: restarted
+    daemon_reload: true
+  # --check did not write the unit it would restart
+  when: not (ansible_check_mode and (pve_ec_fan_profile_unit | default({}) is changed))

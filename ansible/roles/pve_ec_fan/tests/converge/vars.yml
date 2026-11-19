@@ -1,0 +1,6 @@
+# Test seams. Build for the Proxmox kernel whose headers the image carries: the container runs another
+# kernel, so the role builds and installs but skips loading. Clone from the local copy of the upstream
+# repo, and drive a fake sysfs.
+pve_ec_fan_kernel: 7.0.2-6-pve
+pve_ec_fan_repo_url: /src
+pve_ec_fan_sysfs: /fake/ec_su_axb35

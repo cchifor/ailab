@@ -1,0 +1,62 @@
+---
+# EC fan control on the Bosgame M5 Proxmox hosts (Sixunited AXB35-02 board, ITE IT5570E embedded
+# controller): the out-of-tree ec_su_axb35 driver, built by DKMS for every installed kernel that has its
+# headers and for every later one, a temperature curve for the two CPU fans (ec-fan-profile.service, applied at boot), and the
+# fan and temperature readings as node_exporter textfile metrics (ec-fan-textfile.timer, every 30 s).
+# Without the driver the EC runs the fans on its own firmware curve (AUTO).
+#
+# OFF by default; host_vars turns it on per host (ai-node1 since 2026-11-19). The module is NOT signed,
+# so a kernel in Secure Boot lockdown refuses it: the role checks that first and fails before it changes
+# anything on such a host. Turned back off, it stops the profile (the CPU fans go back to AUTO), unloads
+# the module and removes its units and metrics file; the DKMS build stays installed.
+# docs/runbooks/node-maintenance.md "EC fan curve".
+pve_ec_fan_enabled: false
+
+# ---- driver source (pinned to a reviewed commit) ----
+# Reviewed at this commit (2026-11-19): loading the module only reads the EC; its 1 s worker writes a fan's
+# level only while that fan is in curve mode; unloading it resets all three fans to AUTO. A new pin is a new
+# review: read every ec_write() in src/ec_su_axb35.c. The checkout is verified against the full SHA.
+pve_ec_fan_repo_url: https://github.com/cmetz/ec-su_axb35-linux.git
+pve_ec_fan_commit: f62c2c228959a08683273a26ef3afd8991e69f6d
+# DKMS version, and so the source dir /usr/src/ec_su_axb35-<version>. Upstream has no releases (its own
+# DKMS script uses 1.0); the short commit makes each pin its own DKMS version, and the role removes the
+# versions of earlier pins.
+pve_ec_fan_dkms_version: "1.0+{{ pve_ec_fan_commit[:7] }}"
+pve_ec_fan_src_dir: "/usr/src/ec_su_axb35-{{ pve_ec_fan_dkms_version }}"
+# The kernel the role builds for. The module is loaded only when this is the running kernel.
+pve_ec_fan_kernel: "{{ ansible_kernel }}"
+# Build dependencies. proxmox-default-headers follows proxmox-default-kernel, so the next kernel of the
+# default series comes with its headers and DKMS builds the module for it on install (AUTOINSTALL). A host
+# that boots an opt-in kernel series needs that series' headers meta package (e.g. proxmox-headers-7.0)
+# here as well, or its next kernel boots without the module (the fans stay on AUTO and
+# ProxmoxEcFanDriverNotLoaded fires).
+pve_ec_fan_packages:
+  - dkms
+  - build-essential
+  - git
+  - proxmox-default-headers
+  - "proxmox-headers-{{ pve_ec_fan_kernel }}"
+
+# ---- the CPU-fan curve ----
+# fan1 and fan2 are the CPU fans. fan3, the small system fan, has no known control register: the EC accepts
+# writes to it and ignores them. The role never writes it (the assert below and ec-fan-profile both refuse
+# it) and only monitors it; 0 rpm on fan3 is normal.
+pve_ec_fan_fans: [1, 2]
+# Five EC temperatures (deg C, integers 0-100, strictly rising) for fan levels 1-5 (20/40/60/80/100 %; level
+# 0 is off). The driver moves one level per second: up from level N while temp >= rampup[N+1], down from
+# level N while temp <= rampdown[N]. Each rampdown value must sit below the rampup value of the same level,
+# or the fan oscillates between two levels.
+# This profile (being validated on ai-node1, 2026-11-19): 20 % from 35 C, 40 % from 50, 60 % from 60, 80 %
+# from 68, 100 % only from 95, each 5 C of hysteresis. It caps the fans at 80 % below 95 C: hwbusters'
+# AXB35 testing found no usable extra airflow above 80 %, and one fan dips at 100 %. Measured on node1:
+# 20 % ~1540 rpm, 80 % ~4200 rpm, 100 % ~4790 rpm.
+pve_ec_fan_rampup_curve: [35, 50, 60, 68, 95]
+pve_ec_fan_rampdown_curve: [30, 45, 55, 63, 90]
+
+# ---- paths ----
+pve_ec_fan_sysfs: /sys/class/ec_su_axb35
+pve_ec_fan_config: /etc/default/ec-fan-profile
+# node_exporter's textfile directory. The Debian package reads this directory by default, so the Proxmox
+# hosts need no collector flag (the nvme_* metrics there come the same way). Literal, like the runners'
+# group_vars, rather than a reference to the node_exporter role's default.
+pve_ec_fan_textfile_dir: /var/lib/prometheus/node-exporter
