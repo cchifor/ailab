@@ -634,12 +634,13 @@ class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
     which TAGS are kept: the canary policy is strive/**'s exact rules plus deleteReferrers, between
     strive/ci-build/** and strive/**; widening to strive/** puts the flag on strive/** itself."""
 
-    def test_default_is_the_strive_web_canary(self):
-        self.assertEqual(_load_defaults()[_CANARY_KNOB], ["strive/web"])
+    def test_default_is_the_canary_plus_batch_b1(self):
+        # Widening in batches (2026-11-19): strive/web (canary) + B1. B2-B4 follow, then ["strive/**"].
+        self.assertEqual(_load_defaults()[_CANARY_KNOB], ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"])
 
     def test_canary_sits_between_ci_build_and_strive(self):
         repos = [p["repositories"] for p in _policies()]
-        self.assertEqual(repos[:3], [[_CI_BUILD_REPOS], ["strive/web"], ["strive/**"]])
+        self.assertEqual(repos[:3], [[_CI_BUILD_REPOS], ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"], ["strive/**"]])
 
     def test_canary_keeps_exactly_what_strive_keeps(self):
         canary = _first_retention_policy(_policies(), "strive/web")
@@ -657,7 +658,9 @@ class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
 
     def test_first_match_routing(self):
         pols = _policies()
-        expected = {"strive/web": ["strive/web"], "strive/webx": ["strive/**"], "strive/ci-build/a": [_CI_BUILD_REPOS],
+        expected = {"strive/web": ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"], "strive/e2e-runner": ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"],
+                    "strive/profile": ["strive/**"],
+                    "strive/webx": ["strive/**"], "strive/ci-build/a": [_CI_BUILD_REPOS],
                     "strive/platform-api": ["strive/**"], "agentforge/orchestrator": ["agentforge/**"],
                     "library/python": ["**"]}
         for repo, want in expected.items():

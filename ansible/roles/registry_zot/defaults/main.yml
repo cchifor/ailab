@@ -195,7 +195,11 @@ registry_zot_strive_keep_recent: 100
 # BEFORE adding a repo here, run scripts/zot-referrer-orphan-check.py on it: zot's GC checks a referrer's subject
 # against TOP-LEVEL index.json entries only and ignores keepTags, so the check must report nested_not_top == 0 and
 # tagged_orphans == 0 (2026-11-18: strive/web, strive/sentinel, strive/knowledge all safe).
-registry_zot_strive_delete_referrers_repos: ["strive/web"]
+# Widening, in batches (owner go 2026-11-19; ~4 MB of metaDB writes per deletion on node1, so ~100 GB in all):
+#   B1 e2e-runner, keycloak-realm-sync, notification (5.4k orphans) -> B2 profile, knowledge, tms, mcp (7.0k)
+#   -> B3 workflow, airlock, integration, sentinel (5.8k) -> B4 ["strive/**"] (the rest, 3.6k). One GC hour
+#   observed between batches, with the abort budget in docs/runbooks/registry-cache.md.
+registry_zot_strive_delete_referrers_repos: ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"]
 
 # strive/ci-build/** holds cchifor/platform's per-commit e2e images (`ci-<40-hex commit>`, pushed by
 # strive-ci-push above). Its policy is listed BEFORE strive/** in config.json.j2: zot applies only
