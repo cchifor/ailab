@@ -576,7 +576,11 @@ class CurrentRelease(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(body)
             config = json.loads(original[pin.CONFIG])
-            config["leadership"] = {"leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2}
+            # A timing that is not the overlay: the preparation's, unless the overlay is set back to it (the
+            # installation runbook's timing-only rollback), then T1's 30/20/2.
+            prepared = {"leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2}
+            config["leadership"] = prepared if pin.leadership_overlay(ROOT) != prepared else \
+                {"leaseDurationSeconds": 30, "renewDeadlineSeconds": 20, "retryPeriodSeconds": 2}
             (tree / pin.CONFIG).write_text(json.dumps(config, sort_keys=True, separators=(",", ":")) + "\n",
                                            encoding="utf-8")
             staged = pin.snapshot(tree, pin.STAGED)
