@@ -411,7 +411,7 @@
   notify: Restart systemd-tmpfiles-clean timer
   when: gitea_runner_tmp_manage | bool
 
-# ── 4f. thin-pool trim: give freed space back to the host (#1857) ───────────
+# ── 4f. thin-pool trim: give freed space back to the host (#1858) ───────────
 # Why, and the one-off reboot: defaults/main.yml and docs/runbooks/ci-runners.md, "Thin-pool trim".
 # Nothing here touches the act_runner daemon or a job.
 #

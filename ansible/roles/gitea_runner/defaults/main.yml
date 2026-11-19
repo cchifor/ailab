@@ -319,7 +319,8 @@ gitea_runner_cleanup_actcache_max_mb: 1536 # trim the act_runner actions cache a
 # daemon's start-pre budget and took ALL 5 runners offline. 48h >> the 3h job timeout, so a live or
 # recent workspace always has a fresh mtime and is never touched.
 gitea_runner_cleanup_ws_prune_age_h: 48
-# Cargo target sweep (section 6 of the script, 2026-11-08). Under disk pressure, in a confirmed gap and with
+# Cargo target sweep (section 6 of the script, 2026-11-08). Under disk pressure (or, with
+# gitea_runner_cleanup_target_age_sweep, by age alone below it; see below), in a confirmed gap and with
 # the runner held stopped, delete the files in Cargo target dirs under these roots that no build has read
 # for *_keep_h hours (*_keep_critical_h at the critical threshold). A Cargo target dir is a dir with a
 # .rustc_info.json at its root (Cargo writes one into every target dir it uses), at most *_maxdepth levels
@@ -333,6 +334,16 @@ gitea_runner_cleanup_target_maxdepth: 4
 gitea_runner_cleanup_target_keep_h: 72
 gitea_runner_cleanup_target_keep_critical_h: 24
 gitea_runner_cleanup_target_min_free_mb: 1024
+# Also sweep BELOW disk pressure, by age alone (target_keep_h), with every guard above unchanged (2026-11-18).
+# Off by default because the cloud runners share this role; enabled for the on-prem pool in
+# group_vars/gitea_runners.yml. Why: the root disks grew to 250 GB, so pressure (75%) was never reached and
+# the targets piled up (41 GB on ci-runner-1) on the QLC drive etcd shares. Docker levers stay disk-gated.
+gitea_runner_cleanup_target_age_sweep: false
+# The age path's own floor (MB): below pressure the runner is held only for at least this much. The pressure
+# and critical paths keep gitea_runner_cleanup_target_min_free_mb, where a small gain is what is wanted.
+gitea_runner_cleanup_target_age_min_free_mb: 1024
+# The age path walks the target dirs at most once per this many hours (0 = every idle tick).
+gitea_runner_cleanup_target_age_every_h: 6
 # BuildKit's bbolt metadata file, whose size the beacon publishes (buildkit_db_bytes): it never shrinks.
 gitea_runner_cleanup_buildkit_db: /var/lib/docker/buildkit/cache.db
 # Reap RUNNING containers older than this (seconds). MUST exceed the job timeout (gitea_runner_job_timeout
@@ -373,7 +384,7 @@ gitea_runner_cleanup_heal_cooldown_sec: 21600 # at most one heal per 6h; a recor
 gitea_runner_cleanup_heal_stuck_ticks: 3
 gitea_runner_cleanup_heal_state: /var/lib/gitea-runner-cleanup/buildkit-heal.state
 
-# ---- thin-pool trim: give freed disk space back to the host (#1857, 2026-11-18) ─────────────────
+# ---- thin-pool trim: give freed disk space back to the host (#1858, 2026-11-18) ─────────────────
 # The on-prem runners sit on thin LVs (64 KiB chunks, discard passed down to a QLC NVMe that etcd shares).
 # The cloud image mounts / with online `discard`: deleting many small files sends discards too small and
 # scattered to free whole chunks, and ext4 then keeps those groups flagged as trimmed, so fstrim trims 0 B.

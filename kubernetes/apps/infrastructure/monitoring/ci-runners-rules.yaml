@@ -499,7 +499,7 @@ spec:
               One of the gitea_runner beacons in /var/lib/prometheus/node-exporter on {{ $labels.instance }}
               is malformed (the other files still parse). Its alerts are blind until it is fixed; check
               `journalctl -u prometheus-node-exporter` for the file name.
-        # ---- thin-pool trim (gitea-runner-fstrim-chunked.sh, #1857; docs/runbooks/ci-runners.md "Thin-pool trim") ----
+        # ---- thin-pool trim (gitea-runner-fstrim-chunked.sh, #1858; docs/runbooks/ci-runners.md "Thin-pool trim") ----
         # Every rule keys on gitea_runner_fstrim_enabled 1, a marker the gitea_runner role writes to its own
         # textfile wherever the trim is on and removes when it is turned off. It does not come from the script,
         # so a host whose timer never fires (masked, a broken unit) still alerts, and a host turned off does not.

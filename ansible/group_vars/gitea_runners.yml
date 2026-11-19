@@ -11,7 +11,15 @@ gitea_runner_enabled: true
 gitea_runner_instance_url: https://git.chifor.me
 gitea_runner_label: self-hosted-hv
 
-# Thin-pool trim (#1857): / nodiscard + the nightly chunked trim instead of the weekly fstrim.timer.
+# Cargo target age sweep (role defaults: gitea_runner_cleanup_target_age_sweep). On-prem only: these runners'
+# 250 GB root disks never reach the 75% pressure line, and their thin LVs sit on the QLC NVMe that each
+# node's etcd member shares (2026-11-18 RCA). The age path's own 5 GB floor keeps a runner from being held
+# out of the pool for a small gain (pilot: 41 GB freed on ci-runner-1); the pressure and critical paths keep
+# the role's 1 GB floor.
+gitea_runner_cleanup_target_age_sweep: true
+gitea_runner_cleanup_target_age_min_free_mb: 5120
+
+# Thin-pool trim (#1858): / nodiscard + the nightly chunked trim instead of the weekly fstrim.timer.
 # On-prem only (thin LVs on the etcd NVMe); the cloud runners share the role and keep the defaults (off).
 # Each runner's window is in host_vars/ci-runner-N.yml, staggered per Proxmox node.
 # Runbook: docs/runbooks/ci-runners.md, "Thin-pool trim".

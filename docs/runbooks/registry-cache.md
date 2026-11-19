@@ -332,7 +332,7 @@ UNIT
 systemctl daemon-reload && systemctl enable --now registry-lxc-fstrim.timer
 ```
 
-**The Sunday deadline (2026-11-19, #1857).** The script's pressure-wait budget (`PSI_WAIT_MAX_S`) is
+**The Sunday deadline (2026-11-19, #1858).** The script's pressure-wait budget (`PSI_WAIT_MAX_S`) is
 per chunk, so on this 384 GiB volume a run can wait for many hours. `TimeoutStartSec=19h45min` (with
 `TimeoutStopSec=300` for the in-flight chunk) ends it by 23:36 Sunday at the latest, whatever the
 pressure: systemd SIGTERMs it, and the script stops at once, even mid-wait, releases the mount and exits

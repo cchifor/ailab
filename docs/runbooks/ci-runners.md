@@ -355,7 +355,7 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   `gitea_runner_buildkit_heal.prom` (`dangling_record`, `runner_held`, `heal_last_seconds`, `heals_total`);
   alerts **CIRunnerBuildkitDanglingRecord** (1h) and **CIRunnerBuildkitHealRunnerHeld** (30m). Manual
   recipe in Troubleshooting below.
-- **Thin-pool trim** (`gitea-runner-fstrim-chunked.sh`, nightly `gitea-runner-fstrim.timer`; #1857,
+- **Thin-pool trim** (`gitea-runner-fstrim-chunked.sh`, nightly `gitea-runner-fstrim.timer`; #1858,
   2026-11-18). On-prem pool only: `gitea_runner_root_nodiscard` and `gitea_runner_fstrim_enabled` are on in
   `group_vars/gitea_runners.yml`; the cloud runners keep the role defaults (off).
   - **Why.** Each runner's root is a 250 GB thin LV on its node's local-lvm (64 KiB chunks, discard passed

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # MANAGED BY ANSIBLE (role: gitea_runner). Nightly, chunked, paced fstrim of the runner VM's root
-# filesystem, so the space the cleanup frees goes back to the host's thin pool (#1857, 2026-11-18).
+# filesystem, so the space the cleanup frees goes back to the host's thin pool (#1858, 2026-11-18).
 #
 # WHY. The runner VMs sit on 250 GB thin LVs (Proxmox local-lvm, 64 KiB chunks, discard passed down to a
 # QLC NVMe that etcd shares). The cloud image mounts / with online `discard`. Deleting many small files

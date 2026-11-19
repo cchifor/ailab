@@ -148,7 +148,7 @@ variable "runner_rootfs_gb" {
     frees stay allocated in the thin pool until they are trimmed. The cloud image's online `discard`
     did not do that (2026-11-18: the cleanup freed ~50 GB in ci-runner-1 and its thin LV shrank by
     1.2 GB; scattered small discards cannot free whole 64 KiB chunks, and ext4 then skips those groups
-    on fstrim). Since #1857 the gitea_runner role mounts / nodiscard and trims it nightly in chunks
+    on fstrim). Since #1858 the gitea_runner role mounts / nodiscard and trims it nightly in chunks
     (docs/runbooks/ci-runners.md, "Thin-pool trim"), so a runner's thin LV follows what the guest
     holds rather than its high-water mark.
 

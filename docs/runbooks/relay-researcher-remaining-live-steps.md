@@ -1,6 +1,7 @@
 # Relay researcher: remaining live steps before the first qualification run
 
-Status: **checklist, 2026-11-16. Merging this file changes nothing live.** It puts in execution order
+Status: **checklist, updated 2026-11-18. Steps 1-2 are DONE; resume at step 3 after the readbacks in steps 0-2 pass.**
+Merging this file changes nothing live. It puts in execution order
 the owner and operator live steps that are still open between today's state and lifting the hold on
 hub step H6 (ailab #1811). It does not replace the runbooks it cites. Each step is an operator action on
 the cluster, OpenBao, the budget ledger or the Router admin API, run only with the owner's direct
@@ -21,14 +22,19 @@ runbook's later lines by a few. To read a cited range after that, use
 
 ## Starting state
 
-Operator readbacks of 2026-11-16. Step 0 checks them again.
+Operator readbacks of 2026-11-16, updated for the completed steps 1-2. Step 0 checks them again;
+the other live values below still require that readback.
 
 - **Hub.** Relay v0.10.4 (`e77bd09a`), schema 79. H1-H3 and H4a are applied (H4a: ailab #1805, rolled
   17:33Z). H6 is ailab #1811, held (label `no-automerge`).
 - **Router.** Budget step 8's reader inclusion is applied (ailab #1807, rolled 17:16Z) with
   `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST=547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad`.
   The `worker-budget-authority` plugin is disabled. The relay-keys trust component
-  (`kubernetes/components/llm-router-relay-keys-trust`) is not included.
+  (`kubernetes/components/llm-router-relay-keys-trust`) is included by
+  `kubernetes/apps/apps/llm-router/kustomization.yaml` (step 2 DONE).
+- **Installation releases.** The agent is v0.10.6 (`1599d06e`), pinned by `agentRelease` in
+  `docs/relay-workers/researcher-binding-inputs.json`; runtime and binding remain v0.10.3 (`c0fe50f0`).
+  The agent-only update does not change the hub's v0.10.4 pin.
 - **Ledger.** One `worker_budget.authority` row, `ready=f`. Budget steps 1-7 File A are done: the
   `clients` and `readers` rows (#1753 comment 124073). There is no `qualifications` row: File B comes
   later.
@@ -42,8 +48,9 @@ Operator readbacks of 2026-11-16. Step 0 checks them again.
   `kubernetes/components/relay-worker-budget-client/deployment.yaml`. A `subPath` file never updates
   in a running Pod (`relay-worker-budget-authority.md:376-378`), so a Pod's mounted witness is the one
   from its own start until it is rolled. Every "mounted" readback below relies on that.
-- **OpenBao.** `af/relay-router` is empty. ExternalSecret `relay/relay-router-files` is
-  `SecretSyncedError`.
+- **OpenBao.** Step 1's signer and trust documents exist. ExternalSecret
+  `llm-router/llm-router-relay-trust` is Ready. `relay/relay-router-files` remains
+  `SecretSyncedError` until step 9 supplies the escrow token.
 - **Collector Secrets.** There is no `relay-control-metrics` Secret in any namespace, and no
   `monitoring/relay-control-collector`.
 
@@ -79,9 +86,11 @@ Operator readbacks of 2026-11-16. Step 0 checks them again.
 **Tags.** Each step has a **Writes** line, naming any write to OpenBao, the budget ledger, Kubernetes
 objects or the Router admin API, and a **Restarts** line, naming every rollout. A `force-sync`
 annotation is a Kubernetes write, and ESO then re-renders the ExternalSecret's Secret.
+For DONE steps 1-2, the Writes/Restarts in the step bodies are historical; only the readbacks are current.
 
-**Owner decisions come first.** Some steps cannot run until the owner settles an open point (end of
-this file):
+**Owner decisions come first.** The decisions below are recorded in
+[ailab #1820](https://git.chifor.me/cchifor/ailab/issues/1820) and repeated at the end of this file.
+Their required readbacks and per-step confirmations still apply:
 
 | Step | Needs |
 | --- | --- |
@@ -97,8 +106,8 @@ Each of those steps repeats the requirement as a pre-check.
 | # | Step | Source | Writes | Restarts |
 | --- | --- | --- | --- | --- |
 | 0 | Session, helpers, baseline | (this checklist) | none | none |
-| 1 | Signer keys and the Router trust document (H5, first half) | Router connection step 3 | **OpenBao**: 3 documents; **Kubernetes**: 1 ExternalSecret annotation | none |
-| 2 | Router trust inclusion | Router connection step 6 | one PR (Flux) | **Router** (Recreate) |
+| 1 | **DONE**: Signer keys and the Router trust document (H5, first half) | Router connection step 3 | completed; readback only now | none |
+| 2 | **DONE**: Router trust inclusion | Router connection step 6 | completed; readback only now | none |
 | 3 | Control-metrics collector Secrets | control monitoring, activation step 2 | **OpenBao**: 1 document (NEW path); **Kubernetes**: 2 Secrets | none |
 | 4 | Budget step 8 proofs | budget step 8 | **Kubernetes**: one temporary client Pod | none |
 | 5 | Witness drills A-D | budget, "Drills before production `ready=true`" | **OpenBao**: witness versions; **ledger**: the rotation to B and the `ready` flips; **Router admin API**: plugin on and off; **Kubernetes**: ExternalSecret annotations, Deployment restarts, the client Pod's deletion | **Router**, 8 times |
@@ -196,15 +205,15 @@ wsha_bao; wsha_secret relay relay-worker-budget; wsha_secret llm-router llm-rout
 
 **Expected.**
 
-- **ExternalSecrets.** `relay-router-files` is `SecretSyncedError`. `llm-router-relay-trust` is not
-  Ready either: its document does not exist yet. Both `*-worker-budget` ExternalSecrets are
+- **ExternalSecrets.** `relay-router-files` is `SecretSyncedError` (escrow token still missing).
+  `llm-router-relay-trust` is Ready. Both `*-worker-budget` ExternalSecrets are
   `SecretSynced`, and both SecretStores are Ready.
-- **OpenBao.** The `af/relay-router` list is empty.
+- **OpenBao.** `af/relay-router` lists `relay/` and `router/`; step 1's signer/trust readbacks hold.
 - **Collector Secrets.** Neither Secret exists.
 - **Provision objects.** The policy and the token role read back exactly as Router connection step 1
   says: `allowed_policies [relay-router-escrow]`, `orphan true`, `renewable false`,
   `token_no_default_policy true`, `token_explicit_max_ttl 720h`.
-- **Router.** `worker-budget-authority` is `disabled`. Record what `relay-keys` shows. The digest is
+- **Router.** `worker-budget-authority` is `disabled`; `relay-keys` is `active`. The digest is
   `547353ac…1a261ad`.
 - **Ledger.**
   - Authority: one row, `singleton=t`, `ready=f`. Its IDs equal the record's latest entry (A).
@@ -218,41 +227,48 @@ wsha_bao; wsha_secret relay relay-worker-budget; wsha_secret llm-router llm-rout
 
 ## Step 1. Signer keys and the Router trust document (H5, first half)
 
+**DONE.** Keep the commands below as the original ceremony record; do not generate or overwrite keys
+again. Recheck the public fingerprints and rendered trust. Resume at step 3 after the readbacks in
+steps 0-2 pass.
+
 **Purpose.** Create the two Ed25519 signer keys that Relay uses, and the document that gives the Router
 their public keys (Router connection step 3, `relay-router-connection.md:219-231`, readback
 `:263-274`). The hub runbook's H5 (`relay-researcher-hub-upgrade.md:312-316`) names only the escrow
-token, because it assumed this step was already done. It is not: `af/relay-router` is empty. The
+token, because it assumed this step was already done. It is now complete. The
 escrow token is not minted here, because its 720 h lifetime starts when it is minted. It is step 9.
 
-**Writes:** **OpenBao**, three new documents in KV-v2 mount `af`:
+**Writes (historical; completed):** **OpenBao**, three new documents in KV-v2 mount `af`:
 
 - `relay-router/relay/admin-signer` (field `private_key`);
 - `relay-router/relay/reconciler-signer` (field `private_key`);
 - `relay-router/router/trust` (fields `admin_public_key` and `reconciler_public_key`).
 
-Also **Kubernetes**: one `force-sync` annotation on ExternalSecret `llm-router/llm-router-relay-trust`.
+Also a historical **Kubernetes** write: one `force-sync` annotation on ExternalSecret
+`llm-router/llm-router-relay-trust`.
 
-**Restarts:** none.
+**Restarts (historical):** none.
 
-**Pre-checks.**
+**Original pre-checks (before the completed ceremony).**
 
-- Step 0's readback holds, and `bao kv list -mount=af relay-router` is empty.
+- Before the initial key creation, `bao kv list -mount=af relay-router` was empty.
 - SecretStore `relay/relay-router-store` is Ready, so ESO can reach OpenBao (it uses `ca.crt` of
   `relay-router-openbao-tls`; step 9 has more on that Secret).
 
-**Commands.** Verbatim from `relay-router-connection.md:221-231`. The keys are generated in a private
-directory and shredded at the end:
+**Original commands (completed ceremony).** Verbatim from `relay-router-connection.md:221-231`.
+The keys are generated in a private directory and shredded at the end:
 
-```sh
-umask 077; d="$(mktemp -d)"
-openssl genpkey -algorithm ed25519 -out "$d/admin.pem"
-openssl genpkey -algorithm ed25519 -out "$d/reconciler.pem"
-openssl pkey -in "$d/admin.pem" -pubout -out "$d/admin.pub"
-openssl pkey -in "$d/reconciler.pem" -pubout -out "$d/reconciler.pub"
-bao kv put -mount=af relay-router/relay/admin-signer private_key=@"$d/admin.pem"
-bao kv put -mount=af relay-router/relay/reconciler-signer private_key=@"$d/reconciler.pem"
-bao kv put -mount=af relay-router/router/trust admin_public_key=@"$d/admin.pub" reconciler_public_key=@"$d/reconciler.pub"
-shred -u "$d"/*; rmdir "$d"
+```text
+# HISTORICAL RECORD, step 1 DONE. DO NOT RUN: it would generate NEW keys and overwrite the live
+# signer keys and the Router trust document. Every line is commented out so a paste does nothing.
+# umask 077; d="$(mktemp -d)"
+# openssl genpkey -algorithm ed25519 -out "$d/admin.pem"
+# openssl genpkey -algorithm ed25519 -out "$d/reconciler.pem"
+# openssl pkey -in "$d/admin.pem" -pubout -out "$d/admin.pub"
+# openssl pkey -in "$d/reconciler.pem" -pubout -out "$d/reconciler.pub"
+# bao kv put -mount=af relay-router/relay/admin-signer private_key=@"$d/admin.pem"
+# bao kv put -mount=af relay-router/relay/reconciler-signer private_key=@"$d/reconciler.pem"
+# bao kv put -mount=af relay-router/router/trust admin_public_key=@"$d/admin.pub" reconciler_public_key=@"$d/reconciler.pub"
+# shred -u "$d"/*; rmdir "$d"
 ```
 
 **Readback.** First verbatim from `relay-router-connection.md:266-270`. It prints no private material:
@@ -265,10 +281,17 @@ done
 ```
 
 Each role's two fingerprints are equal, and the admin and reconciler fingerprints differ. Record both.
-Then this block, which is NEW (not in the runbook):
+Then recheck the rendered trust with the read-only commands below. The ceremony also forced one
+ExternalSecret sync, a write that must not be repeated; it is kept here only as a commented record:
+
+```text
+# HISTORICAL RECORD, step 1 DONE. DO NOT RUN (a Kubernetes write):
+# kubectl --context admin@ai -n llm-router annotate externalsecret llm-router-relay-trust force-sync="$(date +%s)" --overwrite
+```
+
+The read-only recheck. This block was NEW (not in the runbook):
 
 ```sh
-kubectl --context admin@ai -n llm-router annotate externalsecret llm-router-relay-trust force-sync="$(date +%s)" --overwrite
 kubectl --context admin@ai -n llm-router wait --for=condition=Ready externalsecret/llm-router-relay-trust --timeout=3m
 kubectl --context admin@ai -n llm-router get secret llm-router-relay-trust -o json | jq -c '.data | keys'
 trust | jq -c '.issuers[0] | {issuer, keys: [.keys[] | {kid, roles}], tenant: .tenants[0].tenant, routes: .tenants[0].routes, workerBudgets: .tenants[0].workerBudgets}'
@@ -290,10 +313,9 @@ Expected:
 - The two fingerprints in the trust equal the admin and reconciler values above.
 - `relay-router-files` is still not Ready, because there is no `escrow-token` yet.
 
-Step 3's readback in the Router connection runbook says the trust "still carries the `maxTokens`
-placeholder". That is out of date: since ailab #1778 the template carries 7441536.
+Router connection step 3 and the template both carry `maxTokens` 7441536 (ailab #1778).
 
-**Stop and rollback.**
+**Original stop and rollback (ceremony record).**
 
 - **A command in the block fails.** Run `shred -u "$d"/*; rmdir "$d"` first, then stop.
 - **A fingerprint or content readback is wrong.** `relay-router-files` cannot have rendered the
@@ -309,6 +331,9 @@ placeholder". That is out of date: since ailab #1778 the template carries 744153
 
 ## Step 2. Router trust inclusion
 
+**DONE.** The component is included. Re-run the readback only; the PR instructions below record the
+completed inclusion and are not a second rollout. Resume at step 3 after the readbacks in steps 0-2 pass.
+
 **Purpose.** Load the Relay trust into the Router's `relay-keys` plugin. This is Router connection step
 6 (`relay-router-connection.md:282-297`), and this is where it belongs in the order:
 
@@ -321,11 +346,12 @@ placeholder". That is out of date: since ailab #1778 the template carries 744153
 - **Not part of H6.** The H6 PR (#1811) does not include the trust, and no test requires it there. Its
   body says the trust "rides with budget step 8".
 
-**Writes:** one reviewed PR, which Flux applies to `Deployment llm-router/llm-router`.
+**Writes (historical; completed):** one reviewed PR, which Flux applied to
+`Deployment llm-router/llm-router`.
 
-**Restarts:** **the Router** (Recreate: a short outage of all Router traffic).
+**Restarts (historical; completed):** **the Router** (Recreate: a short outage of all Router traffic).
 
-**Pre-checks.**
+**Original pre-checks (before the completed inclusion).**
 
 - `llm-router-relay-trust` reads back as in step 1.
 - **The `clients` row.** Router connection step 6's readback, verbatim:
@@ -353,19 +379,13 @@ placeholder". That is out of date: since ailab #1778 the template carries 744153
     is not in git; it is set in Relay when the pool is created, so the comparison is repeated then.
 
   The owner records the review on #1753.
-- **The `qualifications` rows: an owner decision, before the PR merges.** The order of the sources
-  conflicts here:
-  - Router connection step 6 (`relay-router-connection.md:282-291`) lists them before the trust
-    inclusion;
-  - the hub runbook's order (File B after H6, before H7, `relay-researcher-hub-upgrade.md:473`) and
-    the step-7 plan (File B after the final Router rollout, 124071 §5) put them later.
+- **The `qualifications` rows. Decided 2026-11-17** (open point 6, ailab #1820): the trust is
+  included without File B. Router connection step 6 and hub H7 agree: File B comes after H6 and the
+  final Router rollout, before any run is signed. H6 rolls Relay, not the Router; use Router readings
+  after step 5's rolls or any later Router change when generating File B.
 
-  This checklist follows the second order: File B later, after H6 and before H7 (the hub runbook's
-  enablement order; the step-7 plan's "after the final Router rollout" is the same point, because H6 is
-  the last Router-facing rollout before File B). **Decided 2026-11-17** (open point 6): the trust is
-  included without File B, and File B comes after H6, before H7.
-
-**The PR.** Add `- ../../../components/llm-router-relay-keys-trust` under `components:` in
+**Original PR (completed inclusion).** Add `- ../../../components/llm-router-relay-keys-trust` under
+`components:` in
 `kubernetes/apps/apps/llm-router/kustomization.yaml`. Amend `scripts/tests/test_relay_v060_activation_gate.py`
 for that component only. Its forbidden list names `llm-router-relay-keys-trust`, and the retired
 bridge's name `llm-router-relay-keys` is a substring of it, so the amended check must still refuse the
@@ -378,7 +398,7 @@ owner gives the go-ahead.
 ```sh
 kubectl --context admin@ai -n llm-router rollout status deploy/llm-router --timeout=10m
 # An unsigned request with a VALID body: {} would fail validation first (400 INVALID_REQUEST,
-# llm-router packages/plugins/relay-keys/protected-request.ts) and prove nothing about the trust.
+# llm-router 5a5181b7 packages/plugins/relay-keys/index.ts and contracts.ts) and prove nothing about the trust.
 cap relay-keys-probe curl -sS -w '\nHTTP %{http_code}\n' -X POST -H 'Content-Type: application/json' \
   -d '{"version":1,"operationId":"operator-probe","action":"capabilities"}' https://router.chifor.me/register/relay-keys
                                                                          # HTTP 403, body code RELAY_DELEGATION_DENIED
@@ -389,8 +409,8 @@ trust | sha256sum                                                        # equal
 wsha_router                                                              # still A
 ```
 
-**Stop and rollback.** Revert the PR (another Router Recreate). Before the Relay connection exists,
-reverting an inclusion PR is enough (`relay-router-connection.md:331-332`).
+**Original stop and rollback (inclusion record).** Revert the PR (another Router Recreate). Before the
+Relay connection exists, reverting an inclusion PR is enough (`relay-router-connection.md:331-332`).
 
 ## Step 3. Control-metrics collector Secrets
 
@@ -663,8 +683,8 @@ wsha_bao; wsha_secret relay relay-worker-budget; wsha_secret llm-router llm-rout
 
   The QNAP no-snapshot check was done at step 6 (#1753 comment 123957). An acknowledged test
   allocation cannot exist before H6: no Relay connection, no allocation. Step 7 therefore does not run
-  until the owner has either accepted named evidence that meets this gate, or approved a reviewed
-  runbook change that defers the allocation part (open point 7).
+  until the owner has accepted the evidence specified by the recorded decision: (i)-(iii) and the
+  NAS-side record in "Durability evidence for the first `ready=true`" (open point 7, ailab #1820).
 
 **Stop.** Any difference keeps `ready=false` (`relay-worker-budget-authority.md:235`) and needs the
 owner's investigation. Keep the client Pod for step 5.
@@ -892,8 +912,8 @@ later roll cannot overwrite it.
   - `current_epoch` with A's IDs fails with SQLSTATE 42501.
   - The control with B's IDs succeeds.
 
-  On llm-router `main`, a valid but stale witness lets the plugin start, and its snapshot read then
-  fails (`packages/plugins/worker-budget-authority/runtime.ts:83-97`).
+  On the pinned llm-router `5a5181b7`, a valid but stale witness lets the plugin start, and its snapshot
+  read then fails (`packages/plugins/worker-budget-authority/runtime.ts:83-97`).
 - **A4. Run R.**
 
 **Drill B, missing witness.**
@@ -901,7 +921,7 @@ later roll cannot overwrite it.
 - **B1.** Run W with step 3 = `printf '' | bao kv put -mount=af relay-budget/witness witness=-`. The
   expected sha256 is that of the empty string,
   `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
-- **B2. Run O,** with the pass criterion the owner set in open point 4. On llm-router `main`:
+- **B2. Run O,** with the pass criterion the owner set in open point 4. On llm-router `5a5181b7`:
   - the plugin parses the witness file when it starts
     (`packages/plugins/worker-budget-authority/index.ts`, `readBudgetWitness`);
   - an empty or malformed witness makes the start fail;
@@ -913,10 +933,9 @@ later roll cannot overwrite it.
   - `cap plugins plugins` then shows `worker-budget-authority` `disabled`;
   - the gate is open (`open-B` output) and the positive control succeeds.
 
-  There are no mounted IDs to query. This differs from the runbook's text in two ways: its pass says
-  "Router unavailable, as in A", and its protocol step 3 says the plugin is enabled. The owner
-  accepts this criterion before the drill runs. If the live Router instead starts the plugin and logs
-  `Worker budget authority unavailable`, that is the runbook's own pass.
+  There are no mounted IDs to query. This is the accepted bootstrap pass (ailab #1820), also recorded
+  in the budget runbook's drill protocol. If the live Router instead starts the plugin and logs
+  `Worker budget authority unavailable`, that is the original runbook's pass criterion.
 - **B3. Soft delete.** First record the Router Pod's UID with
   `cap router-pod-before kubectl --context admin@ai -n llm-router get pod -l app=llm-router -o jsonpath='{.items[*].metadata.uid}'`.
   Then run `bao kv delete -mount=af relay-budget/witness`, the runbook's `bao kv delete` with the mount
@@ -968,8 +987,9 @@ later roll cannot overwrite it.
   receipts) runs when D is repeated with the Relay-wired drills.
 
 `Worker budget authority available` proves the gate and the witness, not qualification. The Router
-accepts a snapshot with no qualification row (`runtime.ts:20-21`, `:89-96`). The first proof that the
-Router qualifies a row is H6's preflight after File B (124071 §5).
+accepts a snapshot with no qualification row (`runtime.ts:20-21`, `:89-96`). The planned proof that the
+Router qualifies File B needs a separate operator preflight; H6's pool-readiness route cannot provide
+it before the ordinary registry exists. See the **TOOLING GAP** in budget step 9.
 
 **Readback, end of step 5.**
 
@@ -1049,6 +1069,7 @@ git -C '<operator fills: the ailab checkout>' archive '<operator fills: the revi
 # This endpoint returns every comment of the issue in one answer: it takes since/before, not pages
 # (on 2026-11-17, limit=3&page=2 returned all 8 comments). The listing below is the check that every
 # evidence comment (drills A-D, durability (i)-(iii)) is in it.
+# scripts/gitea-api.sh requires the operator workstation's non-admin workstation-bot identity.
 scripts/gitea-api.sh GET /repos/cchifor/ailab/issues/1753/comments > "$rv/issue-1753-comments.txt"
 sed 1d "$rv/issue-1753-comments.txt" | jq -r '.[] | "\(.id) \(.created_at) \(.body | split("\n")[0])"'
 mkdir "$rv/step4"; cp '<operator fills: the files holding step 4 readbacks, the step8-proofs capture among them>' "$rv/step4/"
@@ -1084,15 +1105,15 @@ DA..DD One item per drill A, B, C, D. Each comment has captures timestamped just
         "Drills before production ready=true", as checklist step 5 runs it;
       - B: B2, the pass decided at checklist open point 4: the enable answered HTTP 500
         PLUGIN_FAILED and the plugin stays disabled, while the gate is open and the positive control
-        succeeds (or, if the Router started the plugin, the runbook's own pass); and B3, the soft
-        delete: both ExternalSecrets not Ready, both Secrets still holding the empty-witness hash,
+        succeeds (or, if the Router started the plugin, the originally documented unavailable pass);
+        and B3, the soft delete: both ExternalSecrets not Ready, both Secrets still holding the empty-witness hash,
         the Router Pod UID unchanged;
       - C: as B2 (checklist step 5, C2);
       - D: checklist step 5's D3, the Router-side scope of this window: Worker budget authority
         available, the Router's mounted witness equal to B and the record's latest entry, the
-        authority row equal before and after. Relay still mounts A until H6, so Relay's mounted
-        witness and the history comparison are deferred to drill run R0
-        (relay-researcher-r0-relay-drills.md), not a FAIL here.
+        authority row equal before and after. Relay still mounts A until H6; verify its mounted B
+        at H6. R0 covers A-C only. D's later history comparison still needs a separately scheduled
+        Relay-wired repeat, not a FAIL in this pre-allocation window.
       A refusal without same-window captures of the open gate does not count.
 DE    After the drills: the record's latest entry is B, B restored and verified, the authority
       withdrawn, the authority row never rewritten to match a witness. Criterion: checklist step 5,
@@ -1383,10 +1404,15 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
    Router change.
 4. **The E6 rehearsal**
    ([relay-researcher-qualification-campaign.md](relay-researcher-qualification-campaign.md) §4).
-5. **R1.** Its per-run PR includes H7's candidate component. Before it, drill run R0 runs Relay's half
-   of drills A-C ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
+5. **R0, then R1.** R0's per-run PR first includes H7's candidate component for Relay's half of drills
+   A-C, with the agent suspended and no grant or create. Reset R0 before signing R1; R1's per-run PR
+   includes H7 again ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
 
 ## Open points for the owner
+
+Points 1-8 below record the 2026-11-17 decisions in
+[ailab #1820](https://git.chifor.me/cchifor/ailab/issues/1820); they are not undecided proposals.
+Their acceptance evidence remains on #1753. R0's additional confirmations are in its own §4.
 
 1. **Collector token escrow. Decided 2026-11-17:** escrow at `af/relay-control/collector`; the path class is
    in `openbao-recovery.md`.
@@ -1394,9 +1420,9 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
    the collector expiry `2027-02-15T00:00:00Z` (step 3).
 3. **Relay in the drills.** Relay is wired since H4a, and the budget runbook's drill text predates that.
    This checklist rolls only the Router, and Relay mounts B at H6. When does Relay's half of drills A-C
-   run? Relay's budget authority starts only at H7, inside R1's 60-minute readback window. **Decided
+   run? Relay's budget authority starts only at H7, inside the first signed run's readback window. **Decided
    2026-11-17:** drill run R0 before R1 ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md)).
-4. **Drills B and C on the current Router.** On llm-router `main`
+4. **Drills B and C on the current Router.** On llm-router `5a5181b7`
    (`packages/plugins/worker-budget-authority/index.ts`, `packages/kernel/manager.ts:108-116`) the
    witness is parsed when the plugin starts. With an empty or malformed witness, enabling the plugin
    therefore answers `HTTP 500` `PLUGIN_FAILED` and the plugin stays disabled. The runbook's pass ("Router
@@ -1408,10 +1434,9 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
    The plugin may be enabled after budget step 8 and the Router-side readbacks (trust, deployment digest,
    File A); File B is not needed to enable it, because the ledger refuses every allocation without it,
    and is mandatory before any candidate run is signed. Budget step 9 now lists the gates (step 8).
-6. **Trust inclusion without File B.** Router connection step 6 lists the `qualifications` rows before
-   the trust inclusion. The hub runbook and the step-7 plan put File B after the final Router rollout.
-   Confirm the trust inclusion without File B (step 2). **Decided 2026-11-17: included without File B**;
-   the Router connection runbook's step 6 now says so.
+6. **Trust inclusion without File B. Decided 2026-11-17: included without File B** (step 2 DONE).
+   Router connection step 6 agrees with the hub runbook: File B follows H6 and the final Router
+   rollout, before any run is signed.
 7. **Durability evidence for `ready=true`.** The runbook asks for measured QNAP/CSI power-loss
    durability and an acknowledged test allocation through controlled interruptions. The second
    cannot exist before H6. Which evidence does the owner accept now, or which reviewed runbook change
@@ -1422,5 +1447,5 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
 8. **The independent reviewer** for step 6. **Decided 2026-11-17:** a structured Codex review of the
    full step-6 scope plus the owner's explicit acceptance, both on #1753, with the owner's part in the
    drills noted as a known limit of independence (step 6).
-9. **A stale runbook line.** Router connection step 3's readback still says the trust carries the
-   `maxTokens` placeholder. That is a follow-up fix to the runbook text.
+9. **Resolved documentation correction.** Router connection step 3's readback now says `maxTokens`
+   7441536, matching the committed template; there is no placeholder left to replace.

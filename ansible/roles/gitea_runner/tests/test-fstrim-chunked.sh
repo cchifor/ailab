@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for files/gitea-runner-fstrim-chunked.sh, the nightly chunked trim of a runner's root fs (#1857),
+# Tests for files/gitea-runner-fstrim-chunked.sh, the nightly chunked trim of a runner's root fs (#1858),
 # plus the role pieces it depends on: the env template's defaults, the fstab regexes, the per-node windows.
 #
 # The script runs for real with mocked findmnt, tune2fs, fstrim, systemctl, pgrep, sleep and date on PATH.
