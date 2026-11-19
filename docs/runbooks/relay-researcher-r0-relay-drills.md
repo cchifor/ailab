@@ -79,6 +79,19 @@ shared 120 requests per minute per issuer and tenant (`rel:deploy/worker-budget-
 `scripts/relay-admin-call.py` (ailab #1799) has no operation for this route anyway: its allowlist is
 `me`, `list-installations`, `get-installation` and `enrollment-token`.
 
+For File B use `file_b_router_check`, the exact operator helper in
+[budget File B pre-signing readback](relay-worker-budget-authority.md#file-b-pre-signing-readback),
+from this repository root. It bypasses this listing: it performs the full read-only ledger
+comparison, then one authenticated Router preflight. `ledger: pass` proves the reviewed rows,
+canonical digests, stored route/bounds and remaining lifetime match; the Router proof adds current
+Router acceptance. At Router `5a5181b7`, `worker-budget-preflight` authenticates but durably consumes
+a nonce before its non-allocating check (`packages/plugins/relay-keys/index.ts:23-25`,
+`service.ts:34-50,69-88`). The owner accepted that one replay-set write on 2026-11-19; the tool makes
+it only with the explicit `--router-preflight`, and prints it and the scope's readiness slots before
+and after the call. Without that flag (`file_b_check`) the tool leaves the Router uncalled, reports
+`router: unavailable` and exits 1; `--skip-router-preflight-unavailable` permits ledger-only evidence
+collection, always with `signingReady: false`, and does not satisfy the R0 prerequisite.
+
 **F2. The hub's isolated budget observer does reach the ledger, read-only.** When control metrics are
 configured (H6) and the budget authority has started (H7), the hub opens a separate one-connection pool,
 `application_name` `relay-worker-budget-observation` (`rel4:server/main.ts:429-442`,
@@ -134,11 +147,21 @@ plans around it.
 R0 runs **after** H6, the candidate journal and File B are read back (checklist, "After this
 checklist", items 1-3), and **before** R1 (item 5). The E6 rehearsal (item 4) may come before or after
 R0. R0 signs a real run, so File B's `tokenPolicyDigest` must exist first (hub runbook H7: "File B comes
-before any run is signed").
+before any run is signed"). File B must be **committed, read back and qualified by the Router before
+any candidate run is signed (R0 first)**. With reviewed `$ev/file-b.json` and
+`FILE_B_REQUIRED_LIFETIME_SECONDS` covering this check through the original worker deadline, run
+the helper defined in the budget runbook (F1):
 
-File B's planned pre-signing qualification probe is still a **TOOLING GAP** (budget step 9): F1's
-pool listing cannot perform it, and F2's observer is only a witness/gate check. Resolve that gap
-without granting or creating R0. Drill D's later history comparison is also outside R0's A-C scope.
+```sh
+file_b_router_check
+```
+
+Sign only on its exit 0 (`status: pass`, `signingReady: true`), never on a ledger-only result. It
+writes one Router replay-set nonce per run (F1); run it once, immediately before signing, and never
+retry it automatically. Neither pool readiness nor an `available` log proves Router qualification.
+
+F1's pool listing cannot perform the Router half, and F2's observer is only a witness/gate check.
+Drill D's later history comparison is also outside R0's A-C scope.
 
 **The gate during R0.** By then the production gate is open: checklist steps 7 and 8 set `ready=true`
 and enabled the Router plugin, and H6 requires both (`relay-researcher-hub-upgrade.md:324-327`). R0
@@ -309,7 +332,9 @@ SQL
 **Pre-checks.** A failed one stops R0 before signing.
 
 - **Order (§3).** H6 is read back (hub runbook H6), the candidate journal is on `10.96.0.42`, and File B
-  is committed and read back, with its `tokenPolicyDigest` recorded.
+  is committed, read back and qualified by the Router, with its `tokenPolicyDigest` recorded.
+  `file_b_router_check` is the readback command (§3), and only its exit 0 (`signingReady: true`)
+  satisfies Router qualification; an acknowledged ledger-only result from `file_b_check` does not.
 - **Owner confirmations (§4)** are on #1753, and the owner confirms the window.
 - **Production gate.** `cap gate-before ledger_state` shows `ready = t` with B's IDs, and all five
   history counts 0. `cap plugins-before plugins` shows `worker-budget-authority` `active`.

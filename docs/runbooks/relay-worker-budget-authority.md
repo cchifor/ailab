@@ -273,22 +273,371 @@ Follow Consumer wiring for the early file mounts; the production gate and plugin
    mandatory: committed, read back and qualified by the Router (the preflight planned in
    ailab #1753 comment 124071 §5) **before any candidate run is signed**
    (`relay-researcher-hub-upgrade.md` H7).
+   Run `file_b_router_check` from the procedure below before signing R0 first,
+   then before each candidate run. Only its exit 0 (`signingReady: true`) satisfies this
+   signing prerequisite. The zero-write `file_b_check` stays available for ledger-only
+   evidence; it exits non-zero even when the ledger passes.
 
-   **TOOLING GAP: the File B preflight before signing.** H6 does not expose the promised budget
-   preflight through `GET /api/worker-pools`: ordinary qualification is checked first, so the route
-   cannot reach the ledger or Router during the candidate campaign
-   (`e77bd09a:server/workers/pool-readiness.ts:100-122,157-211`; R0 §2 F1).
-   Neither the ailab operator allowlist (`scripts/relay-admin-call.py`) nor Relay's operator CLIs at
-   `c0fe50f0`, `e77bd09a` or audited `origin/main` (`83262314`) provide this standalone check. A reviewed
-   operator tool must check the exact File B policy digests, route, bounds and required lifetime against the
-   ledger and authenticated Router preflight, without allocating or creating a worker. The observer
-   checks only the witness/gate and cannot substitute. Keep the pre-signing requirement; resolve
-   this gap before R0.
+   **Router qualification: one nonce write, accepted by the owner on 2026-11-19.** H6 cannot
+   provide the pre-signing check: `GET /api/worker-pools` stops at ordinary qualification during the
+   candidate campaign (`e77bd09a:server/workers/pool-readiness.ts:100-122,157-211`; R0 §2 F1). The
+   ledger half is read-only. The Router half cannot be: the pinned Router's authenticated
+   `worker-budget-preflight` first persists the delegation's nonce
+   (`5a5181b7:packages/plugins/relay-keys/service.ts:34-50`). The owner chose to accept that one
+   replay-set write per check instead of a Router change. `--router-preflight` is the explicit opt-in;
+   without it the tool still makes no Router request
+   ([Router half](#router-half-one-nonce-write-accepted-by-the-owner-on-2026-11-19)).
 
    With the bootstrap gates above satisfied, enable it through the authenticated admin API:
    `POST /admin/v1/plugins/worker-budget-authority` with `{"enabled":true}`. Read
    back `GET /admin/v1/plugins` (state active) and the router log line
    `Worker budget authority available`. No manifest enables it.
+
+### File B pre-signing readback
+
+**File A and File B are separate.** File A is step 7's `clients`/`readers`
+mapping. File B is the independently reviewed content committed to
+`worker_budget.qualifications`, not a release qualification registry, candidate
+run, or allocation. There is no qualifying File B file/template in this checkout:
+`kubernetes/components/relay-worker-budget-client` wires connection files only,
+and step 7 deliberately supplies no qualifying seed. The operator retains the
+reviewed SQL and its successful `COMMIT` receipt in the private evidence directory
+(`remaining-live-steps` step 0's `lwrite`). "Committed" here means the ledger
+transaction, not merely a git commit. Do not generate the expected file from the
+database readback: that would compare the database with itself.
+
+For this tool, retain the same reviewed rows as `$ev/file-b.json`, a JSON object
+with exactly `version: 1` and `qualifications: [...]`. Each array entry has exactly
+`deployment_digest`, `digest`, and `policy`, matching the table columns. It is an
+expected **complete table**, including other deployments if present; an extra,
+missing or duplicate row fails. Row order is immaterial. `policy` is the actual
+JSON object, with exactly these fields (no placeholders or synthetic evidence):
+
+| Fields | Source-derived meaning |
+| --- | --- |
+| `version`, `digest` | Version 1; `digest` is the canonical SHA-256 `tokenPolicyDigest` of every other policy field, and must equal the row's `digest`. |
+| `routerReleaseDigest`, `adapterDigest` | Hash of the executing compiled release plus dependency lockfile; hash of the executing provider adapter. These are distinct from the row's Router connection `deployment_digest`. |
+| `accountId`, `deploymentId`, `model`, `provider`, `providerGeneration`, `baseUrl`, `transport` | Exact provider target/endpoint and generation; transport is `chat-completions` or `anthropic-messages`. This does not by itself prove a requested route currently selects that target. |
+| `maximumInputTokens`, `maximumOutputTokens`, `outputIncludesReasoning`, `usageIncludesAllTokens` | Positive safe integer bounds; both coverage flags must be true, including reasoning and cached tokens. The bounds' sum must remain a safe integer. |
+| `qualificationExpiresAt`, `evidenceDigest` | Expiry as positive Unix milliseconds, covering the whole original worker lifetime; SHA-256 identifying independently retained review/test evidence. |
+
+Grounding (fixed revisions, not moving branches):
+
+- Relay ledger `d1c77f876606976362d70f42973033d31ac913c6`,
+  `deploy/worker-budget-ledger/001-authority.sql:20-36` defines mappings and rows;
+  `:188-198` sends all policies for the reader's deployment to the Router.
+- Router `5a5181b7`, `packages/plugins/worker-budget-authority/runtime.ts:9-30`
+  defines the strict policy schema and canonical digest (sorted keys, compact
+  UTF-8 JSON, excluding `digest`); `:35-58` derives release/adapter hashes;
+  `:89-96` verifies snapshot identity/digests; `:110-129` filters policies against
+  executing release, adapter, enabled account/deployment/model, endpoint, provider
+  generation, output-limit support and expiry. Availability alone is insufficient.
+  `packages/modules/inference-budget/index.ts:9-21,33-50` defines provider-enforced
+  context coverage (framing, tools and cache reads/writes), reasoning coverage and
+  per-attempt use of the exact target's qualified input/output bounds.
+- Relay hub `e77bd09a`, `server/workers/inference/budget-preparation.ts:119-140`
+  binds proof policy digests and original deadline to the profile; `:449-489`
+  supplies those digests and deadline to allocation/inspection. These allocating
+  paths are not invoked by the check. The ledger's
+  `005-provenance-purpose.sql:110-125,164-171` checks qualification expiry before
+  inserting allocation/outbox records. `003-scoped-requests.sql:117-127` and
+  `005-provenance-purpose.sql:214-224` also mutate allocation/outbox state.
+
+**Ledger half, zero-write (`file_b_check`), from this repository root.** It sends no
+Router request; the signing check is `file_b_router_check`
+([Router half](#router-half-one-nonce-write-accepted-by-the-owner-on-2026-11-19)), which reuses this
+pipeline. Set `FILE_B_REQUIRED_LIFETIME_SECONDS` to the planned interval from **this check**
+through the end of the original worker lifetime, including signing/start delays
+(1..604800 seconds, the ledger preflight's seven-day bound). Use the existing
+step-5 operator socket access; no credentials need to be read or printed here.
+Use a shell with `pipefail` (bash, including 3.2, or zsh); the subshell keeps
+that option local to the helper.
+This is a new read-only command, not authorization to execute it automatically:
+
+```sh
+file_b_check() (
+  set -o pipefail
+  python3 scripts/relay-worker-budget-file-b-check.py --print-ledger-sql \
+    | kubectl --context admin@ai -n relay-budget-authority exec -i relay-budget-postgres-0 -- \
+        env PSQL_HISTORY=/dev/null PGCLIENTENCODING=UTF8 psql -X -qAt -w -v ON_ERROR_STOP=1 \
+          -h /var/run/postgresql -U postgres -d relay_budget -f - \
+    | python3 scripts/relay-worker-budget-file-b-check.py \
+        --file-b "$ev/file-b.json" \
+        --required-lifetime-seconds "${FILE_B_REQUIRED_LIFETIME_SECONDS:?set the reviewed remaining lifetime}" \
+        --ledger-json - "$@"
+)
+file_b_check --json
+```
+
+The fixed SQL uses `BEGIN READ ONLY`, session-local statement/lock timeouts and
+`search_path=pg_catalog`, a single SELECT over the **whole** qualifications table,
+and `ROLLBACK`. It calls
+only PostgreSQL JSON/clock/settings builtins, with no worker-budget functions,
+row locks, reservations, counters, audit inserts, worker creation or allocation.
+It verifies exact field equality and canonical digests, a read-only receipt,
+readback age/clock disagreement of at most 15 seconds, and expiry through the
+requested deadline using the later of the database and operator clocks. It does
+not prove the authority gate, witness, File A, evidence quality, or live Router
+route/release/provider acceptance. Repeat after any change and immediately before
+signing; a readback does not freeze the table or extend policy expiry.
+`--print-router-ledger-sql`, used only by `file_b_router_check`, is the same transaction and
+SELECT plus one scalar subquery over `worker_budget.authority` (`001-authority.sql:14-19`): its
+`instance_id`, `recovery_epoch` and `ready`, never `witness_digest`, with no lock and no function.
+The Router's preflight requires that recovery epoch (`5a5181b7:packages/plugins/api-keys/meter.ts:121-125`).
+
+The existing `relay_budget_reader` is **not** a SELECT role:
+`001-authority.sql:200-206` grants only function execution. Both application logins
+lack table privileges; `kubernetes/optional/relay-budget-authority/pg_hba.conf:2-9`
+permits `postgres` only via local peer authentication and rejects remote owner
+connections. A port-forward alone therefore cannot give this tool table access.
+Where the operator already has a permitted local connection, direct mode is:
+
+```sh
+python3 scripts/relay-worker-budget-file-b-check.py \
+  --file-b "$ev/file-b.json" --required-lifetime-seconds "$FILE_B_REQUIRED_LIFETIME_SECONDS" \
+  --ledger-dsn-env FILE_B_LEDGER_DSN --json
+```
+
+`FILE_B_LEDGER_DSN` contains a PostgreSQL URL, or use `--ledger-dsn-file PATH`.
+The tool passes parsed connection fields only through psql's environment, never
+argv/output. TCP requires `sslmode=verify-full`; only `sslmode`, `sslrootcert` and
+`hostaddr` URL options are allowed. This does not create/grant a role or bypass
+the existing access rules. The deployed socket pipeline is the current path.
+
+**Ledger preflight side-effect review.** At the ledger pin,
+`002-preflight.sql:4-33`, replaced by `004-preflight-errors.sql:5-36`, performs
+reads and returns a proof; there are no audit/counter/reservation writes. Its
+`gate` callee (`001-authority.sql:60-66`) takes `FOR SHARE`, which PostgreSQL
+rejects inside a READ ONLY transaction. Neither it nor `runtime_snapshot` is
+called here. They also do not verify full policy content: preflight checks
+digest presence and expiry (`004:23-33`); the Router performs runtime qualification.
+
+#### Router half: one nonce write, accepted by the owner on 2026-11-19
+
+**What the Router offers.** The pinned Router has one non-allocating, authenticated qualification
+check: `POST /register/relay-keys`, action `worker-budget-preflight`. It requires an Ed25519-signed
+Bearer JWT, valid at most 60 seconds, binding the exact request bytes, action, operation ID, issuer,
+tenant, role and nonce; an ordinary Router admin token is insufficient
+(`5a5181b7:packages/plugins/relay-keys/contracts.ts:6-11,40,58-74`). The kernel leaves `/register`
+authentication to the plugin (`packages/kernel/http.ts:63-68`). `relay-keys/index.ts:18-25`
+verifies the delegation, then **always durably consumes its nonce before dispatch**
+(`service.ts:34-50`), then runs the check (`service.ts:69-88`): trust ceiling and route membership,
+exact runtime identity, policy set and lifetime (`packages/plugins/api-keys/meter.ts:121-131`), and
+at least one usable target of the requested route matching a qualified policy. The worker-budget
+plugin exposes no other HTTP diagnostic (`packages/plugins/worker-budget-authority/index.ts:39-71`).
+Relay records the same bookkeeping (`c0fe50f0:deploy/worker-budget-ledger/README.md:319-327`).
+
+**The write the owner accepted.** One SQLite transaction in the Router's store
+(`/data/router.sqlite`, `kubernetes/apps/apps/llm-router/router.yaml:156-157`; table
+`kv(ns, key, value, updated_at)`, `5a5181b7:packages/adapters/sqlite/sqlite-worker.mjs:38,261-267`):
+
+- the scope's `relay-key-nonces` row, key `sha256(JSON.stringify([issuer, tenant]))`
+  (`relay-keys/service.ts:11`), gains this nonce tagged `readiness: true`, and loses its expired
+  entries (`service.ts:39-49`);
+- the same transaction rewrites the unchanged `api-keys`/`state` row, as every
+  `managedTransaction` with operations does (`packages/plugins/api-keys/keys.ts:35,135-143`).
+
+Nothing else: no key, grant, allocation, operation receipt, audit row or ledger write; the
+preflight branch returns before the key transaction (`service.ts:69-89`). The entry is unexpired
+for 10 seconds, the delegation's lifetime, and occupies one of the scope's **12 readiness slots**
+(`service.ts:45-47`; the 120 management slots are counted apart). It stays stored, expired, until
+the scope's next nonce consumption prunes it. A refusal at the limit (429 `RATE_LIMITED`) writes
+nothing.
+
+**How the tool obtains a delegation the Router accepts.** Three ways were examined:
+
+- **(A) The hub's own pool-readiness route: not available before the ordinary registry.**
+  `GET /api/worker-pools` reaches the Router only through `inspectPoolReadiness`. Without an
+  ordinary qualification registry the hub's qualification mode stays `"refuse-fixture"`
+  (`e77bd09a:server/main.ts:260,267-273`), so every template gets
+  `runtime-qualification-unavailable` (`server/workers/pool-readiness.ts:100-122`), and the budget
+  preflight runs only `if (!reason && …)` (`:157`, the call at `:174-190`). That holds through the
+  whole candidate campaign (R0 §2 F1). Even when reachable it would report only `available`, for the
+  profile's digests and the template's deadline, not File B's. The hub's budget authority itself
+  starts only at H7 (`server/main.ts:337`), after File B. `origin/main` (`6869d4fe`) keeps the same
+  gate (`pool-readiness.ts:100-142,184`).
+- **(C) Other routes.** Exec into the hub Pod and sign there with its mounted key: the key would
+  stay in the Pod, but a second, unreviewed process would run inside the production hub container
+  with its identity, egress and memory limit, and before H7 Relay's own preflight code is not
+  instantiated there (`server/main.ts:337`), so it would be the same custom signer relocated, with
+  `pods/exec` on the hub added. A new operator signer in the Router trust needs a trust change and a
+  Router restart: new authority. The admin API has no worker-budget diagnostic (above). A Router
+  change is what the owner declined.
+- **(B) Chosen: the tool signs one `reconciler` delegation itself.** It is the least new authority:
+  the existing reconciler signer, which the Router trust maps to `relay-reconciler-2026-11` with role
+  `[reconciler]` only (Router connection runbook "Router trust mapping"), and whose Router role
+  cannot create, list, inspect or authorize; it is limited to `operation`, `delivery-ack`, `revoke`
+  of unacknowledged keys, `capabilities`, `lifetime-usage`, `worker-budget-inspect` and
+  `worker-budget-preflight` (`relay-keys/contracts.ts:70-71`, `service.ts:198`). The tool uses only
+  the last. Its claims are exactly the ones Relay's `SignedRouterBridge` signs
+  (`e77bd09a:server/router-credentials/transport.ts:160-198`, identical at `origin/main`):
+  `iss`, `kid` and `tenant` from the reviewed connection record, role `reconciler`, one fresh UUID
+  operation ID and 24-byte nonce, `exp - iat` = 10 seconds (Relay's own preflight signs with at most
+  10, `server/workers/inference/budget-authority.ts:130-137`). Only `sub` differs:
+  `operator:file-b-check` instead of Relay's `worker-pool-readiness`; the preflight branch records
+  no subject. The operator already holds this key's access: H5's readback reads the same Secret
+  ([remaining-live-steps](relay-researcher-remaining-live-steps.md) step 9).
+
+**The key never reaches argv, disk or output.** The tool reads it from an inherited descriptor
+(`--reconciler-key-fd 3`) and refuses anything but a pipe there, so `3< key.pem` fails. The pipe
+comes straight from `kubectl get secret relay-router-files -o jsonpath='{.data.reconciler-key\.pem}'
+| base64 -d`: the field Relay mounts as `/run/relay-router/reconciler-key.pem`
+(`kubernetes/apps/relay-router-connection/credentials/relay.yaml:89-97`;
+`kubernetes/components/relay-router-connection/deployment.yaml:31-32`). It accepts exactly one
+unencrypted PKCS#8 Ed25519 PEM (what step 1's `openssl genpkey -algorithm ed25519` wrote), signs in
+memory (RFC 8032, Python stdlib; RFC 8032 §7.1 known-answer tests in the test file), and prints
+only the public key's SHA-256 (`reconcilerPublicKeySha256`, the same value as step 1's
+`openssl pkey -pubout -outform DER | sha256sum` fingerprint). A wrong key is refused by the Router's
+signature check, before any write.
+
+**What it proves, and what it does not.** A valid proof shows that, at its `observedAt`, the Router
+accepted a reconciler delegation for this issuer and tenant (the hub's signer and the Router trust
+agree); the request fits the tenant's trust ceiling; its runtime ledger snapshot carries this
+deployment digest and the ledger's current recovery epoch; **every File B policy digest of this
+deployment** is runtime-qualified (executing release and adapter, account, deployment, model,
+endpoint, provider generation, transport and output-limit support) through `requiredUntil`; and
+the requested route has a usable target matching one of them. It does not prove the hub's own
+wiring (its profile's digests, model, limit or mounted file), it does not run the hub's
+ledger-before/after `worker_budget.preflight` as the client role (the ledger half here is the
+read-only full-table comparison plus the authority row), and it expires with the proof's
+`validUntil`, at most 10 seconds later. Run it immediately before signing.
+
+**Inputs.** Everything the tool needs is reviewed in git except the key, the run's token budget and
+its lifetime:
+
+| Input | Value | Source |
+| --- | --- | --- |
+| `--router-connection`, `--router-connection-id` | `kubernetes/components/relay-router-connection/connections.json`, `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8` | The record Relay mounts at H6. The tool derives issuer `relay.chifor.me`, kid `relay-reconciler-2026-11`, origin `https://router.chifor.me` and the deployment digest `547353ac…61ad` from it, with Relay's own digest (`e77bd09a:server/router-credentials/service.ts:41-54`) |
+| `--router-tenant` | `00000000-0000-4000-8000-000000000001` | The record's only tenant; the trust's tenant |
+| `--router-route`, `--router-requested-model` | `relay-researcher-luna` | The pool's selection model and the trust's only route ([Router connection](relay-router-connection.md) "Route precondition") |
+| `--router-access` | `api` | The trust's and the route's access |
+| `--router-limit` | the run's grant `inferenceTokenBudget` (`FILE_B_ROUTER_LIMIT`) | Per run, at most 1,000,000 in the campaign ([qualification campaign](relay-researcher-qualification-campaign.md) §3.6); the trust's `maxTokens` 7441536 is the Router's ceiling |
+| `--required-lifetime-seconds` | `FILE_B_REQUIRED_LIFETIME_SECONDS`, as for the ledger | The same `requiredUntil` goes to the Router, which also caps it at the trust's `maxLifetimeSeconds` 86400 |
+| `--reconciler-key-fd` | `3`, a pipe from Secret `relay/relay-router-files`, key `reconciler-key.pem` | Above |
+| `--router-store-json` | the Router store readback, before the call | Below |
+
+The tool refuses before signing when the ledger fails, when the authority row is not exactly one
+row with `ready=true` (the Router would answer 503 after its write), when a File B row belongs to
+another deployment or there are more than 32 policies (the Router's maximum), when the requested
+model is not one of the routes, when the key is not one Ed25519 PEM from a pipe, and when the
+scope has no free readiness slot.
+
+**Readiness slots, read-only.** The tool counts the scope's unexpired readiness nonces from the
+Router's own store, through a fixed program in the same pattern as `--print-ledger-sql`:
+`--print-router-store-script` prints it, `node -` runs it in the Router container. It opens
+`/data/router.sqlite` with `readOnly: true` (SQLite read-only; a missing file is never created)
+and `PRAGMA query_only`, runs one `SELECT key, value FROM kv WHERE ns = 'relay-key-nonces'` in a
+read transaction, and prints, per scope, only each entry's `exp`, readiness tag and the SHA-256 of
+its nonce. A WAL reader takes read locks only, never a checkpoint; the program has no inputs.
+`--router-slots` turns a readback into the report: remaining = 12 minus the readiness entries whose
+`exp` is after the readback's clock, the Router's own rule (`service.ts:37-40`).
+
+**Signing check (`file_b_router_check`), from this repository root.** It defines the ledger
+helper's Router twin and an after pass, and needs `jq`. Set `FILE_B_REQUIRED_LIFETIME_SECONDS` as
+above and `FILE_B_ROUTER_LIMIT` to the run's `inferenceTokenBudget`. Each run of
+`file_b_router_check` writes **one** nonce; never wrap it in a retry loop. The store readback is one
+short `node` process in the Router container, as `validate-live.mjs` is
+([llm-router](llm-router.md) step 8); it reads, never writes.
+
+```sh
+router_store_readback() (
+  set -o pipefail
+  python3 scripts/relay-worker-budget-file-b-check.py --print-router-store-script \
+    | kubectl --context admin@ai -n llm-router exec -i deploy/llm-router -c router -- node --no-warnings -
+)
+file_b_router_slots() (   # zero-write; optional argument: the call's nonceSha256
+  set -o pipefail
+  router_store_readback | python3 scripts/relay-worker-budget-file-b-check.py --router-slots --json \
+    --router-connection kubernetes/components/relay-router-connection/connections.json \
+    --router-connection-id babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8 \
+    --router-tenant 00000000-0000-4000-8000-000000000001 \
+    --router-store-json - ${1:+--router-nonce-sha256} ${1:+"$1"}
+)
+file_b_router_check() (
+  set -o pipefail
+  out="$(python3 scripts/relay-worker-budget-file-b-check.py --print-router-ledger-sql \
+    | kubectl --context admin@ai -n relay-budget-authority exec -i relay-budget-postgres-0 -- \
+        env PSQL_HISTORY=/dev/null PGCLIENTENCODING=UTF8 psql -X -qAt -w -v ON_ERROR_STOP=1 \
+          -h /var/run/postgresql -U postgres -d relay_budget -f - \
+    | python3 scripts/relay-worker-budget-file-b-check.py --router-preflight --json \
+        --file-b "$ev/file-b.json" \
+        --required-lifetime-seconds "${FILE_B_REQUIRED_LIFETIME_SECONDS:?set the reviewed remaining lifetime}" \
+        --ledger-json - \
+        --router-connection kubernetes/components/relay-router-connection/connections.json \
+        --router-connection-id babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8 \
+        --router-tenant 00000000-0000-4000-8000-000000000001 \
+        --router-route relay-researcher-luna --router-requested-model relay-researcher-luna \
+        --router-access api --router-limit "${FILE_B_ROUTER_LIMIT:?set the run inferenceTokenBudget}" \
+        --router-store-json <(router_store_readback) \
+        --reconciler-key-fd 3 3< <(kubectl --context admin@ai -n relay get secret relay-router-files \
+            -o jsonpath='{.data.reconciler-key\.pem}' | base64 -d))"
+  rc=$?
+  printf '%s\n' "$out"
+  nonce="$(printf '%s' "$out" | jq -r '.router.nonceSha256 // empty')"
+  file_b_router_slots "$nonce" || echo "after pass failed; rerun file_b_router_slots $nonce (zero-write)" >&2
+  return "$rc"
+)
+file_b_router_check
+```
+
+In order, the operator sees: on stderr, **before the call**, that exactly one request goes to
+`https://router.chifor.me/register/relay-keys`, that the Router durably writes its delegation nonce
+to its replay set for scope `relay.chifor.me/00000000-0000-4000-8000-000000000001`, and the readiness
+slots before (for example `12 of 12 remaining`); after it, whether the nonce was written, its SHA-256
+and the expected slots after (`11 of 12` until the delegation expires); then the report; then the
+after pass, read back from the store: the remaining slots and `callNonceRecorded`. Within the
+10-second lifetime the after pass counts the new entry; later the slot is free again and
+`callNonceRecorded` still shows the retained entry, unless a later consumption on the scope pruned
+it. The process substitutions' own exit codes are not checked by the shell, but an empty or failed
+readback or key fails the tool before any request.
+
+**Exactly one request, never retried.** The tool opens one verified TLS connection (system trust,
+TLS 1.2 or later, no proxy, no redirect followed) with `User-Agent:
+relay-worker-budget-file-b-check/1 (ailab operator)`, sends one POST and reads one answer. It
+validates a 200 strictly against the preflight branch's response (`service.ts:85-88`): exactly
+`version`, `action`, `operationId`, `requestDigest`, `issuer`, `tenant`, `deploymentDigest`,
+`recoveryEpoch`, `policyDigests` (File B's digests for this deployment, sorted, as sent),
+`requiredUntil`, `limit`, `observedAt`, `validUntil`, each equal to what was sent or read from the
+ledger; `observedAt` within 15 seconds of the operator clock, `validUntil` in the future, at most 15
+seconds after `observedAt` and not after the delegation's `exp`. Refusals are distinct and say
+whether the nonce was written; none is retried:
+
+| Answer | `router.status` | Nonce written |
+| --- | --- | --- |
+| 200, valid proof | `pass` | yes |
+| 200, invalid proof | `invalid-proof` | yes if it echoes this operation ID, else unknown |
+| 429 `RATE_LIMITED` (12 unexpired readiness nonces) | `rate-limited` | no (refused inside the transaction) |
+| 409 `ASSERTION_REPLAY` (this nonce already recorded: the same bytes arrived twice) | `replay` | yes, by the first delivery |
+| 403 `RELAY_DELEGATION_DENIED` (signature, kid, role, trust, binding or clock), or another code | `denied` | unknown: verification refuses before the write, but a delegation that expires between admission and execution is refused after it |
+| 403 `GRANT_DENIED` (outside the trust ceiling) / `WORKER_BUDGET_UNQUALIFIED` | `denied` | yes |
+| 503 `WORKER_BUDGET_UNAVAILABLE` (authority unavailable, or identity/epoch differ) | `unavailable` | yes |
+| any other status | `http-error` | unknown |
+| connection or TLS failure | `not-sent` | no |
+| no answer after sending | `outcome-unknown` | unknown |
+
+"Unknown" is settled by the after pass's `callNonceRecorded`. The operator clock must be within
+about five seconds of the Router's: the Router refuses `iat` more than 5 seconds ahead and an `exp`
+already past (`contracts.ts:69`), before any write. No Router message text, token, nonce or key
+reaches the output; only an allowlisted error code does.
+
+**Exit codes.** Verification exit 0 means **both** halves passed: only `--router-preflight` can
+return it, with `status: pass` and `signingReady: true`. Any failure exits 1, including invalid
+arguments, every Router refusal and, without `--router-preflight`, the uncalled Router half: the
+zero-write `file_b_check --json` exits 1 with `ledger: pass` if the readback passed and
+`router: unavailable`. For explicit collection of ledger-only evidence,
+`file_b_check --skip-router-preflight-unavailable --json` exits 2 only when every ledger check
+passes, reports `status: ledger-only`, and **always** `signingReady: false`: **evidence collected,
+not signable**. An evidence collector must deliberately check for exit 2; an `&& sign` chain cannot
+accept ledger-only evidence. The flags `--router-preflight`, `--router-slots` and
+`--skip-router-preflight-unavailable` exclude each other, and Router inputs without one of the first
+two are refused. The utilities `--print-ledger-sql`, `--print-router-ledger-sql` and
+`--print-router-store-script` exit 0 after printing and verify nothing; `--router-slots` exits 0
+for a valid readback (`status: router-slots`, `signingReady: false`). `file_b_router_check` returns
+the tool's exit code; a failed after pass only prints how to rerun it. Omitting `--json` gives a
+short human-readable report.
+File B must be **committed, read back and qualified by the Router before any candidate run is
+signed (R0 first)**: `file_b_router_check` exiting 0, immediately before signing. A ledger-only
+exit code must never become a signing gate.
 
 ### Credential delivery
 
