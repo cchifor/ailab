@@ -244,17 +244,24 @@ that curve for the two CPU fans:
   `/etc/modules-load.d/ec_su_axb35.conf`. Loading it only reads the EC; unloading it resets all three
   fans to auto.
 - **Curve:** `ec-fan-profile.service` (oneshot, after `systemd-modules-load`) writes the rampup and
-  rampdown curves of fan1 and fan2, then sets them to `curve`. From then on the driver re-reads the EC
-  temperature every second and moves one level at a time. Stopping the service sets them back to
-  `auto`. The default curve is 20 % from 35 C, 40 % from 50, 60 % from 60, 80 % from 68, and 100 % only
-  from 95, with 5 C of hysteresis.
+  rampdown curves of each fan in `pve_ec_fan_fans` (fan1 and fan2), then sets it to `curve`. A CPU fan
+  dropped from that list goes back to `auto`. From then on the driver re-reads the EC temperature every
+  second and moves one level at a time. Stopping the service sets both CPU fans back to `auto`. The
+  default curve is 20 % from 35 C, 40 % from 50, 60 % from 60, 80 % from 68, and 100 % only from 95, with
+  5 C of hysteresis.
+- **Converge on the live state:** each converge runs `ec-fan-profile check`, which reads the sysfs, and
+  restarts the service when the fans are not on the profile. That covers a module reloaded under the
+  active service, a start that failed at boot, and a value written by hand. The role fetches the driver
+  source only when the checkout is missing, not at the pin, or edited, so converging a current host does
+  not need github.com.
 - **fan3**, the small system fan, is firmware-controlled. It has no known control register, so the role
   never writes it and only reports it. 0 rpm on fan3 is normal.
 - **Metrics:** `ec-fan-textfile.timer` writes
   `/var/lib/prometheus/node-exporter/ec_fan.prom` every 30 s. It reports `ec_fan_rpm`, `ec_fan_level` and
-  `ec_fan_mode_info` per fan, plus `ec_temp_celsius` and `ec_fan_driver_loaded`. The alerts are in
-  `kubernetes/apps/infrastructure/monitoring/pve-ec-fan-rules.yaml`: a CPU fan under 1000 rpm above
-  70 C, the file going stale, and the driver not loaded.
+  `ec_fan_mode_info` per fan, `ec_fan_managed` per CPU fan, plus `ec_temp_celsius` and
+  `ec_fan_driver_loaded`. The alerts are in `kubernetes/apps/infrastructure/monitoring/pve-ec-fan-rules.yaml`:
+  a CPU fan under 1000 rpm above 70 C, a managed CPU fan not in curve mode for 15 min, the file going stale,
+  and the driver not loaded.
 
 **Secure Boot must be off.** The module is unsigned. With Secure Boot on, the Proxmox kernel locks down
 (integrity mode) and refuses it. node1 has had Secure Boot off (lockdown `none`) since 2026-11-19.
@@ -301,9 +308,10 @@ fan3 often 0), `cat /sys/class/ec_su_axb35/fan{1,2}/{mode,level}` and `cat /sys/
 0-100, strictly rising, each rampdown value below the rampup value of its level). Put them in that
 host's host_vars for one host, or in the role defaults for all. Then run `just ec-fan --limit <host>`.
 The role refuses a curve that breaks those rules, and any fan list other than 1 and 2. A changed config
-restarts `ec-fan-profile`, so the fans are on auto for a moment and then on the new curve. To try a curve
-by hand first, write it to `/sys/class/ec_su_axb35/fan{1,2}/rampup_curve` (and `rampdown_curve`) on the
-host. The next converge or reboot puts the role's curve back.
+restarts `ec-fan-profile`, so the fans are on auto for a moment and then on the new curve. Dropping a fan
+from `pve_ec_fan_fans` puts it back on auto. To try a curve by hand first, write it to
+`/sys/class/ec_su_axb35/fan{1,2}/rampup_curve` (and `rampdown_curve`) on the host. The next converge
+(which sees the fans off the profile) or the next reboot puts the role's curve back.
 
 **Rollback:** set `pve_ec_fan_enabled: false` (or delete the line) in host_vars and run
 `just ec-fan --limit <host>`. The role stops `ec-fan-profile` (its stop sets fan1/fan2 to auto). It also
@@ -311,7 +319,8 @@ stops the metrics timer, unloads the module (which resets all three fans to auto
 config, scripts, boot load and `ec_fan.prom`, so no alert keeps watching the host. The DKMS build stays;
 to purge it run `dkms remove ec_su_axb35/<version> --all && rm -rf /usr/src/ec_su_axb35-<version>`. For
 an immediate stop on the host, `systemctl stop ec-fan-profile` or `rmmod ec_su_axb35` also hands the fans
-back to the firmware, but the next boot loads the curve again until the role is switched off.
+back to the firmware, but the next converge or boot loads the module and the curve again until the role
+is switched off.
 
 **Kernel updates:** the kernel's postinst hook runs DKMS autoinstall, and a converge also builds for every
 installed kernel that has its headers. Before rebooting into a new kernel, check that
@@ -325,8 +334,10 @@ SHA in `pve_ec_fan_commit`. The converge builds it as a new DKMS version for eve
 has its headers, and removes the old version. If the loaded module's srcversion then differs, the role
 reloads it, so the fans are on auto for a moment. Before converging a new pin, run the Docker converge
 harness against it: `bash ansible/roles/pve_ec_fan/tests/test-converge-docker.sh`. It builds the module
-against the Proxmox headers, with systemd as PID 1 and a fake sysfs. It covers apply, idempotence,
-`--check`, a second installed kernel, a curve change, refusals, disable, re-pin, and the lockdown refusal.
+against the Proxmox headers, with systemd as PID 1 and a fake sysfs. It covers apply (the profile runs
+once), idempotence, `--check`, a converge without the network, a second installed kernel, a curve change
+next to a failing build for another kernel, a dropped fan, recovery after a module reload, refusals,
+disable (also after an apply that stopped part-way), re-pin, and the lockdown refusal.
 
 **Caveat:** the curve runs in the driver, not in the EC. If the host kernel hangs, the EC keeps the last
 level it was given. A clean shutdown or reboot stops `ec-fan-profile` first, so the fans are back on auto

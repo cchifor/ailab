@@ -7,6 +7,8 @@ Description=Publish the EC fan and temperature readings for node_exporter (ec_su
 Type=oneshot
 Environment=EC_FAN_SYSFS={{ pve_ec_fan_sysfs }}
 Environment=EC_FAN_TEXTFILE_DIR={{ pve_ec_fan_textfile_dir }}
+# The profile's config: EC_FAN_FANS says which CPU fans are managed (ec_fan_managed). `-`: optional.
+EnvironmentFile=-{{ pve_ec_fan_config }}
 ExecStart=/usr/local/sbin/ec-fan-textfile
 ProtectSystem=strict
 ReadWritePaths={{ pve_ec_fan_textfile_dir }}

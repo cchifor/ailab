@@ -89,6 +89,31 @@
     cache_valid_time: 3600
   register: pve_ec_fan_pkgs
 
+# Only when the checkout is missing, not at the pin, or has edited tracked files does the role go to the
+# network: a converge of a current host must not depend on github.com being reachable (site.yml runs this
+# role on every full converge).
+- name: Read the checkout's commit and whether its tracked files are edited
+  ansible.builtin.shell: |
+    set -u
+    if ! head=$(git -C "$SRC" rev-parse --verify -q HEAD 2>/dev/null); then
+      echo "head=none"
+      exit 0
+    fi
+    if out=$(git -C "$SRC" status --porcelain --untracked-files=no 2>/dev/null) && [ -z "$out" ]; then
+      tree=clean
+    else
+      tree=edited
+    fi
+    echo "head=$head"
+    echo "tree=$tree"
+  args:
+    executable: /bin/bash
+  environment:
+    SRC: "{{ pve_ec_fan_src_dir }}"
+  register: pve_ec_fan_src_state
+  changed_when: false
+  check_mode: false
+
 # force: tracked files are reset to the pin. dkms.conf is untracked, so it stays.
 - name: Fetch the driver source at the pinned commit
   ansible.builtin.git:
@@ -97,18 +122,29 @@
     version: "{{ pve_ec_fan_commit }}"
     force: true
   register: pve_ec_fan_src
-  # check mode on a host that lacks git or the checkout: nothing below can be previewed yet
-  when: not (ansible_check_mode and pve_ec_fan_pkgs is changed)
+  when:
+    - pve_ec_fan_src_state.stdout_lines != ['head=' ~ pve_ec_fan_commit, 'tree=clean']
+    # check mode on a host that lacks git or the checkout: nothing below can be previewed yet
+    - not (ansible_check_mode and pve_ec_fan_pkgs is changed)
 
 # A first --check cannot look at what the apply would install; it stops short of the steps that need it.
 - name: Note whether this is a check-mode preview of a first install
   ansible.builtin.set_fact:
     pve_ec_fan_preview: "{{ ansible_check_mode and (pve_ec_fan_pkgs is changed or pve_ec_fan_src is changed) }}"
 
+# The guard, whichever way the checkout got here: read HEAD again rather than trust a report.
+- name: Read the checkout's commit again
+  ansible.builtin.command:
+    argv: [git, -C, "{{ pve_ec_fan_src_dir }}", rev-parse, --verify, HEAD]
+  register: pve_ec_fan_src_head
+  changed_when: false
+  check_mode: false
+  when: not pve_ec_fan_preview
+
 - name: Check the checkout is the pinned commit
   ansible.builtin.assert:
-    that: pve_ec_fan_src.after == pve_ec_fan_commit
-    fail_msg: "{{ pve_ec_fan_src_dir }} is at {{ pve_ec_fan_src.after }}, not the pin {{ pve_ec_fan_commit }}"
+    that: pve_ec_fan_src_head.stdout | trim == pve_ec_fan_commit
+    fail_msg: "{{ pve_ec_fan_src_dir }} is at {{ pve_ec_fan_src_head.stdout | trim }}, not the pin {{ pve_ec_fan_commit }}"
     quiet: true
   when: not pve_ec_fan_preview
 
@@ -296,6 +332,8 @@
     - pve_ec_fan_loaded.loaded_srcversion != pve_ec_fan_loaded.installed_srcversion
   notify: Restart ec-fan-profile
 
+# A freshly loaded module starts with every fan on auto, and an `rmmod` leaves ec-fan-profile active
+# (exited), so `state: started` below would not rerun it: a load restarts the profile.
 - name: Load the module now
   community.general.modprobe:
     name: ec_su_axb35
@@ -303,6 +341,7 @@
   when:
     - pve_ec_fan_inspect | bool
     - pve_ec_fan_kernel == ansible_kernel
+  notify: Restart ec-fan-profile
 
 # ---- 5. the curve and the metrics ----
 - name: Install the profile script
@@ -363,6 +402,34 @@
     - ec-fan-textfile.timer
   register: pve_ec_fan_textfile_units
 
+# Converge on the fans' live state, not only on changed files: a module reloaded under the active
+# service, a start that failed at boot (the driver's sysfs not there within 10 s) or a value written by
+# hand all leave the fans off the profile while every file is unchanged. `ec-fan-profile check` reads the
+# sysfs and exits 3 when a configured fan is not on the configured curve or another CPU fan is not on auto.
+- name: Check the CPU fans run the profile
+  ansible.builtin.command:
+    argv: [/usr/local/sbin/ec-fan-profile, check]
+  environment:
+    EC_FAN_SYSFS: "{{ pve_ec_fan_sysfs }}"
+    EC_FAN_FANS: "{{ pve_ec_fan_fans | join(' ') }}"
+    EC_FAN_RAMPUP_CURVE: "{{ pve_ec_fan_rampup_curve | join(',') }}"
+    EC_FAN_RAMPDOWN_CURVE: "{{ pve_ec_fan_rampdown_curve | join(',') }}"
+  register: pve_ec_fan_live
+  changed_when: pve_ec_fan_live.rc == 3
+  failed_when: pve_ec_fan_live.rc not in [0, 3]
+  check_mode: false
+  when:
+    - pve_ec_fan_inspect | bool
+    # --check did not install the script it would run
+    - not (ansible_check_mode and pve_ec_fan_profile_script is changed)
+  notify: Restart ec-fan-profile
+
+# Restart the profile NOW, once, for everything above that asked for it: before the start below, so a
+# first apply runs the curve once (no curve -> auto -> curve), and before the builds for other kernels,
+# so a failed build there cannot hold back the running kernel's curve.
+- name: Apply a pending profile restart now
+  ansible.builtin.meta: flush_handlers
+
 # A unit file that --check did not write cannot be enabled in check mode either.
 - name: Enable and start the curve and the textfile timer
   ansible.builtin.systemd:
@@ -382,7 +449,8 @@
 # A kernel installed AFTER this version was added gets the module from its postinst hook (DKMS
 # AUTOINSTALL). One installed before -- typically the next kernel, waiting for a reboot -- would boot
 # without it (fans on the firmware curve, ProxmoxEcFanDriverNotLoaded), so build for every installed kernel
-# that has its headers. Last, so a failed build for another kernel cannot hold up the running one's curve.
+# that has its headers. Last, after the handler flush above, so a failed build for another kernel cannot
+# hold up the running one's curve.
 - name: List the other installed kernels that have their headers
   ansible.builtin.shell: |
     set -euo pipefail

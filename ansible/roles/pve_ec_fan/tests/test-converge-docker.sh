@@ -2,9 +2,11 @@
 # Converge the pve_ec_fan role in a Docker container, the closest thing to a Proxmox host that is not one.
 # It builds the driver at the pinned commit with DKMS against the Proxmox kernel headers the hosts use.
 # The container runs systemd as PID 1, with a fake /sys/class/ec_su_axb35. Cases are in
-# converge/converge.sh: a first --check, apply, idempotence (changed=0), --check after apply, a second
-# installed kernel, a curve change, refused profiles, disable / re-enable, a re-pin, an edited checkout,
-# and the Secure Boot lockdown refusal.
+# converge/converge.sh: a first --check; apply (the profile runs once); idempotence (changed=0) and --check
+# after apply; a converge with the repo unreachable; a second installed kernel; a curve change next to a
+# failing build for another kernel (the curve is still applied); a fan dropped from the list (back to auto);
+# recovery after a module reload under the active service; refused profiles; disable after an apply that
+# stopped part-way, and re-enable; a re-pin; an edited checkout; and the Secure Boot lockdown refusal.
 # The container runs another kernel, so nothing is loaded: the srcversion reload and the live load only run
 # on a host.
 #

@@ -7,18 +7,20 @@ real templates with the real role defaults. Pinned here:
     from the rampup curve in effect when the mode switches), reads them back, and never touches fan3. fan3
     in the fan list is refused, and so is a curve the driver would step wrongly on (not five rising
     integers 0-100, or a rampdown value not below the rampup value of its level), before anything is
-    written;
-  * `reset` (the unit's ExecStop) puts only the configured fans back to auto, and does nothing when the
-    module is not loaded (unloading already reset every fan);
-  * ec-fan-textfile reports all three fans, the EC temperature and the power mode, counts a value it cannot
-    read instead of publishing it, says driver_loaded 0 without the module, and replaces the file in one
-    rename;
+    written. A CPU fan not in the list is put back on auto (a fan dropped from the config);
+  * `reset` (the unit's ExecStop) puts both CPU fans back to auto whatever the config says, never fan3,
+    and does nothing when the module is not loaded (unloading already reset every fan);
+  * `check` (run by the role on each converge) writes nothing, exits 0 when the live state is the
+    profile and 3 when it is not: a configured fan off the curve or on another curve, a dropped fan still
+    on a curve, the driver gone;
+  * ec-fan-textfile reports all three fans, the EC temperature, the power mode and which CPU fans the
+    profile manages, counts a value it cannot read instead of publishing it, says driver_loaded 0 without
+    the module, and replaces the file in one rename;
   * the rendered config is one the profile script accepts, the units say what the scripts expect, and only
     ai-node1 turns the role on.
 
-The Docker converge (DKMS build against the Proxmox headers, systemd, idempotence, --check, disable) is
-described in docs/runbooks/node-maintenance.md "EC fan curve"; it needs the Proxmox headers and is not run
-here.
+The Docker converge (ansible/roles/pve_ec_fan/tests/test-converge-docker.sh: DKMS against the Proxmox
+headers, systemd, idempotence, --check, recovery, disable) needs the network and is not run here.
 
     python3 -m unittest discover -s scripts/tests -p "test_pve_ec_fan.py" -v
 """
@@ -185,34 +187,95 @@ class ProfileTests(unittest.TestCase):
         self.assertIn('fan2/rampdown_curve failed', run.stderr)
         self.assertEqual(self.sysfs.get('fan2/mode'), 'auto')
 
-    def test_reset_hands_only_the_configured_fans_back_to_auto(self):
+    def test_apply_hands_a_cpu_fan_dropped_from_the_list_back_to_auto(self):
+        # systemd's ExecStop reads the NEW config, so only apply can reset a fan that left the list.
         self.sysfs.create(mode='curve')
         before3 = self.sysfs.fan3_snapshot()
-        run = self.run_profile('reset')
+        run = self.run_profile('apply', fans='1')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.sysfs.get('fan1/mode'), 'curve')
+        self.assertEqual(self.sysfs.get('fan1/rampup_curve'), UP)
+        self.assertEqual(self.sysfs.get('fan2/mode'), 'auto')
+        self.assertEqual(self.sysfs.fan3_snapshot(), before3)
+        writes = re.findall(r'^ec-fan-profile: (fan\d/\w+) <- ', run.stdout, re.M)
+        self.assertEqual(writes, ['fan1/rampup_curve', 'fan1/rampdown_curve', 'fan1/mode', 'fan2/mode'])
+
+    def test_reset_hands_both_cpu_fans_back_to_auto_and_never_fan3(self):
+        self.sysfs.create(mode='curve')
+        before3 = self.sysfs.fan3_snapshot()
+        run = self.run_profile('reset', fans='1')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(self.sysfs.get('fan1/mode'), 'auto')
         self.assertEqual(self.sysfs.get('fan2/mode'), 'auto')
         self.assertEqual(self.sysfs.fan3_snapshot(), before3)
 
-    def test_reset_does_not_need_a_valid_curve(self):
-        # A broken config must not keep the fans on a curve when the unit is stopped.
+    def test_reset_ignores_a_broken_config(self):
+        # A broken config must not keep the fans on a curve when the unit is stopped, nor reach fan3.
         self.sysfs.create(mode='curve')
-        run = self.run_profile('reset', up='nonsense', down='')
+        before3 = self.sysfs.fan3_snapshot()
+        run = self.run_profile('reset', fans='1 3', up='nonsense', down='')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(self.sysfs.get('fan1/mode'), 'auto')
+        self.assertEqual(self.sysfs.get('fan2/mode'), 'auto')
+        self.assertEqual(self.sysfs.fan3_snapshot(), before3)
 
     def test_reset_without_the_module_is_a_no_op(self):
         run = self.run_profile('reset')
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn('module not loaded', run.stdout)
 
-    def test_reset_refuses_fan3_too(self):
-        self.sysfs.create(mode='curve')
-        before3 = self.sysfs.fan3_snapshot()
-        run = self.run_profile('reset', fans='1 3')
-        self.assertEqual(run.returncode, 1)
-        self.assertEqual(self.sysfs.fan3_snapshot(), before3)
-        self.assertEqual(self.sysfs.get('fan1/mode'), 'curve')
+    def snapshot(self):
+        return {f: (f.read_text(), f.stat().st_mtime_ns)
+                for f in sorted(self.sysfs.root.rglob('*')) if f.is_file()}
+
+    def test_check_passes_on_the_profile_and_writes_nothing(self):
+        self.sysfs.create()
+        self.assertEqual(self.run_profile('apply').returncode, 0)
+        before = self.snapshot()
+        run = self.run_profile('check')
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.snapshot(), before)
+        # one fan managed and the other back on auto is the profile too
+        self.assertEqual(self.run_profile('apply', fans='2').returncode, 0)
+        self.assertEqual(self.run_profile('check', fans='2').returncode, 0)
+
+    def test_check_reports_every_way_off_the_profile(self):
+        cases = {
+            # a module loaded fresh under an active service: every fan auto, the driver's own curves
+            'fresh module': lambda: None,
+            'managed fan on auto': lambda: self.sysfs.put('fan2/mode', 'auto'),
+            'managed fan on fixed': lambda: self.sysfs.put('fan1/mode', 'fixed'),
+            'another rampup curve': lambda: self.sysfs.put('fan1/rampup_curve', '40,52,62,70,95'),
+            'another rampdown curve': lambda: self.sysfs.put('fan2/rampdown_curve', '30,45,55,60,90'),
+        }
+        for name, change in cases.items():
+            with self.subTest(name):
+                self.sysfs.create()
+                if name != 'fresh module':
+                    self.assertEqual(self.run_profile('apply').returncode, 0)
+                change()
+                before = self.snapshot()
+                run = self.run_profile('check')
+                self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+                self.assertRegex(run.stdout, r"^fan[12]: is '")
+                self.assertEqual(self.snapshot(), before)
+
+    def test_check_reports_a_dropped_fan_still_on_a_curve(self):
+        self.sysfs.create()
+        self.assertEqual(self.run_profile('apply').returncode, 0)
+        run = self.run_profile('check', fans='1')
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        self.assertIn("fan2: is 'curve', want 'auto'", run.stdout)
+
+    def test_check_reports_a_missing_driver(self):
+        run = self.run_profile('check')
+        self.assertEqual(run.returncode, 3, run.stdout + run.stderr)
+        self.assertIn("fan1: is 'missing", run.stdout)
+
+    def test_check_refuses_a_bad_config(self):
+        self.sysfs.create()
+        self.assertEqual(self.run_profile('check', fans='1 3').returncode, 1)
+        self.assertEqual(self.run_profile('check', down=UP).returncode, 1)
 
     def test_unknown_action(self):
         self.sysfs.create()
@@ -257,9 +320,12 @@ class TextfileTests(unittest.TestCase):
         self.dir = self.tmp / 'textfile'
         self.dir.mkdir()
 
-    def run_textfile(self):
+    def run_textfile(self, fans='1 2'):
         env = dict(os.environ, EC_FAN_SYSFS=self.sysfs.root.as_posix(),
                    EC_FAN_TEXTFILE_DIR=self.dir.as_posix(), EC_FAN_NOW=self.NOW)
+        env.pop('EC_FAN_FANS', None)
+        if fans is not None:
+            env['EC_FAN_FANS'] = fans
         return subprocess.run([BASH, TEXTFILE.as_posix()], env=env, capture_output=True, text=True,
                               timeout=30)
 
@@ -273,6 +339,8 @@ class TextfileTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(parse_exposition(self.prom()), {
             ('ec_fan_driver_loaded', ''): '1',
+            ('ec_fan_managed', '{fan="1"}'): '1',
+            ('ec_fan_managed', '{fan="2"}'): '1',
             ('ec_fan_rpm', '{fan="1"}'): '4210',
             ('ec_fan_rpm', '{fan="2"}'): '4190',
             ('ec_fan_rpm', '{fan="3"}'): '0',
@@ -293,6 +361,8 @@ class TextfileTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(parse_exposition(self.prom()), {
             ('ec_fan_driver_loaded', ''): '0',
+            ('ec_fan_managed', '{fan="1"}'): '1',
+            ('ec_fan_managed', '{fan="2"}'): '1',
             ('ec_fan_read_errors', ''): '0',
             ('ec_fan_textfile_timestamp_seconds', ''): self.NOW,
         })
@@ -317,6 +387,17 @@ class TextfileTests(unittest.TestCase):
                          [('ec_fan_mode_info', '{fan="1",mode="auto"}'),
                           ('ec_fan_mode_info', '{fan="3",mode="auto"}')])
         self.assertFalse(any(k[0] in ('ec_temp_celsius', 'ec_apu_power_mode_info') for k in samples))
+
+    def test_managed_follows_the_profiles_fan_list(self):
+        self.sysfs.create()
+        for fans, want in (('1', ('1', '0')), ('2', ('0', '1')), (None, ('0', '0'))):
+            with self.subTest(fans=fans):
+                run = self.run_textfile(fans=fans)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                samples = parse_exposition(self.prom())
+                self.assertEqual((samples[('ec_fan_managed', '{fan="1"}')],
+                                  samples[('ec_fan_managed', '{fan="2"}')]), want)
+                self.assertNotIn(('ec_fan_managed', '{fan="3"}'), samples)
 
     def test_a_value_without_a_trailing_newline_is_read(self):
         self.sysfs.create()
@@ -420,6 +501,8 @@ class RoleRenderTests(unittest.TestCase):
         self.assertIn('ReadWritePaths=/var/lib/prometheus/node-exporter', service)
         self.assertIn('Environment=EC_FAN_SYSFS=/sys/class/ec_su_axb35', service)
         self.assertIn('ExecStart=/usr/local/sbin/ec-fan-textfile', service)
+        # EC_FAN_FANS for ec_fan_managed; optional, so a missing config does not fail the metrics
+        self.assertIn('EnvironmentFile=-/etc/default/ec-fan-profile', service)
         timer = unit_lines(render('ec-fan-textfile.timer.j2'))
         self.assertIn('OnUnitActiveSec=30', timer)
         self.assertIn('WantedBy=timers.target', timer)

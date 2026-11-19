@@ -91,6 +91,8 @@ for n in 1 2; do
   eq "fan$n mode" curve "$(cat $F/fan$n/mode)"
 done
 eq "fan3 never written" "$FAN3_PRISTINE" "$(fan3_state)"
+eq "first apply: the profile ran once" 1 "$(journalctl -u ec-fan-profile --no-pager | grep -c 'fan1/mode <- curve')"
+eq "first apply: no auto in between" 0 "$(journalctl -u ec-fan-profile --no-pager | grep -c 'fan1/mode <- auto')"
 eq "profile active" active "$(systemctl is-active ec-fan-profile.service)"
 eq "profile enabled" enabled "$(systemctl is-enabled ec-fan-profile.service)"
 eq "timer active" active "$(systemctl is-active ec-fan-textfile.timer)"
@@ -134,11 +136,54 @@ else
   bad "no second kernel's headers to test with (proxmox-default-headers should have brought them)"
 fi
 
-# ---- a curve change rewrites the config and restarts the profile ----
-run curve-change -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampup_curve": [40, 52, 62, 70, 95]}' || { bad "curve change failed"; show curve-change; }
-eq "curve change: fan1 rampup" 40,52,62,70,95 "$(cat $F/fan1/rampup_curve)"
-eq "curve change: fan2 mode" curve "$(cat $F/fan2/mode)"
-if grep -q 'RUNNING HANDLER \[pve_ec_fan : Restart ec-fan-profile\]' /tmp/run-curve-change.log; then ok "restart handler ran"; else bad "restart handler did not run"; fi
+# ---- a current host converges without the network: the checkout is not fetched again ----
+run offline -e pve_ec_fan_enabled=true -e pve_ec_fan_repo_url=/nonexistent || { bad "converge without the repo failed"; show offline; }
+eq "offline: changed" 0 "$(changed)"
+
+# ---- a curve change is applied even when a build for ANOTHER kernel then fails ----
+# The handler flush comes before those builds, so the failure there cannot hold back the profile restart.
+BROKEN=9.9.9-ecfan-broken
+CURVE2='{"pve_ec_fan_rampup_curve": [40, 52, 62, 70, 95]}'
+mkdir -p /lib/modules/$BROKEN/build
+printf 'modules:\n\tfalse\n' > /lib/modules/$BROKEN/build/Makefile
+touch /boot/vmlinuz-$BROKEN
+if run broken-kernel -e pve_ec_fan_enabled=true -e "$CURVE2"; then bad "a failing build for another kernel did not fail the play"; else ok "a failing build for another kernel fails the play"; fi
+eq "broken kernel: it failed at that build" "TASK [pve_ec_fan : Build and install the module for those kernels too]" \
+  "$(grep -E '^TASK' /tmp/run-broken-kernel.log | tail -1 | sed 's/ \**$//')"
+if grep -q 'RUNNING HANDLER \[pve_ec_fan : Restart ec-fan-profile\]' /tmp/run-broken-kernel.log; then ok "broken kernel: the restart handler ran first"; else bad "broken kernel: the restart handler did not run"; fi
+eq "broken kernel: fan1 rampup" 40,52,62,70,95 "$(cat $F/fan1/rampup_curve)"
+eq "broken kernel: fan2 rampup" 40,52,62,70,95 "$(cat $F/fan2/rampup_curve)"
+eq "broken kernel: fan2 mode" curve "$(cat $F/fan2/mode)"
+rm -rf /lib/modules/$BROKEN /boot/vmlinuz-$BROKEN /var/lib/dkms/ec_su_axb35/$V/$BROKEN
+run broken-gone -e pve_ec_fan_enabled=true -e "$CURVE2" || { bad "converge after removing the broken kernel failed"; show broken-gone; }
+eq "broken kernel gone: changed" 0 "$(changed)"
+
+# ---- a fan dropped from the list goes back to auto (ExecStop reads the new config) ----
+run drop-fan2 -e pve_ec_fan_enabled=true -e "$CURVE2" -e '{"pve_ec_fan_fans": [1]}' || { bad "dropping fan2 failed"; show drop-fan2; }
+eq "drop fan2: fan1 mode" curve "$(cat $F/fan1/mode)"
+eq "drop fan2: fan2 mode" auto "$(cat $F/fan2/mode)"
+eq "drop fan2: fan3 still never written" "$FAN3_PRISTINE" "$(fan3_state)"
+systemctl start ec-fan-textfile.service
+eq "drop fan2: textfile says fan2 is not managed" 1 "$(grep -c '^ec_fan_managed{fan="2"} 0$' $P)"
+run drop-fan2-again -e pve_ec_fan_enabled=true -e "$CURVE2" -e '{"pve_ec_fan_fans": [1]}' || bad "second converge with fan2 dropped failed"
+eq "drop fan2: next run changed" 0 "$(changed)"
+run fan2-back -e pve_ec_fan_enabled=true -e "$CURVE2" || { bad "adding fan2 back failed"; show fan2-back; }
+eq "fan2 back: fan2 mode" curve "$(cat $F/fan2/mode)"
+eq "fan2 back: fan2 rampup" 40,52,62,70,95 "$(cat $F/fan2/rampup_curve)"
+
+# ---- recovery: the module reloaded (rmmod; modprobe) under the still-active service ----
+# A container cannot load the module, so this makes the state a fresh load leaves: every fan on auto with
+# the driver's own curves, while ec-fan-profile is still active (exited). `state: started` alone would leave
+# it so; the converge must restart the profile.
+eq "recovery: profile active before" active "$(systemctl is-active ec-fan-profile.service)"
+mkfake
+run recovery -e pve_ec_fan_enabled=true -e "$CURVE2" || { bad "recovery converge failed"; show recovery; }
+eq "recovery: fan1 mode" curve "$(cat $F/fan1/mode)"
+eq "recovery: fan2 mode" curve "$(cat $F/fan2/mode)"
+eq "recovery: fan1 rampup" 40,52,62,70,95 "$(cat $F/fan1/rampup_curve)"
+eq "recovery: fan3 never written" "$FAN3_PRISTINE" "$(fan3_state)"
+run recovery-again -e pve_ec_fan_enabled=true -e "$CURVE2" || bad "converge after recovery failed"
+eq "recovery: next run changed" 0 "$(changed)"
 
 # ---- a bad profile is refused before any change ----
 if run fan3 -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_fans": [1, 2, 3]}'; then bad "fans [1,2,3] accepted"; else ok "fans [1,2,3] refused"; fi
@@ -149,6 +194,10 @@ eq "refusals left the curve alone" 40,52,62,70,95 "$(cat $F/fan1/rampup_curve)"
 eq "fan3 still never written" "$FAN3_PRISTINE" "$(fan3_state)"
 
 # ---- disabling hands the fans back to auto and removes all but the DKMS build ----
+# ... even after an apply that stopped between the profile unit and the textfile units: those are missing.
+systemctl stop ec-fan-textfile.timer ec-fan-textfile.service
+rm -f /etc/systemd/system/ec-fan-textfile.timer /etc/systemd/system/ec-fan-textfile.service
+systemctl daemon-reload
 run disable -e pve_ec_fan_enabled=false || { bad "disable failed"; show disable; }
 eq "disable: fan1 mode" auto "$(cat $F/fan1/mode)"
 eq "disable: fan2 mode" auto "$(cat $F/fan2/mode)"

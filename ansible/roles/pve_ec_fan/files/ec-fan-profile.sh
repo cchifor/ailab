@@ -5,14 +5,22 @@
 #
 #   apply   for each configured fan: write the rampup and rampdown curves, read them back, then set the
 #           mode to curve. Curves first, because switching to curve picks the starting level from the
-#           rampup curve in effect at that moment. From then on the driver's 1 s worker moves the level
-#           with the EC temperature, so this runs once per module load (ExecStart).
-#   reset   set each configured fan back to auto, the EC's own curve (ExecStop: stopping or disabling the
-#           service hands the fans back to the firmware). Nothing to do when the module is not loaded:
-#           unloading it already reset every fan to auto.
+#           rampup curve in effect at that moment. A CPU fan NOT in the list goes back to auto, so a fan
+#           dropped from the config is handed back to the firmware (systemd's ExecStop reads the NEW
+#           config, so it cannot be relied on for that). From then on the driver's 1 s worker moves the
+#           level with the EC temperature, so this runs once per module load (ExecStart).
+#   reset   set both CPU fans back to auto, the EC's own curve, whatever the config says (ExecStop:
+#           stopping or disabling the service hands them back to the firmware; a broken config must not
+#           keep them on a curve). Nothing to do when the module is not loaded: unloading it already reset
+#           every fan to auto.
+#   check   compare the live state with the config without writing anything: exit 0 when every
+#           configured fan is in curve mode with the configured curves and every other CPU fan is in
+#           auto, 3 (and the differences on stdout) when not, 1 on a bad config. The role runs it on each
+#           converge and restarts the service on 3: a module reloaded under an active service, a start
+#           that failed at boot, a value written by hand.
 #
 # Only fan1 and fan2, the CPU fans. fan3 has no known control register (the EC accepts writes to it and
-# ignores them), so it is refused here, not merely left out of the config.
+# ignores them), so it is refused in the config and never written, not even by reset.
 #
 # Environment (ec-fan-profile.service reads /etc/default/ec-fan-profile, rendered from the role vars):
 #   EC_FAN_FANS            fans to manage, e.g. "1 2"
@@ -27,6 +35,7 @@ FANS="${EC_FAN_FANS:-}"
 RAMPUP="${EC_FAN_RAMPUP_CURVE:-}"
 RAMPDOWN="${EC_FAN_RAMPDOWN_CURVE:-}"
 WAIT_S="${EC_FAN_WAIT_S:-10}"
+CPU_FANS="1 2"
 
 log() { echo "ec-fan-profile: $*"; }
 die() {
@@ -75,11 +84,15 @@ check_curves() {
 
 fans_present() {
   local f
-  for f in $FANS; do
+  for f in $CPU_FANS; do
     [ -e "$SYSFS/fan$f/mode" ] || return 1
   done
 }
 
+managed() { [[ " $FANS " == *" $1 "* ]]; }
+
+# No trailing newline is needed: at the pin, the driver's mode store compares with sysfs_streq (which
+# ignores one), and its curve store splits on ',' and parses each value with kstrtoint (which accepts one).
 write() { # $1 attribute path, $2 value
   printf '%s' "$2" > "$1" || die "writing '$2' to $1 failed"
   log "${1#"$SYSFS"/} <- $2"
@@ -109,16 +122,20 @@ apply() {
     write "$d/mode" curve
     expect "$d/mode" curve
   done
+  for f in $CPU_FANS; do
+    managed "$f" && continue
+    write "$SYSFS/fan$f/mode" auto
+    expect "$SYSFS/fan$f/mode" auto
+  done
 }
 
 reset() {
   local f rc=0
-  check_fans
   if [ ! -d "$SYSFS" ]; then
     log "$SYSFS is absent (module not loaded): the EC already runs every fan on its own curve"
     return 0
   fi
-  for f in $FANS; do
+  for f in $CPU_FANS; do
     if [ ! -e "$SYSFS/fan$f/mode" ]; then
       echo "ec-fan-profile: $SYSFS/fan$f/mode is missing" >&2
       rc=1
@@ -132,8 +149,31 @@ reset() {
   return "$rc"
 }
 
+check() {
+  local f d want got drift=0
+  check_fans
+  check_curves
+  for f in $CPU_FANS; do
+    d="$SYSFS/fan$f"
+    if managed "$f"; then
+      want="curve $RAMPUP $RAMPDOWN"
+      got="$(cat "$d/mode" 2> /dev/null || echo missing) $(cat "$d/rampup_curve" 2> /dev/null || echo missing)"
+      got="$got $(cat "$d/rampdown_curve" 2> /dev/null || echo missing)"
+    else
+      want=auto
+      got=$(cat "$d/mode" 2> /dev/null || echo missing)
+    fi
+    if [ "$got" != "$want" ]; then
+      echo "fan$f: is '$got', want '$want'"
+      drift=1
+    fi
+  done
+  ((drift == 0)) || exit 3
+}
+
 case "${1:-}" in
   apply) apply ;;
   reset) reset ;;
-  *) die "usage: ec-fan-profile apply|reset" ;;
+  check) check ;;
+  *) die "usage: ec-fan-profile apply|reset|check" ;;
 esac

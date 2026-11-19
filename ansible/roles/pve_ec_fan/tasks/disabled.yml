@@ -13,7 +13,9 @@
   when: pve_ec_fan_unit.stat.exists
   block:
     # The timer first, then a run it may have started (static unit: stopped, not disabled), so no run
-    # rewrites the metrics file after it is removed below.
+    # rewrites the metrics file after it is removed below. A unit that is not there (an apply that stopped
+    # between installing the profile unit and the textfile units) is nothing to stop, and must not keep
+    # the teardown from reaching the unload and the file removal.
     - name: Stop the textfile timer and its service, and the curve (stopping the curve sets the fans to auto)
       ansible.builtin.systemd:
         name: "{{ item.name }}"
@@ -25,6 +27,10 @@
         - { name: ec-fan-profile.service, enabled: false }
       loop_control:
         label: "{{ item.name }}"
+      register: pve_ec_fan_stop
+      failed_when:
+        - pve_ec_fan_stop is failed
+        - "'Could not find the requested service' not in (pve_ec_fan_stop.msg | default(''))"
 
     - name: Look for the loaded module
       ansible.builtin.stat:

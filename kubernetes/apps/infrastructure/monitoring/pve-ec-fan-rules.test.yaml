@@ -155,6 +155,89 @@ tests:
       - eval_time: 39m
         alertname: ProxmoxCpuFanStalled
         exp_alerts: []
+      - eval_time: 39m
+        alertname: ProxmoxCpuFanNotOnCurve
+        exp_alerts: []
+
+  # ----------------------------------------------------------------- ProxmoxCpuFanNotOnCurve
+  - interval: 1m
+    name: a managed CPU fan left on auto for 15m warns
+    input_series:
+      - series: 'ec_fan_mode_info{job="proxmox-node", instance="192.168.0.2:9100", fan="1", mode="curve"}'
+        values: "1x4"
+      - series: 'ec_fan_mode_info{job="proxmox-node", instance="192.168.0.2:9100", fan="1", mode="auto"}'
+        values: "_x4 1x30"
+      - series: 'ec_fan_mode_info{job="proxmox-node", instance="192.168.0.2:9100", fan="2", mode="curve"}'
+        values: "1x35"
+      - series: 'ec_fan_managed{job="proxmox-node", instance="192.168.0.2:9100", fan="1"}'
+        values: "1x35"
+      - series: 'ec_fan_managed{job="proxmox-node", instance="192.168.0.2:9100", fan="2"}'
+        values: "1x35"
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: ProxmoxCpuFanNotOnCurve
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: ProxmoxCpuFanNotOnCurve
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: proxmox-node
+              instance: 192.168.0.2:9100
+              fan: "1"
+              mode: auto
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.2:9100: CPU fan 1 is in auto mode, not on the curve"
+              description: "ec-fan-profile manages CPU fan 1 on 192.168.0.2:9100, but the driver has reported mode auto for 15m, so the CPU-fan curve is not running (in auto the firmware curve still cools it). Usually the profile failed at boot or the module was reloaded without a profile restart: check `systemctl status ec-fan-profile` and `journalctl -b -u ec-fan-profile`, then `systemctl restart ec-fan-profile` or converge `just ec-fan --limit <host>` (the converge restarts it when the fans are off the profile). Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+  - interval: 1m
+    name: a managed CPU fan in fixed mode for 15m warns too
+    input_series:
+      - series: 'ec_fan_mode_info{job="proxmox-node", instance="192.168.0.2:9100", fan="2", mode="fixed"}'
+        values: "1x20"
+      - series: 'ec_fan_managed{job="proxmox-node", instance="192.168.0.2:9100", fan="2"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: ProxmoxCpuFanNotOnCurve
+        exp_alerts:
+          - exp_labels: {severity: warning, job: proxmox-node, instance: 192.168.0.2:9100, fan: "2", mode: fixed}
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.2:9100: CPU fan 2 is in fixed mode, not on the curve"
+              description: "ec-fan-profile manages CPU fan 2 on 192.168.0.2:9100, but the driver has reported mode fixed for 15m, so the CPU-fan curve is not running (in auto the firmware curve still cools it). Usually the profile failed at boot or the module was reloaded without a profile restart: check `systemctl status ec-fan-profile` and `journalctl -b -u ec-fan-profile`, then `systemctl restart ec-fan-profile` or converge `just ec-fan --limit <host>` (the converge restarts it when the fans are off the profile). Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+  - interval: 1m
+    name: a fan dropped from the profile (auto by design), fan3 on auto, and a restart blip do not warn
+    input_series:
+      - series: 'ec_fan_mode_info{job="proxmox-node", instance="192.168.0.2:9100", fan="2", mode="auto"}'
+        values: "1x30"
+      - series: 'ec_fan_managed{job="proxmox-node", instance="192.168.0.2:9100", fan="2"}'
+        values: "0x30"
+      - series: 'ec_fan_mode_info{job="proxmox-node", instance="192.168.0.2:9100", fan="3", mode="auto"}'
+        values: "1x30"
+      - series: 'ec_fan_mode_info{job="proxmox-node", instance="192.168.0.2:9100", fan="1", mode="auto"}'
+        values: "_x5 1x2 _x23"
+      - series: 'ec_fan_mode_info{job="proxmox-node", instance="192.168.0.2:9100", fan="1", mode="curve"}'
+        values: "1x5 _x2 1x23"
+      - series: 'ec_fan_managed{job="proxmox-node", instance="192.168.0.2:9100", fan="1"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ProxmoxCpuFanNotOnCurve
+        exp_alerts: []
+  - interval: 1m
+    name: every managed CPU fan on the curve does not warn
+    input_series:
+      - series: 'ec_fan_mode_info{job="proxmox-node", instance="192.168.0.2:9100", fan="1", mode="curve"}'
+        values: "1x30"
+      - series: 'ec_fan_mode_info{job="proxmox-node", instance="192.168.0.2:9100", fan="2", mode="curve"}'
+        values: "1x30"
+      - series: 'ec_fan_managed{job="proxmox-node", instance="192.168.0.2:9100", fan="1"}'
+        values: "1x30"
+      - series: 'ec_fan_managed{job="proxmox-node", instance="192.168.0.2:9100", fan="2"}'
+        values: "1x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ProxmoxCpuFanNotOnCurve
+        exp_alerts: []
 
   # ------------------------------------------------------------- ProxmoxEcFanDriverNotLoaded
   - interval: 1m
