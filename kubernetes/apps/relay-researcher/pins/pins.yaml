@@ -33,5 +33,5 @@ metadata:
     config.kubernetes.io/local-config: "true"
 data:
   installationId: "b380ff7f-0716-478d-8b01-3d39f30e750b"
-  agentImage: "registry.chifor.me/relay/infrastructure-agent@sha256:e72eb7d566aece4d26b6b21d5eefb0e37f1484ef10b10001df6cfabca8835e98"
+  agentImage: "registry.chifor.me/relay/infrastructure-agent@sha256:1b17c32f4743865451a3af936b2acb9ed4765e5baf9cc8535c3607a5040474a2"
   sourceCommit: "c0fe50f030eac65d78a113e42797c5fe8c395233"

@@ -618,15 +618,16 @@ reproduction.
 The agent (Deployment `relay-infrastructure-agent` in `relay-infra-control`) logs one JSON line per
 leadership event, with enums and counts only. This is what the operator's Lease watch (E4) reads. Names
 are as of Relay v0.10.6, from `packages/infrastructure-agent/leadership.ts` and `daemon.ts` at
-`1599d06e`.
+`1599d06e`. The durations below come from `agent/config.json` `leadership`: renew deadline 10 s and
+lease duration 15 s at 15/10/2, 20 s and 30 s once T1 merges ("Lease timing (T1, 30/20/2)" below).
 
 | Event | Meaning |
 | --- | --- |
 | `starting`, `leader_acquired`, `ready` | A new incarnation took the Lease and the installation is `ready` at the next epoch. |
-| `lease_renewal_failed` | A renewal round proved nothing. Leadership continues until the renew deadline, 10 s after the last proven renewal was sent. Fields: `reason`, `failureClass`, `lastDuration`, `failedAttempts`, `sinceRenewMs`. |
-| `lease_write_adopted` | v0.10.6 and later. A later read showed that an earlier renewal whose outcome was unknown did land: it carries that write's random marker (annotation `relay.chifor.me/lease-write`) on a newer Lease version. The deadline moves to that write's send time plus 10 s. `failedAttempts` counts the rounds bridged. |
+| `lease_renewal_failed` | A renewal round proved nothing. Leadership continues until the renew deadline (`renewDeadlineSeconds`) after the last proven renewal was sent. Fields: `reason`, `failureClass`, `lastDuration`, `failedAttempts`, `sinceRenewMs`. |
+| `lease_write_adopted` | v0.10.6 and later. A later read showed that an earlier renewal whose outcome was unknown did land: it carries that write's random marker (annotation `relay.chifor.me/lease-write`) on a newer Lease version. The deadline moves to that write's send time plus the renew deadline. `failedAttempts` counts the rounds bridged. |
 | `lease_renewal_recovered` | A renewal was proven again; `failedAttempts` is the number of rounds it bridged. |
-| `admission_halted` with `code: leadership_lost` | Leadership ended. Fields: `reason`; the last failed round's `lastFailure`, `failureClass` and `lastDuration`; `failedAttempts`, `sinceRenewMs`; and `inFlight`/`inFlightDuration` when a Lease request was still outstanding. The process exits; a new incarnation takes over once the old Lease expires (15 s), at epoch + 1. Expect about 25-30 s without admission. |
+| `admission_halted` with `code: leadership_lost` | Leadership ended. Fields: `reason`; the last failed round's `lastFailure`, `failureClass` and `lastDuration`; `failedAttempts`, `sinceRenewMs`; and `inFlight`/`inFlightDuration` when a Lease request was still outstanding. The process exits; the restarted process takes over at epoch + 1 once it has watched the old Lease record unchanged for longer than that record's `leaseDurationSeconds`. At 15/10/2 that was 22-31 s from this event to the next `ready` (2026-11-18); expect about 37-46 s under T1. The restart fires `RelayInfrastructureAgentRestarted`, and running workers end at their next lease renewal ("Lease timing (T1, 30/20/2)"). |
 
 - **Round reasons** (`lastFailure`, and `reason` of `lease_renewal_failed`):
   - `lease-renew-unknown`: the PUT got no answer and may have landed;
@@ -636,7 +637,7 @@ are as of Relay v0.10.6, from `packages/infrastructure-agent/leadership.ts` and 
   - `lease-read-late` and `lease-renew-late`: answered only at or after the deadline.
 - **Failure classes:** `timeout`, `late`, `transport`, `invalid-response`, `local`, `error`, `401`, `403`, `404`, `409`, `429`, `4xx`, `5xx`, `other`.
 - **Loss reasons** (all terminal for this incarnation):
-  - `renew-deadline-passed`: no proven renewal within 10 s;
+  - `renew-deadline-passed`: no proven renewal within the renew deadline;
   - `lease-taken`: another holder or Lease UID;
   - `lease-deleted`;
   - `lease-invalid`: a successful read returned an invalid Lease or the wrong namespace (definitive loss);
@@ -647,8 +648,8 @@ are as of Relay v0.10.6, from `packages/infrastructure-agent/leadership.ts` and 
 
 Reading an episode:
 
-- **A slow API server** shows `lease_renewal_failed` (`lease-renew-unknown`, `timeout`). Within the 10 s window it is followed by `lease_write_adopted` and/or `lease_renewal_recovered`. That is tolerated, not an incident.
-- **`renew-deadline-passed`** means no renewal was proven within 10 s; timely refusals or repeated conflicts can also cause this. Inspect `lastFailure`, `failureClass`, `lastDuration` and any `inFlight`/`inFlightDuration` first. Investigate etcd (WAL fsync, leader changes, apiserver-to-etcd latency) when those indicate stalled Lease requests. On 2026-11-18 at 03:53Z that was an etcd leader stall: reads were held 8-10 s on every apiserver. Riding out a stall that long needs longer Lease timings: a Relay preparation change, parked for the owner.
+- **A slow API server** shows `lease_renewal_failed` (`lease-renew-unknown`, `timeout`). Within the renew-deadline window it is followed by `lease_write_adopted` and/or `lease_renewal_recovered`. That is tolerated, not an incident.
+- **`renew-deadline-passed`** means no renewal was proven within the renew deadline; timely refusals or repeated conflicts can also cause this. Inspect `lastFailure`, `failureClass`, `lastDuration` and any `inFlight`/`inFlightDuration` first. Investigate etcd (WAL fsync, leader changes, apiserver-to-etcd latency) when those indicate stalled Lease requests. On 2026-11-18 at 03:53Z that was an etcd leader stall: reads were held 8-10 s on every apiserver. Riding out a stall that long needs longer Lease timings: T1 below, an ailab overlay (not a Relay preparation change).
 - **`lease-taken`, `lease-deleted` or `lease-holder-reused`** are definitive. Find out who changed or removed the Lease.
 
 The agent's Lease requests are GET and PUT on `leases/relay-infrastructure-agent` and POST on the
@@ -656,6 +657,226 @@ Lease collection (no list or watch). `agent/rbac.yaml` grants exactly `get` and 
 resourceName and `create` on leases. For a `403` in `failureClass`, check `agent/rbac.yaml` and the
 RoleBinding first; it does not prove RBAC changed. Also check admission denials, namespace state and
 the requested Lease/namespace.
+
+### Lease timing (T1, 30/20/2)
+
+**Status.** Approved on 2026-11-18 on three conditions, answered below: an alert for brief leadership
+losses ("Monitoring"), and audits of the hub's timeouts and the qualification campaign's timings.
+Nothing changes until its PR merges. Until then the agent runs 15/10/2
+(`leaseDurationSeconds`/`renewDeadlineSeconds`/`retryPeriodSeconds`), the values Relay's
+preparation writes into every bundle: it takes no timing input (Relay `c0fe50f0`
+`packages/infrastructure-agent/installation-preparation.ts:192-196`). T1 sets 30/20/2 with a reviewed
+ailab overlay that the bundle tooling applies to the agent's config and values on `check`, `import`
+and the reproduction. From the merge on, this installation's timing is the overlay's, and
+`agent/config.json` `leadership` records it. The agent's schema already accepts 30/20/2 (lease 10-120,
+renew 5-110, retry 1-30, renew < lease, 2 × retry ≤ renew: `config.ts:127-138`), so Relay changes nothing.
+It ships in ONE PR with the agent-only update to v0.10.8 (the operator's T1 decision; the owner's go on
+2026-11-19), so the merge is a single rollout of the new timing and the new agent image together.
+
+**Why.** On 2026-11-18 the v0.10.6 agent lost leadership 12 times, each on an etcd stall from the
+control-plane nodes' worn NVMe disks (`kubernetes/apps/infrastructure/monitoring/control-plane-storage-rules.yaml`).
+v0.10.7, live since 18:38Z, sends a second identical Lease request on a fresh connection when the
+first is still pending after 1 s (Relay `61c02f76` `packages/infrastructure-agent/leadership.ts:105`).
+That routes around an API server stuck on a stalled etcd follower, and it absorbed its first follower
+stall cleanly. It cannot route around a stalled etcd leader, which every API server waits on: 2 of
+the 12 losses were leader stalls, and the one at 03:53Z held reads 8-10 s on every API server. v0.10.7's first loss (2026-11-19
+03:31:57Z) was a leader stall too, on cp3 (fsync p99 1.29 s): its last renewal write landed 9.3 s after the
+round's send, too late for the 10 s deadline, after 43 hedged requests. A 10 s
+renew deadline with a 3 s per-request bound cannot ride that out; 20 s with 6 s can. T1 is not a
+liveness guarantee: a longer stall, or repeated stalls with conflicts, still exhausts 20 s.
+
+**What changes.**
+
+- `agent/config.json` `leadership` becomes
+  `{"leaseDurationSeconds":30,"renewDeadlineSeconds":20,"retryPeriodSeconds":2}`; nothing else in it.
+- Hence the config ConfigMap's hashed name and the Deployment's reference to it: one Recreate rollout
+  of the agent. One replica, Recreate and the 30 s termination grace stay.
+- The Lease the agent writes carries `spec.leaseDurationSeconds: 30` (it publishes its configured
+  duration: `leadership.ts:459`).
+- The provenance record names the effective timing and the overlay.
+
+**What does not.** The timing needs no Relay release. The same PR carries the agent-only update from
+v0.10.7 (`e72eb7d5…5e98`) to v0.10.8 (`1b17c32f…74a2`; "Agent-only update" above, provenance in
+`docs/relay-workers/researcher-i5-provenance.md`), which changes `pins.yaml` `agentImage`, the inputs'
+`agentRelease` and the agent fields of `definition.json` and `summary.json`, and nothing the timing
+touches. v0.10.8 adds the `lease_request_hedged` event, `hedgedRequests` on `lease_write_adopted` and
+the `lease-write-not-sent` failure reason (Relay `24176e00`); it changes no leadership decision, timing
+or request. The runtime (`c0fe50f0`) and the hub (v0.10.4) stay. Timing is in neither the local policy digest (it covers
+`config.policy.installation` only: Relay `c0fe50f0` `packages/infrastructure-agent/config.ts:255-256`)
+nor `PodRuntimeBinding` (`packages/worker-runtime/binding.ts:163`), so the timing leaves `binding.json`,
+`definition.json`, `summary.json`, the binding and policy digests and `pins.yaml` byte-identical (the
+agent pin alone changes the agent fields listed above; the binding and policy digests stay),
+as do RBAC, the NetworkPolicy, the installation identity, the fence and the slot. Qualification
+receipts bind the binding, runtime, image and cluster, so none is invalidated, but none exercised
+30/20/2: a run's record names the effective timing. A later agent-only update keeps the overlay:
+Relay's bundle still carries 15/10/2, the import applies the overlay, and `agent/config.json` stays
+byte-identical across the update, as that procedure requires.
+
+**The trade-off: slower failover.** Fewer losses, each one longer (Relay `61c02f76`
+`packages/infrastructure-agent/leadership.ts`):
+
+| | 15/10/2 | 30/20/2 |
+| --- | --- | --- |
+| Admission closes this long after the start of the last proven renewal round, exited or not (`:811`) | 10 s | 20 s |
+| Lease duration minus renew deadline: the successor's margin | 5 s | 10 s |
+| Per-request bound, `floor(renewDeadline / 3)` clamped to 2-10 s (`:110-112`) | 3 s | 6 s |
+| Hedge after; retry after a fast failure; after a timeout | 1 s; 1 s; at once | unchanged |
+| Acquisition write, proof included | min(10 s, rest of the window) | unchanged: still ≤ 10 s |
+| A restarted process's wait on an unchanged foreign Lease, from its first read, to the next 2 s tick (`:742-757`) | > 15 s (about 16 s) | > 30 s (about 32 s) |
+| `admission_halted` to the next `ready` | 22-31 s observed | about 37-46 s |
+
+The last row takes the 2026-11-18 handovers as measured from `admission_halted` to the next `ready`;
+under T1 only the wait grows, by 15 s. Counted from the last proven renewal instead, the longer
+deadline adds too (+25 s in all): about 47-56 s. These are projections, not bounds: kubelet restart
+backoff after repeated exits, image pulls and slow hub calls add to both. Under T1 keep, for every
+episode, `admission_halted` with its `sinceRenewMs` and the time of the next `ready`.
+
+The first takeover after the merge, and the first after a rollback, are not steady-state
+measurements: the restarted process waits the duration the old Lease record carries (`:755`), 15 s
+on the merge and 30 s on a rollback.
+
+**Hub timeouts across a handover** (Relay `e77bd09a`). None is broken by 37-46 s:
+
+- **Offer claim, 30 s** from the claim (`server/environments/lifecycle.ts:540`), sent as the offer's
+  `deadline` (`server/workers/operations/service.ts:339-366`). The agent executes only before it
+  (Relay `61c02f76` `packages/infrastructure-agent/executor.ts:189-193`, `:1428`). An expired claim
+  is offered again, to the new incarnation, as `reconcile`, never as a second `execute`
+  (`lifecycle.ts:518`, `:537`); the old incarnation's late receipt is kept as evidence and settles
+  nothing (`service.ts:538-544`, `:586-588`). At 22-31 s a claim made just before the loss could
+  still be live when the successor first polled; at 37-46 s it has always expired, so the successor
+  reconciles at once. Do not lengthen the claim to hide a handover.
+- **Deferred offers, 30 s**: a refused candidate is retried after 30 s, and an expired claim becomes
+  `unknown` first (`service.ts:183-202`). A poll backoff, not a takeover timer.
+- **Polls** return at once when idle (`service.ts:113-128`).
+- **Installation state** has no heartbeat: it stays `ready` through a takeover (`auth.ts:344-363`),
+  `relay_control_installations_oldest_pending_seconds` counts only `approved` and `awaiting-fence`
+  (`server/workers/metrics.ts:78`), and request freshness is a ±120 s signature skew
+  (`packages/infrastructure-protocol/installation-auth.ts:45`).
+- The 30 s holder and workspace observation windows (`server/environments/readiness.ts:97`, `:100`;
+  `renewal.ts:91`) are reported by the worker, not the agent, and use the environment's authority
+  epoch, not the installation's.
+- **Running workers end at a takeover, at any timing.** A worker's runtime lease renewal is decided
+  under the incarnation and epoch stored on its previous lease (`server/workers/runtime-lease/service.ts:36-41`,
+  `:135-148`; `server/workers/bootstrap/README.md:111-114`), and `lockInstallationAuthority` refuses
+  any but the current ones with 409 `installation_authority_lost` (`auth.ts:515-535`). The supervisor
+  does not retry a 409 and stops (`protocol-violation`: Relay `c0fe50f0`
+  `packages/worker-runtime/supervisor/supervisor.ts:91-92`, `:579-583`). So every takeover ends every
+  running worker at its next renewal attempt. T1 does not change that; it makes takeovers rarer.
+
+**Monitoring.** `RelayInfrastructureAgentUnavailable` (`agent/relay-researcher-rules.yaml`) waits 10
+minutes, far longer than any 2026-11-18 loss. `RelayInfrastructureAgentRestarted` (warning) sees one: every
+admission halt ends the process (exit 3; any other exit is a crash), the kubelet restarts the
+container in place, and the rule fires on any increase of the agent container's
+`kube_pod_container_status_restarts_total` within 15 minutes (`for: 1m`), then clears. A rollout or
+a scale to zero makes a new Pod or none, so neither fires it. The agent exports no metrics and
+nothing alerts on its log, so the restart counter is the signal (as for `GiteaForgeRestarting`). Its
+fixture (`relay-researcher-rules.test.yaml`) covers a rollout, a restart and the clearing. A
+narrower rule would need a leadership metric from the agent or alerting on its `admission_halted`
+log line; neither exists. kube-state-metrics' Lease series (`kube_lease_renew_time`) could show a
+stalled renewal, but no rule here reads them yet, so their presence in this Prometheus is
+unverified. The other rules are unaffected by 37-46 s handovers: the worker rules hold 120-600 s for
+5 minutes (`kubernetes/components/relay-worker-monitoring/relay-worker-rules.yaml`), and the
+control-plane, candidate and recovery rules observe holders, journals and backups, not the agent.
+
+**The qualification campaign** assumes no agent handover time: its cut and lease margins
+(`relay-researcher-qualification-campaign.md` §6) are the worker lease `L`, and R2's 55 s disruption
+and R3/R4's cuts change the worker slot's egress, not the agent's. Two things do depend on the agent:
+its restart at §3.8 (U12 records the timing it was measured at) and a takeover during a run, which
+ends the run's worker as above (§5.6).
+
+**Why it stays safe.** The Lease timing decides when a successor may act. Stale authority is stopped
+by two mechanisms that T1 does not touch:
+
+- Locally, admission closes at the deadline whether or not the process has exited, and every offer
+  rechecks it before acting (Relay `61c02f76` `packages/infrastructure-agent/daemon.ts:289-294`,
+  `executor.ts:381`, `:1436`). A successor watches an unchanged record for longer than a full lease
+  duration, so the old leader's window has closed at least the margin (10 s, was 5 s) before the
+  successor can acquire, without comparing clocks across nodes.
+- At the hub, a takeover advances the epoch: under the installation's row lock it retires the
+  previous incarnation and sets epoch + 1 in one transaction (Relay `e77bd09a`
+  `server/workers/installations/auth.ts:335-363`). Every later request from the old incarnation then
+  fails the retired/current-incarnation/epoch check, however fresh its signature (`:476-480`), and a
+  transaction relying on an earlier authentication rechecks it (`:515`). Polls and receipts take
+  that path (`server/workers/operations/service.ts:120`, `:429`), and a receipt's identity must match
+  (`:450`). The new incarnation CAS-persists its epoch in the fence before it is `ready` (Relay
+  `61c02f76` `packages/infrastructure-agent/daemon.ts:619-620`), and the fence refuses a lower epoch
+  (`fence.ts:182-203`). The hub keeps no timer tied to the Lease ("Hub timeouts" above).
+
+Neither, at any timing, retracts a Kubernetes write already in flight or stops a hub transaction
+serialized before the takeover; the fence is a point-in-time check (`fence.ts:176-180`). Uncertain
+operations stay reserved and are reconciled.
+
+**Rollout** (the operator merges the held PR):
+
+1. Merge between qualification runs, with no worker running: the rollout is a takeover, and a
+   takeover ends running workers ("Hub timeouts" above). While `relay-researcher-agent` is suspended
+   (campaign runbook §3.5 to §3.10) Flux applies nothing, and a per-run branch cut before the merge
+   still renders 15/10/2. Note the current epoch and the Lease
+   (`kubectl -n relay-infra-control get lease relay-infrastructure-agent -o jsonpath='{.spec.holderIdentity} {.spec.leaseDurationSeconds}{"\n"}'`: `15`).
+2. Merge. Flux applies the new config ConfigMap and the Deployment recreates the Pod. The new process
+   waits out the old record's 15 s, so this gap is about one 15/10/2 handover.
+3. Readbacks:
+   - exactly one agent Pod Running from the new ReplicaSet, zero restarts, `imageID`
+     `…@sha256:1b17c32f4743865451a3af936b2acb9ed4765e5baf9cc8535c3607a5040474a2` (v0.10.8);
+   - its config:
+     `kubectl -n relay-infra-control get cm "$(kubectl -n relay-infra-control get deploy relay-infrastructure-agent -o jsonpath='{.spec.template.spec.volumes[?(@.name=="config")].configMap.name}')" -o jsonpath='{.data.config\.json}' | jq -c .leadership`
+     prints `{"leaseDurationSeconds":30,"renewDeadlineSeconds":20,"retryPeriodSeconds":2}`;
+   - the Lease command of step 1 shows the new holder and `30`, and `.spec.renewTime` advances
+     between two reads a few seconds apart (one renewal per 2 s);
+   - its log has `"event":"ready"` with an epoch one higher, and the installation is `ready` at that
+     epoch and incarnation with the fence, recovery and enrollment fields unchanged (as at I10
+     step 2);
+   - renewals flowing: since `ready`, no `admission_halted` and no `lease_renewal_failed` without a
+     following `lease_renewal_recovered` or `lease_write_adopted`. v0.10.8 also logs an info-level
+     `lease_request_hedged` (`request` GET or PUT, cumulative `hedgedRequests`) for each second leg,
+     which is expected under a slow API server, and may report `reason: lease-write-not-sent` on a
+     `lease_renewal_failed` whose write never reached the transport;
+   - the slot as before the merge.
+
+**Rollback** (under step 1's conditions; the operator merges the rollback PR).
+- **Timing (the rollback the triggers below call for).** One PR that sets `LEADERSHIP_OVERLAY` in
+  `scripts/relay-researcher-bundle.py` back to `PREPARED_LEADERSHIP`'s 15/10/2 and re-imports in the
+  order below. Only `agent/config.json` `leadership` changes, back to Relay's 15/10/2. The restart alert
+  `RelayInfrastructureAgentRestarted`, the v0.10.8 agent, the pin tool's overlay guard and the audits
+  all stay, so the window in which the triggers are judged keeps its alert. The committed-state tests
+  pass with the overlay set to 15/10/2, and the import writes exactly those bytes. The agent rolls once
+  (Recreate). That restarted process waits the 30 s the old record carries, so this one takeover is as
+  slow as a T1 one; later ones are back to 22-31 s. Readbacks as above, with `15` and
+  `{"leaseDurationSeconds":15,"renewDeadlineSeconds":10,"retryPeriodSeconds":2}`, and `imageID` still
+  v0.10.8's.
+- **The agent image, if v0.10.8 itself is at fault.** The agent-only update procedure back to v0.10.7
+  (`e72eb7d5…5e98`), with the pin tool's `--allow-downgrade`; the timing stays.
+- **Reverting this whole PR** is the last resort. It rolls back the timing and the pin together, and it
+  also removes the restart alert, the overlay machinery and these audits: re-land the alert at once
+  (`kubernetes/apps/relay-researcher/agent/relay-researcher-rules.yaml` and its promtool tests).
+
+Run the committed-state tests and the reproduction on any of these, as for any change to these files (I5).
+
+**Order for a timing change.** `check` compares the committed config with the overlaid bundle. So when
+the overlay itself changes (introducing T1, or reverting it), run `prepare` → `import --chart` →
+`check --chart` → the 4-argument reproduce. For any later update under an unchanged overlay, including
+an agent-only update, the I5 order (`check` before `import`) still works.
+
+**Ship gates (operator decision 2026-11-18; all four).**
+1. The agent release that ships with T1 has been reviewed independently, with its image provenance,
+   its reproduction and the chart rendering verified.
+2. Relay's deterministic leadership tests pass at 30/20/2: an 8.2 s stall, the 20 s expiry,
+   delayed and late responses, a stale epoch, mixed 15/30 timings, and 30→15 rollback.
+3. The hub-timeout and alert audits above are complete.
+4. No v0.10.7 regression up to ship time: no leadership loss that v0.10.7 should have survived.
+   A leader-stall loss makes T1 urgent but waives none of gates 1–3.
+
+**After the rollout.** The readbacks above, plus: the Lease shows exactly one transition, and the fence
+UID is unchanged. Hold other changes for 4 h with zero unexpected losses.
+
+**Rollback triggers** (the timing-only rollback above, through GitOps; keep the identity and the fence):
+- `lease-taken` or `lease-holder-reused`;
+- a hub epoch conflict or any stale-epoch admission (halt immediately);
+- a config or provenance mismatch;
+- a handover over 60 s while the API is healthy;
+- 24 h of losses not below the v0.10.7 baseline.
+
+Persistent disk stalls alone do not justify a rollback.
 
 ## Qualification stage (owner decision G3)
 

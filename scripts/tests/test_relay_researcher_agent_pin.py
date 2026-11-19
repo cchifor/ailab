@@ -37,7 +37,9 @@ class AgentPin(unittest.TestCase):
         self.text = (ROOT / pin.INPUTS).read_bytes().decode("utf-8")
         self.inputs = json.loads(self.text)
         self.agent = copy.deepcopy(self.inputs["agentRelease"])
-        self.agent.update(tag="v0.10.7", giteaReleaseId=999007, sourceCommit="7" * 40,
+        # One patch above the committed pin, so the fixture is never a downgrade after a real pin.
+        major, minor, patch = map(int, self.agent["tag"][1:].split("."))
+        self.agent.update(tag=f"v{major}.{minor}.{patch + 1}", giteaReleaseId=999007, sourceCommit="7" * 40,
                           agentReceipt="worker-image-infrastructure-agent-999007.json",
                           agentImage=self.inputs["release"]["agentImage"].split("@")[0] + "@sha256:" + "7" * 64)
         self.agent["assets"] = {"SHA256SUMS": "1" * 64, "manifest.json": "2" * 64,
@@ -50,6 +52,9 @@ class AgentPin(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix=".agent-pin-test-", dir=ROOT)
         self.addCleanup(self.tmp.cleanup)
         self.assets = Path(self.tmp.name)
+        # The committed config and the bundle tool's leadership overlay it carries.
+        self.config = (ROOT / pin.CONFIG).read_bytes()
+        self.leadership = pin.leadership_overlay(ROOT)
 
     def write_assets(self, *, receipt=None, manifest=None, sums=None):
         for name, value in ((self.agent["agentReceipt"], self.receipt if receipt is None else receipt),
@@ -234,16 +239,19 @@ class AgentPin(unittest.TestCase):
                       f"{indent}sourceCommit: unchanged\n").encode()
             for scalar in (json.dumps(image), f"'{image}'", image):
                 with self.subTest(indent=indent, scalar=scalar):
-                    pin.check_import({pin.PINS: before}, {pin.PINS: before.replace(b"'old'", scalar.encode())}, image)
+                    pin.check_import({pin.PINS: before, pin.CONFIG: self.config},
+                                     {pin.PINS: before.replace(b"'old'", scalar.encode()), pin.CONFIG: self.config},
+                                     image, self.leadership)
             for changed in (before.replace(b"unchanged", b"changed"),
                             before.replace(b"retained comment", b"edited comment"),
                             before + f"{indent}agentImage: 'old'\n".encode(), b"data: [bad]\n"):
                 with self.subTest(changed=changed), self.assertRaises(pin.Refusal):
-                    pin.check_import({pin.PINS: before}, {pin.PINS: changed}, "old")
+                    pin.check_import({pin.PINS: before, pin.CONFIG: self.config},
+                                     {pin.PINS: changed, pin.CONFIG: self.config}, "old", self.leadership)
 
     def test_import_requires_pyyaml_with_context(self):
         with mock.patch.dict(sys.modules, {"yaml": None}), self.assertRaisesRegex(pin.Refusal, "PyYAML is required"):
-            pin.check_import({}, {}, self.agent["agentImage"])
+            pin.check_import({}, {}, self.agent["agentImage"], self.leadership)
 
     def test_malformed_receipts_and_manifests_are_refused(self):
         cases = [
@@ -254,7 +262,7 @@ class AgentPin(unittest.TestCase):
             ("platform", lambda r, m: r.update(platform="linux/arm64")),
             ("source", lambda r, m: r.update(sourceCommit="8" * 40)),
             ("invalid source", lambda r, m: (r.update(sourceCommit="bad"), m.update(sourceCommit="bad"))),
-            ("tag mismatch", lambda r, m: m.update(version="v0.10.8")),
+            ("tag mismatch", lambda r, m: m.update(version=self.agent["tag"] + "0")),
             ("missing v", lambda r, m: m.update(version="0.10.7")),
             ("publication", lambda r, m: r.update(publication=[])),
             ("tag image", lambda r, m: r["publication"].update(image="registry.chifor.me/relay/infrastructure-agent:v0.10.7")),
@@ -316,12 +324,52 @@ class AgentPin(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(pin.Refusal):
                 pin.check_i4(before, after, agent, config)
         installation = pin.snapshot(ROOT, [pin.TREE])
-        pin.check_import(installation, installation, agent["agentImage"])
+        pin.check_import(installation, installation, agent["agentImage"], self.leadership)
         for name in (pin.PINS, f"{pin.TREE}/agent/config.json"):
             with self.subTest(name=name), self.assertRaises(pin.Refusal):
-                pin.check_import(installation, {**installation, name: installation[name] + b"\n"}, agent["agentImage"])
+                pin.check_import(installation, {**installation, name: installation[name] + b"\n"}, agent["agentImage"],
+                                 self.leadership)
         with self.assertRaises(pin.Refusal):
-            pin.check_import(installation, {**installation, "unexpected": b""}, agent["agentImage"])
+            pin.check_import(installation, {**installation, "unexpected": b""}, agent["agentImage"], self.leadership)
+
+    def test_import_guard_requires_the_leadership_overlay_and_nothing_else(self):
+        # The config import leaves byte-identical must carry exactly the bundle tool's overlay; any
+        # config change is refused, a change to the overlay's own timing included (that is the bundle
+        # tool's import, landed before an agent-only update), and so is any other timing.
+        bundle = importlib.util.spec_from_file_location("bundle_for_pin", ROOT / pin.BUNDLE_TOOL)
+        module = importlib.util.module_from_spec(bundle)
+        bundle.loader.exec_module(module)
+        self.assertEqual(self.leadership, module.LEADERSHIP_OVERLAY)
+        installation = pin.snapshot(ROOT, [pin.TREE])
+        image = self.inputs["agentRelease"]["agentImage"]  # the committed pin: pins.yaml is unchanged here
+        config = json.loads(installation[pin.CONFIG])
+        self.assertEqual(config["leadership"], self.leadership)
+        pin.check_import(installation, installation, image, self.leadership)
+
+        def body(**changes):
+            return (json.dumps({**config, **changes}, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        # A valid timing that is not the overlay: the preparation's, unless the overlay is set back to it
+        # (the installation runbook's timing-only rollback), then T1's 30/20/2.
+        other = (module.PREPARED_LEADERSHIP if self.leadership != module.PREPARED_LEADERSHIP
+                 else {"leaseDurationSeconds": 30, "renewDeadlineSeconds": 20, "retryPeriodSeconds": 2})
+        committed, prepared = installation[pin.CONFIG], body(leadership=other)
+        floats = body(leadership={k: float(v) for k, v in self.leadership.items()})
+        cases = {  # config.json before and after the import
+            "the overlay newly imported": (prepared, committed, "import changed"),
+            "another timing imported": (committed, prepared, "import changed"),
+            "another config field": (committed, body(version=2), "import changed"),
+            "the preparation's timing kept": (prepared, prepared, "not the bundle tool's"),
+            "the overlay as floats": (floats, floats, "not the bundle tool's"),
+        }
+        for name, (before, after, reason) in cases.items():
+            with self.subTest(name), self.assertRaisesRegex(pin.Refusal, reason):
+                pin.check_import({**installation, pin.CONFIG: before}, {**installation, pin.CONFIG: after}, image,
+                                 self.leadership)
+        with self.subTest("a bundle tool without the overlay"), tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            (Path(tmp) / "scripts").mkdir()
+            (Path(tmp) / pin.BUNDLE_TOOL).write_text("ROOT = None\n", encoding="utf-8")
+            with self.assertRaisesRegex(pin.Refusal, "declares no LEADERSHIP_OVERLAY"):
+                pin.leadership_overlay(Path(tmp))
 
 
 class AtomicInstall(unittest.TestCase):
@@ -515,6 +563,28 @@ class CurrentRelease(unittest.TestCase):
             self.assertEqual((updated["tag"], updated["giteaReleaseId"], updated["sourceCommit"],
                               updated["agentReceipt"], updated["agentImage"]),
                              (tag, 999007, "7" * 40, receipt_name, image))
+            self.assertFalse(list(tree.glob(".relay-agent-pin-*")))
+
+    def test_unimported_leadership_overlay_is_refused_and_installs_nothing(self):
+        # A config without the bundle tool's overlay (as before the overlay landed) is not an agent-only
+        # update: the bundle check refuses it, and the tree is left as it was.
+        with tempfile.TemporaryDirectory(prefix=".agent-pin-timing-", dir=ROOT) as tmp:
+            tree = Path(tmp)
+            original = pin.snapshot(ROOT, pin.STAGED)
+            for name, body in original.items():
+                target = tree / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(body)
+            config = json.loads(original[pin.CONFIG])
+            config["leadership"] = {"leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2}
+            (tree / pin.CONFIG).write_text(json.dumps(config, sort_keys=True, separators=(",", ":")) + "\n",
+                                           encoding="utf-8")
+            staged = pin.snapshot(tree, pin.STAGED)
+            agent = json.loads(original[pin.INPUTS])["agentRelease"]
+            with mock.patch.object(pin, "ROOT", tree), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(pin.Refusal, "not LEADERSHIP_OVERLAY"):
+                    pin.pin(Path(RELAY), Path(ASSETS), Path(AGENT_ASSETS), agent["tag"], agent["giteaReleaseId"])
+            self.assertEqual(pin.snapshot(tree, pin.STAGED), staged)
             self.assertFalse(list(tree.glob(".relay-agent-pin-*")))
 
     def test_failed_verification_never_installs_staged_edits(self):

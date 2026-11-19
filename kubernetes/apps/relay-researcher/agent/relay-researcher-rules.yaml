@@ -26,6 +26,21 @@ spec:
         summary: The Relay infrastructure agent has no available replica
         description: Workers cannot be created, observed or cleaned up while it is down. Never replace its installation identity or fence to restart it.
         runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-researcher-installation.md
+    # A leadership loss is over in under a minute, so the rule above never sees one. Every admission
+    # halt ends the agent process (exit 3; any other exit is a crash) and the kubelet restarts its
+    # container in place, which this counts. A rollout or a scale to zero replaces or removes the Pod
+    # instead, and a new Pod's count starts at 0, so neither fires it. The agent exports no metrics and
+    # nothing alerts on its log, so the restart counter is the signal (as for GiteaForgeRestarting).
+    - alert: RelayInfrastructureAgentRestarted
+      expr: increase(kube_pod_container_status_restarts_total{namespace="relay-infra-control",container="agent",pod=~"relay-infrastructure-agent-.+"}[15m]) > 0
+      for: 1m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: The Relay infrastructure agent exited and restarted
+        description: Admission stopped until the restarted process takes over at the next epoch, and running workers' lease renewals bound to the old epoch are refused. Exit code 3 is an admission halt; read the admission_halted line of the previous container's log (kubectl -n relay-infra-control logs <pod> --previous) with the runbook's leadership log. Never replace the installation identity or fence to restart it.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-researcher-installation.md
     # The relay-gvisor RuntimeClass and the dedicated taint should make this impossible. If it fires,
     # a worker runs beside protected workloads: stop it through Relay at once.
     - alert: RelayResearcherPodOffWorkerPool

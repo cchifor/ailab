@@ -664,6 +664,7 @@ Keep the originals until the canary.
 | An interrupted call (charged 930,192) | no more prompts; zero-request drivers may continue |
 | Unknown journal slot | stop until reviewed reconciliation; only R7's O8 procedure retains an `admitted`, null-UID journal entry (§3.10 step 5) |
 | A `failed` row traceable to the hub, agent or runtime image | stop the campaign: a fix changes the subject and voids every row; owner |
+| The agent takes over during a run (its log's `ready` at a new epoch; `RelayInfrastructureAgentRestarted`) | the hub refuses the worker's next lease renewal (409 `installation_authority_lost`: a lease binds the installation epoch) and its supervisor stops (installation runbook, "Lease timing (T1, 30/20/2)"). Record the epoch change; do not read that stop as a runtime result; remove and reconcile (§3.10) |
 | A row fails to convert | fix the evidence path before the next run |
 | More than one lost terminating run | new owner approval (O1) |
 
@@ -970,6 +971,10 @@ and restart within the timing budget (§8 U12).
     signing. Repeat at each run's §3.0 and immediately before §3.6; apply §5.1's 250 ms/0.5 s limits.
 12. U12 — **UNVERIFIED:** in E6 record monotonic start/finish times and results for every §4 step and
     the window, storage, matrix, egress and replay drivers. Include agent shutdown and restart through
-    session issuance, and record failures/retries separately. Fill each `D_x` in §6 from the measured
+    session issuance, and record failures/retries separately. Record the agent's Lease timing with the
+    restart (`agent/config.json` `leadership`): the restarted agent first watches the previous Lease
+    record for that record's full duration, about 16 s at 15/10/2 and 32 s at 30/20/2 (installation
+    runbook, "Lease timing (T1, 30/20/2)"), so a restart measured at one timing does not stand for the
+    other. Fill each `D_x` in §6 from the measured
     elapsed duration with an explicit operator-chosen margin; verify the latest-start formulas and
     create → Pod Running < 5 min before R1. Repeat timings in each run's stopwatch log (§5.5).
