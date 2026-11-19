@@ -517,14 +517,14 @@ class RoleRenderTests(unittest.TestCase):
                          'CLEAN="make KERNEL_BUILD=${kernel_source_dir} clean"'):
             self.assertIn(expected, lines)
 
-    def test_ai_node1_and_ai_node2_turn_it_on_and_ai_node3_does_not(self):
-        # node3 still boots with Secure Boot on; node1/2 run the role defaults' curve (no override).
+    def test_all_three_nodes_turn_it_on_with_the_default_curve(self):
+        # Secure Boot is off on all three nodes (node3 since 2026-11-19); each runs the role defaults' curve
+        # (no override), so a host_vars curve or fan list here would be a deliberate, reviewed exception.
         host_vars = {h: yaml.safe_load((ROOT / f'ansible/host_vars/{h}.yml').read_text()) or {}
                      for h in ('ai-node1', 'ai-node2', 'ai-node3')}
-        self.assertIs(host_vars['ai-node1'].get('pve_ec_fan_enabled'), True)
-        self.assertIs(host_vars['ai-node2'].get('pve_ec_fan_enabled'), True)
-        self.assertNotIn('pve_ec_fan_enabled', host_vars['ai-node3'])
-        for h in ('ai-node1', 'ai-node2'):
+        for h in ('ai-node1', 'ai-node2', 'ai-node3'):
+            self.assertIs(host_vars[h].get('pve_ec_fan_enabled'), True, h)
+        for h in ('ai-node1', 'ai-node2', 'ai-node3'):
             self.assertFalse([k for k in host_vars[h] if k.startswith('pve_ec_fan_') and k != 'pve_ec_fan_enabled'])
 
     def test_site_runs_the_role_ungated_so_switching_it_off_takes_it_down(self):
