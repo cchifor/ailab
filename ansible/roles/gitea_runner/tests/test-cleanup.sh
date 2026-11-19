@@ -283,6 +283,8 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     GITEA_CLEANUP_TARGET_ROOTS="${TROOTS-/nonexistent/targets}" GITEA_CLEANUP_TARGET_MAXDEPTH="${TDEPTH:-4}" \
     GITEA_CLEANUP_TARGET_KEEP_H="${TKEEP:-72}" GITEA_CLEANUP_TARGET_KEEP_CRITICAL_H="${TKEEPCRIT:-24}" \
     GITEA_CLEANUP_TARGET_MIN_FREE_MB="${TMINFREE:-1024}" GITEA_CLEANUP_BUILDKIT_DB="${BKDB:-/nonexistent/cache.db}" \
+    GITEA_CLEANUP_TARGET_AGE_SWEEP="${TAGE:-0}" GITEA_CLEANUP_TARGET_AGE_MIN_FREE_MB="${TAGEMINFREE:-1024}" \
+    GITEA_CLEANUP_TARGET_AGE_EVERY_H="${TAGEEVERY:-6}" GITEA_CLEANUP_TARGET_AGE_STAMP="${TAGESTAMP-$WORK/age.stamp}" \
     MOCK_MNT_OPTS="${MOCK_MNT_OPTS:-rw,relatime}" MOCK_MNT_FAIL="${MOCK_MNT_FAIL:-0}" \
     bash "$SCRIPT" ${SCRIPT_ARGS:-} >/dev/null 2>&1 &
   local pid=$! i=0
@@ -1123,7 +1125,7 @@ TR="$WORK/troot"
 mb() { mkdir -p "$(dirname "$1")"; head -c $(( ${2:-2} * 1048576 )) /dev/zero > "$1"; }
 age() { touch -a -d "$2" "$1"; } # atime only: what the sweep reads
 mk_targets() {
-  rm -rf "$TR"
+  rm -rf "$TR"; rm -f "$WORK/age.stamp"
   local t="$TR/repo-ci/pull_request/target"
   mb "$t/CACHEDIR.TAG" 0; echo '{}' > "$t/.rustc_info.json"; age "$t/CACHEDIR.TAG" '30 days ago'
   mb "$t/debug/deps/libold-1.rlib"; age "$t/debug/deps/libold-1.rlib" '5 days ago'
@@ -1303,6 +1305,58 @@ rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; IDLEWAIT=2 BKDB="$BKF" BEACON=1 TE
 rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; BEACON=1 TEXTDIR="$BEACONDIR" run_case 1 50
 [ "$(beacon_field buildkit_db_bytes)" = 0 ] && ok "T18: no cache.db -> 0, not a missing line" || bad "T18: no cache.db (got '$(beacon_field buildkit_db_bytes)')"
 rm -f "$BKF"
+
+# T19: TARGET_AGE_SWEEP=1 sweeps BELOW pressure by age alone, with the same guards (2026-11-18: the 250 GB
+# root disks never reached 75%, so the targets piled up unswept).
+mk_targets; TAGE=1 TROOTS="$TR" TAGEMINFREE=1 run_case 0 50
+gone "$T/debug/deps/libold-1.rlib" "T19: age sweep at 50% deletes a file unread for 5 days"
+kept "$T/debug/deps/libday-3.rlib" "T19: ...keeps one unread for 30h (the 72h window, not the critical 24h)"
+kept "$T/CACHEDIR.TAG" "T19: ...keeps the markers"
+assert_has "systemctl stop gitea-act-runner" "T19: the runner is held for an age sweep too"
+assert_has "systemctl start" "T19: ...and started again"
+grep -q "target sweep: disk 50%, .* -> deleting (age sweep)" "$WORK/logger.log" \
+  && ok "T19: the log keeps the 'target sweep: disk N%,' prefix and names the age sweep" || bad "T19: the age-sweep log line"
+[ -f "$WORK/age.stamp" ] && ok "T19: a completed age sweep writes the cadence stamp" || bad "T19: a completed age sweep writes the cadence stamp"
+# The age path has its OWN floor; the pressure path keeps TARGET_MIN_FREE_MB (reviewer-claude, #1857).
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1 TAGEMINFREE=1024 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: below pressure the AGE floor (1024 MB) gates, not TARGET_MIN_FREE_MB (1)"
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1 TAGEMINFREE=1024 run_case 0 85
+gone "$T/debug/deps/libold-1.rlib" "T19: at pressure TARGET_MIN_FREE_MB (1) gates, not the age floor"
+# Cadence: a walk that found too little stamps; the next age tick inside TARGET_AGE_EVERY_H does not walk.
+mk_targets; TAGE=1 TROOTS="$TR" TAGEMINFREE=1024 run_case 0 50
+[ -f "$WORK/age.stamp" ] && ok "T19: a walk below the age floor writes the cadence stamp" || bad "T19: a walk below the age floor writes the cadence stamp"
+TAGE=1 TROOTS="$TR" TAGEMINFREE=1 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: inside TARGET_AGE_EVERY_H the age path does not sweep"
+grep -q "age sweep looked less than 6h ago -> not this tick" "$WORK/logger.log" && ok "T19: ...and says so" || bad "T19: ...and says so"
+TAGE=1 TAGEEVERY=0 TROOTS="$TR" TAGEMINFREE=1 run_case 0 50
+gone "$T/debug/deps/libold-1.rlib" "T19: TARGET_AGE_EVERY_H=0 lifts the cadence limit"
+# The PRODUCTION stamp path (env empty -> the script's default beside HEAL_STATE), with that dir not yet
+# created on a fresh host: the dir is made and the stamp lands there (reviewer-claude, #1857 round 2).
+mk_targets; rm -rf "$WORK/fresh"; TAGESTAMP="" HEALSTATE="$WORK/fresh/heal.state" TAGE=1 TROOTS="$TR" TAGEMINFREE=1024 run_case 0 50
+[ -f "$WORK/fresh/target-age-sweep.stamp" ] && ok "T19: with the stamp env unset it lands beside HEAL_STATE, its dir created" \
+  || bad "T19: default stamp path (want $WORK/fresh/target-age-sweep.stamp)"
+rm -rf "$WORK/fresh"
+# The stamp never limits the pressure path.
+mk_targets; touch "$WORK/age.stamp"; TAGE=1 TROOTS="$TR" TMINFREE=1 run_case 0 85
+gone "$T/debug/deps/libold-1.rlib" "T19: a fresh age stamp does not stop the pressure sweep"
+# The busy early exit below pressure still wins: a job is running, so nothing is read for deletion.
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1 run_case 1 50
+kept "$T/debug/deps/libold-1.rlib" "T19: busy below pressure -> no age sweep"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T19: busy -> the runner must not be stopped"; else ok "T19: busy -> the runner is not stopped"; fi
+# The age floor decides whether the runner is held below pressure.
+mk_targets; TAGE=1 TROOTS="$TR" TAGEMINFREE=1024 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: under TARGET_AGE_MIN_FREE_MB the age sweep deletes nothing"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T19: under TARGET_AGE_MIN_FREE_MB the runner must not be stopped"; else ok "T19: under TARGET_AGE_MIN_FREE_MB the runner is not stopped"; fi
+# A value other than 1 is not "on" (the template only ever renders 1 or 0).
+mk_targets; TAGE=true TROOTS="$TR" TMINFREE=1 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: TARGET_AGE_SWEEP=true (not 1) does not enable it"
+# The mid-job critical path (busy, no gap) still never sweeps, age sweep or not (codex impl review).
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1 run_case 1 95
+kept "$T/debug/deps/libold-1.rlib" "T19: the mid-job path never deletes Cargo targets with the age sweep on"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T19: the mid-job path must not stop the runner"; else ok "T19: the mid-job path does not stop the runner"; fi
+# A runner that did not stop: nothing is deleted below pressure either.
+mk_targets; MOCK_STOP_FAIL=1 TAGE=1 TROOTS="$TR" TAGEMINFREE=1 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: an age sweep whose runner did not stop deletes nothing"
 
 echo "[V] leaked buildx builders are MEASURED (read-only metric), never removed"
 # 2026-11-17: builders that cancelled jobs left behind held 20.1 GB on ci-runner-9 and 20.5 GB on

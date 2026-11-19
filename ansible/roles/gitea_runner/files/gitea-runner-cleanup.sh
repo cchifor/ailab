@@ -133,9 +133,23 @@ TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 # an absolute path of at least two components. TARGET_KEEP_H=0 disables the sweep.
 TARGET_ROOTS="${GITEA_CLEANUP_TARGET_ROOTS:-/home/runner/.cache}"
 TARGET_MAXDEPTH="${GITEA_CLEANUP_TARGET_MAXDEPTH:-4}"          # how deep under a root a target dir may sit
-TARGET_KEEP_H="${GITEA_CLEANUP_TARGET_KEEP_H:-72}"             # at/over PRESSURE_PCT: files unread this long go
+TARGET_KEEP_H="${GITEA_CLEANUP_TARGET_KEEP_H:-72}"             # files unread this long go (at/over PRESSURE_PCT, or the age sweep)
 TARGET_KEEP_CRITICAL_H="${GITEA_CLEANUP_TARGET_KEEP_CRITICAL_H:-24}" # at/over CRITICAL_PCT
 TARGET_MIN_FREE_MB="${GITEA_CLEANUP_TARGET_MIN_FREE_MB:-1024}" # below this much to gain, the runner is not held
+# 1 = also sweep BELOW pressure: age alone (TARGET_KEEP_H) decides, on every idle tick, with the same guards
+# (confirmed gap, runner held and drained, TARGET_MIN_FREE_MB). 0 = only at/over PRESSURE_PCT (the original
+# behaviour). Why it exists: the root disks were grown 120 -> 200 -> 250 GB, so PRESSURE_PCT (75%) now sits
+# ~188 GB up and was never reached; the targets piled up unswept (41 GB on ci-runner-1, 2026-11-18) on a
+# QLC drive whose fill and wear etcd pays for. The docker levers stay disk-gated on purpose: an age sweep
+# rebuilds only what a later build needs, a forced docker prune re-pulls everything (variables.tf).
+TARGET_AGE_SWEEP="${GITEA_CLEANUP_TARGET_AGE_SWEEP:-0}"
+# The age path's own floor: below pressure the runner is held only when at least this much would go. The
+# pressure and critical paths keep TARGET_MIN_FREE_MB, where a small gain is exactly what is wanted.
+TARGET_AGE_MIN_FREE_MB="${GITEA_CLEANUP_TARGET_AGE_MIN_FREE_MB:-1024}"
+# The age path walks the target dirs at most once per this many hours (0 = every idle tick). The stamp is
+# written when a walk finds less than the floor, or after a sweep; a busy or held tick retries next tick.
+TARGET_AGE_EVERY_H="${GITEA_CLEANUP_TARGET_AGE_EVERY_H:-6}"
+TARGET_AGE_STAMP="${GITEA_CLEANUP_TARGET_AGE_STAMP:-$(dirname "$HEAL_STATE")/target-age-sweep.stamp}"
 BUILDKIT_DB="${GITEA_CLEANUP_BUILDKIT_DB:-/var/lib/docker/buildkit/cache.db}" # its size goes in the beacon
 # Leaked buildx builders (a read-only metric, see write_buildx_leak_metric): a builder container counts as
 # leaked once BuildKit has written nothing to its state volume for this long (12h, against a 3h job timeout).
@@ -1172,12 +1186,21 @@ fi
 #      its atime is always old, and deleting the marker would stop the next sweep recognising the dir.
 #    * Cargo hard-links artifacts (deps/libx-<hash>.rlib and the uplifted debug/libx.rlib are one inode),
 #      so the estimate counts each inode once and the freed space is read from du, before and after.
-#    * Disk-gated (TARGET_KEEP_H at PRESSURE_PCT, TARGET_KEEP_CRITICAL_H at CRITICAL_PCT) and NEVER on the
-#      mid-job path. Race-free by construction, like the heal in section 0: in a confirmed gap the runner is
+#    * Disk-gated (TARGET_KEEP_H at PRESSURE_PCT, TARGET_KEEP_CRITICAL_H at CRITICAL_PCT) or, with
+#      TARGET_AGE_SWEEP=1, age-gated below pressure (TARGET_KEEP_H, its own TARGET_AGE_MIN_FREE_MB floor, at
+#      most once per TARGET_AGE_EVERY_H); the critical window still needs the physical CRITICAL_PCT. NEVER on
+#      the mid-job path. Race-free by construction, like the heal in section 0: in a confirmed gap the runner is
 #      HELD (runner_held is persisted first, so a killed run is recovered by the next tick or ExecStopPost),
 #      stopped with its drain, the files deleted, and the runner started again. It is held only when at
 #      least TARGET_MIN_FREE_MB would go, so a runner full of something else is not taken out of the pool
 #      every tick for nothing.
+# Write the age-sweep cadence stamp. Its dir may not exist yet on a fresh host (it sits beside HEAL_STATE,
+# which is only created when the heal first persists state), and a silently failed touch would quietly
+# turn the cadence limit off, so create the dir and say so if the write still fails.
+stamp_age() {
+  mkdir -p "$(dirname "$TARGET_AGE_STAMP")" 2>/dev/null
+  touch "$TARGET_AGE_STAMP" 2>/dev/null || log "target sweep: cannot write the age stamp $TARGET_AGE_STAMP -> the cadence limit is off"
+}
 # Cargo target dirs under TARGET_ROOTS, NUL-separated: each dir holding a .rustc_info.json.
 cargo_target_dirs() {
   local root info d opts
@@ -1239,9 +1262,22 @@ elif [ -n "$TARGET_ROOTS" ]; then
 fi
 if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] && [ "$tg_dirs" -gt 0 ]; then
   pct_tg="$(disk_pct)"; is_num "$pct_tg" || pct_tg=0
-  if [ "$pct_tg" -ge "$PRESSURE_PCT" ]; then
-    if ! is_num "$TARGET_MIN_FREE_MB"; then
-      log "target sweep: TARGET_MIN_FREE_MB='$TARGET_MIN_FREE_MB' is not a number -> skipped"
+  # tg_age=1: below pressure, so only the age sweep may run (its own floor and cadence; the log suffix says so).
+  tg_age=0; tg_tag=""; tg_floor="$TARGET_MIN_FREE_MB"; tg_go=1
+  if [ "$pct_tg" -lt "$PRESSURE_PCT" ]; then
+    tg_age=1; tg_tag=" (age sweep)"; tg_floor="$TARGET_AGE_MIN_FREE_MB"
+    if [ "$TARGET_AGE_SWEEP" != 1 ]; then
+      tg_go=0
+    elif is_num "$TARGET_AGE_EVERY_H" && [ "$TARGET_AGE_EVERY_H" -gt 0 ] && [ -f "$TARGET_AGE_STAMP" ]; then
+      st_m="$(stat -c %Y "$TARGET_AGE_STAMP" 2>/dev/null)"; is_num "$st_m" || st_m=0
+      if [ $(( $(date +%s) - st_m )) -lt $(( TARGET_AGE_EVERY_H * 3600 )) ]; then
+        log "target sweep: age sweep looked less than ${TARGET_AGE_EVERY_H}h ago -> not this tick"; tg_go=0
+      fi
+    fi
+  fi
+  if [ "$tg_go" -eq 1 ]; then
+    if ! is_num "$tg_floor"; then
+      log "target sweep: min-free floor '$tg_floor' is not a number -> skipped${tg_tag}"
     else
       keep_h="$TARGET_KEEP_H"
       if [ "$pct_tg" -ge "$CRITICAL_PCT" ] && is_num "$TARGET_KEEP_CRITICAL_H" && [ "$TARGET_KEEP_CRITICAL_H" -lt "$keep_h" ]; then
@@ -1253,8 +1289,9 @@ if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] 
       tg_min=$(( keep_h * 60 ))
       stale=0
       for d in "${tdirs[@]}"; do b="$(target_stale_bytes "$d" "$tg_min")"; is_num "$b" && stale=$(( stale + b )); done
-      if [ "$stale" -lt $(( TARGET_MIN_FREE_MB * 1048576 )) ]; then
-        log "target sweep: ${tg_dirs} Cargo target dir(s), ${stale}B unread for ${keep_h}h < ${TARGET_MIN_FREE_MB}MB -> runner not held"
+      if [ "$stale" -lt $(( tg_floor * 1048576 )) ]; then
+        log "target sweep: ${tg_dirs} Cargo target dir(s), ${stale}B unread for ${keep_h}h < ${tg_floor}MB -> runner not held${tg_tag}"
+        [ "$tg_age" -eq 1 ] && stamp_age
       elif [ "$(state_get runner_held)" = 1 ]; then
         log "target sweep: an earlier runner recovery is still pending -> not this tick"
       elif ! idle_confirmed; then
@@ -1282,12 +1319,13 @@ if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] 
             esac
           fi
           if [ "$held" -eq 1 ]; then
-            log "target sweep: disk ${pct_tg}%, ${stale}B in ${tg_dirs} Cargo target dir(s) unread for ${keep_h}h, runner held -> deleting"
+            log "target sweep: disk ${pct_tg}%, ${stale}B in ${tg_dirs} Cargo target dir(s) unread for ${keep_h}h, runner held -> deleting${tg_tag}"
             for d in "${tdirs[@]}"; do
               b="$(target_sweep_dir "$d" "$tg_min")"; is_num "$b" || b=0
               tg_freed=$(( tg_freed + b ))
               log "target sweep: $d freed ${b}B"
             done
+            [ "$tg_age" -eq 1 ] && stamp_age
           fi
           heal_release_runner
         fi
