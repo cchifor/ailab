@@ -879,14 +879,14 @@ cchifor/llm-router) instead of a CLI login: an entry in `pr_reviewer_llm_seats` 
 
 | persona | seat | key | route | state |
 |---|---|---|---|---|
-| codex (reviewer-2) | `r` | `key_4fdbe2b833fe` | `codex-reviewer` (pointer to the smart pool `pool-codex`), reached as the key's default route: the seat sends the tier name `gpt-6-astra` | **serving** since 2026-10-13; the ONLY seat since 2026-10-26 |
+| codex (reviewer-2) | `r` | `key_4fdbe2b833fe` | `codex-reviewer` (pointer to the API smart pool `pool-codex-api` since 2026-11-19; `pool-codex` before), reached as the key's default route: the seat sends the tier name `gpt-6-astra` | **serving** since 2026-10-13; the ONLY seat since 2026-10-26 |
 | claude (reviewer-1) | `r` | `key_f856495c9b0c` (expires 2027-01-05) | the smart pool `pool-claude` in `X-Router-Route` (seat `route`), the tier's model in `model` (seat `models`): `fable`, then `opus`; never `sonnet` | **serving** since 2026-10-26 (`claude-reviewer` 2026-10-13..26); the ONLY seat since 2026-10-26 |
 
 **Router only since 2026-10-26 (owner request).** Each persona has seat `r` and nothing else, so a
 router outage pauses reviews - losslessly: the queue is kept and `ReviewbotStalled` fires after
 1 h - and, since merges need both personas, merges with them. There is no subscription fallback.
 The router balances more accounts than the seats ever did (`pool-claude`: five Claude accounts;
-`pool-codex`: every Codex account). **Renew the keys before they expire** (`key_f856495c9b0c`
+`pool-codex-api`: the OpenAI API accounts). **Renew the keys before they expire** (`key_f856495c9b0c`
 2027-01-05): a 401 parks seat `r` for 6 h and the persona stops.
 
 Both routes: llm-router.md § "Reviewer routes (2026-10-13)". Until 2026-10-13 reviewer-2 used
