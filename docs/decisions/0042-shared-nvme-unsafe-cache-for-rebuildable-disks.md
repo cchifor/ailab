@@ -52,8 +52,9 @@ The test Postgres dies when its fsyncs and writes are throttled. The throughput 
    - Runners: `var.runner_disk_cache` (default `unsafe`) in `kubernetes/infra/runners`, with
      `reboot_after_update = false`. A cache change takes effect only on a full stop/start, so each runner is drained
      and restarted by hand (`docs/runbooks/ci-runners.md`, "Disk cache mode").
-   - Reviewers (4501/4502, out-of-band, not in tofu): `qm set <vmid> --scsi0 <existing line>,cache=unsafe`, then a
-     stop/start while idle. Record the change in `docs/runbooks/ci-runners.md` "Disk cache mode".
+   - Reviewers (4501/4502, out-of-band, not in tofu): `qm set <vmid> --scsi0 <current line with cache=none REPLACED
+     by cache=unsafe>`, then a stop/start while idle. The exact replace-or-append command is in
+     `docs/runbooks/ci-runners.md` "Disk cache mode"; appending would duplicate the key, which Proxmox rejects.
 2. **Host writeback bounds** (`pve_base_writeback_sysctl`): `vm.dirty_background_bytes` 256 MiB and `vm.dirty_bytes`
    2 GiB. Without them, the host could build a multi-GiB dirty backlog and flush it in one burst onto the shared NVMe.
 3. **On-prem runner caps:** all at 60 MiB/s, with no IOPS cap. The cap stays as the host-memory guard: it bounds how
@@ -76,5 +77,5 @@ The test Postgres dies when its fsyncs and writes are throttled. The throughput 
   - Most of that rate is dev workers and the registry, not CI.
   - Passing 100% is not failure, but the risk rises. Watch `percentage_used` with `nvme smart-log`.
 - **NVMe APST:** a separate change, trialled live on node3 from 2026-11-19 07:26Z.
-- **Rollback:** set `runner_disk_cache = "none"` (and `qm set ... cache=none` on the reviewers), then restart each guest
-  drained. To restore the caps, set the runner's `disk_write_*` fields back.
+- **Rollback:** set `runner_disk_cache = "none"` (and replace `cache=unsafe` with `cache=none` on the reviewers), then
+  restart each guest drained. To restore the caps, set the runner's `disk_write_*` fields back.

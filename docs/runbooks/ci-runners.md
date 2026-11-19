@@ -721,9 +721,20 @@ writes. Runner disks are rebuildable, and no power loss is assumed.
    `scsi0`. Then check from the guest that `/` is mounted and the runner service is active.
 4. Resume it in Gitea.
 
-**Reviewers** (4501 reviewer-1 and 4502 reviewer-2, on ai-node3; not in tofu): run
-`qm set <vmid> --scsi0 <its current scsi0 line>,cache=unsafe`, then the same stop/start while it has no review
-running. Copy the current line from `qm config <vmid>`, so nothing else on it changes.
+**Reviewers** (4501 reviewer-1 and 4502 reviewer-2, on ai-node3; not in tofu): rewrite the drive line with the
+cache property REPLACED, not appended. The lines already carry `cache=none`, and Proxmox rejects a duplicate key.
+On ai-node3, for each `<vmid>`:
+
+```bash
+cur=$(qm config <vmid> | sed -n 's/^scsi0: //p')
+case "$cur" in
+  *cache=*) new=$(printf '%s' "$cur" | sed -E 's/cache=[a-z]+/cache=unsafe/') ;;
+  *)        new="$cur,cache=unsafe" ;;
+esac
+qm set <vmid> --scsi0 "$new"
+```
+
+Repeating it is a no-op. Then do the same stop/start while the reviewer has no review running.
 
 **After a host crash:** a runner whose filesystem shows errors (`dmesg`, `tune2fs -l` "FS Error count") is
 **rebuilt** (tofu plus the gitea_runner role), not repaired.
