@@ -1416,7 +1416,7 @@ Nothing else changes: no schema change, no new setting. The `codex` concurrency 
 >   - **Re-admit it** once that OpenAI organisation can use `gpt-6-astra` and this probe (administrator token from
 >     `llm-router/llm-router-auth`) streams `PONG` instead of an `error` chunk:
 >     ```sh
->     curl -sN https://router.chifor.me/v1/chat/completions -H "Authorization: Bearer $ADMIN" >       -H 'Content-Type: application/json' -H 'X-Router-Route: codex-api-1' >       -d '{"model":"gpt-6-astra","stream":true,"messages":[{"role":"user","content":"Reply with exactly: PONG"}]}'
+>     curl -sN https://router.chifor.me/v1/chat/completions -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' -H 'X-Router-Route: codex-api-1' -d '{"model":"gpt-6-astra","stream":true,"messages":[{"role":"user","content":"Reply with exactly: PONG"}]}'
 >     ```
 >     Then drop it from `exclude` (`configure_pool`, or `PATCH /admin/v1/plugins/smart-pools/config` with the full
 >     `values` and `If-Match`).
