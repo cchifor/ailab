@@ -35,3 +35,10 @@ pve_grub_cmdline_linux_default: "quiet thunderbolt.host_reset=false pcie_aspm=of
 # lockdown [none]), which the unsigned ec_su_axb35 module needs. All three fans verified controllable on this
 # host the same day (fan1/fan2 ~1,500 rpm at 20% and ~4,750 at 100%; fan3 541 / 2,450 rpm, left on the EC curve).
 pve_ec_fan_enabled: true
+
+# iocost (pve_base, tag iocost; 2026-11-19, owner): this node's Talos control-plane VM (etcd) gets the shared NVMe
+# first while it is saturated (io.weight 10000 against the default 100 of every other cgroup). See
+# roles/pve_base/defaults/main.yml.
+pve_base_iocost_enabled: true
+pve_base_iocost_vm_weights:
+  4003: 10000

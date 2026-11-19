@@ -10,3 +10,10 @@ pve_thin_pool_zero: false
 # same curve as ai-node1 (the role defaults). Secure Boot disabled here 2026-11-19 (mokutil: disabled,
 # lockdown [none]), which the unsigned ec_su_axb35 module needs.
 pve_ec_fan_enabled: true
+
+# iocost (pve_base, tag iocost; 2026-11-19, owner): this node's Talos control-plane VM (etcd) gets the shared NVMe
+# first while it is saturated (io.weight 10000 against the default 100 of every other cgroup). See
+# roles/pve_base/defaults/main.yml.
+pve_base_iocost_enabled: true
+pve_base_iocost_vm_weights:
+  4002: 10000

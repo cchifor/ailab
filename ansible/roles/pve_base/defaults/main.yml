@@ -40,3 +40,16 @@ pve_thin_pool_zero: true
 pve_base_writeback_sysctl:
   vm.dirty_background_bytes: 268435456 # 256 MiB: background writeback starts here
   vm.dirty_bytes: 2147483648 # 2 GiB: writers are throttled above this
+
+# iocost: the node's etcd member gets the shared NVMe first (2026-11-19, owner). Each node's Talos control-plane VM
+# (etcd) shares one worn QLC drive with CI runners and dev workers. Write caps never covered reads: on 2026-11-19
+# node1's runners issued ~7,600 random reads/s (80 MiB/s) and cp1's WAL fsync p99 hit 8 s again with every write cap
+# in place. blk-iocost (cgroup v2) gives each cgroup a share of the device by io.weight, but only while the device
+# is saturated; idle capacity stays fully usable, so CI keeps its speed when etcd is quiet. The protected VM's
+# scope gets a high weight; every other cgroup keeps the default 100. The Proxmox kernel has no io.latency
+# (CONFIG_BLK_CGROUP_IOLATENCY is not set), which is why this uses iocost. `systemctl stop ailab-iocost` turns the
+# controller off at once. Runbook: docs/runbooks/node-maintenance.md "iocost".
+pve_base_iocost_enabled: false
+pve_base_iocost_device: nvme0n1
+# VM id -> io.weight (1-10000) for that VM's qemu.slice scope. Set per host in host_vars.
+pve_base_iocost_vm_weights: {}

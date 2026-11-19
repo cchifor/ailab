@@ -1,0 +1,14 @@
+# Managed by Ansible (pve_base, tag iocost). blk-iocost on {{ pve_base_iocost_device }}; see roles/pve_base/defaults/main.yml.
+[Unit]
+Description=blk-iocost on {{ pve_base_iocost_device }} (the etcd VM gets the shared NVMe first)
+After=local-fs.target
+Before=pve-guests.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/ailab-iocost enable {{ pve_base_iocost_device }}
+ExecStop=/usr/local/sbin/ailab-iocost disable {{ pve_base_iocost_device }}
+
+[Install]
+WantedBy=multi-user.target

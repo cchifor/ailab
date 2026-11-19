@@ -158,3 +158,151 @@
   loop_control:
     label: "{{ item.key }}={{ item.value }}"
   tags: [writeback]
+
+# ---- iocost: the node's etcd VM gets the shared NVMe first (see defaults/main.yml) ----
+# `ansible-playbook site.yml --limit <host> --tags iocost` converges only this. Live, no restart: it enables the
+# controller and sets the weights on the running VM scopes; the drop-ins carry the weights across VM restarts.
+- name: Find the io.weight drop-ins this role manages
+  ansible.builtin.find:
+    paths: /etc/systemd/system
+    patterns: 50-ailab-ioweight.conf
+    recurse: true
+    depth: 2
+  register: pve_base_iocost_dropins
+  tags: [iocost]
+
+- name: Remove io.weight drop-ins of VMs that are no longer protected (only this role's file)
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ pve_base_iocost_dropins.files }}"
+  loop_control:
+    label: "{{ item.path | dirname | basename }}"
+  when: >-
+    not (pve_base_iocost_enabled | bool)
+    or (item.path | dirname | basename).split('.')[0] not in (pve_base_iocost_vm_weights.keys() | map('string') | list)
+  register: pve_base_iocost_removed
+  tags: [iocost]
+
+- name: Install the iocost helper
+  ansible.builtin.copy:
+    src: ailab-iocost.sh
+    dest: /usr/local/sbin/ailab-iocost
+    mode: "0755"
+  when: pve_base_iocost_enabled | bool
+  tags: [iocost]
+
+- name: Install the iocost unit
+  ansible.builtin.template:
+    src: ailab-iocost.service.j2
+    dest: /etc/systemd/system/ailab-iocost.service
+    mode: "0644"
+  register: pve_base_iocost_unit
+  when: pve_base_iocost_enabled | bool
+  tags: [iocost]
+
+- name: Create the protected VMs' scope drop-in directories
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item.key }}.scope.d"
+    state: directory
+    mode: "0755"
+  loop: "{{ (pve_base_iocost_vm_weights | dict2items) if (pve_base_iocost_enabled | bool) else [] }}"
+  loop_control:
+    label: "{{ item.key }}"
+  tags: [iocost]
+
+- name: Give the protected VMs' scopes their io.weight (applied at every VM start)
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.key }}.scope.d/50-ailab-ioweight.conf"
+    mode: "0644"
+    content: |
+      # Managed by Ansible (pve_base, tag iocost): VM {{ item.key }} gets the shared NVMe first under blk-iocost.
+      [Scope]
+      IOWeight={{ item.value }}
+  loop: "{{ (pve_base_iocost_vm_weights | dict2items) if (pve_base_iocost_enabled | bool) else [] }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+  register: pve_base_iocost_weight_files
+  tags: [iocost]
+
+- name: Turn the iocost controller on (restarted when its unit changed)
+  ansible.builtin.systemd_service:
+    name: ailab-iocost.service
+    enabled: true
+    state: "{{ 'restarted' if (pve_base_iocost_unit is changed) else 'started' }}"
+    daemon_reload: true
+  when: pve_base_iocost_enabled | bool
+  tags: [iocost]
+
+- name: Look for the iocost unit
+  ansible.builtin.stat:
+    path: /etc/systemd/system/ailab-iocost.service
+  register: pve_base_iocost_unit_file
+  when: not (pve_base_iocost_enabled | bool)
+  tags: [iocost]
+
+- name: Turn the iocost controller off (stopping the unit disables iocost on the device)
+  ansible.builtin.systemd_service:
+    name: ailab-iocost.service
+    enabled: false
+    state: stopped
+  when:
+    - not (pve_base_iocost_enabled | bool)
+    - pve_base_iocost_unit_file.stat.exists | default(false)
+  tags: [iocost]
+
+- name: Remove the iocost unit and helper
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - /etc/systemd/system/ailab-iocost.service
+    - /usr/local/sbin/ailab-iocost
+  when: not (pve_base_iocost_enabled | bool)
+  register: pve_base_iocost_unit_removed
+  tags: [iocost]
+
+- name: Reload systemd after drop-in or unit changes
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: (pve_base_iocost_removed is changed) or (pve_base_iocost_weight_files is changed) or (pve_base_iocost_unit_removed is changed)
+  tags: [iocost]
+
+# A running VM's scope keeps the weight it started with; set it now so no VM restart is needed. --runtime: the
+# drop-in above is what persists. A VM that is not running gets its weight from the drop-in when it starts.
+- name: Apply the weight to the protected VMs that are running now
+  ansible.builtin.shell: |
+    set -eu
+    s=/sys/fs/cgroup/qemu.slice/{{ item.key }}.scope
+    [ -d "$s" ] || { echo "not running"; exit 0; }
+    cur=$(awk '$1 == "default" {print $2}' "$s/io.weight" 2>/dev/null || true)
+    [ "$cur" = "{{ item.value }}" ] && { echo "already {{ item.value }}"; exit 0; }
+    systemctl set-property --runtime {{ item.key }}.scope IOWeight={{ item.value }}
+    echo "changed from ${cur:-unset} to {{ item.value }}"
+  args:
+    executable: /bin/bash
+  loop: "{{ (pve_base_iocost_vm_weights | dict2items) if (pve_base_iocost_enabled | bool) else [] }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+  register: pve_base_iocost_live
+  changed_when: "'changed from' in pve_base_iocost_live.stdout"
+  tags: [iocost]
+
+- name: Put removed VMs' running scopes back to the default weight
+  ansible.builtin.shell: |
+    set -eu
+    s=/sys/fs/cgroup/qemu.slice/{{ item }}.scope
+    [ -d "$s" ] || { echo "not running"; exit 0; }
+    cur=$(awk '$1 == "default" {print $2}' "$s/io.weight" 2>/dev/null || true)
+    [ -z "$cur" ] || [ "$cur" = 100 ] && { echo "already default"; exit 0; }
+    systemctl set-property --runtime {{ item }}.scope IOWeight=100
+    echo "changed from $cur to 100"
+  args:
+    executable: /bin/bash
+  loop: >-
+    {{ pve_base_iocost_removed.results | default([]) | selectattr('changed')
+       | map(attribute='item.path') | map('dirname') | map('basename')
+       | map('regex_replace', '[.]scope[.]d$', '') | list }}
+  register: pve_base_iocost_reset
+  changed_when: "'changed from' in pve_base_iocost_reset.stdout"
+  tags: [iocost]
