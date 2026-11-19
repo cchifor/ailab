@@ -9,15 +9,16 @@ After={{ gitea_runner_service }}
 [Service]
 Type=oneshot
 ExecStart={{ gitea_runner_fstrim_bin }}
-# A backstop sized from the WINDOW, not from the work: the script itself ends by the window end (it checks
-# the window before every slice and during every job wait, sizes each slice to finish before the end, and
-# kills a stalled fstrim *_kill_allowance_s after it), however many job waits a busy night adds up to. So:
-# the window's length (a window that wraps midnight included), plus that allowance, plus 10 min of slack.
-# The script's own `window` exit should always come first; tests/test-fstrim-chunked.sh renders this for
-# every host. A run killed here loses only its in-flight slice; the cursor is per slice.
+# A backstop sized from the WINDOW, not from the work: the script itself normally ends by the window end
+# (it checks the window before every slice and during every job wait, sizes each slice to finish before
+# the end, SIGKILLs a stalled fstrim *_kill_allowance_s after it, and exits 8 if that one is still alive
+# *_stuck_grace_s later), however many job waits a busy night adds up to. So: the window's length (a
+# window that wraps midnight included), plus the allowance and the grace, plus 10 min of slack. The
+# script's own exit should always come first; tests/test-fstrim-chunked.sh renders this for every host.
+# A run killed here loses only its in-flight slice; the cursor is per slice.
 {% set _ws = (gitea_runner_fstrim_window_start.split(':')[0] | int) * 60 + (gitea_runner_fstrim_window_start.split(':')[1] | int) %}
 {% set _we = (gitea_runner_fstrim_window_end.split(':')[0] | int) * 60 + (gitea_runner_fstrim_window_end.split(':')[1] | int) %}
-TimeoutStartSec={{ ((_we - _ws) if _we > _ws else (_we - _ws + 1440)) * 60 + (gitea_runner_fstrim_kill_allowance_s | int) + 600 }}
+TimeoutStartSec={{ ((_we - _ws) if _we > _ws else (_we - _ws + 1440)) * 60 + (gitea_runner_fstrim_kill_allowance_s | int) + (gitea_runner_fstrim_stuck_grace_s | int) + 600 }}
 # A `systemctl stop` (SIGTERM) is a clean stop, not a failed unit: ext4 aborts the in-flight FITRIM on a
 # fatal signal and the script records its exit in the beacon.
 SuccessExitStatus=143 130

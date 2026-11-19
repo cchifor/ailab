@@ -10,8 +10,10 @@
 # - nothing is trimmed outside the window (also one that wraps midnight, and also when the idle confirmation
 #   ends past it), on a night not in DAYS (by the weekday the window started), beyond the cap (slices are
 #   cut to it), or while a job runs (the cleanup's act_runner signal), and a long job ends the night's run;
-# - each slice is sized to end in the window, and a stalled one is SIGKILLed shortly after the end (real
-#   `timeout`, real seconds) without advancing the cursor;
+# - each slice is sized to end in the window; a stalled one is SIGKILLed after the end (a timer of REAL
+#   seconds) and only a confirmed reap counts: reaped -> `deadline`, still alive after the grace (emulated
+#   through the stubbable liveness check) -> `stuck`, exit 8; neither advances the cursor, and
+#   gitea_runner_fstrim_in_flight is 1 for each slice and 0 only after the reap;
 # - the lock, the stop file (also one that appears during the idle confirmation), bad settings and a
 #   non-ext4 fs stop it before any trim;
 # - the beacon carries the run's numbers and why it ended;
@@ -40,8 +42,8 @@ nth()  { sed -n "${2}p" "$CTL/$1"; }
 ROOT=$(mktemp -d)
 trap 'rm -rf "$ROOT"' EXIT
 BIN="$ROOT/bin"; mkdir -p "$BIN"
-export REAL_DATE REAL_SLEEP REAL_TIMEOUT
-REAL_DATE="$(command -v date)"; REAL_SLEEP="$(command -v sleep)"; REAL_TIMEOUT="$(command -v timeout)"
+export REAL_DATE REAL_SLEEP
+REAL_DATE="$(command -v date)"; REAL_SLEEP="$(command -v sleep)"
 
 # --- stubs (all read their behaviour from $CTL) ---------------------------------------------------
 cat > "$BIN/findmnt" <<'STUB'
@@ -68,8 +70,14 @@ echo "$*" >> "$CTL/fstrim_calls"
 n=$(wc -l < "$CTL/fstrim_calls")
 echo $(( $(cat "$CTL/clock") + $(cat "$CTL/trim_s") )) > "$CTL/clock"
 if [ -f "$CTL/slow_trim" ]; then trap '' TERM; touch "$CTL/fstrim_running"; "$REAL_SLEEP" 2; fi
+# What the in-flight marker said while this slice ran (it must be 1).
+cat "$CTL/textfile/gitea_runner_fstrim_inflight.prom" 2>/dev/null | awk '{ print $2 }' >> "$CTL/inflight_seen"
+# stuck: a FITRIM that outlives SIGKILL (uninterruptible in the kernel). No userspace process can, so it
+# is emulated through the script's liveness seam: a fake /proc/<this pid>/stat in state D, which the
+# script reads (GITEA_FSTRIM_PROC_DIR) and which stays after the real process is killed.
+if [ -f "$CTL/stuck" ]; then mkdir -p "$CTL/proc/$$"; echo "$$ (fstrim) D 1 1 1" > "$CTL/proc/$$/stat"; fi
 # hang: a stalled drive. The FITRIM never returns on its own (60 real seconds); only a KILL ends it.
-[ -f "$CTL/hang" ] && exec "$REAL_SLEEP" 60
+{ [ -f "$CTL/hang" ] || [ -f "$CTL/stuck" ]; } && exec "$REAL_SLEEP" 60
 mnt="${*: -1}"
 if [ -f "$CTL/fail_on" ] && [ "$n" -ge "$(cat "$CTL/fail_on")" ]; then echo "fstrim: $mnt: FITRIM ioctl failed: Input/output error" >&2; exit 1; fi
 echo "$mnt: 1 GiB (1073741824 bytes) trimmed"
@@ -109,12 +117,6 @@ n=$(wc -l < "$CTL/sync_calls")
 if [ -f "$CTL/sync_fail_on" ] && [ "$n" -ge "$(cat "$CTL/sync_fail_on")" ]; then exit 1; fi
 echo "$(tr '\n' ' ' < "$CTL/state/state" 2>/dev/null)" >> "$CTL/sync_seen"
 exit 0
-STUB
-cat > "$BIN/timeout" <<'STUB'
-#!/usr/bin/env bash
-# The real timeout (real seconds, not the fake clock), with its arguments logged.
-echo "$*" >> "$CTL/timeout_calls"
-exec "$REAL_TIMEOUT" "$@"
 STUB
 cat > "$BIN/date" <<'STUB'
 #!/usr/bin/env bash
@@ -314,9 +316,10 @@ MiB=1048576
 # 05:24:04 + 2 s of idle confirmation leaves 54 s to 05:25: 1.8 GiB at 30 s/GiB, cut to 14 whole groups.
 new_case fit; at 05:24:04; run GITEA_FSTRIM_WINDOW_END=05:25
 eq "the slice is cut to the whole groups that fit before the end" "-v -m 64K -o 0 -l $((1792 * MiB)) /" "$(nth fstrim_calls 1)"
-eq "fstrim runs under timeout -s KILL <seconds left + the 60 s allowance>" \
-  "-s KILL 114 fstrim -v -m 64K -o 0 -l $((1792 * MiB)) /" "$(nth timeout_calls 1)"
+has "its kill timer is the seconds left + the 60 s allowance" "kill_after=114s" "$(cat "$CTL/out")"
 eq "then the window is over" "1 window" "$(calls fstrim_calls) $(reason)"
+eq "no process-group kill: no code line runs timeout(1), whose return did not prove fstrim exited" "" \
+  "$(grep -nE '^[[:space:]]*[^#[:space:]][^#]*\btimeout[[:space:]]' "$SCRIPT")"
 new_case fitbig; at 05:24:04; run GITEA_FSTRIM_WINDOW_END=05:25 GITEA_FSTRIM_CHUNK_GB=16
 eq "a 16 GiB chunk near the end shrinks to fit just the same (the tail does not depend on the chunk)" \
   "-v -m 64K -o 0 -l $((1792 * MiB)) /" "$(nth fstrim_calls 1)"
@@ -325,21 +328,42 @@ eq "less than one group fits before the end: nothing trimmed, reason window" "0 
 new_case fitrate; at 05:20:00; run GITEA_FSTRIM_WINDOW_END=05:25 GITEA_FSTRIM_SEC_PER_GB=10000
 eq "the rate is a setting: at 10000 s/GiB, 298 s fits less than one group" "0 window" "$(calls fstrim_calls) $(reason)"
 new_case fitwrap; at 23:59:00; run GITEA_FSTRIM_WINDOW_START=23:30 GITEA_FSTRIM_WINDOW_END=01:00 GITEA_FSTRIM_MAX_GB_PER_RUN=2
-eq "a window that wraps midnight: 3658 s left to 01:00, killed 60 s after" "-s KILL 3718" \
-  "$(nth timeout_calls 1 | cut -d' ' -f1-3)"
+has "a window that wraps midnight: 3658 s left to 01:00, killed 60 s after" "kill_after=3718s" "$(cat "$CTL/out")"
+inflight() { awk '{ print $2 }' "$CTL/textfile/gitea_runner_fstrim_inflight.prom" 2>/dev/null; }
 # A stalled drive: the fstrim never returns. From a saved cursor at 2 GiB, 05:24:54 + 2 s leaves 4 s (one
-# group fits); with a 1 s allowance it is killed 5 REAL seconds in, not after its 60 s stall.
+# group fits); with a 1 s allowance it is SIGKILLed 5 REAL seconds in, dies, and is reaped.
 new_case deadline; touch "$CTL/hang"; printf 'cursor=%s\npasses=4\n' $((2 * GiB)) > "$CTL/state/state"; at 05:24:54
 t0=$("$REAL_DATE" +%s); run GITEA_FSTRIM_WINDOW_END=05:25 GITEA_FSTRIM_KILL_ALLOWANCE_S=1; t1=$("$REAL_DATE" +%s)
-eq "a stalled fstrim runs under timeout -s KILL 5 (4 s left + 1 s)" \
-  "-s KILL 5 fstrim -v -m 64K -o $((2 * GiB)) -l $((128 * MiB)) /" "$(nth timeout_calls 1)"
+eq "a stalled fstrim gets its one group" "-v -m 64K -o $((2 * GiB)) -l $((128 * MiB)) /" "$(nth fstrim_calls 1)"
+has "and a SIGKILL 5 s in (4 s left + 1 s)" "still running 5s in, 1s past the window end: SIGKILL" "$(cat "$CTL/out")"
 [ $(( t1 - t0 )) -ge 4 ] && [ $(( t1 - t0 )) -le 10 ] && ok "killed at the deadline: the run took $(( t1 - t0 )) s, not the 60 s stall" \
   || bad "killed at the deadline" "the run took $(( t1 - t0 )) s"
-eq "a killed slice: exit 0" 0 "$(rc)"
-eq "a killed slice: reason" deadline "$(reason)"
+eq "a killed and reaped slice: exit 0" 0 "$(rc)"
+eq "a killed and reaped slice: reason" deadline "$(reason)"
 eq "a killed slice is unconfirmed: the cursor stays at its start" "$((2 * GiB)) 4" "$(st cursor) $(st passes)"
 eq "a killed slice is not counted" "0 0" "$(beacon range_bytes) $(beacon submitted_bytes)"
-has "a killed slice: logged" "killed; the cursor stays at $((2 * GiB))" "$(cat "$CTL/out")"
+has "a killed slice: logged" "SIGKILLed and reaped; the cursor stays at $((2 * GiB))" "$(cat "$CTL/out")"
+eq "in_flight was 1 during the slice, 0 once the child was reaped" "1 0" "$(cat "$CTL/inflight_seen") $(inflight)"
+# A FITRIM that outlives the SIGKILL (uninterruptible in the kernel), emulated through the liveness seam:
+# still "alive" 2 s (the grace) after the KILL, so the run exits 8 and leaves it.
+new_case stuck; touch "$CTL/stuck"; printf 'cursor=%s\npasses=4\n' $((2 * GiB)) > "$CTL/state/state"; at 05:24:54
+t0=$("$REAL_DATE" +%s)
+run GITEA_FSTRIM_WINDOW_END=05:25 GITEA_FSTRIM_KILL_ALLOWANCE_S=1 GITEA_FSTRIM_STUCK_GRACE_S=2 GITEA_FSTRIM_PROC_DIR="$CTL/proc"
+t1=$("$REAL_DATE" +%s)
+eq "a fstrim alive after its SIGKILL + grace: exit 8" 8 "$(rc)"
+eq "a stuck slice: reason" stuck "$(reason)"
+eq "a stuck slice: the beacon's exit code" 8 "$(beacon exit_code)"
+eq "a stuck slice: the cursor stays at its start" "$((2 * GiB)) 4" "$(st cursor) $(st passes)"
+eq "a stuck slice: in_flight is left at 1" 1 "$(inflight)"
+has "a stuck slice: says it keeps the lock" "later runs exit 7 until it ends" "$(cat "$CTL/out")"
+[ $(( t1 - t0 )) -ge 6 ] && [ $(( t1 - t0 )) -le 12 ] && ok "stuck after the KILL (5 s) plus the grace (2 s): $(( t1 - t0 )) s" \
+  || bad "stuck after the KILL plus the grace" "the run took $(( t1 - t0 )) s"
+echo "== gitea_runner_fstrim_in_flight: 1 around each slice, 0 after each reap =="
+new_case inflight; run
+eq "1 while each of the five slices ran" "1 1 1 1 1" "$(tr '\n' ' ' < "$CTL/inflight_seen" | sed 's/ $//')"
+eq "0 after the last reap" 0 "$(inflight)"
+new_case inflightfail; echo 2 > "$CTL/fail_on"; run
+eq "a failed fstrim (it exited, and was reaped): 0" "5 0" "$(rc) $(inflight)"
 
 echo "== the stop file =="
 new_case stop; touch "$CTL/stop"; run
@@ -375,7 +399,8 @@ for b in GITEA_FSTRIM_CHUNK_GB=0 GITEA_FSTRIM_CHUNK_GB=x GITEA_FSTRIM_CHUNK_GB=6
          GITEA_FSTRIM_WINDOW_START=24:00 GITEA_FSTRIM_WINDOW_START=5:30 GITEA_FSTRIM_WINDOW_END=05:60 \
          "GITEA_FSTRIM_WINDOW_END=00:00" GITEA_FSTRIM_DAYS=8 GITEA_FSTRIM_DAYS=0 "GITEA_FSTRIM_DAYS=mon funday" \
          "GITEA_FSTRIM_DAYS=, ," "GITEA_FSTRIM_DAYS=*" GITEA_FSTRIM_SEC_PER_GB=0 GITEA_FSTRIM_SEC_PER_GB=2.5 \
-         GITEA_FSTRIM_KILL_ALLOWANCE_S=0 GITEA_FSTRIM_KILL_ALLOWANCE_S=x; do
+         GITEA_FSTRIM_KILL_ALLOWANCE_S=0 GITEA_FSTRIM_KILL_ALLOWANCE_S=x GITEA_FSTRIM_STUCK_GRACE_S=0 \
+         GITEA_FSTRIM_STUCK_GRACE_S=-5; do
   new_case "set$(printf '%s' "${b#GITEA_FSTRIM_}" | tr -c 'A-Za-z0-9_=' '_')"; run "$b"
   eq "$b -> exit 2" 2 "$(rc)"
   eq "$b -> nothing trimmed, geometry not read" "0 0" "$(calls fstrim_calls) $(calls tune2fs_calls)"
@@ -455,7 +480,8 @@ eq "exit code" 0 "$(beacon exit_code)"
 eq "one exit reason" 1 "$(grep -c '^gitea_runner_fstrim_exit_reason{' "$P")"
 has "says the host-side reclamation is not visible" "not visible from the guest" "$(cat "$P")"
 eq "readable by node_exporter (0644)" 644 "$(stat -c %a "$P")"
-eq "no temp files left behind" 1 "$(ls "$CTL/textfile" | wc -l | tr -d ' ')"
+eq "no temp files left behind: the beacon and the in-flight marker only" \
+  "gitea_runner_fstrim.prom gitea_runner_fstrim_inflight.prom" "$(ls "$CTL/textfile" | tr '\n' ' ' | sed 's/ $//')"
 
 echo "== the script's defaults equal the role defaults that ship (as test-cleanup.sh [M] does) =="
 # Every case above runs without the env file, so the script's fallbacks are what they test. Each line of
@@ -485,7 +511,7 @@ while IFS= read -r ln; do
   if [ -z "$var" ]; then bad "M: $name renders '$val', not a single {{ var }} or {{ var | join(' ') }}"; continue; fi
   eq "M: $name = $var${how:+ | $how}" "$(role_default "$var" "$how")" "$(script_default "$name")"
 done < "$ENV_TMPL"
-[ "$checked" -ge 11 ] && ok "M: $checked knobs checked" || bad "M: only $checked knobs found in $ENV_TMPL"
+[ "$checked" -ge 12 ] && ok "M: $checked knobs checked" || bad "M: only $checked knobs found in $ENV_TMPL"
 eq "M: the env file path" "$(role_default gitea_runner_fstrim_env)" "$(script_default GITEA_FSTRIM_ENV_FILE)"
 eq "M: the role ships both switches off" "False False" \
   "$(role_default gitea_runner_fstrim_enabled) $(role_default gitea_runner_root_nodiscard)"
@@ -531,16 +557,49 @@ while IFS= read -r l; do
   case "$l" in "ok "*) ok "fstab: ${l#ok }" ;; *) bad "fstab: ${l#BAD }" ;; esac
 done <<< "$out"
 
+echo "== --check safety: a command/shell result a later task reads is registered with check_mode: false =="
+# In --check, Ansible skips command/shell/script/raw tasks, so their registered result has no real stdout
+# or rc: a later `when` that reads one fails the play (older ansible-core), or reads an empty result and
+# silently answers wrong (ansible-core 2.16: the remount looked "skipped" on a host that needs it). That
+# broke this PR's own "--check first" rollout (reviewer-claude on #1858: the root-mount read). Every such
+# task in the role is checked.
+out="$(python3 - "$ROLE/tasks/main.yml" "$ROLE/handlers/main.yml" <<'PY'
+import re, sys, yaml
+SKIPPED_IN_CHECK = {m for b in ("command", "shell", "script", "raw") for m in (b, "ansible.builtin." + b)}
+for path in sys.argv[1:]:
+    tasks = yaml.safe_load(open(path, encoding="utf-8")) or []
+    for i, t in enumerate(tasks):
+        reg = t.get("register")
+        if not reg or not SKIPPED_IN_CHECK & set(t):
+            continue
+        reads = re.compile(re.escape(reg) + r"\.(stdout|stdout_lines|stderr|stderr_lines|rc)\b")
+        readers = [u.get("name", "?") for u in tasks[i + 1:] if reads.search(yaml.safe_dump(u))]
+        if not readers:
+            print(f"ok {t.get('name')}: no later task reads its result")
+        elif t.get("check_mode") is False:
+            print(f"ok {t.get('name')}: read later ({readers[0]}), and runs in --check (check_mode: false)")
+        else:
+            print(f"BAD {t.get('name')}: read later ({readers[0]}) but check_mode is {t.get('check_mode')!r}, not false")
+PY
+)" || bad "check mode: the python check did not run" "$out"
+while IFS= read -r l; do
+  case "$l" in "ok "*) ok "check mode: ${l#ok }" ;; *) bad "check mode: ${l#BAD }" ;; esac
+done <<< "$out"
+grep -q "^ok Read the live options of the root mount: read later" <<< "$out" \
+  && ok "check mode: the root-mount read is among the tasks checked" || bad "check mode: the root-mount read was not checked" "$out"
+
 echo "== the per-host schedule: tails by 05:30, no overlap on a node, the cap and the unit timeout fit, the registry trim missed =="
 # The node of each runner comes from the runners' tofu (kubernetes/infra/runners/variables.tf).
-# - A window's TAIL is how far its trimming can run past its END: slices are sized to end by then, and a
-#   stalled one is killed gitea_runner_fstrim_kill_allowance_s after it, which ext4 honours within about
-#   one block group (128 MiB on these roots). So tail = allowance + one group at sec_per_gb, rounded UP to
-#   whole minutes, derived per host from its settings (not the chunk size, and not a constant). The tail
-#   must end by 05:30 UTC and before the next window on the same node.
+# - A window's TAIL is how far its trimming normally runs past its END: slices are sized to end by then, a
+#   stalled one is killed gitea_runner_fstrim_kill_allowance_s after it (ext4 usually stops within one
+#   block group, 128 MiB on these roots), and one still alive gitea_runner_fstrim_stuck_grace_s later is
+#   left as `stuck` (exit 8, alerted: a stuck discard can outlast any tail, so that overlap is detected,
+#   not prevented). So tail = allowance + grace + one group at sec_per_gb, rounded UP to whole minutes,
+#   derived per host from its settings (not the chunk size, and not a constant). The tail must end by
+#   05:30 UTC and before the next window on the same node.
 # - The service's TimeoutStartSec, rendered from the template for every host and for the role default,
-#   must cover the whole window plus the allowance with slack, so a busy night ends with the script's own
-#   `window` exit, not a systemd timeout.
+#   must cover the whole window plus the allowance and the grace with slack, so a busy night ends with the
+#   script's own exit, not a systemd timeout.
 # - A capped run must fit its own window: the cap at 23 s per GiB (the measured worst) plus, per slice,
 #   the pause and 2 s of idle confirmation.
 # - The registry LXC's weekly trim is a hand-installed timer + oneshot defined in
@@ -552,7 +611,8 @@ echo "== the per-host schedule: tails by 05:30, no overlap on a node, the cap an
 #   start day, gitea_runner_fstrim_days), that it overlaps, tail included.
 # schedule_check <registry runbook>: one "ok ..." or "BAD ..." line per check. The fixture cases below feed
 # it edited copies of the runbook, to prove each conflict is caught.
-# TEST_KILL_ALLOWANCE_S, when set, replaces every host's allowance (the tail derivation's own fixture).
+# TEST_KILL_ALLOWANCE_S / TEST_STUCK_GRACE_S, when set, replace every host's allowance / grace (the tail
+# derivation's own fixtures).
 schedule_check() { python3 - "$REPO" "$1" <<'PY'
 import math, os, pathlib, re, sys, yaml
 repo = pathlib.Path(sys.argv[1])
@@ -573,8 +633,10 @@ hm = lambda m: f"{m // 60:02d}:{m % 60:02d}"
 CUTOFF, GROUP_GIB = mins("05:30"), 128 / 1024
 def allowance(v):
     return int(os.environ.get("TEST_KILL_ALLOWANCE_S") or v["gitea_runner_fstrim_kill_allowance_s"])
-def tail_of(v):  # minutes a window's trimming can run past its end
-    return math.ceil((allowance(v) + GROUP_GIB * int(v["gitea_runner_fstrim_sec_per_gb"])) / 60)
+def grace(v):
+    return int(os.environ.get("TEST_STUCK_GRACE_S") or v["gitea_runner_fstrim_stuck_grace_s"])
+def tail_of(v):  # minutes a window's trimming normally runs past its end
+    return math.ceil((allowance(v) + grace(v) + GROUP_GIB * int(v["gitea_runner_fstrim_sec_per_gb"])) / 60)
 try:
     import jinja2  # Ansible's template engine; trim_blocks as the template module sets it
     svc = jinja2.Environment(undefined=jinja2.StrictUndefined, trim_blocks=True).from_string(
@@ -585,12 +647,13 @@ except ImportError:
 def timeout_covers(label, v):
     if svc is None:
         return
-    s, e =mins(v["gitea_runner_fstrim_window_start"]), mins(v["gitea_runner_fstrim_window_end"])
+    s, e = mins(v["gitea_runner_fstrim_window_start"]), mins(v["gitea_runner_fstrim_window_end"])
     length = (e - s) % 1440 or 1440  # a window that wraps midnight included
     m = re.search(r"^TimeoutStartSec=(\d+)$", svc.render(**v), re.M)
-    t, need = (int(m.group(1)) if m else 0), length * 60 + int(v["gitea_runner_fstrim_kill_allowance_s"]) + 300
+    need = length * 60 + int(v["gitea_runner_fstrim_kill_allowance_s"]) + int(v["gitea_runner_fstrim_stuck_grace_s"]) + 300
+    t = int(m.group(1)) if m else 0
     print(("ok " if t >= need else "BAD ") + f"{label}: the unit's TimeoutStartSec ({t} s) covers its {length}-min window,"
-          f" the kill allowance and 5 min ({need} s)")
+          f" the kill allowance, the stuck grace and 5 min ({need} s)")
 timeout_covers("the role default (00:00-05:25)", base)
 spans = {}
 for h in hosts:
@@ -600,7 +663,7 @@ for h in hosts:
     good = isinstance(s, str) and isinstance(e, str) and re.fullmatch(r"\d\d:\d\d", s) and re.fullmatch(r"\d\d:\d\d", e) \
         and 0 <= mins(s) < mins(e) and mins(e) + tail <= CUTOFF
     print(("ok " if good else "BAD ") + f"{h} window {s!r}-{e!r} is a quoted HH:MM span that ends, with its {tail}-min tail"
-          f" ({allowance(v)} s kill allowance + one group), by 05:30")
+          f" ({allowance(v)} s kill allowance + {grace(v)} s stuck grace + one group), by 05:30")
     print(("ok " if h in nodes else "BAD ") + f"{h} has a node in variables.tf ({nodes.get(h)})")
     raw = v.get("gitea_runner_fstrim_days")
     days = [daynum(d) for d in raw] if isinstance(raw, list) else []
@@ -696,15 +759,19 @@ expect_bad "the registry trim moved to Saturday, when ci-runner-9 runs" \
   's/^OnCalendar=Sun /OnCalendar=Sat /' "ci-runner-9 .*overlaps the registry trim's span on Sat"
 o="$(schedule_check "$(fixture 's/^TimeoutStartSec=.*/TimeoutStartSec=19h45min/')" 2>&1)"
 eq "fixture: the shipped deadline itself passes" "" "$(grep '^BAD' <<< "$o")"
-# The tail is derived from the kill allowance: one past 4 min (301 s + a group = 6 min) no longer fits the
-# 5-min gaps between windows, nor 05:25 + its tail before 05:30.
+# The tail is derived from the kill allowance AND the stuck grace: 301 s + 30 s + a group = 6 min no longer
+# fits the 5-min gaps between windows, nor 05:25 + its tail before 05:30; nor does a 250 s grace with the
+# 60 s allowance; 236 s + 30 s + a group = exactly 5 min still does.
 o="$(export TEST_KILL_ALLOWANCE_S=301; schedule_check "$REPO/docs/runbooks/registry-cache.md" 2>&1)"
 grep -q "^BAD ai-node1: .*do not overlap" <<< "$o" && ok "fixture: a 301 s kill allowance makes the windows' 6-min tails overlap" \
   || bad "fixture: a 301 s kill allowance makes the windows' tails overlap" "$o"
 grep -q "^BAD ci-runner-9 window .*6-min tail" <<< "$o" && ok "fixture: and pushes ci-runner-9's tail past 05:30" \
   || bad "fixture: and pushes ci-runner-9's tail past 05:30" "$o"
+o="$(export TEST_STUCK_GRACE_S=250; schedule_check "$REPO/docs/runbooks/registry-cache.md" 2>&1)"
+grep -q "^BAD ai-node1: .*do not overlap" <<< "$o" && ok "fixture: a 250 s stuck grace counts in the tail too (6 min: overlap)" \
+  || bad "fixture: a 250 s stuck grace counts in the tail too" "$o"
 o="$(export TEST_KILL_ALLOWANCE_S=236; schedule_check "$REPO/docs/runbooks/registry-cache.md" 2>&1)"
-eq "fixture: 236 s (+ a group = 4 min of tail) still fits" "" "$(grep '^BAD' <<< "$o")"
+eq "fixture: 236 s + the 30 s grace + a group (5 min of tail, exactly the gaps) still fits" "" "$(grep '^BAD' <<< "$o")"
 
 echo
 echo "gitea-runner-fstrim-chunked: $PASS passed, $FAIL failed"

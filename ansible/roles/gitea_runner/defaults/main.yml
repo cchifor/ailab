@@ -397,11 +397,13 @@ gitea_runner_fstrim_timer: gitea-runner-fstrim.timer
 # Night window, HH:MM UTC (quoted: YAML 1.1 reads an unquoted 01:50 as the number 110). The timer starts
 # at *_window_start; the script trims only inside the window, checked before every slice. Override per
 # host (host_vars/ci-runner-N.yml) so runners on the same Proxmox node never trim at the same time.
-# A window's TAIL is how far its trimming can run past its end: each slice is sized to end by then, and a
-# stalled one is killed *_kill_allowance_s after it, so the tail is that allowance plus one 128 MiB group,
-# rounded up to whole minutes (2 min at the defaults; NOT the chunk size). Windows on one node must be a
-# tail apart, and every window plus its tail must end by 05:30; tests/test-fstrim-chunked.sh derives the
-# tail from these settings and checks both. The windows end by 05:25 and sit 5 min apart, with margin.
+# A window's TAIL is how far its trimming normally runs past its end: each slice is sized to end by then,
+# a stalled one is killed *_kill_allowance_s after it, and a killed one still alive *_stuck_grace_s later is
+# left as `stuck` (exit 8, alerted). So the tail is allowance + grace + one 128 MiB group, rounded up to
+# whole minutes (2 min at the defaults; NOT the chunk size). A stuck discard can outlast any tail: that
+# cross-VM overlap is detected, not prevented (docs/runbooks/ci-runners.md "Thin-pool trim"). Windows on one
+# node must be a tail apart, and every window plus its tail must end by 05:30; tests/test-fstrim-chunked.sh
+# derives the tail from these settings and checks both. The windows end by 05:25 and sit 5 min apart.
 gitea_runner_fstrim_window_start: "00:00"
 gitea_runner_fstrim_window_end: "05:25"
 # Weekdays the window may run, by the day it STARTS (UTC; 1-7 = Mon-Sun, or mon..sun), checked before
@@ -426,7 +428,10 @@ gitea_runner_fstrim_busy_wait_max_s: 1800
 # END in it, and the next runner on the node starts soon after this window ends. So each slice is cut to
 # what fits before the window end at *_sec_per_gb (conservative: measured 17-23 s per GiB; whole groups,
 # and less than one group ends the run), and fstrim is SIGKILLed *_kill_allowance_s after the end if the
-# drive stalls (ext4 then stops within about one group). The allowance sets the window's tail (above);
-# the service's TimeoutStartSec is the window length plus this allowance plus 10 min.
+# drive stalls (ext4 checks for a fatal signal between groups, so it usually stops within one). Only a
+# confirmed reap counts as its exit: if it is still alive *_stuck_grace_s after the KILL, the run exits 8
+# (`stuck`) and leaves it holding the lock, so later runs exit 7 until it ends. These set the window's
+# tail (above); the service's TimeoutStartSec is the window length plus both plus 10 min.
 gitea_runner_fstrim_sec_per_gb: 30
 gitea_runner_fstrim_kill_allowance_s: 60
+gitea_runner_fstrim_stuck_grace_s: 30

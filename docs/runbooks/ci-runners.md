@@ -374,7 +374,8 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     MainPID, idle confirmed over 3 reads). It waits for a running job and gives up for the night after
     30 min.
   - **Windows** (`host_vars/ci-runner-N.yml`, UTC). A window's tail, how far trimming can run past its
-    end, is the kill allowance below plus one block group, rounded up to minutes (2 min at the defaults).
+    end, is the kill allowance plus the stuck grace (below) plus one block group, rounded up to minutes (2
+    min at the defaults). A `stuck` fstrim can outlast any tail; see "Residual risk".
     Every window plus its tail ends by 05:30, and windows on one node are at least a tail apart: they end
     by 05:25 and sit 5 min apart. The role default, 00:00-05:25 every day, is for a runner without one.
     - ai-node1: ci-runner-1 00:00-01:25, ci-runner-4 01:30-03:10, ci-runner-9 04:15-05:25 **except
@@ -391,22 +392,54 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     tail included, by 03:15, before the registry trim can start, so they run every day.
   - **The schedule is tested.** `tests/test-fstrim-chunked.sh` reads each runner's node from
     `kubernetes/infra/runners/variables.tf` and the registry timer from registry-cache.md. It fails if a
-    window's tail (derived from its kill allowance) runs past 05:30, two windows on a node overlap (tails
+    window's tail (derived from its kill allowance and stuck grace) runs past 05:30, two windows on a node overlap (tails
     included), the cap does not fit a window (23 s per GiB plus pauses), the rendered unit's
     `TimeoutStartSec` does not cover the window, the registry unit has no deadline or too short a stop time for its
     in-flight chunk, or a window on the registry's node overlaps the registry trim's span (15 min before
     its earliest start to 15 min after its deadline-bound latest end, Sunday into Monday included).
     Moving the registry timer or its deadline means moving the node1 windows or days too.
   - **Each slice** is cut to the budget left (in whole groups), so a run never covers more than the cap,
-    and the stop file, the window and the day are checked again right before each FITRIM. It must also
-    END in the window: it is cut to what fits before the end at `gitea_runner_fstrim_sec_per_gb` (30 s per
-    GiB; less than one group ends the run), and fstrim runs under `timeout -s KILL`, which kills a stalled
-    one `gitea_runner_fstrim_kill_allowance_s` (60 s) after the end. ext4 stops a killed FITRIM within
-    about one group; that slice is unconfirmed, so the cursor stays at its start (reason `deadline`). The
-    unit's `TimeoutStartSec` is the window's length plus that allowance plus 10 min, so even a night of
-    many job waits ends with the script's own `window` exit. The cursor is written
+    and the stop file, the window and the day are checked again right before each FITRIM. It is also
+    sized to END in the window: it is cut to what fits before the end at `gitea_runner_fstrim_sec_per_gb`
+    (30 s per GiB; less than one group ends the run). fstrim runs as a background child; if it is still
+    running `gitea_runner_fstrim_kill_allowance_s` (60 s) after the end, it gets SIGKILL, and only a
+    confirmed reap (`wait` on that pid) counts as its exit (no `timeout -s KILL`, whose return did not
+    prove that). Reaped: reason `deadline`, exit 0. Still alive `gitea_runner_fstrim_stuck_grace_s` (30 s)
+    later: reason `stuck`, **exit 8**, and the fstrim is left running; it keeps the lock (fd 9), so later
+    runs exit 7 until it ends. Either way the cursor stays at the slice's start.
+    `gitea_runner_fstrim_in_flight` (its own file, `gitea_runner_fstrim_inflight.prom`) is 1 from just
+    before each slice until its fstrim is reaped, so `stuck` leaves it at 1. The unit's `TimeoutStartSec`
+    is the window's length plus the allowance and the grace plus 10 min, so even a night of many job
+    waits ends with the script's own exit. The cursor is written
     with an fsync of the file and of its directory, so it survives a power cut (a reboot also resets the
     trimmed flags, so a lost cursor would mean re-trimming full slices).
+  - **Residual risk: overlap across runner VMs on one node is accepted and detected, not prevented.**
+    Completion is not bounded: a discard already submitted to the device cannot be cancelled, and a FITRIM
+    in uninterruptible sleep outlives SIGKILL, so a slice can run into the next runner's window on the
+    same NVMe (which etcd shares). That shows as `stuck` (exit 8), `gitea_runner_fstrim_in_flight` stuck
+    at 1, and the alerts below. A **fail-closed admission interlock becomes MANDATORY before the next
+    window** when any of these happens:
+    - the `CIRunnerFstrimStuck` alert fires once, on any runner;
+    - a same-node gap between trim windows shrinks below 5 minutes;
+    - a runner is added to a node.
+
+    The interlock is either a host-side coordinator on the Proxmox node, or a reader gate in this script
+    that reads its same-node siblings' `gitea_runner_fstrim_in_flight` (their node_exporter on :9100)
+    before each slice. A reader gate must **block when a sibling is unreachable**, unless that sibling is
+    fenced (known down): treating an unreachable sibling as "off" is not fail-closed. (Decision record:
+    #1858, 2026-11-19.)
+  - **Alerts** (`kubernetes/apps/infrastructure/monitoring/ci-runners-rules.yaml`, promtool fixtures in
+    `ci-runners-rules.test.yaml`). Each needs the role's `gitea_runner_fstrim_enabled 1` marker
+    (`gitea_runner_fstrim_enabled.prom`, written by the role, so a host whose timer never fires still
+    alerts; turning the trim off removes it, with the beacons).
+    - **CIRunnerFstrimStuck** (critical): reason `stuck`. Triggers the mandatory interlock above.
+    - **CIRunnerFstrimFailed** (warning): any nonzero exit code, with its reason.
+    - **CIRunnerFstrimInFlight** (warning): in flight for over 2h, longer than any run can take (the
+      longest window, 105 min, plus the allowance and the grace).
+    - **CIRunnerFstrimStale** (warning): no run for over 26h (the timer fires every night, and every run,
+      even a quick exit, rewrites the beacon). Also what a stuck fstrim's later exit-7 runs look like.
+    - **CIRunnerFstrimBeaconMissing** (warning): enabled 27h ago, never a beacon.
+    - **CIRunnerFstrimDeadlineRepeated** (warning): reason `deadline` three nights in a row (49h).
   - **One reboot per runner, once.** A remount does not clear the trimmed flags `discard` left behind; a
     fresh mount does. Reboot each runner once while idle (the "Restart a daemon" rules below), after the
     role has removed `discard` from fstab. Done 2026-11-18 for ci-runner-1/-2/-4/-5/-9/-10, still with
@@ -418,10 +451,13 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
       submitted to the host; whether the thin pool reclaimed it is not visible from the guest),
       `range_bytes`, `cursor_bytes`, `fs_bytes`, `passes_total`, `exit_code`, `exit_reason{reason=…}`.
     - Reasons: `cap`, `full` (whole fs covered), `window` (closed, or less than one group fits before its
-      end), `day` (not a night in its days), `busy`, `stopped`, `deadline` (a slice killed past the end;
-      the drive stalled) (all exit 0); `unsupported`
-      or `lock` (1), `invalid` (2), `fstrim_failed` (5), `state` (6, state file not writable or not synced), `signal`
-      (143/130). Exit 7 (another run holds `/run/gitea-runner-fstrim.lock`) writes no beacon.
+      end), `day` (not a night in its days), `busy`, `stopped`, `deadline` (a slice killed past the end
+      and reaped; the drive stalled) (all exit 0); `unsupported` or `lock` (1), `invalid` (2),
+      `fstrim_failed` (5), `state` (6, state file not writable or not synced), `stuck` (8), `signal`
+      (143/130). Exit 7 (another run, or a stuck fstrim, holds `/run/gitea-runner-fstrim.lock`) writes no
+      beacon.
+    - `gitea_runner_fstrim_inflight.prom`: `gitea_runner_fstrim_in_flight` 1 while a slice's fstrim is
+      unreaped; `pgrep -a fstrim` shows a stuck one.
     - `journalctl -u gitea-runner-fstrim.service`: one `slice off=… trimmed=…` line per slice, then the
       reason. `cat /var/lib/gitea-runner-fstrim/state` holds `cursor=` and `passes=`.
     - `findmnt -no OPTIONS /` has no `discard`; `systemctl is-enabled fstrim.timer` says `masked`.

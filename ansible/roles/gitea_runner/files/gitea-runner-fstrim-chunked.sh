@@ -17,17 +17,27 @@
 # The -m is a CONSTANT on purpose: ext4 retrims every flagged group when -m is smaller than the last one.
 # Before EACH slice, in this order: the stop file, the night window (UTC, may wrap midnight), the day gate
 # (DAYS, by the weekday the window started), and the job gate; then the stop file, the window and the day
-# once more, immediately before the FITRIM. Each slice must also END inside the window: it is cut to what
-# fits before the END at SEC_PER_GB, and fstrim runs under `timeout -s KILL`, which kills a stalled one
-# KILL_ALLOWANCE_S after the END. After each slice the
+# once more, immediately before the FITRIM. Each slice is also sized to END inside the window: it is cut
+# to what fits before the END at SEC_PER_GB. fstrim runs as a background child; if it is still running
+# KILL_ALLOWANCE_S after the END it is sent SIGKILL, and only a confirmed reap (`wait` on it) counts as
+# its exit. After each slice the
 # byte offset (cursor) is persisted durably, so a run that stops anywhere resumes there next night; at
 # the end of the filesystem it wraps to 0 and counts a completed pass.
 # A run ends when the whole filesystem has been covered once, when less than one block group of the
 # MAX_GB_PER_RUN budget is left (a slice is cut to the budget, in whole groups: the cap is never
-# exceeded), when the window closes or less than one group fits before its end, or at the deadline.
+# exceeded), when the window closes or less than one group fits before its end, at the deadline, or when
+# a killed fstrim is stuck.
+#
+# COMPLETION IS NOT BOUNDED. The sizing and the KILL keep a slice inside the window plus the allowance
+# almost always, but a discard already submitted to the device cannot be cancelled, and a FITRIM sleeping
+# uninterruptibly in the kernel outlives SIGKILL. If the child is still alive STUCK_GRACE_S after the KILL,
+# the run exits 8 (`stuck`) and leaves it: it keeps the lock (fd 9), so later runs exit 7 until it ends.
+# So an overlap with the next runner's window on the same node is DETECTED (gitea_runner_fstrim_in_flight,
+# `stuck`, and the CIRunnerFstrim* alerts), not prevented. docs/runbooks/ci-runners.md "Thin-pool trim"
+# lists when a host-side admission interlock becomes mandatory.
 #
 # A job can still start during a slice. That is why the slices are small (2 GiB, ~40 s): a TRIM slows
-# the job's disk for at most one slice, and deletes nothing.
+# the job's disk for that slice, and deletes nothing.
 #
 # The beacon reports the bytes SUBMITTED to TRIM (what FITRIM says it trimmed). Whether the host's thin
 # pool reclaimed them is not visible from the guest: check `lvs` on the Proxmox node.
@@ -35,12 +45,15 @@
 # Exit codes:
 #   0   done: the cap or a full pass reached, the window closed (or less than one group fits before its
 #       end), not a night in DAYS, a job outlasted BUSY_WAIT_MAX_S, the stop file is present, or a slice
-#       was killed at the window-relative deadline (reason `deadline`; the cursor stays at its start)
+#       was killed at the window-relative deadline and reaped (reason `deadline`; the cursor stays at its
+#       start)
 #   1   MNT is not a mount point, not ext4, or its geometry is unreadable; or the lock file cannot be opened
 #   2   invalid settings
 #   5   an fstrim failed (the cursor stays at that slice)
 #   6   the state file cannot be written or synced (nothing is trimmed without a durable record of progress)
-#   7   another run holds the lock (no beacon is written: that run owns it)
+#   7   another run holds the lock (no beacon is written: that run owns it), or a stuck fstrim does
+#   8   a killed fstrim is still alive STUCK_GRACE_S after its SIGKILL (reason `stuck`): left running with
+#       the lock; the cursor stays at its slice and gitea_runner_fstrim_in_flight stays 1
 #   143/130  SIGTERM/SIGINT (the in-flight slice is not counted; it is redone next time)
 set -uo pipefail
 
@@ -62,10 +75,11 @@ PAUSE_S="${GITEA_FSTRIM_PAUSE_S:-20}"                   # seconds between slices
 BUSY_WAIT_MAX_S="${GITEA_FSTRIM_BUSY_WAIT_MAX_S:-1800}" # give up for the night after one job wait this long
 # The window-relative deadline. A slice is cut to what fits before the window END at SEC_PER_GB seconds per
 # GiB (conservative: measured 17-23), and fstrim is SIGKILLed KILL_ALLOWANCE_S after the END if the drive
-# stalls. The allowance (plus one group) is each window's tail: the gap the schedule test requires
-# before the next window on the node.
+# stalls. A killed fstrim still alive STUCK_GRACE_S later is `stuck` (exit 8). Allowance + grace + one
+# group is each window's tail: the gap the schedule test requires before the next window on the node.
 SEC_PER_GB="${GITEA_FSTRIM_SEC_PER_GB:-30}"
 KILL_ALLOWANCE_S="${GITEA_FSTRIM_KILL_ALLOWANCE_S:-60}"
+STUCK_GRACE_S="${GITEA_FSTRIM_STUCK_GRACE_S:-30}"
 TEXTFILE_DIR="${GITEA_FSTRIM_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 # Not rendered by the role: fixed paths and the cleanup's own idle-confirm cadence.
 MNT="${GITEA_FSTRIM_MOUNT:-/}"
@@ -74,6 +88,7 @@ STOP_FILE="${GITEA_FSTRIM_STOP_FILE:-/var/lib/gitea-runner-fstrim/stop}"
 LOCK_FILE="${GITEA_FSTRIM_LOCK_FILE:-/run/gitea-runner-fstrim.lock}"
 IDLE_POLL_S="${GITEA_FSTRIM_IDLE_POLL_S:-1}"
 IDLE_CONFIRM_POLLS="${GITEA_FSTRIM_IDLE_CONFIRM_POLLS:-3}"
+PROC_DIR="${GITEA_FSTRIM_PROC_DIR:-/proc}" # the liveness check's source (child_alive); tests stub it
 MINLEN=64K # constant, deliberately not a setting (see the header)
 GiB=1073741824
 
@@ -97,6 +112,17 @@ write_beacon() { # <rc> <reason>
   chmod 0644 "$tmp" 2>/dev/null || true # node_exporter (non-root) must read it
   mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
 }
+# gitea_runner_fstrim_in_flight: 1 from just before a slice's fstrim starts until that child is confirmed
+# reaped, then 0. Its own file, so it changes mid-run without touching the last run's result in the
+# beacon. A `stuck` exit leaves it at 1 (the fstrim is still there), as does a SIGKILL of this script.
+set_in_flight() { # <0|1>
+  [ -d "$TEXTFILE_DIR" ] || return 0
+  local f="$TEXTFILE_DIR/gitea_runner_fstrim_inflight.prom" tmp
+  tmp="$(mktemp "$f.XXXX" 2>/dev/null)" || return 0
+  printf 'gitea_runner_fstrim_in_flight %s\n' "$1" > "$tmp"
+  chmod 0644 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$f" 2>/dev/null || rm -f "$tmp"
+}
 finish() { # <rc> <reason> <message>
   trap - TERM INT
   log "$3 - exit $1 ($2): submitted=$submitted range=$range cursor=$cursor passes=$passes"
@@ -106,15 +132,60 @@ finish() { # <rc> <reason> <message>
 }
 
 # fstrim and sleep run as tracked children, so a SIGTERM/SIGINT is handled at once (bash defers a trap
-# until a FOREGROUND child exits, but `wait` returns to it immediately). The trap waits for an in-flight
-# FITRIM (ext4 ends one early when the signal reaches it too, as `systemctl stop` does), then exits
+# until a FOREGROUND child exits, but `wait` returns to it immediately). The trap stops a slice's timer,
+# waits for an in-flight child (ext4 ends a FITRIM early when the signal reaches it too, as `systemctl
+# stop` does; one stuck in the kernel keeps this wait, and systemd's TimeoutStopSec, waiting), then exits
 # through finish, so the beacon records the stop. That slice is not counted: it is redone next time.
-child=""
+child=""; timer=""; trimming=0
 run_child() { "$@" & child=$!; wait "$child"; local rc=$?; child=""; return "$rc"; }
 on_signal() { # <rc> <signal name>
   trap - TERM INT
-  [ -n "$child" ] && wait "$child" 2>/dev/null
+  [ -n "$timer" ] && kill "$timer" 2>/dev/null
+  if [ -n "$child" ]; then
+    wait "$child" 2>/dev/null
+    [ "$trimming" = 1 ] && set_in_flight 0 # the fstrim child is reaped
+  fi
   finish "$1" signal "stopped by $2"
+}
+
+# The liveness check: is <pid> still a live process? An exited child is a zombie (state Z) until it is
+# reaped, so `kill -0` cannot tell; /proc/<pid>/stat can. PROC_DIR is the seam the tests stub to emulate a
+# FITRIM that outlives SIGKILL, which no userspace process can do.
+child_alive() { # <pid>
+  local st
+  st="$(sed -nE 's/^.*\) ([A-Za-z]).*$/\1/p' "$PROC_DIR/$1/stat" 2>/dev/null)"
+  [ -n "$st" ] && [ "$st" != Z ] && [ "$st" != X ]
+}
+# One slice: fstrim as a background child, raced against a timer of <kill after> REAL seconds (`command
+# -p sleep` bypasses PATH, and the timer drops the lock fd). Sets slice_rc and slice_end:
+#   done    fstrim exited on its own and was reaped; slice_rc is its status
+#   killed  it outlived the timer, was sent SIGKILL, and was then reaped (confirmed gone)
+#   stuck   it was still alive STUCK_GRACE_S after the SIGKILL; it is left running, with the lock
+# No process-group kill: `timeout -s KILL` kills its own group, so its return did not prove fstrim had
+# exited. Here only `wait` on the fstrim pid itself, or the liveness check, decides.
+trim_slice() { # <off> <len> <kill after s>
+  local done_pid="" rc grace=0
+  set_in_flight 1
+  fstrim -v -m "$MINLEN" -o "$1" -l "$2" "$MNT" > "$outf" 2>&1 &
+  child=$!; trimming=1
+  command -p sleep "$3" 9>&- &
+  timer=$!
+  wait -n -p done_pid "$child" "$timer"; rc=$?
+  if [ "$done_pid" = "$child" ]; then
+    kill "$timer" 2>/dev/null; wait "$timer" 2>/dev/null; timer=""
+    child=""; trimming=0; set_in_flight 0
+    slice_rc="$rc"; slice_end="done"; return 0
+  fi
+  timer=""
+  log "fstrim (pid $child) still running ${3}s in, ${KILL_ALLOWANCE_S}s past the window end: SIGKILL"
+  kill -KILL "$child" 2>/dev/null
+  while child_alive "$child"; do
+    if [ "$grace" -ge "$STUCK_GRACE_S" ]; then slice_end=stuck; return 0; fi # in flight stays 1
+    command -p sleep 1 9>&-; grace=$(( grace + 1 ))
+  done
+  wait "$child" 2>/dev/null
+  child=""; trimming=0; set_in_flight 0
+  slice_rc=137; slice_end=killed
 }
 
 # State: key=value lines, digits only. Parsed, never sourced; rewritten atomically AND durably.
@@ -217,6 +288,7 @@ nonneg "$PAUSE_S" || finish 2 invalid "invalid PAUSE_S='$PAUSE_S' (whole seconds
 nonneg "$BUSY_WAIT_MAX_S" || finish 2 invalid "invalid BUSY_WAIT_MAX_S='$BUSY_WAIT_MAX_S' (whole seconds, 0 or more)"
 posint "$SEC_PER_GB" || finish 2 invalid "invalid SEC_PER_GB='$SEC_PER_GB' (a positive integer)"
 posint "$KILL_ALLOWANCE_S" || finish 2 invalid "invalid KILL_ALLOWANCE_S='$KILL_ALLOWANCE_S' (a positive integer)"
+posint "$STUCK_GRACE_S" || finish 2 invalid "invalid STUCK_GRACE_S='$STUCK_GRACE_S' (a positive integer)"
 posint "$IDLE_POLL_S" || finish 2 invalid "invalid IDLE_POLL_S='$IDLE_POLL_S' (a positive integer)"
 posint "$IDLE_CONFIRM_POLLS" || finish 2 invalid "invalid IDLE_CONFIRM_POLLS='$IDLE_CONFIRM_POLLS' (a positive integer)"
 hhmm "$WINDOW_START" || finish 2 invalid "invalid WINDOW_START='$WINDOW_START' (HH:MM, UTC)"
@@ -266,7 +338,7 @@ if [ "$cursor" -ge "$size" ] || [ $(( cursor % group )) -ne 0 ] || [ "$cursor" !
   cursor=0
 fi
 write_state "$cursor" "$passes" || finish 6 state "cannot write or sync $STATE_FILE - not trimming without a durable record of progress"
-outf="$STATE_FILE.fstrim-out" # fstrim's output, per slice (it runs as a tracked child, see run_child)
+outf="$STATE_FILE.fstrim-out" # fstrim's output, per slice (it runs as a background child, see trim_slice)
 
 log "start: $src size=$size group=$group slice=$slice cap=$cap window=$WINDOW_START-$WINDOW_END UTC cursor=$cursor passes=$passes"
 while :; do
@@ -289,24 +361,23 @@ while :; do
   stopped && finish 0 stopped "stop file $STOP_FILE present (appeared while confirming idle)"
   in_window || finish 0 window "the window $WINDOW_START-$WINDOW_END UTC closed while confirming idle"
   day_ok || finish 0 day "this window started on weekday $(start_dow), not one of DAYS='$DAYS'"
-  # The window-relative deadline. The checks above only say the window is OPEN; a slice must also END in
+  # The window-relative deadline. The checks above only say the window is OPEN; a slice should also END in
   # it, or the next runner on this node starts while it runs. So: cut the slice to what fits before the
   # END at SEC_PER_GB (whole groups; less than one group ends the run), and SIGKILL the fstrim if it is
-  # still running KILL_ALLOWANCE_S after the END (a stalled drive). ext4 checks for a fatal signal while it
-  # walks the groups, so a KILL ends the FITRIM within about one group's discard.
+  # still running KILL_ALLOWANCE_S after the END (a stalled drive). ext4 checks for a fatal signal between
+  # groups, so a KILL usually ends it within about one group's discard; one that does not is `stuck`.
   left="$(secs_left)"
   fit=$(( left * GiB / SEC_PER_GB / group * group ))
   [ "$fit" -ge "$group" ] || finish 0 window "${left}s to the window end: less than one block group fits at ${SEC_PER_GB}s/GiB"
   [ "$len" -gt "$fit" ] && len="$fit"
-  run_child timeout -s KILL $(( left + KILL_ALLOWANCE_S )) fstrim -v -m "$MINLEN" -o "$off" -l "$len" "$MNT" > "$outf" 2>&1
-  rc=$?
-  # 137: the KILL (timeout re-raises it on itself); 124: timed out, as timeout reports it otherwise. A
-  # killed slice is UNCONFIRMED: the cursor stays at its start, so the next night trims it again.
-  case "$rc" in
-    0) : ;;
-    124 | 137) finish 0 deadline "fstrim at off=$off len=$len was still running $(( left + KILL_ALLOWANCE_S ))s later, ${KILL_ALLOWANCE_S}s past the window end - killed; the cursor stays at $off" ;;
-    *) finish 5 fstrim_failed "fstrim failed at off=$off len=$len: $(cat "$outf" 2>/dev/null)" ;;
+  kill_after=$(( left + KILL_ALLOWANCE_S ))
+  trim_slice "$off" "$len" "$kill_after"
+  # A killed slice is UNCONFIRMED: the cursor stays at its start, so the next night trims it again.
+  case "$slice_end" in
+    stuck) finish 8 stuck "fstrim at off=$off len=$len is still alive ${STUCK_GRACE_S}s after its SIGKILL (a discard the kernel cannot cancel): leaving it; it keeps $LOCK_FILE, so later runs exit 7 until it ends; the cursor stays at $off" ;;
+    killed) finish 0 deadline "fstrim at off=$off len=$len was still running ${kill_after}s later, ${KILL_ALLOWANCE_S}s past the window end: SIGKILLed and reaped; the cursor stays at $off" ;;
   esac
+  [ "$slice_rc" -eq 0 ] || finish 5 fstrim_failed "fstrim failed at off=$off len=$len: $(cat "$outf" 2>/dev/null)"
   out="$(cat "$outf" 2>/dev/null)"
   bytes="$(sed -nE 's/.*\(([0-9]+) bytes\) trimmed.*/\1/p' <<< "$out")"
   is_num "$bytes" || { log "could not read the trimmed bytes from: $out"; bytes=0; }
@@ -315,6 +386,6 @@ while :; do
   if [ "$next" -ge "$size" ]; then next=0; np=$(( passes + 1 )); fi
   write_state "$next" "$np" || finish 6 state "cannot write or sync $STATE_FILE after the slice at $off"
   cursor="$next"; passes="$np"
-  log "slice off=$off len=$len waited=${waited}s trimmed=$bytes next=$cursor passes=$passes"
+  log "slice off=$off len=$len kill_after=${kill_after}s waited=${waited}s trimmed=$bytes next=$cursor passes=$passes"
   [ "$range" -lt "$size" ] && [ $(( (cap - range) / group )) -ge 1 ] && run_child sleep "$PAUSE_S"
 done

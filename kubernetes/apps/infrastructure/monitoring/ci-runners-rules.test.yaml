@@ -228,3 +228,181 @@ tests:
       - eval_time: 70m
         alertname: CIRunnerLeakedBuildxBuilders
         exp_alerts: []
+  # ---- thin-pool trim (CIRunnerFstrim*): each rule keys on the role's gitea_runner_fstrim_enabled marker ----
+  - interval: 1m
+    name: a failed trim on a trim-enabled runner warns with its reason; a clean run, or the trim off, does not
+    input_series:
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.14:9100"}
+        values: 1+0x60
+      - series: gitea_runner_fstrim_exit_code{job="ci-runner-node", instance="192.168.0.14:9100"}
+        values: 5+0x60
+      - series: gitea_runner_fstrim_exit_reason{job="ci-runner-node", instance="192.168.0.14:9100", reason="fstrim_failed"}
+        values: 1+0x60
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 1+0x60
+      - series: gitea_runner_fstrim_exit_code{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 0+0x60
+      - series: gitea_runner_fstrim_exit_reason{job="ci-runner-node", instance="192.168.0.15:9100", reason="window"}
+        values: 1+0x60
+      - series: gitea_runner_fstrim_exit_code{job="ci-runner-node", instance="192.168.0.16:9100"}
+        values: 5+0x60
+      - series: gitea_runner_fstrim_exit_reason{job="ci-runner-node", instance="192.168.0.16:9100", reason="fstrim_failed"}
+        values: 1+0x60
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: CIRunnerFstrimFailed
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: CIRunnerFstrimFailed
+        exp_alerts:
+          - exp_labels:
+              job: ci-runner-node
+              instance: 192.168.0.14:9100
+              reason: fstrim_failed
+              severity: warning
+            exp_annotations:
+              summary: CI runner 192.168.0.14:9100 thin-pool trim ended with exit 5 (fstrim_failed)
+              description: 'The last nightly chunked trim on 192.168.0.14:9100 failed. unsupported (1): / is not ext4 or its geometry is unreadable; invalid (2): a bad gitea_runner_fstrim_* setting; fstrim_failed (5); state (6): the cursor file cannot be written or synced; stuck (8): see CIRunnerFstrimStuck; signal (143/130): stopped, by hand or by the unit''s timeout. Read `journalctl -u gitea-runner-fstrim.service`. Freed space stays allocated on the node''s NVMe until it runs cleanly.'
+  - interval: 1m
+    name: a trim beacon over 26h old on a trim-enabled runner warns; a nightly one, or the trim off, does not
+    input_series:
+      - series: up{job="ci-runner-node", instance="192.168.0.14:9100"}
+        values: 1+0x1700
+      - series: up{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 1+0x1700
+      - series: up{job="ci-runner-node", instance="192.168.0.16:9100"}
+        values: 1+0x1700
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.14:9100"}
+        values: 1+0x1700
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 1+0x1700
+      - series: gitea_runner_fstrim_last_run_seconds{job="ci-runner-node", instance="192.168.0.14:9100"}
+        values: 0+0x1700
+      - series: gitea_runner_fstrim_last_run_seconds{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 0+60x1700
+      - series: gitea_runner_fstrim_last_run_seconds{job="ci-runner-node", instance="192.168.0.16:9100"}
+        values: 0+0x1700
+    alert_rule_test:
+      - eval_time: 26h30m
+        alertname: CIRunnerFstrimStale
+        exp_alerts: []
+      - eval_time: 28h
+        alertname: CIRunnerFstrimStale
+        exp_alerts:
+          - exp_labels:
+              job: ci-runner-node
+              instance: 192.168.0.14:9100
+              severity: warning
+            exp_annotations:
+              summary: CI runner 192.168.0.14:9100 thin-pool trim has not run for over 26h
+              description: 'gitea-runner-fstrim.timer fires every night at the start of the runner''s window, and every run rewrites its beacon, so on 192.168.0.14:9100 it has missed at least one night: the timer is masked or disabled, the unit fails before the script starts, or the VM was down at the window start (Persistent=false: no catch-up). Check `systemctl status gitea-runner-fstrim.timer gitea-runner-fstrim.service`.'
+  - interval: 1m
+    name: a trim-enabled runner that never wrote the trim beacon warns after 27h; one that did, or the trim off, does not
+    input_series:
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.14:9100"}
+        values: 1+0x1700
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 1+0x1700
+      - series: gitea_runner_fstrim_last_run_seconds{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 0+60x1700
+      - series: up{job="ci-runner-node", instance="192.168.0.16:9100"}
+        values: 1+0x1700
+    alert_rule_test:
+      - eval_time: 26h
+        alertname: CIRunnerFstrimBeaconMissing
+        exp_alerts: []
+      - eval_time: 28h
+        alertname: CIRunnerFstrimBeaconMissing
+        exp_alerts:
+          - exp_labels:
+              job: ci-runner-node
+              instance: 192.168.0.14:9100
+              severity: warning
+            exp_annotations:
+              summary: CI runner 192.168.0.14:9100 has the thin-pool trim enabled but has never published its beacon
+              description: 'The gitea_runner role turned the nightly trim on for 192.168.0.14:9100, but no run has ever written gitea_runner_fstrim.prom: the timer has not fired in the 27h since (a first run comes at the next window start, within 24h). Check `systemctl status gitea-runner-fstrim.timer` and `systemctl list-timers gitea-runner-fstrim.timer`.'
+  - interval: 1m
+    name: three nights in a row ending at the deadline warn; one night, or the trim off, does not
+    input_series:
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.14:9100"}
+        values: 1+0x3060
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 1+0x3060
+      - series: gitea_runner_fstrim_exit_reason{job="ci-runner-node", instance="192.168.0.14:9100", reason="deadline"}
+        values: 1+0x3060
+      - series: gitea_runner_fstrim_exit_reason{job="ci-runner-node", instance="192.168.0.15:9100", reason="deadline"}
+        values: 1+0x1440 stale
+      - series: gitea_runner_fstrim_exit_reason{job="ci-runner-node", instance="192.168.0.15:9100", reason="cap"}
+        values: _x1441 1+0x1618
+      - series: gitea_runner_fstrim_exit_reason{job="ci-runner-node", instance="192.168.0.16:9100", reason="deadline"}
+        values: 1+0x3060
+    alert_rule_test:
+      - eval_time: 48h
+        alertname: CIRunnerFstrimDeadlineRepeated
+        exp_alerts: []
+      - eval_time: 50h
+        alertname: CIRunnerFstrimDeadlineRepeated
+        exp_alerts:
+          - exp_labels:
+              job: ci-runner-node
+              instance: 192.168.0.14:9100
+              reason: deadline
+              severity: warning
+            exp_annotations:
+              summary: CI runner 192.168.0.14:9100 thin-pool trim hit its deadline three nights in a row
+              description: 'On 192.168.0.14:9100 a TRIM slice has overrun the window end by the kill allowance on each of the last three nights: TRIM on the node''s NVMe is much slower than the 30 s/GiB the slices are sized for, and the cursor is stuck there. Check the node''s drive (wear, thermals, other discards at that hour) before raising gitea_runner_fstrim_sec_per_gb.'
+  - interval: 1m
+    name: a stuck trim pages at once on a trim-enabled runner; another reason, or the trim off, does not
+    input_series:
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.14:9100"}
+        values: 1+0x30
+      - series: gitea_runner_fstrim_exit_reason{job="ci-runner-node", instance="192.168.0.14:9100", reason="stuck"}
+        values: _x5 1+0x25
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 1+0x30
+      - series: gitea_runner_fstrim_exit_reason{job="ci-runner-node", instance="192.168.0.15:9100", reason="deadline"}
+        values: 1+0x30
+      - series: gitea_runner_fstrim_exit_reason{job="ci-runner-node", instance="192.168.0.16:9100", reason="stuck"}
+        values: 1+0x30
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: CIRunnerFstrimStuck
+        exp_alerts: []
+      - eval_time: 7m
+        alertname: CIRunnerFstrimStuck
+        exp_alerts:
+          - exp_labels:
+              job: ci-runner-node
+              instance: 192.168.0.14:9100
+              reason: stuck
+              severity: critical
+            exp_annotations:
+              summary: 'CI runner 192.168.0.14:9100 thin-pool trim is stuck: a FITRIM outlived SIGKILL'
+              description: 'On 192.168.0.14:9100 a TRIM slice was killed at its window''s deadline and was still alive after the stuck grace: a discard the kernel cannot cancel, which may overlap the next runner''s trim window on the same node (and its etcd). It holds the trim lock until it ends. Before the next window: build the host-side admission interlock (docs/runbooks/ci-runners.md "Thin-pool trim", "Residual risk"), or stop the trim on that node''s runners. Look at the node''s drive.'
+  - interval: 1m
+    name: a TRIM slice in flight for over 2h warns; one cleared in time, or the trim off, does not
+    input_series:
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.14:9100"}
+        values: 1+0x200
+      - series: gitea_runner_fstrim_in_flight{job="ci-runner-node", instance="192.168.0.14:9100"}
+        values: 1+0x200
+      - series: gitea_runner_fstrim_enabled{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 1+0x200
+      - series: gitea_runner_fstrim_in_flight{job="ci-runner-node", instance="192.168.0.15:9100"}
+        values: 1+0x100 0+0x100
+      - series: gitea_runner_fstrim_in_flight{job="ci-runner-node", instance="192.168.0.16:9100"}
+        values: 1+0x200
+    alert_rule_test:
+      - eval_time: 110m
+        alertname: CIRunnerFstrimInFlight
+        exp_alerts: []
+      - eval_time: 125m
+        alertname: CIRunnerFstrimInFlight
+        exp_alerts:
+          - exp_labels:
+              job: ci-runner-node
+              instance: 192.168.0.14:9100
+              severity: warning
+            exp_annotations:
+              summary: CI runner 192.168.0.14:9100 has had a TRIM slice in flight for over 2h
+              description: 'gitea_runner_fstrim_in_flight has been 1 on 192.168.0.14:9100 for longer than any run can take (the longest window plus the kill allowance and the stuck grace): a fstrim was never reaped, so it may still be discarding outside its window. Check `pgrep -a fstrim` and `journalctl -u gitea-runner-fstrim.service`; with CIRunnerFstrimStuck, see that alert.'

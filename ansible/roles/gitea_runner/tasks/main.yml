@@ -440,10 +440,16 @@
 
 # Converges on the LIVE mount rather than running as a handler of the edit above: a play that failed
 # between the two would otherwise leave / mounted `discard` until the next reboot, with nothing to retry it.
+# check_mode: false, because the next task reads its stdout. In --check, command tasks are skipped, so the
+# registered result has no real stdout: older ansible-core has no `stdout` key at all and the next `when`
+# fails the play; ansible-core 2.16 leaves it empty, so --check silently reports the remount as skipped on
+# a host that still needs it (both seen; reviewer-claude on #1858). It only reads; it changes nothing.
+# tests/test-fstrim-chunked.sh checks this for every command/shell result a later task reads.
 - name: Read the live options of the root mount
   ansible.builtin.command: findmnt -no OPTIONS --mountpoint /
   register: _gitea_runner_root_opts
   changed_when: false
+  check_mode: false
   when: gitea_runner_root_nodiscard | bool
 
 - name: Remount / nodiscard (live-safe on ext4; groups already flagged as trimmed need one reboot)
@@ -489,6 +495,23 @@
     masked: true
   when: gitea_runner_fstrim_enabled | bool
 
+# The "trim is on here" marker the alerts key on (kubernetes/apps/infrastructure/monitoring/ci-runners-
+# rules.yaml, CIRunnerFstrim*). It comes from the role, not from the script, so a host whose timer never
+# fires (masked, broken unit) still alerts: its beacon goes stale or never appears. Its own file, so the
+# script's beacon rewrites never drop it.
+- name: Ensure the node_exporter textfile directory (already there wherever node_exporter is)
+  ansible.builtin.file:
+    path: "{{ gitea_runner_reclaim_textfile_dir }}"
+    state: directory
+  when: gitea_runner_fstrim_enabled | bool
+
+- name: Mark the chunked trim as enabled for the alerts
+  ansible.builtin.copy:
+    dest: "{{ gitea_runner_reclaim_textfile_dir }}/gitea_runner_fstrim_enabled.prom"
+    content: "gitea_runner_fstrim_enabled 1\n"
+    mode: "0644"
+  when: gitea_runner_fstrim_enabled | bool
+
 # The kill switch. The stock timer stays masked (see defaults/main.yml). failed_when: false because on a
 # host that never had the trim (the cloud runners) the units do not exist.
 - name: Stop the chunked-trim timer and service when the trim is disabled
@@ -500,6 +523,17 @@
     - "{{ gitea_runner_fstrim_timer }}"
     - "{{ gitea_runner_fstrim_service }}"
   failed_when: false
+  when: not (gitea_runner_fstrim_enabled | bool)
+
+# ...and its marker and beacons, so a deliberate stop raises no CIRunnerFstrim* alert.
+- name: Drop the chunked-trim marker and beacons when the trim is disabled
+  ansible.builtin.file:
+    path: "{{ gitea_runner_reclaim_textfile_dir }}/{{ item }}"
+    state: absent
+  loop:
+    - gitea_runner_fstrim_enabled.prom
+    - gitea_runner_fstrim.prom
+    - gitea_runner_fstrim_inflight.prom
   when: not (gitea_runner_fstrim_enabled | bool)
 
 # ── 5. systemd unit ──────────────────────────────────────────────────────────

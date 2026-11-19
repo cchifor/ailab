@@ -499,3 +499,109 @@ spec:
               One of the gitea_runner beacons in /var/lib/prometheus/node-exporter on {{ $labels.instance }}
               is malformed (the other files still parse). Its alerts are blind until it is fixed; check
               `journalctl -u prometheus-node-exporter` for the file name.
+        # ---- thin-pool trim (gitea-runner-fstrim-chunked.sh, #1857; docs/runbooks/ci-runners.md "Thin-pool trim") ----
+        # Every rule keys on gitea_runner_fstrim_enabled 1, a marker the gitea_runner role writes to its own
+        # textfile wherever the trim is on and removes when it is turned off. It does not come from the script,
+        # so a host whose timer never fires (masked, a broken unit) still alerts, and a host turned off does not.
+        # The script writes two files: gitea_runner_fstrim.prom (the last run's result) and
+        # gitea_runner_fstrim_inflight.prom (gitea_runner_fstrim_in_flight, 1 while a slice's fstrim is not yet
+        # reaped).
+        # The script rewrites gitea_runner_fstrim.prom at the end of EVERY nightly run, the quick exits too
+        # (outside the window, not a trim day, a job that never ended), and its timer fires daily. A run ends
+        # between its window start and the window end plus the 60 s kill allowance (windows are at most 105
+        # min), so two writes are at most ~25h47m apart: 26h is the staleness line.
+        - alert: CIRunnerFstrimFailed
+          expr: >-
+            (gitea_runner_fstrim_exit_code{job="ci-runner-node"} != 0)
+              * on (instance) group_left (reason) gitea_runner_fstrim_exit_reason{job="ci-runner-node"}
+              and on (instance) gitea_runner_fstrim_enabled{job="ci-runner-node"} == 1
+          for: 10m
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} thin-pool trim ended with exit {{ $value }} ({{ $labels.reason }})"
+            description: >-
+              The last nightly chunked trim on {{ $labels.instance }} failed. unsupported (1): / is not ext4
+              or its geometry is unreadable; invalid (2): a bad gitea_runner_fstrim_* setting; fstrim_failed
+              (5); state (6): the cursor file cannot be written or synced; stuck (8): see
+              CIRunnerFstrimStuck; signal (143/130): stopped, by hand or by the unit's timeout. Read
+              `journalctl -u gitea-runner-fstrim.service`. Freed space stays allocated on the node's NVMe
+              until it runs cleanly.
+        # exit 8: a FITRIM still alive gitea_runner_fstrim_stuck_grace_s after its SIGKILL, left running in the
+        # kernel. It keeps the lock (later runs exit 7, so the beacon goes stale too) and may still be
+        # discarding when the next runner's window on the node opens: the cross-VM overlap the schedule cannot
+        # prevent, only detect. Its FIRST firing makes the host-side admission interlock mandatory before the
+        # next window (docs/runbooks/ci-runners.md "Thin-pool trim", "Residual risk").
+        - alert: CIRunnerFstrimStuck
+          expr: >-
+            gitea_runner_fstrim_exit_reason{job="ci-runner-node", reason="stuck"} == 1
+              and on (instance) gitea_runner_fstrim_enabled{job="ci-runner-node"} == 1
+          labels: { severity: critical }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} thin-pool trim is stuck: a FITRIM outlived SIGKILL"
+            description: >-
+              On {{ $labels.instance }} a TRIM slice was killed at its window's deadline and was still alive
+              after the stuck grace: a discard the kernel cannot cancel, which may overlap the next runner's
+              trim window on the same node (and its etcd). It holds the trim lock until it ends. Before the
+              next window: build the host-side admission interlock (docs/runbooks/ci-runners.md "Thin-pool
+              trim", "Residual risk"), or stop the trim on that node's runners. Look at the node's drive.
+        # in_flight is 1 from just before a slice's fstrim starts until it is reaped. A run flips it back to 0
+        # only for the pauses between slices, which a scrape may miss, so a whole run can read as 1: at most
+        # the longest window (105 min) + the 60 s kill allowance + the 30 s stuck grace. 2h of 1 means a
+        # fstrim nobody reaped: stuck, or this script itself killed with SIGKILL mid-slice.
+        - alert: CIRunnerFstrimInFlight
+          expr: >-
+            gitea_runner_fstrim_in_flight{job="ci-runner-node"} == 1
+              and on (instance) gitea_runner_fstrim_enabled{job="ci-runner-node"} == 1
+          for: 2h
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} has had a TRIM slice in flight for over 2h"
+            description: >-
+              gitea_runner_fstrim_in_flight has been 1 on {{ $labels.instance }} for longer than any run can
+              take (the longest window plus the kill allowance and the stuck grace): a fstrim was never
+              reaped, so it may still be discarding outside its window. Check `pgrep -a fstrim` and
+              `journalctl -u gitea-runner-fstrim.service`; with CIRunnerFstrimStuck, see that alert.
+        - alert: CIRunnerFstrimStale
+          expr: >-
+            (time() - gitea_runner_fstrim_last_run_seconds{job="ci-runner-node"}) > 93600
+              and on (instance) gitea_runner_fstrim_enabled{job="ci-runner-node"} == 1
+              and on (instance) up{job="ci-runner-node"} == 1
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} thin-pool trim has not run for over 26h"
+            description: >-
+              gitea-runner-fstrim.timer fires every night at the start of the runner's window, and every run
+              rewrites its beacon, so on {{ $labels.instance }} it has missed at least one night: the timer is
+              masked or disabled, the unit fails before the script starts, or the VM was down at the window
+              start (Persistent=false: no catch-up). Check `systemctl status gitea-runner-fstrim.timer
+              gitea-runner-fstrim.service`.
+        - alert: CIRunnerFstrimBeaconMissing
+          expr: >-
+            gitea_runner_fstrim_enabled{job="ci-runner-node"} == 1
+              unless on (instance) gitea_runner_fstrim_last_run_seconds{job="ci-runner-node"}
+          for: 27h
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} has the thin-pool trim enabled but has never published its beacon"
+            description: >-
+              The gitea_runner role turned the nightly trim on for {{ $labels.instance }}, but no run has ever
+              written gitea_runner_fstrim.prom: the timer has not fired in the 27h since (a first run comes at
+              the next window start, within 24h). Check `systemctl status gitea-runner-fstrim.timer` and
+              `systemctl list-timers gitea-runner-fstrim.timer`.
+        # reason="deadline" (exit 0): a slice was still running past the window end plus the kill allowance,
+        # so it was killed, and that part of the disk is retried the next night. Once is a stalled drive;
+        # the series lasts until the next run replaces it, so 49h of it is three nights in a row.
+        - alert: CIRunnerFstrimDeadlineRepeated
+          expr: >-
+            gitea_runner_fstrim_exit_reason{job="ci-runner-node", reason="deadline"} == 1
+              and on (instance) gitea_runner_fstrim_enabled{job="ci-runner-node"} == 1
+          for: 49h
+          labels: { severity: warning }
+          annotations:
+            summary: "CI runner {{ $labels.instance }} thin-pool trim hit its deadline three nights in a row"
+            description: >-
+              On {{ $labels.instance }} a TRIM slice has overrun the window end by the kill allowance on each
+              of the last three nights: TRIM on the node's NVMe is much slower than the 30 s/GiB the slices
+              are sized for, and the cursor is stuck there. Check the node's drive (wear, thermals, other
+              discards at that hour) before raising gitea_runner_fstrim_sec_per_gb.
