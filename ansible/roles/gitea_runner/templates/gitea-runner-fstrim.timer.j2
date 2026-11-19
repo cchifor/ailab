@@ -1,0 +1,14 @@
+# MANAGED BY ANSIBLE (role: gitea_runner). Starts the chunked fstrim at the start of this host's night
+# window (UTC). Persistent=false: a run missed while the VM was down is NOT caught up at boot, which would
+# land outside the window, on whatever else the node's NVMe is doing. The next night resumes at the cursor.
+[Unit]
+Description=Nightly chunked fstrim of / ({{ gitea_runner_fstrim_window_start }}-{{ gitea_runner_fstrim_window_end }} UTC)
+
+[Timer]
+OnCalendar=*-*-* {{ gitea_runner_fstrim_window_start }} UTC
+Persistent=false
+AccuracySec=1min
+Unit={{ gitea_runner_fstrim_service }}
+
+[Install]
+WantedBy=timers.target

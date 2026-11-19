@@ -18,3 +18,10 @@ gitea_runner_label: self-hosted-hv
 # the role's 1 GB floor.
 gitea_runner_cleanup_target_age_sweep: true
 gitea_runner_cleanup_target_age_min_free_mb: 5120
+
+# Thin-pool trim (#1858): / nodiscard + the nightly chunked trim instead of the weekly fstrim.timer.
+# On-prem only (thin LVs on the etcd NVMe); the cloud runners share the role and keep the defaults (off).
+# Each runner's window is in host_vars/ci-runner-N.yml, staggered per Proxmox node.
+# Runbook: docs/runbooks/ci-runners.md, "Thin-pool trim".
+gitea_runner_root_nodiscard: true
+gitea_runner_fstrim_enabled: true

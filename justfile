@@ -163,6 +163,7 @@ mirror-image src dst:
 test-gitea-runner:
     bash {{ansible_dir}}/roles/gitea_runner/tests/test-cleanup.sh
     bash {{ansible_dir}}/roles/gitea_runner/tests/test-reclaim.sh
+    bash {{ansible_dir}}/roles/gitea_runner/tests/test-fstrim-chunked.sh
     python3 {{ansible_dir}}/roles/gitea_runner/tests/test-reap.py
     python3 {{ansible_dir}}/roles/gitea_runner/tests/test-cache-verify.py
 

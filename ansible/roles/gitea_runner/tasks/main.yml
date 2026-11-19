@@ -411,6 +411,131 @@
   notify: Restart systemd-tmpfiles-clean timer
   when: gitea_runner_tmp_manage | bool
 
+# ── 4f. thin-pool trim: give freed space back to the host (#1858) ───────────
+# Why, and the one-off reboot: defaults/main.yml and docs/runbooks/ci-runners.md, "Thin-pool trim".
+# Nothing here touches the act_runner daemon or a job.
+#
+# The fstab edit removes ONLY the `discard` token of the root entry, keeping every other option. Each
+# regex needs a whole `discard` token (at the start of the options field or after a comma, and followed
+# by a comma, a blank or the end of the line), so `nodiscard` never matches, and once the token is gone
+# none of them matches again: idempotent by construction. tests/test-fstrim-chunked.sh applies these
+# exact regexes the way ansible.builtin.replace does (Python re, MULTILINE) and checks both.
+- name: Drop the online `discard` option from the root fstab entry (every other option is kept)
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.replace }}"
+    backup: true
+  loop:
+    # discard followed by more options: `discard,commit=30,errors=remount-ro` -> `commit=30,errors=remount-ro`
+    - regexp: '^(LABEL=cloudimg-rootfs[ \t]+/[ \t]+ext4[ \t]+(?:[^\s,]+,)*)discard,(?=[^\s,])'
+      replace: '\g<1>'
+    # discard last: `commit=30,discard` -> `commit=30`
+    - regexp: '^(LABEL=cloudimg-rootfs[ \t]+/[ \t]+ext4[ \t]+[^\s,]+(?:,[^\s,]+)*),discard(?=[ \t]|$)'
+      replace: '\g<1>'
+    # discard alone: `discard` -> `defaults`
+    - regexp: '^(LABEL=cloudimg-rootfs[ \t]+/[ \t]+ext4[ \t]+)discard(?=[ \t]|$)'
+      replace: '\g<1>defaults'
+  when: gitea_runner_root_nodiscard | bool
+
+# Converges on the LIVE mount rather than running as a handler of the edit above: a play that failed
+# between the two would otherwise leave / mounted `discard` until the next reboot, with nothing to retry it.
+# check_mode: false, because the next task reads its stdout. In --check, command tasks are skipped, so the
+# registered result has no real stdout: older ansible-core has no `stdout` key at all and the next `when`
+# fails the play; ansible-core 2.16 leaves it empty, so --check silently reports the remount as skipped on
+# a host that still needs it (both seen; reviewer-claude on #1858). It only reads; it changes nothing.
+# tests/test-fstrim-chunked.sh checks this for every command/shell result a later task reads.
+- name: Read the live options of the root mount
+  ansible.builtin.command: findmnt -no OPTIONS --mountpoint /
+  register: _gitea_runner_root_opts
+  changed_when: false
+  check_mode: false
+  when: gitea_runner_root_nodiscard | bool
+
+- name: Remount / nodiscard (live-safe on ext4; groups already flagged as trimmed need one reboot)
+  ansible.builtin.command: mount -o remount,nodiscard /
+  when:
+    - gitea_runner_root_nodiscard | bool
+    - "'discard' in _gitea_runner_root_opts.stdout.strip().split(',')"
+
+- name: Install the chunked-trim config (env sourced by the trim script)
+  ansible.builtin.template:
+    src: gitea-runner-fstrim.env.j2
+    dest: "{{ gitea_runner_fstrim_env }}"
+    mode: "0644"
+  when: gitea_runner_fstrim_enabled | bool
+
+- name: Install the chunked-trim script
+  ansible.builtin.copy:
+    src: gitea-runner-fstrim-chunked.sh
+    dest: "{{ gitea_runner_fstrim_bin }}"
+    mode: "0755"
+  when: gitea_runner_fstrim_enabled | bool
+
+- name: Install the chunked-trim oneshot service
+  ansible.builtin.template:
+    src: gitea-runner-fstrim.service.j2
+    dest: "/etc/systemd/system/{{ gitea_runner_fstrim_service }}"
+    mode: "0644"
+  notify: Reload systemd for gitea reclaim
+  when: gitea_runner_fstrim_enabled | bool
+
+- name: Install the chunked-trim timer
+  ansible.builtin.template:
+    src: gitea-runner-fstrim.timer.j2
+    dest: "/etc/systemd/system/{{ gitea_runner_fstrim_timer }}"
+    mode: "0644"
+  notify: Restart gitea fstrim timer
+  when: gitea_runner_fstrim_enabled | bool
+
+- name: Stop and mask the stock weekly fstrim.timer (it trims all of / in one burst)
+  ansible.builtin.systemd:
+    name: fstrim.timer
+    state: stopped
+    masked: true
+  when: gitea_runner_fstrim_enabled | bool
+
+# The "trim is on here" marker the alerts key on (kubernetes/apps/infrastructure/monitoring/ci-runners-
+# rules.yaml, CIRunnerFstrim*). It comes from the role, not from the script, so a host whose timer never
+# fires (masked, broken unit) still alerts: its beacon goes stale or never appears. Its own file, so the
+# script's beacon rewrites never drop it.
+- name: Ensure the node_exporter textfile directory (already there wherever node_exporter is)
+  ansible.builtin.file:
+    path: "{{ gitea_runner_reclaim_textfile_dir }}"
+    state: directory
+  when: gitea_runner_fstrim_enabled | bool
+
+- name: Mark the chunked trim as enabled for the alerts
+  ansible.builtin.copy:
+    dest: "{{ gitea_runner_reclaim_textfile_dir }}/gitea_runner_fstrim_enabled.prom"
+    content: "gitea_runner_fstrim_enabled 1\n"
+    mode: "0644"
+  when: gitea_runner_fstrim_enabled | bool
+
+# The kill switch. The stock timer stays masked (see defaults/main.yml). failed_when: false because on a
+# host that never had the trim (the cloud runners) the units do not exist.
+- name: Stop the chunked-trim timer and service when the trim is disabled
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: "{{ omit if item.endswith('.service') else false }}"
+  loop:
+    - "{{ gitea_runner_fstrim_timer }}"
+    - "{{ gitea_runner_fstrim_service }}"
+  failed_when: false
+  when: not (gitea_runner_fstrim_enabled | bool)
+
+# ...and its marker and beacons, so a deliberate stop raises no CIRunnerFstrim* alert.
+- name: Drop the chunked-trim marker and beacons when the trim is disabled
+  ansible.builtin.file:
+    path: "{{ gitea_runner_reclaim_textfile_dir }}/{{ item }}"
+    state: absent
+  loop:
+    - gitea_runner_fstrim_enabled.prom
+    - gitea_runner_fstrim.prom
+    - gitea_runner_fstrim_inflight.prom
+  when: not (gitea_runner_fstrim_enabled | bool)
+
 # ── 5. systemd unit ──────────────────────────────────────────────────────────
 - name: Install the act_runner systemd unit
   ansible.builtin.template:
@@ -450,3 +575,11 @@
     state: started
     daemon_reload: true
   when: gitea_runner_cleanup_enabled | bool
+
+- name: Enable + start the chunked-trim timer
+  ansible.builtin.systemd:
+    name: "{{ gitea_runner_fstrim_timer }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: gitea_runner_fstrim_enabled | bool

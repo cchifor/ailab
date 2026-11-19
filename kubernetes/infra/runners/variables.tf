@@ -144,7 +144,13 @@ variable "runner_rootfs_gb" {
     200 GB takes the sawtooth peak from ~97% to ~58%, which puts CRITICAL_PCT (92) out of reach in
     normal operation. It is close to free: local-lvm is LVM-thin and allocate-on-write, measured at
     39.26% used on ai-node1 and 19.93% on ai-node3 with >1 TB free on each, so a larger declared size
-    consumes nothing until written.
+    consumes nothing until written. It does not give space back by itself, though: blocks the guest
+    frees stay allocated in the thin pool until they are trimmed. The cloud image's online `discard`
+    did not do that (2026-11-18: the cleanup freed ~50 GB in ci-runner-1 and its thin LV shrank by
+    1.2 GB; scattered small discards cannot free whole 64 KiB chunks, and ext4 then skips those groups
+    on fstrim). Since #1858 the gitea_runner role mounts / nodiscard and trims it nightly in chunks
+    (docs/runbooks/ci-runners.md, "Thin-pool trim"), so a runner's thin LV follows what the guest
+    holds rather than its high-water mark.
 
     RESIZE SEMANTICS, checked against the bpg provider docs rather than assumed. Increasing this is an
     IN-PLACE resize — it does NOT replace the VM. But it is not free either: the provider applies a
@@ -156,9 +162,10 @@ variable "runner_rootfs_gb" {
 
     The guest also needs `growpart /dev/sda 1 && resize2fs /dev/sda1` — cloud-init only grows the root
     fs on FIRST boot. The live runners were grown exactly that way on 2026-08-12 (qm disk resize, then
-    growpart + resize2fs online, ext4 grows mounted), so declared and actual already agree at 200G and
-    a plan is a no-op — no reboot is pending from this change. A rebuilt runner picks the size up from
-    cloud-init instead and needs neither step.
+    growpart + resize2fs online, ext4 grows mounted). The 2026-11-17 growth to 250G was applied the
+    same way, so declared and actual agree at 250 GB, the live size, and a plan is a no-op: no reboot
+    is pending from either change. A rebuilt runner picks the size up from cloud-init instead and needs
+    neither step.
   EOT
   type        = number
   default     = 250

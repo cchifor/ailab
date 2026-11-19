@@ -309,9 +309,15 @@ Description=Chunked, IO-pressure-guarded fstrim of the registry LXC data volume 
 Type=oneshot
 ExecStart=/usr/local/sbin/lxc-fstrim-chunked.sh 5004 mp0
 Nice=10
-# On stop the script waits for the in-flight FITRIM, then unmounts (exit 143); leave it time to,
-# and record that deliberate stop as clean rather than a failed unit.
-TimeoutStopSec=180
+# The overall deadline. A oneshot is "activating" for its whole run, so RuntimeMaxSec= does nothing
+# here (checked on systemd 255): TimeoutStartSec= is the limit. Latest start 03:46 Sunday (03:30 +
+# 15 min RandomizedDelaySec + 1 min AccuracySec); SIGTERM by 23:31, done by 23:36 with the stop time
+# below, so a run that keeps waiting out IO pressure never reaches Monday's ai-node1 runner windows.
+TimeoutStartSec=19h45min
+# On stop the script waits for the in-flight FITRIM (8 GiB at up to ~23 s/GiB is ~3 min), then
+# unmounts (exit 143); leave it time to, and record that deliberate stop as clean rather than a
+# failed unit. (A stop at the deadline above still shows as failed, Result=timeout: by design.)
+TimeoutStopSec=300
 SuccessExitStatus=143 130
 UNIT
 cat > /etc/systemd/system/registry-lxc-fstrim.timer <<'UNIT'
@@ -325,6 +331,23 @@ WantedBy=timers.target
 UNIT
 systemctl daemon-reload && systemctl enable --now registry-lxc-fstrim.timer
 ```
+
+**The Sunday deadline (2026-11-19, #1858).** The script's pressure-wait budget (`PSI_WAIT_MAX_S`) is
+per chunk, so on this 384 GiB volume a run can wait for many hours. `TimeoutStartSec=19h45min` (with
+`TimeoutStopSec=300` for the in-flight chunk) ends it by 23:36 Sunday at the latest, whatever the
+pressure: systemd SIGTERMs it, and the script stops at once, even mid-wait, releases the mount and exits
+143. A run cut off there shows as failed (`Result=timeout`). The next week starts again from chunk 1.
+**The live unit on ai-node1 predates this:** after merge, re-run the `cat > …registry-lxc-fstrim.service`
+block above on the node (root, via `scripts/node-ssh.py`), then `systemctl daemon-reload`, and check
+`systemctl show -p TimeoutStartUSec,TimeoutStopUSec registry-lxc-fstrim.service`.
+
+ai-node1's CI runners trim their own disks nightly and stay off this trim's span: from 15 min before it
+can start to 15 min after that deadline ([ci-runners.md](ci-runners.md), "Thin-pool trim"). ci-runner-1
+and -4 end by 03:15 UTC, ci-runner-9 (04:15) skips Sundays (`gitea_runner_fstrim_days`), and the deadline
+keeps the trim out of Monday's 00:00 window. Moving this timer, or raising the deadline, means moving their
+windows or days too: `ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh` reads `OnCalendar`,
+`RandomizedDelaySec`, `TimeoutStartSec` and `TimeoutStopSec` above and fails if they collide, Sunday
+into Monday included.
 
 **Verify a run, including that it did not hurt etcd.** A trim is a discard burst on the same drive as
 cp1's etcd WAL.
