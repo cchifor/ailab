@@ -446,11 +446,12 @@ def _without_strive_ci_user(defaults: dict) -> dict:
     }
 
 
-# strive/**'s two bounded families (2026-11-20): the 10 most recently pushed OR pushed within 14 days, one entry each;
+# strive/**'s two bounded families (2026-11-20): the 30 most recently pushed (10 once the platform protects airlock's
+# admitted runtimes) OR pushed within 14 days, one entry each;
 # an ailab-<digest> protect tag also while its digest was pulled within 14 days (the platform re-fetches pins daily).
-_STRIVE_SHA_ENTRY = {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 10, "pushedWithin": "336h"}
+_STRIVE_SHA_ENTRY = {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 30, "pushedWithin": "336h"}
 _STRIVE_AILAB_DIGEST_ENTRY = {
-    "patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"], "mostRecentlyPushedCount": 10, "pushedWithin": "336h",
+    "patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"], "mostRecentlyPushedCount": 30, "pushedWithin": "336h",
     "pulledWithin": "336h",
 }
 _STRIVE_POLICY = {
@@ -939,7 +940,7 @@ class RegistryZotStriveTagRetentionTest(unittest.TestCase):
         self.policies = json.loads(_render_config())["storage"]["retention"]["policies"]
 
     def test_knobs(self):
-        self.assertEqual(self.defaults["registry_zot_strive_keep_recent"], 10)
+        self.assertEqual(self.defaults["registry_zot_strive_keep_recent"], 30)
         self.assertEqual(self.defaults["registry_zot_strive_keep_within"], "336h")  # 14 days, a Go duration
         self.assertIs(self.defaults["registry_zot_retention_dry_run"], False)
 

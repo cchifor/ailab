@@ -147,14 +147,20 @@ step is a reload (`storage.retention` is on the apply helper's allowlist). Alway
    `mode: reload` with `storage.retention.dryRun` (plus `storage.retention.policies` if the policy changed too).
    `dryRun` is GLOBAL: while it is on, zot deletes nothing anywhere. deleteReferrers, deleteUntagged and the
    strive/ci-build/** and agentforge/** pruning all pause, so finish a deleteReferrers widening first. A reload
-   restarts zot's background tasks, so the next GC pass starts within `gcInterval` (1h). Then read the decisions
-   on the registry LXC (`ssh registry`, or `pct exec 5004 -- sh -c '...'` on ai-node1):
+   restarts zot's background tasks, so a GC pass can start soon after it, and the next one `gcInterval` (1h)
+   later. Each pass logs one line per tag, so count DISTINCT strive repo:tag pairs, not lines. Do it on the registry
+   LXC (`ssh registry`, or `pct exec 5004 -- sh -c '...'` on ai-node1), with `SINCE` = the reload time (the
+   `loaded new configuration settings` line):
    ```bash
-   journalctl -u zot --since -90min -o cat | grep 'applied policy' | grep '"decision":"delete"' \
-     | grep -c '"dry-run":true'
+   journalctl -u zot --since "$SINCE" -o cat | grep 'applied policy' | grep '"decision":"delete"' \
+     | grep '"dry-run":true' | grep '"repository":"strive/' \
+     | sed -E 's/.*"repository":"([^"]*)".*"tag":"([^"]*)".*/\1:\2/' | sort -u > /tmp/would-delete.txt
+   wc -l < /tmp/would-delete.txt
    ```
-   The count of `"decision":"delete"` lines (one per tag, per pass) must match the scan's `delete` total. Spot-check
-   that no line names a digest the scan listed as in use. Untagged and referrer deletions log `"dry-run":true` too.
+   The count must match the `delete` total of a pin scan run at the same time. The scan models strive/** only, so
+   agentforge/** deletions are filtered out above. Tags pushed, or crossing the 14-day line, between the two make
+   small differences. Any listed tag that the scan's `--json` keeps, or that holds a digest the scan reports as in
+   use, is a stop. Untagged and referrer deletions log `"dry-run":true` too, with other messages.
 3. **Apply for real**: the same play without the `-e`. Watch the GC hour with the abort budget of "Dropping orphaned
    referrers" step 3 (node1 writes, cp1 fsync p99). **Abort** = apply again with
    `-e registry_zot_retention_dry_run=true`. That reload stops all deletion from the next GC pass on; a pass already
@@ -293,9 +299,10 @@ only the FIRST policy whose glob matches a repo):
   repos (`strive/ci/platform-e2e-local`, ...) whose `latest`/`ailab*`/`sha-*` tags rely on
   `strive/**`, and a first-match policy there would strip them.
 - `strive/**` keeps `latest`, `ailab` and `ailab-prev*`. It bounds two families, the `sha-<commit>` builds and
-  the `ailab-<digest>` protect tags: each keeps the `registry_zot_strive_keep_recent` (10) most recently pushed
+  the `ailab-<digest>` protect tags: each keeps the `registry_zot_strive_keep_recent` (30) most recently pushed
   tags OR any pushed within `registry_zot_strive_keep_within` (336h = 14 days). One keepTags entry per family,
-  which zot v2.1.18 ORs, so the 10 newest always stay. "Pushed" is zot's per-digest metaDB push time: re-tagging an
+  which zot v2.1.18 ORs, so the 30 newest always stay. The owner's target is 10. It drops to 10 once the platform
+  protects airlock's admitted workflow runtimes (see the defaults comment) and the pin scan passes at 10. "Pushed" is zot's per-digest metaDB push time: re-tagging an
   old digest does not refresh it. An `ailab-<digest>` tag also stays while its digest was PULLED within the window:
   the platform's `protect-ailab-images` job GETs every pinned digest daily, which refreshes zot's pull time, so a
   pin stays protected however old it is. A digest that job does not fetch is not covered; the pin scan catches

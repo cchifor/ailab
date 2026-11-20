@@ -187,8 +187,8 @@ registry_zot_config_allow_restart: false
 # A time window as the SOLE criterion stays wrong: age pruning alone is non-deterministic (it drops
 # the deployed pin in a quiet period and balloons under heavy CI). Count-only history: 25 pruned
 # sha-b80a376c out from under the LIVE ailab pins in ~4 days (registry-404 ImagePullBackOff on every
-# reschedule, 2026-06-28), then 100 with every ailab-<digest> tag kept forever. 10 + 14 days since
-# 2026-11-20 (owner): a GC'd digest can't be re-pulled, only rebuilt, so what is deployed must stay
+# reschedule, 2026-06-28), then 100 with every ailab-<digest> tag kept forever. A count plus 14 days
+# since 2026-11-20 (owner): a GC'd digest can't be re-pulled, only rebuilt, so what is deployed must stay
 # tagged. "Pushed" is zot's per-DIGEST metaDB PushTimestamp: re-tagging an existing digest (the
 # protect job's `imagetools create`) does NOT refresh it, so an ailab-<digest> tag ages from its
 # build, not from its tagging. BEFORE lowering either knob (or editing the macro), run
@@ -201,7 +201,14 @@ registry_zot_config_allow_restart: false
 # the metaDB LastPullTimestamp (v2.1.18 routes.go GetManifest -> meta.OnGetManifest ->
 # UpdateStatsOnDownload; a HEAD does not). So "pulled within 14 days" tracks "still pinned", with 13
 # days of slack if that job stops. A digest the job does not fetch is NOT covered: the gate shows it.
-registry_zot_strive_keep_recent: 10
+# 30, not the 10 the owner asked for, until that gap closes. On 2026-11-20 the gate failed at 10 and
+# 15: airlock's processingRuntimeAdmissions name 8 workflow runtimes that platform list-ailab-pins.py
+# does not list, so they are never re-fetched. They rank 11th-20th among workflow's protect tags by
+# push time. 20 passes with no spare rank; 30 leaves 10 (workflow gained 24 protect tags in the 30
+# days before, 3 in the last 14). Lower it to 10 once the platform protects those admissions and the
+# gate passes at 10. Until then a new workflow pin moves them one rank down: re-run the gate before
+# every apply.
+registry_zot_strive_keep_recent: 30
 # ...OR pushed within this window (and, for ailab-<digest>, pulled within it). A Go duration string
 # (zot parses it like gcDelay): 336h = 14 days.
 registry_zot_strive_keep_within: "336h"
