@@ -1,0 +1,169 @@
+# `promtool test rules` fixtures for local-drives-rules.yaml. Run by scripts/rules-lint.sh on every PR.
+# `rule_files` is the extracted spec name (rules-lint.sh hands promtool each PrometheusRule's `spec:`
+# body under the manifest's basename).
+rule_files:
+  - local-drives-rules.yaml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    name: spare below threshold (1) for 5m is critical; a host at 0 is quiet
+    input_series:
+      - series: nvme_critical_warning{job="proxmox-node", device="nvme0n1", instance="192.168.0.2:9100"}
+        values: 1x30
+      - series: nvme_critical_warning{job="proxmox-node", device="nvme0n1", instance="192.168.0.3:9100"}
+        values: '0x30'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: ProxmoxNvmeCriticalWarning
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ProxmoxNvmeCriticalWarning
+        exp_alerts:
+          - exp_labels:
+              job: proxmox-node
+              device: nvme0n1
+              instance: 192.168.0.2:9100
+              severity: critical
+            exp_annotations:
+              summary: 'Proxmox host 192.168.0.2:9100: NVMe nvme0n1 reports a critical warning (1)'
+              description: 'The local NVMe nvme0n1 on 192.168.0.2:9100 has set its critical-warning byte (temperature bit excluded; value 1): 1 = spare below threshold, 4 = reliability degraded, 8 = media read-only, 16 = volatile memory backup failed, 32 = persistent memory region read-only; values add up. Every local guest disk on that host (etcd''s included) is on this drive, and a read-only drive fails all their writes. Check `nvme smart-log /dev/nvme0` and `nvme error-log /dev/nvme0` on the host, move what can move off the host, and tell the owner (the drive needs replacing). Dashboard: Local Drives.'
+  - interval: 1m
+    name: the temperature bit alone (2) is left to ProxmoxNvmeTemperatureHigh
+    input_series:
+      - series: nvme_critical_warning{job="proxmox-node", device="nvme0n1", instance="192.168.0.2:9100"}
+        values: 2x30
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ProxmoxNvmeCriticalWarning
+        exp_alerts: []
+  - interval: 1m
+    name: temperature with spare (3) fires with the temperature bit masked out
+    input_series:
+      - series: nvme_critical_warning{job="proxmox-node", device="nvme0n1", instance="192.168.0.2:9100"}
+        values: 3x30
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ProxmoxNvmeCriticalWarning
+        exp_alerts:
+          - exp_labels:
+              job: proxmox-node
+              device: nvme0n1
+              instance: 192.168.0.2:9100
+              severity: critical
+            exp_annotations:
+              summary: 'Proxmox host 192.168.0.2:9100: NVMe nvme0n1 reports a critical warning (1)'
+              description: 'The local NVMe nvme0n1 on 192.168.0.2:9100 has set its critical-warning byte (temperature bit excluded; value 1): 1 = spare below threshold, 4 = reliability degraded, 8 = media read-only, 16 = volatile memory backup failed, 32 = persistent memory region read-only; values add up. Every local guest disk on that host (etcd''s included) is on this drive, and a read-only drive fails all their writes. Check `nvme smart-log /dev/nvme0` and `nvme error-log /dev/nvme0` on the host, move what can move off the host, and tell the owner (the drive needs replacing). Dashboard: Local Drives.'
+  - interval: 1m
+    name: media read-only with temperature (10) fires as 8
+    input_series:
+      - series: nvme_critical_warning{job="proxmox-node", device="nvme0n1", instance="192.168.0.2:9100"}
+        values: 10x30
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ProxmoxNvmeCriticalWarning
+        exp_alerts:
+          - exp_labels:
+              job: proxmox-node
+              device: nvme0n1
+              instance: 192.168.0.2:9100
+              severity: critical
+            exp_annotations:
+              summary: 'Proxmox host 192.168.0.2:9100: NVMe nvme0n1 reports a critical warning (8)'
+              description: 'The local NVMe nvme0n1 on 192.168.0.2:9100 has set its critical-warning byte (temperature bit excluded; value 8): 1 = spare below threshold, 4 = reliability degraded, 8 = media read-only, 16 = volatile memory backup failed, 32 = persistent memory region read-only; values add up. Every local guest disk on that host (etcd''s included) is on this drive, and a read-only drive fails all their writes. Check `nvme smart-log /dev/nvme0` and `nvme error-log /dev/nvme0` on the host, move what can move off the host, and tell the owner (the drive needs replacing). Dashboard: Local Drives.'
+  - interval: 1m
+    name: a bit set for under 5m does not fire
+    input_series:
+      - series: nvme_critical_warning{job="proxmox-node", device="nvme0n1", instance="192.168.0.2:9100"}
+        values: 0x5 4x3 0x20
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: ProxmoxNvmeCriticalWarning
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ProxmoxNvmeCriticalWarning
+        exp_alerts: []
+  - interval: 1m
+    name: a new media error fires for 24 h, then resolves; old errors alone are quiet
+    input_series:
+      - series: nvme_media_errors_total{job="proxmox-node", device="nvme0n1", instance="192.168.0.2:9100"}
+        values: 0x60 1x1560
+      - series: nvme_media_errors_total{job="proxmox-node", device="nvme0n1", instance="192.168.0.3:9100"}
+        values: 5x1620
+    alert_rule_test:
+      - eval_time: 50m
+        alertname: ProxmoxNvmeMediaErrors
+        exp_alerts: []
+      - eval_time: 2h
+        alertname: ProxmoxNvmeMediaErrors
+        exp_alerts:
+          - exp_labels:
+              job: proxmox-node
+              device: nvme0n1
+              instance: 192.168.0.2:9100
+              severity: warning
+            exp_annotations:
+              summary: 'Proxmox host 192.168.0.2:9100: NVMe nvme0n1 reported new media errors in the last 24 h'
+              description: 'The local NVMe nvme0n1 on 192.168.0.2:9100 has reported unrecovered data-integrity errors in the last 24 h (media_errors rose by about 1). The drive could not read data it had stored; a guest may have seen an I/O error. Check `nvme smart-log /dev/nvme0` and `nvme error-log /dev/nvme0` on the host and the guests'' kernel logs for I/O errors, and tell the owner. This resolves 24 h after the last new error. Dashboard: Local Drives.'
+      - eval_time: 24h
+        alertname: ProxmoxNvmeMediaErrors
+        exp_alerts:
+          - exp_labels:
+              job: proxmox-node
+              device: nvme0n1
+              instance: 192.168.0.2:9100
+              severity: warning
+            exp_annotations:
+              summary: 'Proxmox host 192.168.0.2:9100: NVMe nvme0n1 reported new media errors in the last 24 h'
+              description: 'The local NVMe nvme0n1 on 192.168.0.2:9100 has reported unrecovered data-integrity errors in the last 24 h (media_errors rose by about 1). The drive could not read data it had stored; a guest may have seen an I/O error. Check `nvme smart-log /dev/nvme0` and `nvme error-log /dev/nvme0` on the host and the guests'' kernel logs for I/O errors, and tell the owner. This resolves 24 h after the last new error. Dashboard: Local Drives.'
+      - eval_time: 26h
+        alertname: ProxmoxNvmeMediaErrors
+        exp_alerts: []
+  - interval: 1m
+    name: nvme.prom over an hour old for 15m warns; one rewritten every minute does not
+    input_series:
+      - series: up{job="proxmox-node", instance="192.168.0.2:9100"}
+        values: 1x120
+      - series: up{job="proxmox-node", instance="192.168.0.3:9100"}
+        values: 1x120
+      - series: node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.2:9100", file="/var/lib/prometheus/node-exporter/nvme.prom"}
+        values: '0x120'
+      - series: node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.3:9100", file="/var/lib/prometheus/node-exporter/nvme.prom"}
+        values: 0+60x120
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: ProxmoxNvmeSmartMetricsStale
+        exp_alerts: []
+      - eval_time: 80m
+        alertname: ProxmoxNvmeSmartMetricsStale
+        exp_alerts:
+          - exp_labels:
+              job: proxmox-node
+              instance: 192.168.0.2:9100
+              file: /var/lib/prometheus/node-exporter/nvme.prom
+              severity: warning
+            exp_annotations:
+              summary: 'Proxmox host 192.168.0.2:9100: the NVMe SMART metrics are stale or missing'
+              description: 'nvme.prom on 192.168.0.2:9100 is over an hour old or gone, so the drive''s wear, spare, media errors and critical warning are not being read: AiNodeNvmeWearHigh, ProxmoxNvmeCriticalWarning and ProxmoxNvmeMediaErrors judge stale numbers or nothing. The file comes from the Debian prometheus-node-exporter-collectors package: check `systemctl status prometheus-node-exporter-nvme.timer prometheus-node-exporter-nvme.service` and `journalctl -u prometheus-node-exporter-nvme` on the host (nvme-cli must be installed).'
+  - interval: 1m
+    name: nvme.prom missing on an up host warns (another textfile does not count); a down host is TargetDown's
+    input_series:
+      - series: up{job="proxmox-node", instance="192.168.0.2:9100"}
+        values: 1x60
+      - series: up{job="proxmox-node", instance="192.168.0.3:9100"}
+        values: '0x60'
+      - series: node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.2:9100", file="/var/lib/prometheus/node-exporter/apt.prom"}
+        values: 0+60x60
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ProxmoxNvmeSmartMetricsStale
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ProxmoxNvmeSmartMetricsStale
+        exp_alerts:
+          - exp_labels:
+              job: proxmox-node
+              instance: 192.168.0.2:9100
+              severity: warning
+            exp_annotations:
+              summary: 'Proxmox host 192.168.0.2:9100: the NVMe SMART metrics are stale or missing'
+              description: 'nvme.prom on 192.168.0.2:9100 is over an hour old or gone, so the drive''s wear, spare, media errors and critical warning are not being read: AiNodeNvmeWearHigh, ProxmoxNvmeCriticalWarning and ProxmoxNvmeMediaErrors judge stale numbers or nothing. The file comes from the Debian prometheus-node-exporter-collectors package: check `systemctl status prometheus-node-exporter-nvme.timer prometheus-node-exporter-nvme.service` and `journalctl -u prometheus-node-exporter-nvme` on the host (nvme-cli must be installed).'
