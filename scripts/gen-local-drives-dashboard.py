@@ -34,9 +34,11 @@ SECTIONS (one row each; every panel filters on the $host variable, All by defaul
 SOURCES. node_exporter on the hosts (job proxmox-node: diskstats, PSI, hwmon, and the Debian
 prometheus-node-exporter-collectors nvme textfile, refreshed every 15 min); pve-exporter (job
 pve-exporter: guest names, the pool's size/usage); kube-etcd and kube-state-metrics; the guests' own
-node_exporters (filesystem use). Two families are not live yet and their panels read "No data" until
-they are: pve_thin_* (#1886, pve_base tag thin_textfile: pool metadata %, per-volume allocation) and the
-trim beacons of #1883/#1884/#1885 (pve_lxc_fstrim_*, the node-fstrim CronJobs, node_fstrim_*).
+node_exporters (filesystem use). Some families are not live yet and their panels read "No data" until
+they are: pve_thin_* (#1886, pve_base tag thin_textfile: pool metadata %, per-volume allocation),
+pve_thin_lv_open from the same collector (a VM's untrimmed gap needs it as evidence that its disks are the
+local volumes), and the trim beacons of #1883/#1884/#1885 (pve_lxc_fstrim_*, the node-fstrim CronJobs,
+node_fstrim_*).
 
 Tests: scripts/tests/test_local_drives_dashboard.py (structure, no services) and
 scripts/tests/test_local_drives_dashboard_promql.py (what the joins return, promtool in Docker).
@@ -80,9 +82,11 @@ GUEST_FS = 'fstype=~"ext4|xfs|btrfs|vfat",job!="proxmox-node"'
 # A VM's own virtual disks as the guest sees them. A Talos node also sees the QNAP's iSCSI LUNs
 # (model iSCSI_Storage, its PVCs), which are not on this drive.
 QEMU_DISK = 'node_disk_info{job!="proxmox-node",model="QEMU_HARDDISK"}'
-# Range totals add up one STEP-long increase per step (see range_total), each attributed with the device
-# mapping of its own step. 5m: the increases tile the range exactly, 288 steps for a day.
-STEP = "5m"
+# The hosts' scrape interval. Per-guest counters are re-sampled at it with their volume's name attached
+# BEFORE rate()/increase() (see consumers()).
+RES = "30s"
+# A guest's thin volumes in #1886's series (its disks; not the cloud-init drive).
+DISK_LV = 'lv=~"(vm|base)-[0-9]+-disk-[0-9]+"'
 
 TYPE_MAP = [{"type": "value", "options": {
     "qemu": {"text": "VM", "index": 0}, "lxc": {"text": "LXC", "index": 1},
@@ -143,23 +147,28 @@ def top(expr, pick, only_active=False):
 
 
 def range_total(metric, scale=""):
-    """A consumer's total over the selected range: the sum of its {STEP} increases, each joined to the
-    device-mapper mapping at its OWN step. A dm-N number is reused when a guest stops or the host reboots;
-    an increase over the whole range joined to the mapping at its end would hand the old owner's I/O to
-    the new one and drop a volume that is gone at the end (reviewer-codex on #1890)."""
-    return f"sum_over_time(({consumers(metric, fn='increase', window=STEP, scale=scale)})[$__range:{STEP}])"
+    """A consumer's total over the selected range (see consumers(): the volume is attached per sample)."""
+    return consumers(metric, fn="increase", window="$__range", scale=scale)
 
 
 def consumers(metric, fn="rate", window=RI, scale=""):
     """Per consumer of the drive: every guest (its disks summed, named from pve_guest_info; a vmid that
     pve-exporter does not know reads "vmid <n>"), plus "<host> root", "<host> swap" and "<host> thin-pool
-    metadata". Labels: nodename, name, type (qemu | lxc | host), vmid. `scale` multiplies (sectors -> bytes)."""
-    r = f'{fn}({metric}{{{HOSTS},device=~"dm-[0-9]+"}}[{window}]){scale}'
-    guest = (f'sum by (instance, vmid) (label_replace({r} * on(instance, device) group_left(lv_name) {DM_GUEST}, '
+    metadata". Labels: nodename, name, type (qemu | lxc | host), vmid. `scale` multiplies (sectors -> bytes).
+
+    The counters are per dm-N device, and a dm-N number is reused when a guest stops or the host reboots. So
+    the volume's name is attached to every RAW sample (a {RES} subquery of counter x device-mapper info) before
+    rate()/increase(): each owner of a number gets a series of its own, with no false reset between them, and
+    a volume gone by the range's end keeps its I/O. Joining after rate()/increase() would hand a window's old
+    owner's I/O, and the reset, to the new one (reviewer-codex on #1890)."""
+    def per_volume(info):
+        joined = f'{metric}{{{HOSTS},device=~"dm-[0-9]+"}} * on(instance, device) group_left(lv_name) {info}'
+        return f"{fn}(({joined})[{window}:{RES}]){scale}"
+    guest = (f'sum by (instance, vmid) (label_replace({per_volume(DM_GUEST)}, '
              f'"vmid", "$1", "lv_name", "(?:vm|base)-([0-9]+)-.+"))')
     named = (f'({guest} * on(vmid) group_left(name, type) {GUEST_NAMES}) '
              f'or on(instance, vmid) label_replace({guest}, "name", "vmid $1", "vmid", "(.+)")')
-    host = f'sum by (instance, lv_name) ({r} * on(instance, device) group_left(lv_name) {DM_HOST})'
+    host = f'sum by (instance, lv_name) ({per_volume(DM_HOST)})'
     host_named = (f'label_replace(label_replace(label_join({on_host(host)}, "name", " ", "nodename", "lv_name"), '
                   f'"name", "$1 thin-pool metadata", "name", "(.+) data_tmeta"), "type", "host", "", "")')
     return f"max by (nodename, name, type, vmid) ({on_host(named)} or {host_named})"
@@ -168,29 +177,37 @@ def consumers(metric, fn="rate", window=RI, scale=""):
 def thin_by_guest(metric):
     """#1886's per-volume thin-pool series (pve_thin_lv_*), summed over a guest's disks, named and on the
     selected hosts. Labels: nodename, name, type, vmid."""
-    s = f'sum by (instance, vmid) ({metric}{{{HOSTS},lv=~"(vm|base)-[0-9]+-disk-[0-9]+"}})'
+    s = f'sum by (instance, vmid) ({metric}{{{HOSTS},{DISK_LV}}})'
     named = (f'({s} * on(vmid) group_left(name, type) {GUEST_NAMES}) '
              f'or on(instance, vmid) label_replace({s}, "name", "vmid $1", "vmid", "(.+)")')
     return f"max by (nodename, name, type, vmid) ({on_host(named)})"
 
 
-def guest_fs_used():
-    """Bytes a guest's own filesystems use ON ITS LOCAL VOLUMES (size - free, the filesystem's metadata
-    included), per vmid, from the guests' own node_exporters. Only filesystems that can be tied to the
-    guest's local-lvm volumes count, so storage elsewhere (the QNAP) can't make the gap look smaller
-    (reviewer-codex on #1890):
-      - a container's volumes are mounted under their device-mapper name, /dev/mapper/pve-vm--<id>--disk--<n>:
-        exact, per volume;
-      - a VM's filesystems on its QEMU hard disks count only when the guest has as many QEMU hard disks as
-        the host has local thin volumes for it (#1886's pve_thin_lv_size_bytes). A VM with a disk elsewhere
-        gets no figure rather than a wrong one. iSCSI LUNs (a Talos node's PVCs) are never QEMU disks.
-    Guests without node_exporter (the registry container) have no figure. Labels: name, type, vmid, nodename."""
+def _named(by_vmid):
+    """A per-vmid series named, typed and placed on its host (the selected hosts only)."""
+    return (f"max by (nodename, name, type, vmid) (({by_vmid}) * on(vmid) group_left(name, type) {GUEST_NAMES} "
+            f"* on(name) group_left(nodename) {GUEST_HOST})")
+
+
+# A container's volumes are mounted under their device-mapper names, which the guest's node_exporter reports.
+LXC_DEV = 'device=~"/dev/mapper/pve-vm--[0-9]+--disk--[0-9]+"'
+
+
+def _lxc_fs_used_by_device():
+    used = (f"node_filesystem_size_bytes{{{GUEST_FS},{LXC_DEV}}} - "
+            f"node_filesystem_free_bytes{{{GUEST_FS},{LXC_DEV}}}")
+    return f"max by (device) ({used})"
+
+
+def _vm_with_local_disks_only():
+    """The vmids whose guest-visible disks are all open local thin volumes, with their filesystems' use on
+    those disks. Evidence, not a count of volumes (reviewer-codex on #1890): a VM's QEMU hard disks
+    (node_disk_info in the guest; never the QNAP iSCSI LUNs a Talos node also sees) must number exactly its
+    local disk volumes that are OPEN on the host (pve_thin_lv_open: QEMU holds an attached disk open; a
+    source kept after a disk move, or an unused disk, is closed). Every open local volume of the vmid is one
+    of its attached disks, so equal numbers mean no attached disk is elsewhere. A VM with an EFI or TPM
+    volume (open, but not a guest disk) gets no figure: the safe side. Labels: vmid."""
     fs_used = f"(node_filesystem_size_bytes{{{GUEST_FS}}} - node_filesystem_free_bytes{{{GUEST_FS}}})"
-    lxc_dev = 'device=~"/dev/mapper/pve-vm--[0-9]+--disk--[0-9]+"'
-    lxc_used = (f"(node_filesystem_size_bytes{{{GUEST_FS},{lxc_dev}}} - "
-                f"node_filesystem_free_bytes{{{GUEST_FS},{lxc_dev}}})")
-    lxc = (f'sum by (vmid) (max by (vmid, device) (label_replace({lxc_used}, "vmid", "$1", "device", '
-           f'"/dev/mapper/pve-vm--([0-9]+)--disk--[0-9]+")))')
     uname = 'label_replace(node_uname_info{job!="proxmox-node"}, "name", "$1", "nodename", "(.+)")'
     qemu = f'label_replace({QEMU_DISK}, "disk", "$1", "device", "(.+)")'
     vm_fs = (f'max by (job, instance, device) (label_replace({fs_used}, "disk", "$1", "device", '
@@ -199,18 +216,34 @@ def guest_fs_used():
                f"* on(name) group_left(vmid) {GUEST_NAMES}")
     vm_disks = (f"count by (name) ({QEMU_DISK} * on(job, instance) group_left(name) {uname}) "
                 f"* on(name) group_left(vmid) {GUEST_NAMES}")
-    local_vols = f'count by (vmid) (pve_thin_lv_size_bytes{{{HOSTS},lv=~"(vm|base)-[0-9]+-disk-[0-9]+"}})'
-    vm = (f"max by (vmid) ({vm_used}) and on(vmid) "
-          f"(max by (vmid) ({vm_disks}) == on(vmid) {local_vols})")
-    return (f"max by (nodename, name, type, vmid) ((({lxc}) or on(vmid) ({vm})) "
-            f"* on(vmid) group_left(name, type) {GUEST_NAMES} * on(name) group_left(nodename) {GUEST_HOST})")
+    open_vols = f"count by (vmid) (pve_thin_lv_open{{{HOSTS},{DISK_LV}}} == 1)"
+    return f"max by (vmid) ({vm_used}) and on(vmid) (max by (vmid) ({vm_disks}) == on(vmid) {open_vols})"
+
+
+def guest_fs_used():
+    """Bytes a guest's own filesystems use ON ITS LOCAL VOLUMES (size - free, the filesystem's metadata
+    included), from the guests' own node_exporters, so storage elsewhere (the QNAP) can't make the gap look
+    smaller: a container's by its volumes' device-mapper names (exact), a VM's only with the evidence of
+    _vm_with_local_disks_only(); otherwise no figure. Guests without node_exporter (the registry container)
+    have none. Labels: nodename, name, type, vmid."""
+    lxc = (f'sum by (vmid) (label_replace({_lxc_fs_used_by_device()}, "vmid", "$1", "device", '
+           f'"/dev/mapper/pve-vm--([0-9]+)--disk--[0-9]+"))')
+    return _named(f"({lxc}) or on(vmid) ({_vm_with_local_disks_only()})")
 
 
 def untrimmed_gap():
     """Thin allocation minus the guest's filesystem use: blocks the guest freed but never discarded, plus
-    filesystem overhead and anything outside its filesystems (Talos's boot partitions, a guest's swap)."""
-    return (f"{thin_by_guest('pve_thin_lv_allocated_bytes')} - on(nodename, name, type, vmid) "
-            f"{guest_fs_used()}")
+    filesystem overhead and anything outside its filesystems (Talos's boot partitions, a guest's swap).
+      - a container: per VOLUME, its allocation minus the filesystem mounted from it (by device-mapper name),
+        summed; a volume with no filesystem in the guest (an unused one) is left out;
+      - a VM: the allocation of its OPEN disk volumes minus its filesystems' use, only with the evidence of
+        _vm_with_local_disks_only()."""
+    alloc = f"pve_thin_lv_allocated_bytes{{{HOSTS},{DISK_LV}}}"
+    lxc = (f'sum by (vmid) (label_replace({alloc}, "device", "/dev/mapper/pve-vm--$1--disk--$2", "lv", '
+           f'"vm-([0-9]+)-disk-([0-9]+)") - on(device) group_left() {_lxc_fs_used_by_device()})')
+    vm_alloc = (f"sum by (vmid) ({alloc} and on(instance, lv) (pve_thin_lv_open{{{HOSTS},{DISK_LV}}} == 1))")
+    vm = f"{vm_alloc} - on(vmid) {_vm_with_local_disks_only()}"
+    return _named(f"({lxc}) or on(vmid) ({vm})")
 
 
 def etcd_p99(hist):

@@ -5,11 +5,15 @@ The dashboard's own queries are taken from the generator, the Grafana variables 
 of three hosts, $__range = 1h), and run as `promql_expr_test`s by `promtool test rules` in the same pinned
 Prometheus image scripts/rules-lint.sh uses (Docker, no network). Pinned here:
 
-  * a dm-N number that changes owner inside the range: each guest gets its own I/O, not the other's
-    (reviewer-codex on #1890), and the host's root counts as "<host> root";
-  * the untrimmed gap and "filesystem used" count only filesystems on the guest's LOCAL volumes: a VM with
-    one disk on another storage gets no figure, a Talos node's iSCSI PVC filesystem is left out, a container
-    is matched by its device-mapper volume names, a bind mount counts once (reviewer-codex on #1890);
+  * a dm-N number that changes owner in the MIDDLE of a 5-minute window, with different write rates on either
+    side: each guest gets exactly its own I/O, not the other's and no false reset (reviewer-codex on #1890),
+    and the host's root counts as "<host> root";
+  * the untrimmed gap and "filesystem used" count only filesystems on the guest's LOCAL volumes, with
+    evidence (reviewer-codex on #1890): a VM whose source volume was kept after its disk moved to the QNAP
+    (closed on the host) gets no figure, nor one whose only local volume is an unused disk beside a remote
+    one, nor one with one local and one remote disk; a Talos node's iSCSI PVC filesystem is left out; a
+    container is matched per volume by device-mapper name, and its unused volume is left out of the gap; a
+    bind mount counts once;
   * allocation, virtual size, allocated %, share of the pool and the pool's metadata %, per guest, named,
     only on the selected hosts, with a cloud-pve guest reusing a vmid kept out;
   * bytes written per day is the raw counter difference, and stays positive across a drive replacement,
@@ -92,6 +96,8 @@ def guest(node, name, typ, vmid):
 
 
 CI1 = guest("ai-node1", "ci-runner-1", "qemu", "4101")
+MOVED = guest("ai-node1", "moved-vm", "qemu", "4203")
+MIXED = guest("ai-node2", "mixed-vm", "qemu", "4206")
 CI4 = guest("ai-node1", "ci-runner-4", "qemu", "4104")
 DW1 = guest("ai-node1", "dev-worker-1", "qemu", "4201")
 REG = guest("ai-node1", "registry", "lxc", "5004")
@@ -110,17 +116,19 @@ def estate():
     for gid, name, node in (("qemu/4101", "ci-runner-1", "ai-node1"), ("qemu/4104", "ci-runner-4", "ai-node1"),
                             ("qemu/4201", "dev-worker-1", "ai-node1"), ("lxc/5004", "registry", "ai-node1"),
                             ("lxc/5002", "ai-llm-2", "ai-node2"), ("qemu/4002", "talos-cp2", "ai-node2"),
-                            ("qemu/4202", "dev-worker-2", "ai-node2"), ("qemu/4103", "ci-runner-3", "ai-node3")):
+                            ("qemu/4202", "dev-worker-2", "ai-node2"), ("qemu/4103", "ci-runner-3", "ai-node3"),
+                            ("qemu/4203", "moved-vm", "ai-node1"), ("qemu/4206", "mixed-vm", "ai-node2")):
         s.add("pve_guest_info", {"job": "pve-exporter", "id": gid, "name": name, "node": node,
                                  "type": gid.split("/")[0]}, "1x70")
     # cloudlab's exporter reuses vmid 4101
     s.add("pve_guest_info", {"job": "cloud-pve", "id": "qemu/4101", "name": "cloud-ci-1", "node": "cloud1",
                              "type": "qemu"}, "1x70")
 
-    def lv(inst, name, vmid, size, alloc):
+    def lv(inst, name, vmid, size, alloc, is_open=1):
         L = {"job": "proxmox-node", "instance": inst, "pool": "pve/data", "lv": name, "vmid": vmid}
         s.add("pve_thin_lv_size_bytes", L, f"{size}x70")
         s.add("pve_thin_lv_allocated_bytes", L, f"{alloc}x70")
+        s.add("pve_thin_lv_open", L, f"{is_open}x70")
     lv(H1, "vm-4101-disk-0", "4101", 250 * GiB, 100 * GiB)
     lv(H1, "vm-4101-cloudinit", "4101", 4 * MiB, 393216)
     lv(H1, "vm-4201-disk-0", "4201", 60 * GiB, 30 * GiB)
@@ -128,6 +136,9 @@ def estate():
     lv(H1, "vm-5004-disk-0", "5004", 16 * GiB, 5 * GiB)
     lv(H2, "vm-5002-disk-0", "5002", 24 * GiB, 10 * GiB)
     lv(H2, "vm-5002-disk-1", "5002", 160 * GiB, 120 * GiB)
+    lv(H2, "vm-5002-disk-2", "5002", 8 * GiB, 7 * GiB, is_open=0)  # an unused container volume
+    lv(H1, "vm-4203-disk-0", "4203", 80 * GiB, 70 * GiB, is_open=0)  # source kept after a move to the QNAP
+    lv(H2, "vm-4206-disk-1", "4206", 16 * GiB, 10 * GiB, is_open=0)  # unused, beside a remote attached disk
     lv(H2, "vm-4002-disk-0", "4002", 76 * GiB, 50 * GiB)
     lv(H2, "vm-4202-disk-0", "4202", 60 * GiB, 40 * GiB)       # its second disk is on the QNAP
     lv(H3, "vm-4103-disk-0", "4103", 250 * GiB, 99 * GiB)      # unselected host
@@ -155,16 +166,20 @@ def estate():
     node("ai-llm-node", "192.168.0.45:9100", "ai-llm-2", [("nvme0n1", "KINGSTON"), ("dm-14", "")],
          [("/dev/mapper/pve-vm--5002--disk--0", "/", "ext4", 24 * GiB, 16 * GiB),
           ("/dev/mapper/pve-vm--5002--disk--1", "/models-local", "ext4", 160 * GiB, 60 * GiB)])
+    node("dev-worker-node", "192.168.0.12:9100", "moved-vm", [("sda", Q), ("sr0", DVD)],
+         [("/dev/sda1", "/", "ext4", 79 * GiB, 49 * GiB)])
+    node("dev-worker-node", "192.168.0.13:9100", "mixed-vm", [("sda", Q), ("sr0", DVD)],
+         [("/dev/sda1", "/", "ext4", 39 * GiB, 19 * GiB)])
     node("ci-runner-node", "192.168.0.16:9100", "ci-runner-3", [("sda", Q)],
          [("/dev/sda1", "/", "ext4", 240 * GiB, 200 * GiB)])
 
-    # Host device-mapper I/O on ai-node1: dm-9 belongs to ci-runner-1 until 30m, then (ci-runner-1 stopped,
-    # ci-runner-4 started) to ci-runner-4; its counter starts again. ci-runner-1 writes 1 MiB/min, ci-runner-4
-    # 2 MiB/min, the host root 0.5 MiB/min all hour.
+    # Host device-mapper I/O on ai-node1: dm-9 belongs to ci-runner-1 until 32m, in the middle of a 5-minute
+    # window; then (ci-runner-1 stopped, ci-runner-4 started) to ci-runner-4, and its counter starts again.
+    # ci-runner-1 writes 1 MiB/min, ci-runner-4 2 MiB/min, the host root 0.5 MiB/min all hour.
     dm = {"job": "proxmox-node", "instance": H1}
-    s.add("node_disk_device_mapper_info", {**dm, "device": "dm-9", "lv_name": "vm-4101-disk-0"}, "1x30 stale")
-    s.add("node_disk_device_mapper_info", {**dm, "device": "dm-9", "lv_name": "vm-4104-disk-0"}, "_x31 1x38")
-    s.add("node_disk_written_bytes_total", {**dm, "device": "dm-9"}, f"0+{MiB}x30 {2 * MiB}+{2 * MiB}x38")
+    s.add("node_disk_device_mapper_info", {**dm, "device": "dm-9", "lv_name": "vm-4101-disk-0"}, "1x32 stale")
+    s.add("node_disk_device_mapper_info", {**dm, "device": "dm-9", "lv_name": "vm-4104-disk-0"}, "_x33 1x36")
+    s.add("node_disk_written_bytes_total", {**dm, "device": "dm-9"}, f"0+{MiB}x32 {2 * MiB}+{2 * MiB}x36")
     s.add("node_disk_device_mapper_info", {**dm, "device": "dm-1", "lv_name": "root"}, "1x70")
     s.add("node_disk_written_bytes_total", {**dm, "device": "dm-1"}, f"0+{MiB // 2}x69")
 
@@ -198,20 +213,25 @@ def expr_tests():
     nv2 = {**nv1, "instance": H2, "nodename": "ai-node2"}
     one = lambda e: f"({e}) > bool 0"  # noqa: E731  presence and sign, where the exact float is not the point
     return [
-        # dm-9 changes owner at 30m: 6 five-minute windows each, 5 MiB vs 10 MiB per window.
-        ("dm owner change, written", panel_expr(W, "A"), "60m",
-         [sample(CI1, 30 * MiB), sample(CI4, 60 * MiB),
-          sample({"name": "ai-node1 root", "nodename": "ai-node1", "type": "host"}, 30 * MiB)]),
+        # dm-9 changes owner at 32m. ci-runner-1: 0 -> 32 MiB (+ a quarter-minute of extrapolation past its
+        # last sample); ci-runner-4: 2 -> 56 MiB from 33m (+ a quarter-minute before its first). In MiB,
+        # rounded to 0.25 (increase() extrapolates). Joining after increase() would give ci-runner-4 most of it.
+        ("dm owner change mid-window, written MiB", f"round(({panel_expr(W, 'A')}) / {MiB}, 0.25)", "60m",
+         [sample(CI1, 32.25), sample(CI4, 54.5),
+          sample({"name": "ai-node1 root", "nodename": "ai-node1", "type": "host"}, 30)]),
+        # Every volume counts in the pool's figures, unused or not.
         ("virtual size", panel_expr(T, "A"), "60m",
-         [sample(CI1, 250 * GiB), sample(DW1, 188 * GiB), sample(REG, 16 * GiB), sample(LLM2, 184 * GiB),
-          sample(CP2, 76 * GiB), sample(DW2, 60 * GiB)]),
+         [sample(CI1, 250 * GiB), sample(DW1, 188 * GiB), sample(REG, 16 * GiB), sample(LLM2, 192 * GiB),
+          sample(CP2, 76 * GiB), sample(DW2, 60 * GiB), sample(MOVED, 80 * GiB), sample(MIXED, 16 * GiB)]),
         ("allocated", panel_expr(T, "B"), "60m",
-         [sample(CI1, 100 * GiB), sample(DW1, 130 * GiB), sample(REG, 5 * GiB), sample(LLM2, 130 * GiB),
-          sample(CP2, 50 * GiB), sample(DW2, 40 * GiB)]),
+         [sample(CI1, 100 * GiB), sample(DW1, 130 * GiB), sample(REG, 5 * GiB), sample(LLM2, 137 * GiB),
+          sample(CP2, 50 * GiB), sample(DW2, 40 * GiB), sample(MOVED, 70 * GiB), sample(MIXED, 10 * GiB)]),
         ("allocated %", panel_expr(T, "C"), "60m",
-         [sample(CI1, 40), sample(DW1, 100 * 130 / 188), sample(REG, 31.25), sample(LLM2, 100 * 130 / 184),
-          sample(CP2, 100 * 50 / 76), sample(DW2, 100 * 40 / 60)]),
-        # local volumes only: no dev-worker-2 (a disk elsewhere), talos-cp2 without its iSCSI PVC, no registry
+         [sample(CI1, 40), sample(DW1, 100 * 130 / 188), sample(REG, 31.25), sample(LLM2, 100 * 137 / 192),
+          sample(CP2, 100 * 50 / 76), sample(DW2, 100 * 40 / 60), sample(MOVED, 87.5), sample(MIXED, 62.5)]),
+        # Local volumes only, with evidence: no dev-worker-2 (one disk elsewhere), no moved-vm (its local
+        # volume is the closed source of a move), no mixed-vm (an unused local disk beside a remote one), no
+        # registry (no node_exporter); talos-cp2 without its iSCSI PVC.
         ("filesystem used", panel_expr(T, "D"), "60m",
          [sample(CI1, 60.5 * GiB), sample(DW1, 90 * GiB), sample(LLM2, 108 * GiB), sample(CP2, 40 * GiB)]),
         ("untrimmed gap", panel_expr(T, "E"), "60m",
@@ -220,7 +240,8 @@ def expr_tests():
          [sample(CI1, 39.5 * GiB), sample(DW1, 40 * GiB), sample(LLM2, 22 * GiB), sample(CP2, 10 * GiB)]),
         ("share of pool", panel_expr(T, "F"), "60m",
          [sample(CI1, 100 * 100 / 1755), sample(DW1, 130 * 100 / 1755), sample(REG, 5 * 100 / 1755),
-          sample(LLM2, 130 * 100 / 1755), sample(CP2, 50 * 100 / 1755), sample(DW2, 40 * 100 / 1755)]),
+          sample(LLM2, 137 * 100 / 1755), sample(CP2, 50 * 100 / 1755), sample(DW2, 40 * 100 / 1755),
+          sample(MOVED, 70 * 100 / 1755), sample(MIXED, 10 * 100 / 1755)]),
         ("pool metadata %", panel_expr("Thin pool used % (data", "B"), "60m",
          [sample({"instance": H1, "job": "proxmox-node", "pool": "pve/data", "nodename": "ai-node1"}, 2.5),
           sample({"instance": H2, "job": "proxmox-node", "pool": "pve/data", "nodename": "ai-node2"}, 2.5)]),

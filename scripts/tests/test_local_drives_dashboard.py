@@ -168,13 +168,17 @@ class Queries(unittest.TestCase):
                     self.assertTrue(metrics(drawn))
                     self.assertEqual(metrics(drawn), metrics(pick))
 
-    def test_range_totals_attribute_each_step_with_its_own_mapping(self):
-        # A dm-N number changes owner when a guest stops or the host reboots: a counter's increase over the
-        # whole range, joined to the mapping at the range's end, would hand the old owner's I/O to the new
-        # one (reviewer-codex on #1890). Range-wide figures integrate per-step increases instead.
+    def test_per_guest_counters_carry_their_volume_before_any_range_function(self):
+        # A dm-N number changes owner when a guest stops or the host reboots. rate()/increase() on the dm counter
+        # joined to its owner AFTERWARDS would hand a window's (or the range's) old-owner I/O, and the reset, to
+        # the new owner (reviewer-codex on #1890): the volume name is attached to each raw sample first.
         for p, t in TARGETS:
             with self.subTest(f"{p['title']} {t['refId']}"):
-                self.assertNotRegex(t["expr"], r'device=~"dm-\[0-9\]\+"\}\[\$__range\]')
+                self.assertNotRegex(t["expr"], r'(rate|increase)\(node_disk_\w+\{[^}]*dm-')
+                for m in re.finditer(r'node_disk_\w+\{[^}]*device=~"dm-\[0-9\]\+"\}', t["expr"]):
+                    after = t["expr"][m.end():]
+                    self.assertTrue(after.startswith(" * on(instance, device) group_left(lv_name) "
+                                                     "node_disk_device_mapper_info"), after[:80])
 
     def test_variables_used_are_defined(self):
         defined = {v["name"] for v in DASH["templating"]["list"]}
