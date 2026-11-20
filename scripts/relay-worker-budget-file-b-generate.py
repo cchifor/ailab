@@ -203,6 +203,30 @@ def sql_text(value):
     return "'" + value.replace("'", "''") + "'"
 
 
+def dollar_quote_blocks(text):
+    """Close each DO block with a dollar-quote tag absent from its body.
+
+    PostgreSQL ends a dollar-quoted body at the first matching tag, even one inside an
+    embedded single-quoted literal, so a policy string containing e.g. `$post$` would
+    otherwise end the block early. The blocks are marked with control-character
+    sentinels, which validated inputs cannot contain.
+    """
+    for name in ("pre", "post"):
+        start, end = "\x01" + name + "-open\x01", "\x01" + name + "-close\x01"
+        if text.count(start) != 1 or text.count(end) != 1:
+            raise Fail("internal: DO block sentinel")
+        head, rest = text.split(start)
+        body, tail = rest.split(end)
+        tag, n = name, 0
+        while "$" + tag + "$" in body:
+            n += 1
+            tag = f"{name}{n}"
+        text = f"{head}${tag}${body}${tag}${tail}"
+    if "\x01" in text:
+        raise Fail("internal: DO block sentinel")
+    return text
+
+
 def canonical_sql(policy_expr, exclude_digest):
     # The Router's canonical() over a flat object (runtime.ts:22-26): keys in
     # UTF-16 order (= "C" byte order for these ASCII keys), compact members,
@@ -244,7 +268,7 @@ SET LOCAL ROLE relay_budget_owner;
 LOCK TABLE worker_budget.authority IN SHARE ROW EXCLUSIVE MODE;
 LOCK TABLE worker_budget.qualifications IN SHARE ROW EXCLUSIVE MODE;
 
-DO $pre$
+DO \x01pre-open\x01
 BEGIN
   IF (SELECT count(*) FROM worker_budget.authority) <> 1 THEN
     RAISE EXCEPTION 'step 7B precondition failed: need exactly one authority row';
@@ -269,7 +293,7 @@ BEGIN
     RAISE EXCEPTION 'step 7B precondition failed: qualificationExpiresAt has elapsed on the ledger clock';
   END IF;
 END
-$pre$;
+\x01pre-close\x01;
 
 -- qualifications: the one reviewed policy, compact canonical JSON (sorted keys).
 INSERT INTO worker_budget.qualifications (deployment_digest, digest, policy)
@@ -278,7 +302,7 @@ VALUES {row};
 -- Post-insert assertions: whole-row, NULL-safe (IS NOT DISTINCT FROM), exactly one row; the stored
 -- policy re-serialized in-database must equal the reviewed canonical text byte for byte, and the
 -- SHA-256 of its canonical form without `digest` must equal both digests (Router tokenPolicyDigest).
-DO $post$
+DO \x01post-open\x01
 BEGIN
   IF (SELECT count(*) FROM worker_budget.qualifications) <> 1
      OR (SELECT count(*) FROM worker_budget.qualifications
@@ -297,7 +321,7 @@ BEGIN
     RAISE EXCEPTION 'step 7B assertion failed: authority row count changed';
   END IF;
 END
-$post$;
+\x01post-close\x01;
 
 -- Readbacks, inside the transaction, before COMMIT. The first line beginning {{" is the stored
 -- policy as compact canonical JSON; grep '^{{"' step7b.out must equal file-b.json's policy.
@@ -346,7 +370,7 @@ def generate(inputs, *, override=None, now_ms=None):
     rows = check.rows_by_key(parsed["qualifications"], "generated File B", validate=True)
     if parsed["version"] != 1 or rows != {(deployment, policy["digest"]): policy}:
         raise Fail("internal: generated File B does not round-trip through the checker")
-    return policy, file_b, ledger_sql(deployment, policy).encode("utf-8")
+    return policy, file_b, dollar_quote_blocks(ledger_sql(deployment, policy)).encode("utf-8")
 
 
 def main(argv=None):

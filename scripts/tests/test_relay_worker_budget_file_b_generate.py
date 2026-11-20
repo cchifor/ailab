@@ -155,6 +155,23 @@ class Generate(unittest.TestCase):
         self.assertIn("\"model\":\"o''brien-model\"", sql.decode())
 
 
+    def test_dollar_quote_tags_avoid_policy_text(self):
+        # PostgreSQL ends a dollar-quoted body at the first matching tag, even inside a
+        # quoted literal: a policy string must never contain the tag closing its block.
+        _, _, normal = generate()
+        self.assertIn("DO $pre$", normal.decode())
+        self.assertIn("DO $post$", normal.decode())
+        model = "m$post$x$post1$y$pre$"
+        _, _, sql = generate(dict(INPUTS, model=model))
+        text = sql.decode()
+        self.assertNotIn("\x01", text)
+        for name, tag in (("pre", "pre"), ("post", "post2")):  # only the post block embeds the policy
+            self.assertIn(f"DO ${tag}$\nBEGIN", text)
+            body = text.split(f"DO ${tag}$", 1)[1].split(f"${tag}$;", 1)[0]
+            self.assertNotIn(f"${tag}$", body)
+        self.assertIn(model, text)
+
+
 class Refusals(unittest.TestCase):
     def refuse(self, pattern, inputs=None, **kwargs):
         with self.assertRaisesRegex(check.Fail, pattern):
@@ -420,6 +437,16 @@ VALUES ('relay_budget_allocator', 'relay.chifor.me', 'babbf5ca-38ab-42b2-b7c7-f7
         self.assertIn("qualifications must be empty", second.stderr)
         self.assertNotIn("COMMIT", second.stdout.splitlines())
         self.assertEqual(self.qualification_count(), 1)
+
+    def test_policy_text_with_dollar_quote_tags_commits_exactly(self):
+        model = "m$post$x$post1$y$pre$"
+        policy, _, sql = generate(dict(INPUTS, model=model), now_ms=None)
+        result = self.run_file_b(sql)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("COMMIT", result.stdout.splitlines())
+        stored = self.psql_raw("SELECT policy FROM worker_budget.qualifications", flags=["-qAt"], check=True).stdout
+        self.assertEqual(json.loads(stored), policy)
+        self.assertEqual(json.loads(stored)["model"], model)
 
     def assert_refused(self, setup_sql, message, sql=None):
         self.psql_raw(setup_sql, check=True)
