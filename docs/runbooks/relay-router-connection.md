@@ -1,4 +1,4 @@
-# Relay Router connection for the first researcher worker (inactive)
+# Relay Router connection for the first researcher worker (hub connection inactive)
 
 This is the fixed, reviewed record of the Relay → Router connection that the first repository-free
 researcher worker (`relay-researcher`, `gpt-6-luna` on the dedicated route `relay-researcher-luna`) will use, the Router's trust mapping for it, the
@@ -6,19 +6,20 @@ OpenBao escrow writer, and the order in which the operator brings them up. Owner
 the connection, binding and reader identity: [relay#277 comment 120817](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-120817)
 (caps in 120818 as corrected, amendments in 120903), 2026-11-14.
 
-**Nothing here was active when it merged.** Merging installed only inert objects: three OpenBao
-policies, two k8s-auth roles and one token role (no document, no token), and two ExternalSecrets that
-stay not-Ready until the operator writes their documents. The Relay connection is the **last** step
-below; its inclusion PR is hub upgrade step H6
+**State.** The signer keys and trust document are written, and the Router trust and budget-reader
+components are included (`kubernetes/apps/apps/llm-router/kustomization.yaml`; remaining-live-steps
+checklist steps 1-2 DONE). The hub release and budget client are deployed (H2-H4a). The Relay
+connection is the **last** step below; its inclusion PR is hub upgrade step H6
 ([relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md)), which also took it off
-`test_relay_v060_activation_gate.py`'s forbidden list. The Router trust stays un-included until step 6.
+`test_relay_v060_activation_gate.py`'s forbidden list. `relay-router-files` needs step 9's escrow token
+before H6 merges.
 
 | Source | Flux Kustomization | Merge effect |
 | --- | --- | --- |
 | `apps/infrastructure/security/openbao/relay-router-provision-job.yaml` | `openbao` | Policies `relay-router-escrow`, `af-app-relay-router`, `af-app-router-relay-keys`; k8s-auth roles of the two `af-app-*` names; token role `relay-router-escrow`. No KV document, no token |
 | `apps/relay-router-connection/credentials/` | `relay-router-credentials` (no wait) | SecretStore + ExternalSecret in `relay` and `llm-router`, not Ready until their documents exist |
 | `components/relay-router-connection` | `apps` (through `kubernetes/apps/apps/relay`, since hub step H6) | Step 10, the Relay connection |
-| `components/llm-router-relay-keys-trust` | none (not included) | Nothing until step 6 |
+| `components/llm-router-relay-keys-trust` | `apps` (included) | Step 6 complete; Router loads the public trust |
 
 `scripts/tests/test_relay_router_connection.py` pins the record, the digest, the trust mapping,
 the mounts, the policies and the inclusion gates; `scripts/tests/test-relay-router-provision.sh`
@@ -50,12 +51,18 @@ of those six fields is refused ("Router deployment identity changed; reconcile i
 invalidates the ledger rows below, so it is a **new connection**, not an edit. `name`, the kids and the
 file paths can change without that.
 
-**Public-origin trust.** The Router origin is public. The worker side reaches it with the pinned
-complete Mozilla CA bundle (`https://curl.se/ca/cacert.pem`, SHA-256
+**TLS trust.** The Router origin is public. On the post-qualification production path, the worker
+side reaches it with the pinned complete Mozilla CA bundle (`https://curl.se/ca/cacert.pem`, SHA-256
 `427c064216761a1e72a8b30f0d954d08cb6e4435a82091fb865afd20c8497285`, vendored by the researcher
-image; relay#277 comment 120903). Relay's own process keeps Node's bundled roots for it:
+image; [relay#277 comment 120903](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-120903)).
+This owner-recorded choice still applies. During qualification only, G3's measured `hostAliases`
+resolve the Router origin to the in-cluster terminator at `10.96.0.41`, and the pinned runtime and
+template use the ailab root CA in `/etc/relay/hub-ca.pem`
+(`docs/relay-workers/researcher-runtime-ca.crt`, `researcher-i4/binding.json`; installation Q1-Q5).
+
+Relay's own process keeps Node's bundled roots for the public Router origin:
 `NODE_EXTRA_CA_CERTS` only **adds** `ailab-ca` for the private OpenBao origin. Pinning Relay itself to
-that exact bundle would change trust for all of Relay's outbound TLS and is a separate decision.
+that exact Mozilla bundle would change trust for all of Relay's outbound TLS and is a separate decision.
 
 ## Deployment digest
 
@@ -91,11 +98,10 @@ Recompute it yourself from the merged record before using it anywhere. It goes, 
 - `worker_budget.qualifications.deployment_digest` of every qualification row;
 - `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` in `kubernetes/components/llm-router-worker-budget-reader`.
 
-**Why this PR does not write it into that component.** Its placeholder stays.
+**The reader digest is pinned.** Step 5 (ailab #1807) included the component with this value in
+`kubernetes/components/llm-router-worker-budget-reader/deployment.yaml`.
 `test_router_component_is_not_live_with_a_placeholder_digest` requires a 64-hex digest when the
-component is included and refuses one while it is not ("a real digest belongs in the same PR that
-includes the component"). The operator's inclusion PR (step 5) replaces the placeholder with this
-value.
+component is included. There is no remaining placeholder to replace.
 
 ## Router trust mapping
 
@@ -252,6 +258,11 @@ closed (`remote_unavailable`) until a valid token is in place.
 
 Every step is its own reviewed change or operator action. A failed readback stops the sequence.
 Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authority.md`.
+Steps 1-6 and the release deployment in step 8 are complete; retain their readbacks without repeating
+key generation or inclusion. H2-H4a ran before the remaining budget proofs. The resumed order is the
+[remaining-live-steps checklist](relay-researcher-remaining-live-steps.md): its steps 3-10, then H6
+(step 10 here). File B follows H6, before R0/H7, per the decisions in
+[ailab #1820](https://git.chifor.me/cchifor/ailab/issues/1820).
 
 1. **Record fixed (this PR merged).** Readback: the `openbao-relay-router-provision` Job log ends with
    `no KV document and no token written`; `bao policy read relay-router-escrow` is exactly the HCL
@@ -272,7 +283,8 @@ Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authorit
 
    Each role's two fingerprints are equal and the admin and reconciler fingerprints differ.
    `llm-router-relay-trust` becomes Ready; its `trust.json` (public keys only) parses as JSON and
-   still carries the `maxTokens` placeholder. `relay-router-files` stays not Ready (no token yet).
+   carries `workerBudgets.maxTokens` 7441536 (ailab #1778). `relay-router-files` stays not Ready (no
+   token yet).
 4. **Readers row** (budget step 7): `relay_budget_router` → this digest.
    Readback: `SELECT login, deployment_digest FROM worker_budget.readers;`
 5. **Router budget-reader inclusion** (budget step 8): one PR includes
@@ -280,11 +292,15 @@ Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authorit
    Recreate rollout; the `worker-budget-authority` plugin stays disabled. Readback: the router's
    `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` equals the digest, `GET /admin/v1/plugins` shows the plugin
    disabled, the mounted files' SHA-256 equal the Secret's.
-6. **Qualification, then Router trust inclusion.** After the route precondition is resolved and
-   qualification proves I (comment 120818 A/B): the `qualifications` rows (keyed on this digest) and
-   the `clients` row for `relay_budget_allocator` (issuer `relay.chifor.me`, connection
+6. **Router trust inclusion; File B later.** The owner decided on 2026-11-17 (remaining-live-steps
+   open point 6) to include the trust without the `qualifications` rows (File B, keyed on this
+   digest). File B follows H6, before H7 (`relay-researcher-hub-upgrade.md`, enablement order).
+   Before this step the route precondition is resolved, I is accepted (comment 120818 A/B), and
+   the `clients` row exists for `relay_budget_allocator`. It is written with File A at budget step 7
+   (`relay-worker-budget-authority.md`, step 7; the step-7 plan, ailab #1753 comment 124071), not here.
+   The row carries issuer `relay.chifor.me`, connection
    `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`, this digest, tenant `00000000-0000-4000-8000-000000000001`,
-   `max_tokens` 8 × (I + 8192), `max_requests` 8, `max_authority_ms` 120000). The ledger's
+   `max_tokens` 8 × (I + 8192), `max_requests` 8, `max_authority_ms` 120000. The ledger's
    `max_requests` applies only to scoped allocations (candidate runs); the canary's unscoped
    allocation is capped at 8 requests by the Router from the `requestLimit` Relay v0.10.3 sends
    (owner decision U10, relay#277 comment 124122). The trust `maxTokens` is already
@@ -292,8 +308,11 @@ Budget-runbook step numbers refer to `docs/runbooks/relay-worker-budget-authorit
    `components/llm-router-relay-keys-trust` and amends `test_relay_v060_activation_gate.py` for that
    component only. Readback:
    `SELECT login, issuer, connection_id, deployment_digest, tenant_ids, max_tokens, max_requests, max_authority_ms FROM worker_budget.clients;`;
-   after the rollout an unsigned `POST https://router.chifor.me/register/relay-keys` is refused with
-   403 `RELAY_DELEGATION_DENIED` (before inclusion the plugin does not serve that path),
+   after the rollout an unsigned `POST https://router.chifor.me/register/relay-keys` with
+   `Content-Type: application/json` and body
+   `{"version":1,"operationId":"operator-probe","action":"capabilities"}` is refused with
+   403 `RELAY_DELEGATION_DENIED` (an empty body fails schema validation first with 400;
+   llm-router `5a5181b7:packages/plugins/relay-keys/index.ts`, `contracts.ts`),
    `GET /admin/v1/plugins` shows `relay-keys` active, the log has no `Invalid RELAY_KEYS_TRUST_FILE`
    error, and the mounted `trust.json` SHA-256 equals the Secret's.
 7. **Budget authority ready** (budget steps 8-9): `worker_budget.authority.ready=true` after independent

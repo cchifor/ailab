@@ -173,6 +173,22 @@ eq "exits 143 (terminated)" 143 "$(cat "$CTL/rc")"
 eq "unmounted on SIGTERM" 1 "$(calls umount_calls)"
 eq "mount dir removed" 0 "$(ls -d "$CTL"/mnt/lxc-fstrim-* 2>/dev/null | wc -l | tr -d ' ')"
 
+echo "== SIGTERM during a pressure wait (the registry unit's TimeoutStartSec deadline): stops promptly, unmounts =="
+# The deadline in docs/runbooks/registry-cache.md relies on this: systemd SIGTERMs the unit's processes,
+# and a run that is waiting out high IO pressure must stop at once, not after its PSI_WAIT_MAX_S.
+new_case sigpsi; echo "some avg10=80.00 avg60=70.00 avg300=60.00 total=1" > "$CTL/psi"; touch "$CTL/block_sleep"
+env PATH="$BIN:$PATH" PSI_FILE="$CTL/psi" STOP_FILE="$CTL/stop" MOUNT_BASE="$CTL/mnt" LOCK_FILE="$CTL/lock" CHUNK_GB=8 PAUSE_S=1   PSI_MAX=45 PSI_WAIT_MAX_S=1800 bash "$SCRIPT" 5004 mp0 > "$CTL/out" 2>&1 &
+spid=$!
+for _ in $(seq 1 100); do [ -f "$CTL/sleeping" ] && break; /bin/sleep 0.1; done
+t0=$(date +%s)
+kill -TERM "$spid" $(pgrep -P "$spid") 2>/dev/null
+wait "$spid"; echo $? > "$CTL/rc"
+eq "exits 143 (terminated)" 143 "$(cat "$CTL/rc")"
+[ $(( $(date +%s) - t0 )) -le 5 ] && ok "stopped within 5 s, not after the 1800 s pressure budget" || bad "stopped promptly" "took $(( $(date +%s) - t0 )) s"
+eq "nothing trimmed" 0 "$(calls fstrim_calls)"
+eq "unmounted" 1 "$(calls umount_calls)"
+eq "mount dir removed" 0 "$(ls -d "$CTL"/mnt/lxc-fstrim-* 2>/dev/null | wc -l | tr -d ' ')"
+
 echo "== SIGTERM while an uninterruptible fstrim is in flight: waits for it, then unmounts =="
 new_case sigtrim; touch "$CTL/slow_trim"
 env PATH="$BIN:$PATH" PSI_FILE="$CTL/psi" STOP_FILE="$CTL/stop" MOUNT_BASE="$CTL/mnt" LOCK_FILE="$CTL/lock" CHUNK_GB=8 PAUSE_S=1   PSI_MAX=45 PSI_WAIT_MAX_S=5 bash "$SCRIPT" 5004 mp0 > "$CTL/out" 2>&1 &

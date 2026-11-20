@@ -28,12 +28,21 @@ neither help nor hurt) and exits 1 on any byte difference. It never touches the 
      exactly the S-A generator's candidate values to the agent config (policy.bootstrapSecrets true,
      the run's candidateRuntime) and render the chart with them, so the committed campaign state is
      reproduced byte for byte too, and any other difference still fails.
+     The leadership timing comes from the exported tree as well: its relay-researcher-bundle.py
+     (LEADERSHIP_OVERLAY, a temporary overlay) requires the bundle to carry exactly the runtime
+     preparation's timing (PREPARED_LEADERSHIP) and imports the overlay's in its place; this script
+     reports both and requires the committed config to carry the overlay. No option changes it.
 
-  relay-researcher-reproduce.py --relay <pinned relay checkout> --assets <release-asset dir> [--ref HEAD]
+  relay-researcher-reproduce.py --relay <pinned relay checkout> --assets <release-asset dir>
+                                [--agent-assets <agent release-asset dir>] [--ref HEAD]
 
 The Relay checkout must be at the pinned sourceCommit with `npm ci` done, Node 22.21+ on PATH, and
-helm on PATH (for --chart). The assets are the five files researcher-binding-inputs.json pins, from
-Gitea release 2142 (private: download them with your own token). Stdlib only; reads no secret.
+helm on PATH (for --chart). The assets are the five files researcher-binding-inputs.json pins in
+`release`, from Gitea release 2142 (private: download them with your own token). When the inputs at
+<ref> pin an `agentRelease` (an agent-only update: the agent image from a later release, runbook
+"Agent-only update"), --agent-assets is required and names the directory of the files it pins; it is
+refused otherwise. The checkout stays the RUNTIME's (release.sourceCommit): its code seals the
+binding, and its chart renders the agent. Stdlib only; reads no secret.
 `just relay-researcher-reproduce` wraps it.
 
 CI does not run this: ailab's runners hold no credential for the private cchifor/relay repository
@@ -118,8 +127,22 @@ def pins_are_placeholders(tree: Path) -> bool:
     return predicate(exported.pins())
 
 
-def reproduce(relay: Path, assets: Path, ref: str) -> list[str]:
+def leadership_overlay(tree: Path) -> tuple[dict, dict] | None:
+    """(PREPARED_LEADERSHIP, LEADERSHIP_OVERLAY) of the exported tree's bundle script, or None for a
+    ref from before the overlay (its import copies the bundle's timing)."""
+    exported = bundle_module(tree)
+    if not hasattr(exported, "LEADERSHIP_OVERLAY"):
+        return None
+    return exported.PREPARED_LEADERSHIP, exported.LEADERSHIP_OVERLAY
+
+
+def timing(value: dict) -> str:
+    return "/".join(str(value.get(k)) for k in ("leaseDurationSeconds", "renewDeadlineSeconds", "retryPeriodSeconds"))
+
+
+def reproduce(relay: Path, assets: Path, ref: str, agent_assets: Path | None = None) -> list[str]:
     relay, assets = relay.resolve(), assets.resolve()
+    agent_assets = agent_assets.resolve() if agent_assets is not None else None
     tsx = relay / "node_modules/.bin/tsx"
     if not tsx.is_file():
         raise Difference(f"{tsx} is missing: run `npm ci` in the pinned Relay checkout")
@@ -128,8 +151,16 @@ def reproduce(relay: Path, assets: Path, ref: str) -> list[str]:
         tree = work / "tree"
         tree.mkdir()
         commit = export(ref, tree)
-        print(f"reproducing {ref} ({commit}) with Relay {run(['git', '-C', str(relay), 'rev-parse', 'HEAD']).strip()}")
-        identity = json.loads((tree / INPUTS).read_text(encoding="utf-8"))["installation"]
+        inputs = json.loads((tree / INPUTS).read_text(encoding="utf-8"))
+        identity = inputs["installation"]
+        # An agent-only update needs the agent release's assets too; without one they are refused (the
+        # generator refuses the same, this only says it before anything runs).
+        if "agentRelease" in inputs and agent_assets is None:
+            raise Difference(f"{INPUTS} at {ref} pins an agentRelease: --agent-assets is required")
+        if "agentRelease" not in inputs and agent_assets is not None:
+            raise Difference(f"--agent-assets is refused: {INPUTS} at {ref} pins no agentRelease")
+        print(f"reproducing {ref} ({commit}) with Relay {run(['git', '-C', str(relay), 'rev-parse', 'HEAD']).strip()}"
+              + (", the agent from the inputs' agentRelease" if agent_assets is not None else ""))
         # After step I10 the committed definition carries the live fence UID; regenerate with it.
         fence = json.loads((tree / I4_OUTPUT / "definition.json").read_text(encoding="utf-8"))["identity"].get(
             "fenceObjectUid")
@@ -139,7 +170,8 @@ def reproduce(relay: Path, assets: Path, ref: str) -> list[str]:
         run([str(tsx), str(tree / "scripts/relay-researcher-binding.mts"), "--relay", str(relay),
              "--assets", str(assets), "--installation-id", identity["installationId"],
              "--installation-public-key", identity["installationPublicKey"], "--out", str(regenerated),
-             *(["--fence-object-uid", fence] if fence else [])])
+             *(["--fence-object-uid", fence] if fence else []),
+             *(["--agent-assets", str(agent_assets)] if agent_assets is not None else [])])
         produced = sorted(p.name for p in regenerated.iterdir())
         committed = sorted(p.name for p in (tree / I4_OUTPUT).iterdir())
         differences = [] if produced == committed == sorted(I4_FILES) else [
@@ -160,6 +192,16 @@ def reproduce(relay: Path, assets: Path, ref: str) -> list[str]:
         run([str(tsx), "scripts/prepare-pod-installation.ts", str(definition), digest, str(bundle)], cwd=relay)
         run([sys.executable, str(tree / "scripts/relay-researcher-bundle.py"), "check", str(bundle), "--chart", str(relay)])
         print("I5: prepare-pod-installation.ts and relay-researcher-bundle.py check --chart pass")
+        overlay = leadership_overlay(tree)
+        if overlay is not None:
+            prepared, leadership = overlay
+            produced = json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8"))["leadership"]
+            committed_timing = json.loads((tree / IMPORTED[1]).read_text(encoding="utf-8")).get("leadership")
+            print(f"I5: leadership overlay of {ref}: the bundle's {timing(produced)} (prepared "
+                  f"{timing(prepared)}) imported as {timing(leadership)}")
+            if produced != prepared or committed_timing != leadership:
+                differences.append(f"I5: leadership: bundle {produced}, committed {committed_timing}; the overlay "
+                                   f"replaces {prepared} with {leadership}")
         if not pins_are_placeholders(tree):
             before = work / "committed"
             for path in IMPORTED:
@@ -185,10 +227,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--relay", type=Path, required=True, help="pinned Relay checkout, `npm ci` done")
     parser.add_argument("--assets", type=Path, required=True, help="directory with the five pinned release assets")
+    parser.add_argument("--agent-assets", type=Path,
+                        help="directory with the assets the inputs' agentRelease pins (agent-only update only)")
     parser.add_argument("--ref", default="HEAD", help="committed ailab state to reproduce (default HEAD)")
     args = parser.parse_args(argv)
     try:
-        differences = reproduce(args.relay, args.assets, args.ref)
+        differences = reproduce(args.relay, args.assets, args.ref, args.agent_assets)
     except Difference as error:
         print(f"relay-researcher-reproduce: {error}", file=sys.stderr)
         return 1

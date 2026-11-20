@@ -1,0 +1,5 @@
+---
+# Thin-pool trim window, UTC (#1858). ai-node3 slots: ci-runner-3 00:00-01:45, ci-runner-6 01:50-03:35.
+# Runners on one node share its NVMe with etcd, so their windows must not overlap.
+gitea_runner_fstrim_window_start: "00:00"
+gitea_runner_fstrim_window_end: "01:45"

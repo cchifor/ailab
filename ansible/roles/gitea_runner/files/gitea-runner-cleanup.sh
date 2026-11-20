@@ -97,7 +97,7 @@ IDLE_CONFIRM_POLLS="${GITEA_CLEANUP_IDLE_CONFIRM_POLLS:-3}"
 # Hard SIZE cap for the docker build cache (bytes; 0 disables). Enforced with a full `builder prune -af`
 # on the idle path only, re-checking the busy signal first and only once disk is at/over PRESSURE_PCT —
 # see section 3b for why nothing cheaper bounds a continuously-reused cache, and for the residual race.
-CACHE_MAX_BYTES="${GITEA_CLEANUP_CACHE_MAX_BYTES:-20000000000}"
+CACHE_MAX_BYTES="${GITEA_CLEANUP_CACHE_MAX_BYTES:-40000000000}"
 # Disk% at which the full (unwindowed) image prune becomes available, on the idle path only. This
 # REPLACES the old IMAGE_MAX_BYTES cap, which could not bound the disk: an absolute byte cap and the
 # filesystem are independent quantities, so "images under cap" and "disk at 88%" were simultaneously
@@ -133,10 +133,31 @@ TEXTFILE_DIR="${GITEA_CLEANUP_TEXTFILE_DIR:-/var/lib/prometheus/node-exporter}"
 # an absolute path of at least two components. TARGET_KEEP_H=0 disables the sweep.
 TARGET_ROOTS="${GITEA_CLEANUP_TARGET_ROOTS:-/home/runner/.cache}"
 TARGET_MAXDEPTH="${GITEA_CLEANUP_TARGET_MAXDEPTH:-4}"          # how deep under a root a target dir may sit
-TARGET_KEEP_H="${GITEA_CLEANUP_TARGET_KEEP_H:-72}"             # at/over PRESSURE_PCT: files unread this long go
+TARGET_KEEP_H="${GITEA_CLEANUP_TARGET_KEEP_H:-72}"             # files unread this long go (at/over PRESSURE_PCT, or the age sweep)
 TARGET_KEEP_CRITICAL_H="${GITEA_CLEANUP_TARGET_KEEP_CRITICAL_H:-24}" # at/over CRITICAL_PCT
 TARGET_MIN_FREE_MB="${GITEA_CLEANUP_TARGET_MIN_FREE_MB:-1024}" # below this much to gain, the runner is not held
+# 1 = also sweep BELOW pressure: age alone (TARGET_KEEP_H) decides, on every idle tick, with the same guards
+# (confirmed gap, runner held and drained, TARGET_MIN_FREE_MB). 0 = only at/over PRESSURE_PCT (the original
+# behaviour). Why it exists: the root disks were grown 120 -> 200 -> 250 GB, so PRESSURE_PCT (75%) now sits
+# ~188 GB up and was never reached; the targets piled up unswept (41 GB on ci-runner-1, 2026-11-18) on a
+# QLC drive whose fill and wear etcd pays for. The docker levers stay disk-gated on purpose: an age sweep
+# rebuilds only what a later build needs, a forced docker prune re-pulls everything (variables.tf).
+TARGET_AGE_SWEEP="${GITEA_CLEANUP_TARGET_AGE_SWEEP:-0}"
+# The age path's own floor: below pressure the runner is held only when at least this much would go. The
+# pressure and critical paths keep TARGET_MIN_FREE_MB, where a small gain is exactly what is wanted.
+TARGET_AGE_MIN_FREE_MB="${GITEA_CLEANUP_TARGET_AGE_MIN_FREE_MB:-1024}"
+# The age path walks the target dirs at most once per this many hours (0 = every idle tick). The stamp is
+# written when a walk finds less than the floor, or after a sweep; a busy or held tick retries next tick.
+TARGET_AGE_EVERY_H="${GITEA_CLEANUP_TARGET_AGE_EVERY_H:-6}"
+TARGET_AGE_STAMP="${GITEA_CLEANUP_TARGET_AGE_STAMP:-$(dirname "$HEAL_STATE")/target-age-sweep.stamp}"
 BUILDKIT_DB="${GITEA_CLEANUP_BUILDKIT_DB:-/var/lib/docker/buildkit/cache.db}" # its size goes in the beacon
+# Leaked buildx builders (a read-only metric, see write_buildx_leak_metric): a builder container counts as
+# leaked once BuildKit has written nothing to its state volume for this long (12h, against a 3h job timeout).
+BUILDX_LEAK_IDLE_SEC="${GITEA_CLEANUP_BUILDX_LEAK_IDLE_SEC:-43200}"
+# Sizing a leaked volume walks it (du), so each size is cached this long per volume, and recomputed sooner
+# when the volume's activity changes.
+BUILDX_SIZE_TTL_SEC="${GITEA_CLEANUP_BUILDX_SIZE_TTL_SEC:-3600}"
+BUILDX_SIZE_CACHE="${GITEA_CLEANUP_BUILDX_SIZE_CACHE:-$(dirname "$HEAL_STATE")/buildx-size.cache}"
 
 # (No docker CLI -> exit 0 happens at the start of section 0, AFTER the runner recovery, which needs
 # only systemctl: a heal that left the runner stopped must still be recovered without docker.)
@@ -269,6 +290,9 @@ idle_confirmed() {
 # whose cache it never sees and which are EXCLUDED from container reaping (INFRA_EXCLUDE_RE) — so without
 # this their cache grows unbounded (the ~41 GB of build cache seen on the wedged ci-runner-2). Window-safe
 # (same `--filter until=` retention as the default-builder prune), so it can run under the pressure gate.
+# NB measured 2026-11-17: this runs as root, and root's `docker buildx ls` lists only root's builders, while
+# the jobs' builders are registered under /home/runner/.docker/buildx. So on the runners this reaches only
+# `default` (skipped). What those builders leak is measured by write_buildx_leak_metric, not removed.
 prune_extra_builders() {
   local win="$1" b
   docker buildx ls --format '{{.Name}}' 2>/dev/null | grep -vE '^$|^default$' | sort -u | while read -r b; do
@@ -346,6 +370,126 @@ write_heal_beacon() { # <dangling_record 0|1>
     heal_last_seconds "$lh" heals_total "$ht" pinned_cache_failed "$pf" > "$tmp"
   chmod 0644 "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$HEAL_BEACON_FILE" 2>/dev/null || rm -f "$tmp"
+}
+
+# ---- leaked buildx builders: MEASURED, never removed here (2026-11-17) -------------------------------
+# docker/setup-buildx-action (and `docker buildx create`) start a docker-container builder per job: a
+# container buildx_buildkit_<name> (buildkitd) and a volume buildx_buildkit_<name>_state that holds its
+# whole build cache. The action removes both in its post step, so a cancelled or killed job leaves them
+# behind, and nothing reclaims them (section 2 excludes builders; the per-builder prunes cannot see them).
+# 2026-11-17: 20.1 GB on ci-runner-9, 20.5 GB on ci-runner-10, two builders running 14h on ci-runner-5.
+# Removing one safely needs a job-admission guarantee this script does not have (a build can attach
+# between any check and the removal), so the cleanup only MEASURES them, and CIRunnerLeakedBuildxBuilders
+# sends an operator to the idle-only manual reap in docs/runbooks/ci-runners.md.
+# Leaked = EITHER a buildx_buildkit_*_state volume no container uses, OR a buildx_buildkit_* container
+# whose own state volume shows no BuildKit write for BUILDX_LEAK_IDLE_SEC. Not the container's age: a
+# builder that later jobs reuse by name (rmv-builder on ci-runner-9) can be weeks old and in use, and a
+# build writes BuildKit's bbolt databases (cache.db, history.db, runc-overlayfs/metadata_v2.db, ...), so
+# their newest mtime is the builder's last activity. A builder whose databases cannot be found (none yet,
+# or a layout this does not know) is UNKNOWN and not counted: a directory's own mtime says nothing about
+# writes to the files in it. A container with no state volume is not counted either.
+# Written to its own file every tick; a read that fails or times out writes NOTHING, so the last value
+# stays, as the heal beacon does. Sizes come from a per-volume cache (BUILDX_SIZE_CACHE, see
+# buildx_volume_bytes), so a leaked volume is walked at most once per BUILDX_SIZE_TTL_SEC.
+BUILDX_LEAK_FILE="$TEXTFILE_DIR/gitea_runner_buildx_leak.prom"
+# The mountpoint of volume <v>; non-zero when unreadable.
+buildx_volume_dir() {
+  local mp
+  mp="$(timeout 30 docker volume inspect -f '{{.Mountpoint}}' "$1" 2>/dev/null)" && [ -n "$mp" ] && [ -d "$mp" ] || return 1
+  printf '%s' "$mp"
+}
+# Epoch seconds of BuildKit's last write in the state dir <dir>: the newest mtime among the *.db files in
+# its first three levels. Bounded and cheap: no walk of the snapshots. 0 = found; 1 = the read failed;
+# 2 = no database there, so the activity is UNKNOWN.
+buildx_last_write() {
+  local dbs newest
+  dbs="$(timeout 30 find "$1" -maxdepth 3 -type f -name '*.db' -printf '%T@\n' 2>/dev/null)" || return 1
+  [ -n "$dbs" ] || return 2
+  newest="$(printf '%s\n' "$dbs" | sed 's/\..*$//' | sort -n | tail -n 1)"
+  is_num "$newest" || return 1
+  printf '%s' "$newest"
+}
+# Bytes volume <v> (mounted at <dir>, activity <act>) holds on disk. From BUILDX_SIZE_CACHE when its entry
+# has the same activity and is younger than BUILDX_SIZE_TTL_SEC; else a bounded du, which refreshes the
+# entry. Every entry used is queued in bx_size_cache_next, which replaces the cache at the end of a pass.
+# The cache is "<volume> <activity> <sized at> <bytes>" lines, parsed and validated, never sourced.
+# The size is left in bx_bytes (not printed: a $(...) subshell would lose the queued entry). Non-zero when
+# the volume cannot be sized.
+bx_size_cache_next=""; bx_bytes=0
+# A canonical, bounded decimal: what a number must be before $(( )) sees it. is_num is not enough here:
+# bash arithmetic reads 08 as a bad octal number (and aborts), and 2^63 wraps negative. 15 digits is
+# 999 TB, far past any disk.
+is_canon_num() { [[ "${1:-}" =~ ^(0|[1-9][0-9]{0,14})$ ]]; }
+buildx_volume_bytes() {
+  local v="$1" d="$2" act="$3" now ttl line cv ca cat cb b
+  now="$(date +%s)"; ttl="$BUILDX_SIZE_TTL_SEC"; is_num "$ttl" || ttl=3600
+  line="$(awk -v v="$v" '$1 == v { print; exit }' "$BUILDX_SIZE_CACHE" 2>/dev/null)"
+  read -r cv ca cat cb <<< "$line"
+  # Anything in the cache that is not a canonical bounded decimal is a miss, not a number.
+  if [ "${cv:-}" = "$v" ] && [ "${ca:-}" = "$act" ] && is_canon_num "${cat:-}" && is_canon_num "${cb:-}" \
+     && [ "$cat" -le "$now" ] && [ $(( now - cat )) -lt "$ttl" ]; then
+    b="$cb"
+  else
+    b="$(timeout 120 du -sxB1 "$d" 2>/dev/null | cut -f1)" && is_canon_num "$b" || return 1
+    cat="$now"
+  fi
+  bx_size_cache_next="${bx_size_cache_next}${v} ${act} ${cat} ${b}
+"
+  bx_bytes="$b"
+}
+write_buildx_leak_metric() {
+  [ "$BEACON" = 1 ] && [ -d "$TEXTFILE_DIR" ] || return 0
+  local idle_max ids cid meta name mounts v mp t rc b bytes=0 count=0 tmp vols
+  idle_max="$BUILDX_LEAK_IDLE_SEC"; is_num "$idle_max" && [ "$idle_max" -gt 0 ] || idle_max=43200
+  bx_size_cache_next=""
+  ids="$(timeout 30 docker ps -aq --filter name=buildx_buildkit_ 2>/dev/null)" \
+    || { log "buildx leak metric: cannot list containers -> not updated"; return 0; }
+  for cid in $ids; do
+    meta="$(timeout 30 docker inspect -f '{{.Name}}|{{range .Mounts}}{{if eq .Type "volume"}}{{.Name}} {{end}}{{end}}' "$cid" 2>/dev/null)" \
+      || { log "buildx leak metric: cannot inspect $cid -> not updated"; return 0; }
+    IFS='|' read -r name mounts <<< "$meta"
+    # The name filter is a substring match; this is the exact shape.
+    grep -qE '^/buildx_buildkit_[A-Za-z0-9][A-Za-z0-9_.-]*$' <<< "$name" || continue
+    for v in $mounts; do
+      [ "$v" = "buildx_buildkit_${name#/buildx_buildkit_}_state" ] || continue
+      mp="$(buildx_volume_dir "$v")" || { log "buildx leak metric: cannot find $v -> not updated"; return 0; }
+      rc=0; t="$(buildx_last_write "$mp")" || rc=$?
+      case "$rc" in
+        0) : ;;
+        2) log "buildx leak metric: no BuildKit database in $v -> activity unknown, not counted"; continue ;;
+        *) log "buildx leak metric: cannot read $v's activity -> not updated"; return 0 ;;
+      esac
+      [ $(( $(date +%s) - t )) -ge "$idle_max" ] || continue
+      buildx_volume_bytes "$v" "$mp" "$t" || { log "buildx leak metric: cannot size $v -> not updated"; return 0; }
+      count=$(( count + 1 )); bytes=$(( bytes + bx_bytes ))
+    done
+  done
+  vols="$(timeout 30 docker volume ls -q --filter dangling=true --filter name=buildx_buildkit_ 2>/dev/null)" \
+    || { log "buildx leak metric: cannot list volumes -> not updated"; return 0; }
+  for v in $vols; do
+    grep -qE '^buildx_buildkit_[A-Za-z0-9][A-Za-z0-9_.-]*_state$' <<< "$v" || continue
+    mp="$(buildx_volume_dir "$v")" || { log "buildx leak metric: cannot find $v -> not updated"; return 0; }
+    # Unattached counts whatever its activity; the activity only keys its cached size ("none" = no database).
+    rc=0; t="$(buildx_last_write "$mp")" || rc=$?
+    case "$rc" in
+      0) : ;;
+      2) t=none ;;
+      *) log "buildx leak metric: cannot read $v's activity -> not updated"; return 0 ;;
+    esac
+    buildx_volume_bytes "$v" "$mp" "$t" || { log "buildx leak metric: cannot size $v -> not updated"; return 0; }
+    count=$(( count + 1 )); bytes=$(( bytes + bx_bytes ))
+  done
+  tmp="$(mktemp "$BUILDX_LEAK_FILE.XXXX" 2>/dev/null)" || return 0
+  printf 'gitea_runner_buildx_leaked_bytes %s\ngitea_runner_buildx_leaked_builders %s\n' "$bytes" "$count" > "$tmp" \
+    || { rm -f "$tmp"; return 0; }
+  chmod 0644 "$tmp" 2>/dev/null || true # mktemp is 0600; node_exporter (non-root) must be able to read it
+  mv -f "$tmp" "$BUILDX_LEAK_FILE" 2>/dev/null || rm -f "$tmp"
+  # The size cache keeps only the volumes sized this pass. An optimisation: failing to write it is harmless.
+  mkdir -p "$(dirname "$BUILDX_SIZE_CACHE")" 2>/dev/null || true
+  tmp="$(mktemp "$BUILDX_SIZE_CACHE.XXXX" 2>/dev/null)" || return 0
+  if ! { printf '%s' "$bx_size_cache_next" > "$tmp" && mv -f "$tmp" "$BUILDX_SIZE_CACHE" 2>/dev/null; }; then
+    rm -f "$tmp"
+  fi
 }
 
 # A heal stopped the runner and has not seen it active since -> start it. Idempotent; runs at the top
@@ -552,6 +696,8 @@ fi
 
 recover_runner
 command -v docker >/dev/null 2>&1 || exit 0
+# Read-only, and before every early exit below, so the series is fresh on busy ticks too.
+write_buildx_leak_metric
 if [ "$HEAL_DANGLING" != 1 ]; then
   # A disabled heal must not leave its last value on node_exporter (a stale 1 would keep alerting).
   rm -f "$HEAL_BEACON_FILE" 2>/dev/null || true
@@ -1040,12 +1186,21 @@ fi
 #      its atime is always old, and deleting the marker would stop the next sweep recognising the dir.
 #    * Cargo hard-links artifacts (deps/libx-<hash>.rlib and the uplifted debug/libx.rlib are one inode),
 #      so the estimate counts each inode once and the freed space is read from du, before and after.
-#    * Disk-gated (TARGET_KEEP_H at PRESSURE_PCT, TARGET_KEEP_CRITICAL_H at CRITICAL_PCT) and NEVER on the
-#      mid-job path. Race-free by construction, like the heal in section 0: in a confirmed gap the runner is
+#    * Disk-gated (TARGET_KEEP_H at PRESSURE_PCT, TARGET_KEEP_CRITICAL_H at CRITICAL_PCT) or, with
+#      TARGET_AGE_SWEEP=1, age-gated below pressure (TARGET_KEEP_H, its own TARGET_AGE_MIN_FREE_MB floor, at
+#      most once per TARGET_AGE_EVERY_H); the critical window still needs the physical CRITICAL_PCT. NEVER on
+#      the mid-job path. Race-free by construction, like the heal in section 0: in a confirmed gap the runner is
 #      HELD (runner_held is persisted first, so a killed run is recovered by the next tick or ExecStopPost),
 #      stopped with its drain, the files deleted, and the runner started again. It is held only when at
 #      least TARGET_MIN_FREE_MB would go, so a runner full of something else is not taken out of the pool
 #      every tick for nothing.
+# Write the age-sweep cadence stamp. Its dir may not exist yet on a fresh host (it sits beside HEAL_STATE,
+# which is only created when the heal first persists state), and a silently failed touch would quietly
+# turn the cadence limit off, so create the dir and say so if the write still fails.
+stamp_age() {
+  mkdir -p "$(dirname "$TARGET_AGE_STAMP")" 2>/dev/null
+  touch "$TARGET_AGE_STAMP" 2>/dev/null || log "target sweep: cannot write the age stamp $TARGET_AGE_STAMP -> the cadence limit is off"
+}
 # Cargo target dirs under TARGET_ROOTS, NUL-separated: each dir holding a .rustc_info.json.
 cargo_target_dirs() {
   local root info d opts
@@ -1107,9 +1262,22 @@ elif [ -n "$TARGET_ROOTS" ]; then
 fi
 if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] && [ "$tg_dirs" -gt 0 ]; then
   pct_tg="$(disk_pct)"; is_num "$pct_tg" || pct_tg=0
-  if [ "$pct_tg" -ge "$PRESSURE_PCT" ]; then
-    if ! is_num "$TARGET_MIN_FREE_MB"; then
-      log "target sweep: TARGET_MIN_FREE_MB='$TARGET_MIN_FREE_MB' is not a number -> skipped"
+  # tg_age=1: below pressure, so only the age sweep may run (its own floor and cadence; the log suffix says so).
+  tg_age=0; tg_tag=""; tg_floor="$TARGET_MIN_FREE_MB"; tg_go=1
+  if [ "$pct_tg" -lt "$PRESSURE_PCT" ]; then
+    tg_age=1; tg_tag=" (age sweep)"; tg_floor="$TARGET_AGE_MIN_FREE_MB"
+    if [ "$TARGET_AGE_SWEEP" != 1 ]; then
+      tg_go=0
+    elif is_num "$TARGET_AGE_EVERY_H" && [ "$TARGET_AGE_EVERY_H" -gt 0 ] && [ -f "$TARGET_AGE_STAMP" ]; then
+      st_m="$(stat -c %Y "$TARGET_AGE_STAMP" 2>/dev/null)"; is_num "$st_m" || st_m=0
+      if [ $(( $(date +%s) - st_m )) -lt $(( TARGET_AGE_EVERY_H * 3600 )) ]; then
+        log "target sweep: age sweep looked less than ${TARGET_AGE_EVERY_H}h ago -> not this tick"; tg_go=0
+      fi
+    fi
+  fi
+  if [ "$tg_go" -eq 1 ]; then
+    if ! is_num "$tg_floor"; then
+      log "target sweep: min-free floor '$tg_floor' is not a number -> skipped${tg_tag}"
     else
       keep_h="$TARGET_KEEP_H"
       if [ "$pct_tg" -ge "$CRITICAL_PCT" ] && is_num "$TARGET_KEEP_CRITICAL_H" && [ "$TARGET_KEEP_CRITICAL_H" -lt "$keep_h" ]; then
@@ -1121,8 +1289,9 @@ if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] 
       tg_min=$(( keep_h * 60 ))
       stale=0
       for d in "${tdirs[@]}"; do b="$(target_stale_bytes "$d" "$tg_min")"; is_num "$b" && stale=$(( stale + b )); done
-      if [ "$stale" -lt $(( TARGET_MIN_FREE_MB * 1048576 )) ]; then
-        log "target sweep: ${tg_dirs} Cargo target dir(s), ${stale}B unread for ${keep_h}h < ${TARGET_MIN_FREE_MB}MB -> runner not held"
+      if [ "$stale" -lt $(( tg_floor * 1048576 )) ]; then
+        log "target sweep: ${tg_dirs} Cargo target dir(s), ${stale}B unread for ${keep_h}h < ${tg_floor}MB -> runner not held${tg_tag}"
+        [ "$tg_age" -eq 1 ] && stamp_age
       elif [ "$(state_get runner_held)" = 1 ]; then
         log "target sweep: an earlier runner recovery is still pending -> not this tick"
       elif ! idle_confirmed; then
@@ -1150,12 +1319,13 @@ if [ "$midjob" -eq 0 ] && is_num "$TARGET_KEEP_H" && [ "$TARGET_KEEP_H" -gt 0 ] 
             esac
           fi
           if [ "$held" -eq 1 ]; then
-            log "target sweep: disk ${pct_tg}%, ${stale}B in ${tg_dirs} Cargo target dir(s) unread for ${keep_h}h, runner held -> deleting"
+            log "target sweep: disk ${pct_tg}%, ${stale}B in ${tg_dirs} Cargo target dir(s) unread for ${keep_h}h, runner held -> deleting${tg_tag}"
             for d in "${tdirs[@]}"; do
               b="$(target_sweep_dir "$d" "$tg_min")"; is_num "$b" || b=0
               tg_freed=$(( tg_freed + b ))
               log "target sweep: $d freed ${b}B"
             done
+            [ "$tg_age" -eq 1 ] && stamp_age
           fi
           heal_release_runner
         fi

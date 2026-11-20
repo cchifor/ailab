@@ -1,0 +1,49 @@
+---
+# Grow the root partition + ext4 filesystem online to fill its disk after the disk was enlarged (a live
+# `qm resize`). cloud-init's growpart only runs at first boot; this needs no reboot. Idempotent: growpart
+# says NOCHANGE when the partition already fills the disk, and resize2fs says "Nothing to do" when the
+# filesystem fills the partition. Same steps as roles/dev_worker/tasks/rootfs.yml, host-class neutral.
+- name: Find the root filesystem's device and type
+  ansible.builtin.command: findmnt -n -o SOURCE,FSTYPE /
+  register: rootfs_grow_src
+  changed_when: false
+  check_mode: false
+
+# Only a root on a PLAIN PARTITION is grown (the runners: /dev/sda1 on virtio-scsi). An LVM/dm or
+# whole-disk root has no .../partition entry; the role then does nothing instead of failing a routine
+# `just runners` run (reviewer-claude on #1833).
+- name: Check that the root device is a plain partition
+  ansible.builtin.stat:
+    path: "/sys/class/block/{{ rootfs_grow_src.stdout.split()[0] | basename }}/partition"
+  register: rootfs_grow_part
+
+- name: Ensure growpart is installed (cloud-guest-utils)
+  ansible.builtin.package:
+    name: cloud-guest-utils
+    state: present
+  when: rootfs_grow_part.stat.exists
+
+# The rescan makes the guest see a disk enlarged while it runs even if QEMU's capacity-change event
+# was missed (it would otherwise report NOCHANGE and pass green at the old size).
+- name: Grow the root partition to fill its disk
+  ansible.builtin.shell: |
+    set -euo pipefail
+    part={{ rootfs_grow_src.stdout.split()[0] }}
+    disk=/dev/$(lsblk -no PKNAME "$part")
+    num=$(cat "/sys/class/block/$(basename "$part")/partition")
+    echo 1 > "/sys/class/block/$(basename "$disk")/device/rescan" 2>/dev/null || true
+    growpart "$disk" "$num"
+  args:
+    executable: /bin/bash
+  register: rootfs_grow_growpart
+  changed_when: "'CHANGED' in rootfs_grow_growpart.stdout"
+  failed_when: rootfs_grow_growpart.rc != 0 and 'NOCHANGE' not in rootfs_grow_growpart.stdout
+  when: rootfs_grow_src.stdout.split()[1] == 'ext4' and rootfs_grow_part.stat.exists
+
+# Every run, not only when growpart changed something this run: a resize2fs that failed (or a play
+# interrupted) after growpart still converges on the next run.
+- name: Grow the root ext4 filesystem online
+  ansible.builtin.command: resize2fs {{ rootfs_grow_src.stdout.split()[0] }}
+  register: rootfs_grow_resize2fs
+  changed_when: "'Nothing to do' not in (rootfs_grow_resize2fs.stdout + rootfs_grow_resize2fs.stderr)"
+  when: rootfs_grow_src.stdout.split()[1] == 'ext4' and rootfs_grow_part.stat.exists

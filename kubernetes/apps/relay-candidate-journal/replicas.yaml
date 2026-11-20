@@ -1,0 +1,12 @@
+# ZERO until the one-time initialization Job has succeeded and is terminal, and its Pod is gone
+# (docs/runbooks/relay-worker-candidate-journal.md, "Reviewed inputs and initialization"). Then the
+# operator sets ONE here in a reviewed PR. Never more than one: one primary, no standby, no promotion,
+# and ReadWriteOnce does not fence two Pods on one node.
+# scripts/tests/test_relay_candidate_journal.py refuses any other value.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: relay-candidate-journal-postgres
+  namespace: relay-candidate-journal-db
+spec:
+  replicas: 0

@@ -10,3 +10,10 @@ gitea_runner_cleanup_infra_exclude_re: 'buildkit|buildx| /dsh-conductor-image-pi
 # pin is removed and the untagged image with it. Only the pin is kept; the ephemeral contract for
 # job containers is unchanged. scripts/tests/test_dsh_validator_pin.py holds the two in step.
 github_runner_reclaim_keep_re: ' /dsh-conductor-image-pin$'
+
+# Thin-pool trim window, UTC (#1858). ai-node1 slots: ci-runner-1 00:00-01:25, ci-runner-4 01:30-03:10,
+# ci-runner-9 04:15-05:25 (not on Sundays). Runners on one node share its NVMe with etcd, so their windows
+# must not overlap. The node's registry LXC trim starts Sunday 03:30-03:45 and can run for hours
+# (docs/runbooks/registry-cache.md): this window ends before it, every day.
+gitea_runner_fstrim_window_start: "00:00"
+gitea_runner_fstrim_window_end: "01:25"

@@ -8,7 +8,8 @@ home dashboard via grafana.ini default_home_dashboard_path). Sections (collapsib
                  what alerted in the selected range + a per-node readiness timeline and the alert
                  table. Added after the 2026-09-20 env-node outage, which this dashboard could
                  only show as "Envs Ready = 0" in the (since retired, ADR 0037) test-pool row.
-  Hypervisors  — host-level node_exporter on the 3 Proxmox hosts (job="proxmox-node")
+  Hypervisors  — host-level node_exporter on the 3 Proxmox hosts (job="proxmox-node"), incl. APU/NVMe
+                 temperatures, NVMe writes/busy and NVMe wear (SMART, the hosts' nvme textfile)
   Instances    — pve-exporter per-guest (VMs + LXCs), label `id` = qemu/<vmid> | lxc/<vmid>
   AI           — amdgpu_* (iGPU) + llamacpp:* + AI-node CPU (node_exporter on the LXCs)
   Storage      — pve_storage pools + k8s PVC usage + host disk I/O + QNAP fabric probes
@@ -21,6 +22,7 @@ import json
 import pathlib
 
 DS = "${DS_PROMETHEUS}"
+DASH_UID = "ailab-reporting"           # the dashboard's uid; panel links into this dashboard use it too
 DS_LOKI = "${DS_LOKI}"
 _pid = 0
 HOSTS = 'job="proxmox-node"'           # the 3 Proxmox hosts' node_exporter
@@ -62,7 +64,12 @@ def row(title, y):
             "gridPos": {"x": 0, "y": y, "w": 24, "h": 1}, "panels": []}
 
 
-def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=None, maxv=None):
+def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=None, maxv=None,
+       thresholds=None, overrides=None, description=None, legend_calcs=None, time_from=None):
+    """`thresholds` (steps) draws each step as a dashed horizontal line (a limit to read the series
+    against, not a colour scheme); `overrides` are Grafana field overrides (e.g. a second axis).
+    `legend_calcs` puts values in the legend (e.g. ["lastNotNull"]); `time_from` pins the panel to its
+    own relative window (e.g. "14d") whatever the dashboard's range, for slow-moving series."""
     legends = legends or ["{{instance}}"] * len(exprs)
     defaults = {"unit": unit, "custom": {"drawStyle": "line", "fillOpacity": fill, "showPoints": "never",
                                          "stacking": {"mode": "none"}}}
@@ -70,14 +77,24 @@ def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=N
         defaults["decimals"] = decimals
     if maxv is not None:
         defaults["max"] = maxv
-    return {
+    if thresholds:
+        defaults["thresholds"] = {"mode": "absolute", "steps": thresholds}
+        defaults["custom"]["thresholdsStyle"] = {"mode": "dashed"}
+    panel = {
         "id": _nid(), "type": "timeseries", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
-        "fieldConfig": {"defaults": defaults, "overrides": []},
+        "fieldConfig": {"defaults": defaults, "overrides": overrides or []},
         "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
         "targets": [{"refId": chr(65 + i), "datasource": _ds(), "expr": e, "legendFormat": legends[i]}
                     for i, e in enumerate(exprs)],
     }
+    if legend_calcs:
+        panel["options"]["legend"]["calcs"] = legend_calcs
+    if time_from:
+        panel["timeFrom"] = time_from
+    if description:
+        panel["description"] = description
+    return panel
 
 
 def stat(title, x, y, w, h, expr, unit="none", decimals=0, steps=None, color="value", graph="area",
@@ -449,6 +466,105 @@ panels += [
                                        {"id": "mappings", "value": [{"type": "value", "options": {
                                            "performance": {"color": "green", "index": 0}}}]}])]),
 ]
+
+
+# Host panels keyed by hostname (ai-node1..3) instead of the scrape IP: join node_uname_info.
+def hn(expr):
+    return f'max by (instance, nodename) (({expr}) * on(instance) group_left(nodename) node_uname_info{{{HOSTS}}})'
+
+
+def hwmon(chip_name, sensor="temp1", chip=None):
+    """One hwmon temperature by chip NAME (k10temp, nvme): chip ids are PCI paths, names are stable.
+    `chip` pins one device where a name can repeat (nvme_nvme0 vs nvme_nvme1)."""
+    pin = f',chip="{chip}"' if chip else ""
+    return (f'node_hwmon_temp_celsius{{{HOSTS},sensor="{sensor}"{pin}}} * on(instance, chip) group_left() '
+            f'node_hwmon_chip_names{{{HOSTS},chip_name="{chip_name}"}}')
+
+
+# Thermals and the NVMe drives, added 2026-11-17: node1/2's drives were at 89%/85% of their rated
+# write life, written at ~4 TB/day (CI runners ~1 TB/day each), the APUs sat at their ~100 °C limit
+# and node1's system fan read 0 rpm (ailab memory ai-node-nvme-wear-and-thermals). Nothing on the
+# dashboard showed any of it.
+# ONE drive in all three panels: nvme0 (each host has one NVMe; local-lvm lives on it). Pinned, so a
+# second drive or a re-enumeration after a replacement can't mix devices (reviewer-claude on #1825).
+NVME_DISK = 'device="nvme0n1"'
+NVME_HWMON_CHIP = "nvme_nvme0"
+# Dashed lines: the drive's warning/critical (86/90 C, NVMe only) and the APU's ~100 C throttle point.
+TEMP_LIMITS = [{"color": "green", "value": None}, {"color": "orange", "value": 86}, {"color": "red", "value": 90},
+               {"color": "purple", "value": 100}]
+# Height of this line of panels: 10, so the wear trend's six-entry legend (with latest values) fits.
+NVME_ROW_H = 10
+WEAR_STEPS = [{"color": "green", "value": None}, {"color": "orange", "value": 70}, {"color": "red", "value": 85}]
+panels += [
+    ts("Temperature per Hypervisor (APU / NVMe)", 0, 21, 8, NVME_ROW_H,
+       [hn(hwmon("k10temp")), hn(hwmon("nvme", chip=NVME_HWMON_CHIP))], "celsius",
+       legends=["{{nodename}} APU", "{{nodename}} NVMe"], fill=0, decimals=0, thresholds=TEMP_LIMITS,
+       description="APU: Tctl (k10temp); this chip throttles itself at about 100 °C. NVMe: the drive's "
+                   "composite temperature, the one its own throttling uses. Dashed lines: the drive's "
+                   "warning (86 °C) and critical (90 °C) thresholds from `nvme id-ctrl` (WCTEMP/CCTEMP), "
+                   "which apply to the NVMe series only, and the APU's ~100 °C throttle point. "
+                   "Fan speeds are not exported: the fans hang off the board's EC, which Linux does not "
+                   "expose under Secure Boot."),
+    ts("NVMe Writes per Day + Busy % per Hypervisor", 8, 21, 8, NVME_ROW_H,
+       [hn(f'rate(node_disk_written_bytes_total{{{HOSTS},{NVME_DISK}}}[1h])') + " * 86400",
+        hn(f'rate(node_disk_io_time_seconds_total{{{HOSTS},{NVME_DISK}}}[5m])') + " * 100"], "decbytes",
+       legends=["{{nodename}} written/day", "{{nodename}} busy %"], fill=0, decimals=1,
+       overrides=[{"matcher": {"id": "byRegexp", "options": ".* busy %"},
+                   "properties": [{"id": "unit", "value": "percent"}, {"id": "min", "value": 0},
+                                  {"id": "max", "value": 100}, {"id": "decimals", "value": 0},
+                                  {"id": "custom.axisPlacement", "value": "right"},
+                                  {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}],
+       description="Left axis: bytes written to the host's NVMe, as a daily rate over the last hour "
+                   "(what wears the drive). Right axis, dashed: share of time the drive had I/O in "
+                   "flight; near 100% it is saturated and fsync latency (etcd on the Talos control "
+                   "planes) climbs. A CI runner VM writes about 1 TB/day."),
+    # A trend, not a table (owner, 2026-11-17: "show graphical traces to see the variation in time"):
+    # wear moves ~1%/day, so the panel is pinned to 14 d (under a relative dashboard range; Grafana may not
+    # apply a panel's relative time to an absolute or zoomed range, reviewer-codex on #1834).
+    ts("NVMe Wear (life used % · days to 100%)", 16, 21, 8, NVME_ROW_H,
+       [hn(f'nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}}') + " * 100",
+        # Guarded (reviewer-claude on #1825): used clamped to >= 1% (a fresh drive reads 0) and the daily
+        # rate to >= 1 data unit, so neither divides by zero; a drive past 100% shows 0, not negative.
+        "clamp_min(" + hn(f'((1 - nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}})'
+                          f' / clamp_min(nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}}, 0.01))'
+                          f' * nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}'
+                          # 1d, not 7d: Prometheus keeps ~15 d, so a 7-day window is partial (and reads
+                          # far too optimistic) over the first half of a 14-day trend; 1d also shows the
+                          # day-to-day swings in CI load.
+                          f' / clamp_min(rate(nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}[1d]) * 86400, 1)')
+        + ", 0)"], "percent",
+       legends=["{{nodename}} used", "{{nodename}} days left"], fill=0, decimals=0,
+       thresholds=WEAR_STEPS, legend_calcs=["lastNotNull"], time_from="14d",
+       overrides=[{"matcher": {"id": "byRegexp", "options": ".* days left"},
+                   "properties": [{"id": "unit", "value": "suffix: d"}, {"id": "decimals", "value": 0},
+                                  # symlog, not log (reviewer-codex on #1834): node1/2 sit at 10-60 d while
+                                  # node3 reaches ~250 d, and an exhausted drive reads 0, which a log axis
+                                  # cannot draw; symlog is linear below 1 d, so 0 stays visible.
+                                  {"id": "custom.scaleDistribution",
+                                   "value": {"type": "symlog", "log": 10, "linearThreshold": 1}},
+                                  {"id": "custom.axisPlacement", "value": "right"},
+                                  {"id": "custom.thresholdsStyle", "value": {"mode": "off"}},
+                                  {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}],
+       description="The last 14 days whenever the dashboard's range is relative (the default, e.g. "
+                   "'Last 6 hours'); after an absolute or zoomed range, the panel link opens it alone over the "
+                   "last 14 days. Left axis, solid: life used, the drive's own estimate of "
+                   "its rated write endurance consumed (SMART percentage_used; it can pass 100%, and "
+                   "failure risk rises after it); dashed lines at 70% and 85%. Right axis (symmetric log, so 0 days still shows), dashed: days "
+                   "to 100% at the last 24 h's write rate, assuming the same TB per 1% as the drive's life so "
+                   "far. The legend shows the latest values. Spare blocks and media errors are in the "
+                   "same source (nvme_available_spare_ratio, nvme_media_errors_total). Source: the "
+                   "hosts' nvme textfile collector, refreshed every few minutes."),
+]
+# An enforced 14-day view (reviewer-codex on #1834): Grafana applies a panel's relative time only under a
+# relative dashboard range, so the wear panel also links to itself, alone, over the last 14 days.
+for _p in panels:
+    if _p.get("title", "").startswith("NVMe Wear ("):
+        _p["links"] = [{"title": "Open the last 14 days (this panel alone)", "targetBlank": False,
+                        # viewPanel=panel-<id>: the scenes form (Grafana 11+; the cluster runs 13.0.2, dashboard-preview.py
+                        # pins the same). ids come from _nid() when ts() builds the panel, before this loop.
+                        "url": f"/d/{DASH_UID}/?from=now-14d&to=now&viewPanel=panel-{_p['id']}"}]
+HV_EXTRA_H = NVME_ROW_H  # the thermal/NVMe line above; every later row shifts by this (as HEALTH_H does below)
+_hv_end = len(panels)
 
 # ───────────────────────── Instances (VMs + Containers) ─────────────────────────
 panels.append(row("Instances (VMs + Containers — pve-exporter)", 21))
@@ -850,6 +966,8 @@ health += [
                                     {"id": "mappings", "value": [{"type": "value", "options": {
                                         "0": {"text": "n/a", "index": 0}}}]}])]),
 ]
+for _p in panels[_hv_end:]:
+    _p["gridPos"]["y"] += HV_EXTRA_H
 HEALTH_H = 13  # row (1) + stat tiles (4) + timeline/table (8): every pre-existing row shifts by this
 for _p in panels:
     _p["gridPos"]["y"] += HEALTH_H
@@ -857,7 +975,7 @@ panels = health + panels
 
 dashboard = {
     "title": "AI Lab Fleet",
-    "uid": "ailab-reporting",
+    "uid": DASH_UID,
     "tags": ["reporting", "infrastructure", "ailab", "fleet"],
     "timezone": "browser",
     "schemaVersion": 39,

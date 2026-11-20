@@ -1,0 +1,11 @@
+# Managed by ansible (role: pve_ec_fan). The ProxmoxEcFanTextfileStale alert fires when the file is 5 min old.
+[Unit]
+Description=Publish the EC fan and temperature readings every 30 s
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=30
+AccuracySec=1
+
+[Install]
+WantedBy=timers.target

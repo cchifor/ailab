@@ -4,24 +4,57 @@
     msg: "{{ inventory_hostname }} — Debian {{ ansible_distribution_release }}, kernel {{ ansible_kernel }}"
 
 # ---- APT repositories (homelab: no enterprise subscription) ----
+- name: Find the PVE enterprise repo list (PVE 8 bookworm)
+  ansible.builtin.stat:
+    path: /etc/apt/sources.list.d/pve-enterprise.list
+  register: pve_base_enterprise_list
+  when:
+    - pve_disable_enterprise_repo | bool
+    - ansible_distribution_release == 'bookworm'
+  tags: [repos]
+
 - name: Disable PVE enterprise repo (list format / PVE 8 bookworm)
   ansible.builtin.replace:
     path: /etc/apt/sources.list.d/pve-enterprise.list
     regexp: '^(deb\s+.*enterprise.*)$'
     replace: '# \1'
-  when: pve_disable_enterprise_repo | bool
-  failed_when: false
+  when:
+    - pve_disable_enterprise_repo | bool
+    - ansible_distribution_release == 'bookworm'
+    - pve_base_enterprise_list.stat.exists | default(false)
+  tags: [repos]
 
-- name: Disable PVE/Ceph enterprise repos (deb822 / PVE 9 trixie)
-  ansible.builtin.replace:
+# PVE 9 ships these deb822 files with NO `Enabled:` line. The earlier task replaced an existing line, matched
+# nothing and, hidden by failed_when: false, left both enterprise repos on: every `apt update` failed with 401
+# (found 2026-11-19 when pve_ec_fan's apt task failed on ai-node1). lineinfile replaces an existing `Enabled:`
+# line, or inserts one right after the first `Types:` line, so it lands INSIDE the stanza (appended at EOF after
+# a trailing blank line it would start a stanza of its own and disable nothing). These files hold one stanza;
+# lineinfile edits one line, so a multi-stanza file would only have its first stanza disabled.
+# A PVE or Ceph upgrade may rewrite these files (node1's ceph.sources became ceph-tentacle): re-run
+# `ansible-playbook site.yml --tags repos` after one.
+- name: Find the PVE/Ceph enterprise repo files (deb822 / PVE 9 trixie)
+  ansible.builtin.stat:
     path: "{{ item }}"
-    regexp: '^(Enabled:\s*).*$'
-    replace: '\1false'
   loop:
     - /etc/apt/sources.list.d/pve-enterprise.sources
     - /etc/apt/sources.list.d/ceph.sources
+  register: pve_base_enterprise_sources
   when: pve_disable_enterprise_repo | bool
-  failed_when: false
+  tags: [repos]
+
+- name: Disable the PVE/Ceph enterprise repos (deb822 / PVE 9 trixie)
+  ansible.builtin.lineinfile:
+    path: "{{ item.item }}"
+    regexp: '^Enabled:'
+    line: 'Enabled: false'
+    insertafter: '^Types:'
+    firstmatch: true
+    create: false
+  loop: "{{ pve_base_enterprise_sources.results | default([]) | selectattr('stat', 'defined') | selectattr('stat.exists') | list }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: pve_disable_enterprise_repo | bool
+  tags: [repos]
 
 - name: Add PVE no-subscription repo (bookworm / PVE 8)
   ansible.builtin.apt_repository:
@@ -31,6 +64,7 @@
   when:
     - pve_use_no_subscription_repo | bool
     - ansible_distribution_release == 'bookworm'
+  tags: [repos]
 
 - name: Add PVE no-subscription repo (trixie / PVE 9, deb822)
   ansible.builtin.copy:
@@ -45,11 +79,13 @@
   when:
     - pve_use_no_subscription_repo | bool
     - ansible_distribution_release == 'trixie'
+  tags: [repos]
 
 - name: APT update
   ansible.builtin.apt:
     update_cache: true
     cache_valid_time: 3600
+  tags: [repos]
 
 # ---- base packages + time sync ----
 - name: Install base packages
@@ -94,3 +130,31 @@
   when:
     - pve_pin_kernel | bool
     - pve_pinned_kernel | length > 0
+
+# ---- LVM thin-pool zeroing (pve_thin_pool_zero; see defaults/main.yml for the trade-off) ----
+# `just thinpool --limit <host>` (tags: thinpool) converges only this, one host at a time. The full
+# `base` tag (and `just net`) also runs it. `lvs --binary` prints 1/0, not "zero"/"".
+- name: Read the thin pool's zeroing flag
+  ansible.builtin.command: "lvs --noheadings --binary -o zero {{ pve_thin_pool }}"
+  register: pve_thin_pool_zero_state
+  changed_when: false
+  check_mode: false
+  tags: [thinpool]
+
+- name: Set the thin pool's zeroing flag (online; persists in the VG metadata)
+  ansible.builtin.command: "lvchange --zero {{ 'y' if (pve_thin_pool_zero | bool) else 'n' }} {{ pve_thin_pool }}"
+  when: (pve_thin_pool_zero_state.stdout | trim == '1') != (pve_thin_pool_zero | bool)
+  tags: [thinpool]
+
+# ---- Host writeback bounds (pve_base_writeback_sysctl; ADR 0042, see defaults/main.yml) ----
+# `ansible-playbook site.yml --limit <host> --tags writeback` converges only this. Live; no reboot.
+- name: Bound host writeback (dirty page cache)
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-ailab-writeback.conf
+    reload: true
+  loop: "{{ pve_base_writeback_sysctl | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}={{ item.value }}"
+  tags: [writeback]

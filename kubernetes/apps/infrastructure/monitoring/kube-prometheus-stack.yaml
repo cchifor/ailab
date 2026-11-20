@@ -74,12 +74,24 @@ spec:
       disabled:
         etcdHighNumberOfFailedGRPCRequests: true
     alertmanager:
+      # Two replicas on different nodes, one evictable at a time. Silences and the notification log live in
+      # each pod's data dir and are gossiped between the peers, so a pod that is rescheduled (a node drain)
+      # resyncs them from the other one; the pair also dedups notifications. With ONE ephemeral replica, the
+      # 2026-11-19 ai-node3 drain moved Alertmanager and wiped every silence: the planned window paged
+      # CIRunnerNodeDown x2, ReviewerNodeDown x2 and ControlPlaneRestartWave to ntfy unsilenced.
+      # Storage stays ephemeral on purpose: alerting must not depend on the QNAP it alerts about.
+      podDisruptionBudget:
+        enabled: true
+        minAvailable: 1
       alertmanagerSpec:
         priorityClassName: platform-critical
+        replicas: 2
+        podAntiAffinity: soft
+        podAntiAffinityTopologyKey: kubernetes.io/hostname
         resources:
           requests: { cpu: 25m, memory: 64Mi }
           limits: { memory: 128Mi }
-        storage: {} # ephemeral
+        storage: {} # ephemeral: see above
         secrets:
           - ntfy-auth # mounted at /etc/alertmanager/secrets/ntfy-auth/ -> password_file for the ntfy receiver
       # Route every alert to the self-hosted ntfy (push to phone); drop the inhibition-only alerts.

@@ -1,17 +1,32 @@
-# Relay hub upgrade for the first researcher worker (plan, inactive)
+# Relay hub upgrade for the first researcher worker (in progress)
 
-Status: **plan and staged components only. Nothing here is applied, and merging changes no cluster
-object.** It expands step 2 and 3 of the gated order in
+Status: **in progress. H1-H3 and H4a are applied; H5, H6, H7 and H4b are not.** Each step's PR changes
+the live hub when it merges (Flux), so each is held until the owner approves its rollout. This runbook
+expands step 2 and 3 of the gated order in
 [relay-worker-capacity.md](relay-worker-capacity.md#next-stage-first-researcher-runtime) and step 8
 ("Researcher release deployed") of [relay-router-connection.md](relay-router-connection.md), into the
 exact settings, their order, the readbacks and what rollback means. The installation that follows is
 [relay-researcher-installation.md](relay-researcher-installation.md), staged with its manifests in
 ailab #1766 (a separate PR; either can merge first).
 
-Live today (operator readback, recheck before acting): Relay v0.9.1, source `a53a3ee8`, image
-`registry.chifor.me/relay/control-plane@sha256:b2c269e7…`, schema 56, no installation, no recovery
-generation, no Router connection, no worker identity. Every write below is an operator action with the
-owner's direct confirmation for the exact reviewed rollout.
+State (hub operator readback on 2026-11-16 after the H4a roll, 17:33Z; agent pin updated 2026-11-18;
+recheck before acting):
+- Relay v0.10.4, source `e77bd09a`, image `registry.chifor.me/relay/control-plane@sha256:d1482bc1…57a7`
+  (ailab #1789), schema 79;
+- the first recovery generation is initialized, and installations are enabled (H3);
+- installation `b380ff7f-0716-478d-8b01-3d39f30e750b` is `ready`, epoch 2, with its fence UID pinned
+  (installation runbook I1-I10), and the slot is on its qualification egress stage (Q1-Q5);
+- the budget client files are mounted (H4a, ailab #1805);
+- the infrastructure agent is now v0.10.6 (`1599d06e`), an agent-only update pinned by
+  `docs/relay-workers/researcher-binding-inputs.json` `agentRelease`. Its `release` still pins the
+  runtime and binding to v0.10.3 (`c0fe50f0`); the hub remains v0.10.4. A later agent update is not a
+  replacement pin until its own reviewed update lands;
+- no Router connection, no agent control plane, no control monitoring, no candidate files and no profile
+  registry yet. H6 is ailab #1811, held while its preconditions are open.
+
+Before this work the hub was Relay v0.9.1 (`a53a3ee8`, schema 56, no installation and no recovery
+generation). Every write below is an operator action with the owner's direct confirmation for the exact
+reviewed rollout.
 
 The per-run ceremony for H7's signed candidate runs is [relay-researcher-qualification-campaign.md](relay-researcher-qualification-campaign.md).
 
@@ -28,11 +43,11 @@ The per-run ceremony for H7's signed candidate runs is [relay-researcher-qualifi
 | `relay-control-monitoring`, `relay-worker-monitoring` (existing) | control metrics and worker alerts | H6 |
 | `relay-worker-candidate` (new) | `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`; the run's document ConfigMap and the key-copy init container; `run/` is generated per signed run ([relay-candidate-run-generator.md](relay-candidate-run-generator.md)) | H7 |
 
-`scripts/tests/test_relay_v060_activation_gate.py` refuses the new components and their settings, and
-the Router connection and control plane, in the live overlay; each step's PR removes exactly its own
-entries from that list (H3's installation pair and H6's Router connection and control plane are
-gone). `relay-restore-fencing` stays includable on its own, because a restore of the hub needs it with
-or without installations. `test_relay_researcher_hub_upgrade.py`
+`scripts/tests/test_relay_v060_activation_gate.py` refuses H7's candidate files and H4b's profile registry in
+the live overlay; each step's PR removes exactly its own entries from that list (H3's installation pair and
+H6's Router connection and agent control plane are gone; H6's monitoring components were never on it).
+`relay-restore-fencing` stays includable on its own, because a restore of the hub needs it with or without
+installations. `test_relay_researcher_hub_upgrade.py`
 pins each patch, and refuses installations without the recovery generation (one way only), the profile
 registry without the installations and budget client or with a placeholder or wrong SHA, the control
 plane without the Router connection or next to `RELAY_ENVIRONMENTS`, `relay-gitea-authority` or
@@ -46,29 +61,29 @@ components change only the relay container's env, mounts and volumes (H7 also ad
 container, the only one that mounts the session-key Secret), and that the whole set (H3, H4a, H6 and
 H4b) and the H7 set (H3, H4a, H6 and the candidate files) combine without collision. It layers every case on the overlay without the hub
 components, and proves that the live overlay renders as exactly that plus the ones it already
-includes (H3 on).
+includes (H3 and H4a on).
 
 ## Operator-filled values
 
 | Value | Where it goes | From |
 | --- | --- | --- |
 | Hub image digest | both `registry.chifor.me/relay/control-plane@sha256:…` lines of `kubernetes/apps/apps/relay/relay.yaml` (`migrate` and `relay`) | the release's `deployment-images-<run>.json` receipt |
-| Source commit, release name | the `chifor.me/source-commit` and `chifor.me/release` annotations and the two image comments | the same receipt; equals the installation's `sourceCommit` |
-| N, the target schema | readback only | `CURRENT_SCHEMA_VERSION` in `server/schema.ts` and the highest `migrations/NNN_*.sql` at that commit (both 79 on Relay main `2ce7cd7ab`) |
+| Source commit, release name | the `chifor.me/source-commit` and `chifor.me/release` annotations and the two image comments | the hub receipt: `e77bd09a4d9179d81ebf5d01ac26c535d1eb8433`, `relay-0.10.4-release-134512`; distinct from the installation's runtime `sourceCommit` |
+| N, the target schema | readback only | `CURRENT_SCHEMA_VERSION` in `server/schema.ts` and the highest `migrations/NNN_*.sql` at the hub commit `e77bd09a` (both 79) |
 | Recovery generation UUID | the operator-created ConfigMap `relay/relay-recovery-generation` (never in git, never in a backup) | `uuid.uuid4()` at step H3 |
 | Profile registry, its SHA-256 | `kubernetes/components/relay-worker-profiles/profiles.json` and that component's `RELAY_WORKER_PROFILES_SHA256` | the release's researcher profile package, with the genuine release approval and the qualified `tokenPolicyDigests` (step H4b) |
 
-None is guessed: until the release is pinned, the image, commit and N stay unknown, and the registry
-stays unknown until the release approval exists (H4b).
+The hub image, commit and N are pinned in `kubernetes/apps/apps/relay/relay.yaml` and the cited Relay
+source. The registry stays unknown until the release approval exists (H4b).
 
 ## Owner decisions (relay#277 comment 122379, 2026-11-14)
 
 **G1. The first recovery generation comes from a one-shot initializer, never from the fence.** Until
 now the only way to create a `relay_recovery_fences` row was `npm run recovery:fence`
 (`server/agent-sessions/restore-fence.ts`), which on the live hub would revoke every connector, agent
-key, browser session and channel membership. The pinned researcher release therefore ships a new
-command, `recovery:initialize` (Relay PR **pending**; its exact compiled script name and arguments
-come from that release and are copied into step H3 when it is pinned). As decided, it:
+key, browser session and channel membership. The pinned hub release (v0.10.4, `e77bd09a`) ships the
+`recovery:initialize` command (`scripts/initialize-recovery.ts`, `package.json`; exact invocation
+in H3). As decided, it:
 
 - refuses if **any** `relay_recovery_fences` row exists, active or not, or any generation-bound
   authority exists (infrastructure installations, worker grants, management credentials, creation
@@ -116,8 +131,11 @@ lifetime 8 h. See [relay-researcher-installation.md](relay-researcher-installati
 
 ### H0. Preconditions
 
-- The researcher release is reviewer-merged and published: hub receipt, agent and runtime publish
-  receipts, all from one `sourceCommit`. It contains the `recovery:initialize` command (G1) and the
+- The researcher releases are reviewer-merged and published: the hub receipt matches `relay.yaml`,
+  the runtime receipt matches `researcher-binding-inputs.json` `release`, and the agent receipt matches
+  its `agentRelease`. These are separate source commits after the hub-only and agent-only updates.
+  The pinned hub release (v0.10.4, `e77bd09a`) contains the `recovery:initialize` command (G1),
+  run from H2's hub image in H3 step 4. The pinned runtime release (v0.10.3, `c0fe50f0`) contains the
   Relay part of G3: `PodRuntimeBinding.hostAliases` rendered and measured, the Router and
   communication CA pins, the candidate journal alias and the hub-partition driver with separate hub
   and Router rules. The runtime is built with `hubCa` = the ailab root CA
@@ -135,6 +153,9 @@ lifetime 8 h. See [relay-researcher-installation.md](relay-researcher-installati
   of Relay for the backup, migration and start (minutes; the backup has a 30-minute bound).
 
 ### H1. Verified backup before anything changes
+
+H1-H3 and H4a below record the completed rollout from v0.9.1. Do not repeat the migration or initial
+generation ceremony on today's initialized database; resume at H5 after the checklist readbacks.
 
 1. Record the live state: image digest and annotations of `deploy/relay`, and
 
@@ -164,7 +185,7 @@ One reviewed PR edits `kubernetes/apps/apps/relay/relay.yaml` only: the hub dige
 `migrate` and `relay`, the release and source annotations, the two comments. No env change, no
 component. Merging is a Recreate rollout through the existing gate: `backup-database` dumps,
 `backup-artifacts` publishes and writes `/tmp/relay-pre-migration-backup.json`, `migrate` applies
-migrations **057 through N** in order, each in its own transaction (on main `2ce7cd7ab`: 057
+migrations **057 through N** in order, each in its own transaction (on the hub commit `e77bd09a`: 057
 `infrastructure_installations` … 079 `worker_provenance_connectors`, 23 files), re-grants `relay_app`,
 runs bootstrap, then `relay` starts.
 
@@ -216,17 +237,23 @@ Readback:
    the owner's evidence, outside the cluster.
 3. **Freeze Relay for the window.** Once a generation row exists, a Relay process started without
    the generation file refuses to start, so no Relay may restart between step 4 and step 5:
-   `flux suspend kustomization apps -n flux-system`, then
+   `flux --context admin@ai suspend kustomization apps -n flux-system`, then
    `kubectl --context admin@ai -n relay scale deploy/relay --replicas=0` and wait until no `relay` Pod
    remains. (Installations are off until step 5, so a running hub could not have created
-   generation-bound authority; the freeze is about the restart, not about racing the initializer.) If
-   the pinned initializer keeps the fence's other-client check, also make sure no `relay-postgres-dump`
-   Job is running and, as `postgres`, `GRANT pg_read_all_stats TO relay_migrator;` for the window.
+   generation-bound authority; the freeze is about the restart, not about racing the initializer.)
+   The shipped initializer imports and calls `initializeRecoveryGeneration` from `restore-fence.ts`
+   (`e77bd09a:scripts/initialize-recovery.ts:6-10,87-94`). That helper locks the generation-bound
+   authority tables and allows other clients to stay connected
+   (`e77bd09a:server/agent-sessions/restore-fence.ts:605-609`). Its initialization path does not
+   inspect `pg_stat_activity`, so no `pg_read_all_stats` grant is needed (`restore-fence.ts:546-664`);
+   the other-client inspection belongs to `recovery:fence` (`restore-fence.ts:227-244`, same commit).
 4. **Initialize.** A one-off Pod with the H2 release image, the schema owner from `relay-migrations`
    and the generation file, in namespace `relay`, labelled `app: relay-backup` so the existing
    `relay-backup` NetworkPolicy gives it DNS and PostgreSQL only. The command line is the pinned
-   release's `recovery:initialize` (compiled script and the "current, unrestored database" statement
-   exactly as that release documents them; the Relay PR is pending):
+   release's `recovery:initialize`: the attestation repeats the database name, and `--receipt-file`
+   must name a new absolute writable path (`e77bd09a:scripts/initialize-recovery.ts:12-45,77-96`).
+   The small `emptyDir` below supplies that path under the read-only root filesystem; stdout is
+   retained outside the Pod before deletion:
 
    ```yaml
    apiVersion: v1
@@ -236,33 +263,39 @@ Readback:
      restartPolicy: Never
      automountServiceAccountToken: false
      tolerations: [{key: dedicated, operator: Equal, value: agent, effect: NoSchedule}]
-     securityContext: {runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, seccompProfile: {type: RuntimeDefault}}
+     securityContext: {runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: {type: RuntimeDefault}}
      containers:
      - name: initialize
        image: registry.chifor.me/relay/control-plane@sha256:<the H2 digest>
        workingDir: /app
-       command: [node, dist/scripts/<recovery:initialize script of the pinned release>, relay, <its current-database statement>]
+       # recovery:initialize (package.json), compiled in the pinned hub image
+       command: [node, dist/scripts/initialize-recovery.js, relay, --current-unrestored-database, relay, --receipt-file, /run/relay-initialize/receipt.json]
        envFrom: [{secretRef: {name: relay-migrations}}]
        env: [{name: RELAY_RECOVERY_GENERATION_FILE, value: /run/relay-restore/generation.json}]
        securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
-       volumeMounts: [{name: generation, mountPath: /run/relay-restore/generation.json, subPath: generation.json, readOnly: true}]
+       volumeMounts:
+       - {name: generation, mountPath: /run/relay-restore/generation.json, subPath: generation.json, readOnly: true}
+       - {name: receipt, mountPath: /run/relay-initialize}
      volumes:
      - name: generation
        configMap: {name: relay-recovery-generation, defaultMode: 292, items: [{key: generation.json, path: generation.json}]}
+     - name: receipt
+       emptyDir: {sizeLimit: 1Mi}
    ```
 
-   `kubectl create -f`, wait for it to finish, and save its stdout: the receipt with
+   `kubectl --context admin@ai create -f <reviewed Pod file>`, wait for it to finish, and save its stdout: the receipt with
    `kind: "initial"`, the generation and `schemaVersion: N`. Kept with the generation UUID outside the
-   cluster, it is the independently recorded receipt. A non-zero exit wrote nothing: read the refusal
-   (an existing fence row, generation-bound authority, wrong role, schema mismatch) and stop. **Never
+   cluster, it is the independently recorded receipt. A non-zero exit requires inspection: a refusal
+   before commit changes no authority, but a receipt-file write failure occurs **after** the database
+   commit and prints the receipt to stdout (`scripts/initialize-recovery.ts:100-127`). Preserve it and
+   read back the row before deciding anything; do not retry initialization. **Never
    fall back to `recovery:fence`**: on this database that would retire every connector, key, session
-   and membership, and the fence is only for a restore. Delete the Pod, and revoke
-   `pg_read_all_stats` if step 3 granted it.
+   and membership, and the fence is only for a restore. Delete the Pod after retaining the receipt.
 5. **Enable together.** One PR includes `../../../components/relay-restore-fencing` and
    `../../../components/relay-infrastructure-installations` in `kubernetes/apps/apps/relay` and removes
    `RELAY_INFRASTRUCTURE_INSTALLATIONS` and `relay-infrastructure-installations` from the activation
    gate's forbidden list (the recovery generation itself is never refused there: a restore needs it). Merge, then
-   `flux resume kustomization apps -n flux-system` (Relay starts with a fresh pre-migration backup;
+   `flux --context admin@ai resume kustomization apps -n flux-system` (Relay starts with a fresh pre-migration backup;
    migrate finds nothing to do).
 
 Readback:
@@ -306,6 +339,11 @@ becomes visible with H6's metrics.
 [relay-router-connection.md](relay-router-connection.md) step 9, unchanged: mint the
 `relay-router-escrow` token, read it back, `relay-router-files` becomes Ready. Its 720 h clock starts
 now, so H6 follows promptly.
+
+[relay-researcher-remaining-live-steps.md](relay-researcher-remaining-live-steps.md) is the checklist
+of the owner and operator live steps before H6, H5 and the H6 preconditions included. Its steps 1-2
+(signer/trust creation and Router trust inclusion) are DONE; step 9 is this H5 escrow token. It also
+records the decisions from ailab #1820 and the readbacks still required.
 
 ### H6. Router connection, control plane, monitoring
 
@@ -381,9 +419,12 @@ from the run and the document Relay's `scripts/compose-candidate-hub-document.ts
   `relay-worker-candidate-key-<runDigest[:16]>` with `install -m 0400` into a Memory `emptyDir`, which
   the relay container mounts read-only. Only that init container mounts the Secret.
 
-**The inclusion PR is the first run's (R1's) per-run PR**: the generator's files for R1, plus
+**The first inclusion PR is drill run R0's per-run PR**: the generator's files for R0, plus
 `- ../../../components/relay-worker-candidate` in `kubernetes/apps/apps/relay/kustomization.yaml` and
-the H7 group removed from the activation gate. Every later run's PR changes only the generated files,
+the H7 group removed from the activation gate. R0 suspends the agent and never grants or creates;
+its reset removes the inclusion, so R1 includes H7 again
+([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md), §§6, 10).
+After R1, each later run's PR changes only the generated files,
 and CI (`test_relay_candidate_run.py`) fails unless they equal the generator's output for the committed
 run; the merge gate is `scripts/relay-candidate-run.py check --base origin/main --run-digest <digest>`
 (the generator on the base revision's files, and nothing else changed). Create the
@@ -459,7 +500,7 @@ failed to load or validate); budget startup is still `started`.
 | Q1-Q6 | internal TLS terminators (`relay-internal-tls`), then the slot's qualification egress stage (Q6 is the drill configuration) | I10; the release's G3 binding and CA pins | Q5: both Certificates Ready and chaining to the pinned root, Services `10.96.0.40`/`.41`, live policy digest `f6d3187c…282f`. The third alias, the candidate journal's Service at `10.96.0.42`, is not created here: it comes with the journal itself ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) before H7's candidate files |
 | journal | the independent candidate journal ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) | per that runbook | its Service on exactly `10.96.0.42` (Q2's `pinned` check) |
 | File B | budget ledger step 7's `qualifications` row (ailab #1753 comment 124071) | the final Router rollout read back | the stored policy re-verified, its `tokenPolicyDigest` recorded for the signed runs |
-| H7 | candidate files: `relay-worker-candidate`, included by R1's per-run PR, each run's values generated (the canary file follows the approval; the qualification file is general activation, step 11) | H6, Q5's readback, the journal at `10.96.0.42`, File B, the run's session-key Secret | init container exit 0, the run's pin in the Pod, budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
+| H7 | candidate files: `relay-worker-candidate`, first included for R0 (never granted), reset, then included again for R1; each run's values generated (the canary file follows the approval; the qualification file is general activation, step 11) | H6, Q5's readback, the journal at `10.96.0.42`, File B, the run's session-key Secret | init container exit 0, the run's pin in the Pod, budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
 | scenarios | the nineteen qualification scenarios | H7's candidate files | the nineteen reports, independently accepted |
 | approval | a genuine `ReleaseApproval` | the nineteen reports and the other release gates accepted | its `workerTemplates` subject asserts the nine passed gates |
 | canary | H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
@@ -487,7 +528,7 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
   it is the cost of restoring, not of initializing.
 - **H4a, H6 and H4b:** revert that step's inclusion PR; nothing in the database changes.
 - **H7's candidate files:** the next run's PR replaces a run's values; before the canary one PR drops
-  the component and resets `run/` (`scripts/relay-candidate-run.py reset`). Removing the file stops
+  the component and resets `run/` and the agent's candidate values (`scripts/relay-candidate-run.py reset`). Removing the file stops
   new candidate admission; Relay keeps the candidate rows it already wrote. Before
   reverting H6 after any issuance, revoke worker credentials through Relay and let escrow cleanup
   finish (Router connection runbook, "Rollback"). Reverting the last profile source (H4b once H7's
@@ -498,22 +539,20 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
 
 ## What still blocks a web-UI-created researcher
 
-1. **The pinned release does not exist yet.** It must carry the `recovery:initialize` command (G1,
-   Relay PR pending) and the Relay part of the internal TLS endpoints (G3), plus the published hub,
-   agent and runtime images, the sealed researcher template built from Relay's
-   `ROLE_BASELINES.researcher` (`packages/infrastructure-protocol/baselines.ts`) and the
-   `PodRuntimeBinding`. The profile registry is not part of the release: it needs the genuine
-   release approval and comes after qualification (H4b).
-2. **The release's binding must place the researcher with `kubernetes.io/hostname: relay-worker-1`**,
-   or Relay's preparation refuses the control placement.
+1. **Release and binding prerequisites are complete.** The published hub, agent and runtime pins
+   are listed above; the sealed template and `PodRuntimeBinding` are in
+   `docs/relay-workers/researcher-i4/`. The binding places the researcher with
+   `kubernetes.io/hostname: relay-worker-1`. These are not remaining blockers.
+2. **H5-H7 and the later profile registry remain.** The registry needs the genuine release approval
+   and comes after qualification (H4b).
 3. **Model and Router:** paid qualification of `gpt-6-luna` on `openai-2` through
    `relay-researcher-luna` (owner), the rolled Router read back, and the budget authority `ready=true`
-   with the `clients` row's `max_tokens` = 8 × (I + 8192) once I is proven.
-4. **Qualification egress (G3):** the installation's Cloudflare rule is enrollment-stage only. The
-   internal TLS terminators (ailab #1768) and the qualification egress stage with its runbook steps
-   Q1-Q6 (ailab #1769) are staged; the Relay part (hostAliases, CA pins, journal alias, driver) must
-   be in the pinned release, and the candidate journal brings its own Service at `10.96.0.42`. No
-   scenario runs before step Q5's readback.
+   with the `clients` row's `max_tokens` = 7441536 (I = 922,000 already accepted, relay#277 comment
+   122095; Router connection runbook, "Router trust mapping").
+4. **Qualification egress (G3):** the internal TLS terminators and qualification egress are applied
+   (Q1-Q5, starting state above); the pinned binding carries the hostAliases and CA pins. Recheck Q5
+   before a scenario. The candidate journal's Service at `10.96.0.42` is under Flux at zero database
+   replicas; its initialization and authority ceremony still precede H7.
 5. **Qualification 0/19, no canary:** the slot keeps zero Pods and the deny-all gate until the nineteen
    rows are accepted, the genuine release approval is issued, the canary passes, H4b's registry is in
    and the activation compiler's outputs (guards, gate replacement, one-Pod quota,

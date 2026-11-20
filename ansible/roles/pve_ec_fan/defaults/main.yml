@@ -1,0 +1,87 @@
+---
+# EC fan control on the Bosgame M5 Proxmox hosts (Sixunited AXB35-02 board, ITE IT5570E embedded
+# controller): the out-of-tree ec_su_axb35 driver, built by DKMS for every installed kernel that has its
+# headers and for every later one, a temperature curve for the two CPU fans (ec-fan-profile.service, applied at boot), and the
+# fan and temperature readings as node_exporter textfile metrics (ec-fan-textfile.timer, every 30 s).
+# Without the driver the EC runs the fans on its own firmware curve (AUTO).
+#
+# OFF by default; host_vars turns it on per host (ai-node1 and ai-node2, 2026-11-19). The module is NOT signed,
+# so a kernel in Secure Boot lockdown refuses it: the role checks that first and fails before it changes
+# anything on such a host. Turned back off, it stops the profile (the CPU fans go back to AUTO), unloads
+# the module and removes its units and metrics file; the DKMS build stays installed.
+# docs/runbooks/node-maintenance.md "EC fan curve".
+pve_ec_fan_enabled: false
+
+# ---- driver source (pinned to a reviewed commit) ----
+# Reviewed at this commit (2026-11-19): loading the module only reads the EC; its 1 s worker writes a fan's
+# level only while that fan is in curve mode; unloading it resets all three fans to AUTO. A new pin is a new
+# review: read every ec_write() in src/ec_su_axb35.c. The checkout is verified against the full SHA.
+pve_ec_fan_repo_url: https://github.com/cmetz/ec-su_axb35-linux.git
+pve_ec_fan_commit: f62c2c228959a08683273a26ef3afd8991e69f6d
+# DKMS version, and so the source dir /usr/src/ec_su_axb35-<version>. Upstream has no releases (its own
+# DKMS script uses 1.0); the short commit makes each pin its own DKMS version, and the role removes the
+# versions of earlier pins.
+pve_ec_fan_dkms_version: "1.0+{{ pve_ec_fan_commit[:7] }}"
+pve_ec_fan_src_dir: "/usr/src/ec_su_axb35-{{ pve_ec_fan_dkms_version }}"
+# The kernel the role builds for. The module is loaded only when this is the running kernel.
+pve_ec_fan_kernel: "{{ ansible_kernel }}"
+# Build dependencies. proxmox-default-headers follows proxmox-default-kernel, so the next kernel of the
+# default series comes with its headers and DKMS builds the module for it on install (AUTOINSTALL). A host
+# that boots an opt-in kernel series needs that series' headers meta package (e.g. proxmox-headers-7.0)
+# here as well, or its next kernel boots without the module (the fans stay on AUTO and
+# ProxmoxEcFanDriverNotLoaded fires).
+pve_ec_fan_packages:
+  - dkms
+  - build-essential
+  - git
+  - proxmox-default-headers
+  - "proxmox-headers-{{ pve_ec_fan_kernel }}"
+
+# ---- the CPU-fan curve ----
+# fan1 and fan2 are the CPU fans, and the only fans this role manages. fan3, the small system fan, IS
+# controllable through the driver too (ai-node2, 2026-11-19: fixed 100 % = 2557 rpm, 20 % = 625, auto =
+# 970; its stock curve is rampup 20,60,83,95,97, rampdown 0,50,80,94,96), but it is not managed by this role
+# yet: it stays on the EC's own curve (owner decision pending). So the role never writes it (the assert below
+# and ec-fan-profile both refuse it in the list) and only reports it. ai-node1's fan3 reads 0 rpm even at a
+# fixed 100 %: that fan is unplugged or failed, a hardware fault unrelated to the driver.
+pve_ec_fan_fans: [1, 2]
+# Five EC temperatures (deg C, integers 0-100, strictly rising) for fan levels 1-5 (20/40/60/80/100 %; level
+# 0 is off). The driver moves one level per second: up from level N while temp >= rampup[N+1], down from
+# level N while temp <= rampdown[N]. Each rampdown value must sit below the rampup value of the same level,
+# or the fan oscillates between two levels.
+# This profile is the quiet one the owner asked for on 2026-11-19 ("reduce the fans rpm, they are too loud"),
+# set by hand on all three nodes that evening before it became the default: 20 % from 40 C, 40 % from 55,
+# 60 % from 80, 80 % from 90 and 100 % from 95, each 5 C of hysteresis, together with the APU in quiet mode
+# (pve_ec_fan_power_mode below). It trades a little heat for a lot less noise: level 4 (80 %, ~4200 rpm) only
+# engages from 90 C EC. Measured on node1/node2 that evening: from EC 85-92 C at level 4-5 (4150-4790 rpm, on
+# the earlier curve) to EC 67-69 C at level 2 (~2650 rpm) within a minute, with the NVMe drives at 43-56 C,
+# far below the ~78 C that went with the morning's stalls. The earlier profile (35,50,60,68,95 /
+# 30,45,55,63,90) reached 80 % from 68 C. 100 % still waits for 95 C: hwbusters' AXB35 testing found no
+# usable extra airflow above 80 %, and one fan dips at 100 %. Measured on node1: 20 % ~1540 rpm, 40 % ~2650
+# rpm, 80 % ~4200 rpm, 100 % ~4790 rpm.
+pve_ec_fan_rampup_curve: [40, 55, 80, 90, 95]
+pve_ec_fan_rampdown_curve: [35, 50, 75, 85, 90]
+
+# ---- the APU power mode ----
+# The EC's APU power profile (apu/power_mode): quiet, balanced (the AXB35's factory EC default) or
+# performance. quiet is the lowest, so the APU makes less heat and the curve stays on its low levels; it is
+# half of the 2026-11-19 quiet setup above. Measured on ai-node1 under real CI load that evening, with the
+# quiet curve, 2-minute windows:
+#   quiet        54 W (capped)        3850 MHz avg at 43 % busy   EC 73 C   level 2 / 2650 rpm   NVMe 55 C
+#   balanced     82 W                 4570 MHz avg at 32 % busy   EC 86 C   level 3 / 3490 rpm   NVMe 55 C
+#   performance  74 W (cap not hit)   4550 MHz avg at 27 % busy   EC 82 C   level 3 / 3490 rpm   NVMe 52 C
+# So quiet costs ~16 % clock under load; performance gains nothing at this load (CI stays under balanced's
+# limit); quiet is ~6 dB quieter than balanced and ~10 dB quieter than the old 35/50/60/68/95 curve; the
+# drives are unaffected in every mode. Caveat: the load fell during the run (43 % to 27 % busy), which
+# flatters the later modes.
+# ec-fan-profile writes it on start and sets balanced, the factory EC default, on stop. Stopping does not
+# restore a mode that was set before the role (on these hosts that was balanced too).
+pve_ec_fan_power_mode: quiet
+
+# ---- paths ----
+pve_ec_fan_sysfs: /sys/class/ec_su_axb35
+pve_ec_fan_config: /etc/default/ec-fan-profile
+# node_exporter's textfile directory. The Debian package reads this directory by default, so the Proxmox
+# hosts need no collector flag (the nvme_* metrics there come the same way). Literal, like the runners'
+# group_vars, rather than a reference to the node_exporter role's default.
+pve_ec_fan_textfile_dir: /var/lib/prometheus/node-exporter

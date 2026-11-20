@@ -12,7 +12,107 @@ just registry                                      # converge the registry_zot r
 just ping-registry                                 # connectivity check
 ```
 
-The `sync` config is rendered into `/etc/zot/config.json`; a change triggers the `restart zot` handler.
+The `sync` config is rendered into `/etc/zot/config.json`; a change to it restarts zot (sync is not on the
+reload allowlist, see "Reload or restart" below).
+
+### Applying a config change (pin the live binary)
+
+There is no config-only apply: `registry.yml` always runs the WHOLE role. Besides `config.json`,
+it converges the htpasswd lines, the certs, the sync upstream credentials and the systemd unit, and
+a change to any of those restarts zot (a config.json change may reload instead, see "Reload or restart"). Its `get_url` task also converges `/usr/local/bin/zot` to
+`registry_zot_version` (the renovate pin in defaults), and the live binary can lag it (2026-11-17:
+live `v2.1.18`, pin `v2.1.23`). For a config or auth change, pin the version that is running:
+
+```bash
+python scripts/node-ssh.py 192.168.0.2 "pct exec 5004 -- /usr/local/bin/zot -v"   # e.g. commit v2.1.18-0-g...
+# WSL: ansible ignores the world-writable /mnt/c ansible.cfg, so name it explicitly
+export ANSIBLE_CONFIG=/mnt/c/Users/chifo/work/home/ailab/ansible/ansible.cfg
+cd /mnt/c/Users/chifo/work/home/ailab/ansible
+SOPS_AGE_KEY_FILE=../kubernetes/infra/_out/age.agekey ansible-playbook registry.yml -e registry_zot_version=v2.1.18
+```
+
+With the live version pinned, the binary task is EXPECTED to be a no-op: `get_url` sends a
+conditional request (`If-Modified-Since` = the binary's mtime) and gets `304`, or downloads the same
+bytes, and the file's mode/owner already match (`0755 root:root`), so `changed=False` and no
+restart from it. It still runs, and it would replace the binary (and restart zot) if the bytes or
+those attributes differed, so confirm `zot -v` first. The role has no task-level switch to skip it;
+the pin is the gate.
+
+### Reload or restart
+
+**A zot restart is an outage, and an expensive one.** zot re-parses the whole store into its BoltDB metaDB
+(`/var/lib/registry/store/meta.db`) before it binds :443. On 2026-11-17 that took **19 min** (161 repos, ~45.6k
+manifests) and wrote **~265 GB** to ai-node1's worn NVMe, stalling etcd on cp1. Pulls and pushes fail meanwhile.
+Poll `GET https://registry.chifor.me/v2/` for 200 (`systemctl is-active` reports active early).
+
+So `config.json` is not templated straight into place. Each play renders its OWN candidate,
+`config.json.candidate.<utc>.<random>`, so overlapping plays never share one; an `always:` step removes it. The play
+runs `zot verify` on the candidate and hands it to `/usr/local/lib/zot-config-apply.py` (role `files/`), which picks
+one of:
+
+- **none**: the candidate equals the live config (content, owner, group and mode).
+- **attributes**: same content, but a different owner/group/mode. The helper converges them with chown/chmod, which
+  emit no WRITE, so zot does not reload.
+- **reload**: only keys on the helper's `RELOADABLE` allowlist changed. Those are `storage.retention` (while
+  retention is already active on both sides), `storage.gcDelay`, `storage.gcInterval` and the
+  `http.accessControl` rules (`repositories`, `adminPolicy`, `groups`, `metrics`). zot v2.1.x watches the config
+  FILE and reloads it on an fsnotify WRITE (`pkg/cli/server/config_reloader.go`), copying only some fields
+  (`UpdateReloadableConfig`). So the helper writes the SAME inode, then proves the reload. First it waits until zot
+  has logged no reload line for 3 s, then it takes a journal cursor. After its write, the LAST reload attempt must
+  show `config file changed, trying to reload config` followed by `loaded new configuration settings`, with no
+  `failed to reload config` after it. The PID must be unchanged and `/v2/` must answer. A FAILED line is not final
+  (zot can read the file between the write and the truncate), so the helper waits for the last attempt and retries
+  the write once. Otherwise it **fails the play** and writes the previous bytes back. That restores the file on DISK;
+  whether zot's in-memory config also matches is then unconfirmed, which is what the marker below is for.
+- **restart**: any other difference, or a first deploy. The helper replaces the file atomically and the role
+  notifies `restart zot`.
+- **blocked**: a reload-safe change that cannot be reloaded. Either zot no longer watches the file, or the live
+  config.json is not valid JSON. zot ignores rename/remove events, so a config.json replaced since zot started (an
+  atomic write, an editor save) is no longer watched. The helper checks zot's inotify watches in `/proc/<pid>/fdinfo`
+  against the file's exact (inode, device) identity. Rather than cause a surprise 19 min outage, the play FAILS.
+  Restart zot in a quiet window, or rerun once with `-e registry_zot_config_allow_restart=true`. Applies are
+  serialized by an flock on `config.json.lock`.
+
+**`config.json.unconfirmed`** (root-only, no secrets) marks an apply that is not proven yet. The helper writes it
+before every reload or restart write, with a per-transaction token. A proven reload removes it. On a restart, the
+`restart zot` handlers remove it after zot restarted, via `zot-config-apply.py --clear-marker <token>` under the
+helper's lock, and only for this play's token. Restarts for other reasons (htpasswd, binary) clear nothing. While it exists, an unchanged candidate is NOT reported as `none`: the next run re-proves the
+file on disk (an identical in-place rewrite that zot must reload), or restarts if the watch is gone. That covers a
+failed reload, a killed helper, and a play that aborted before its handlers ran.
+
+Run the play with `--check` first. The helper then only classifies (`--dry-run`) and the `Report how the zot
+config was applied` task shows `{"mode": ..., "paths": [...]}`. Key paths only, never values: config.json holds
+secrets. Check mode is not entirely side-effect free: it installs the helper and writes, then removes, this play's
+throwaway candidate. The live `config.json` is never touched. Do not run two registry plays at once: the helper
+serializes its own steps, but zot restarts (handlers) run outside its lock.
+
+### Dropping orphaned referrers (`deleteReferrers`)
+
+`registry_zot_strive_delete_referrers_repos` lists the repos whose retention also deletes **orphaned referrers**:
+buildx attestation manifests whose subject image retention already deleted (55-77% of every strive repo's
+manifests on 2026-11-18; they bloat zot's metaDB, which every restart rebuilds). zot v2.1.18's GC deletes a
+referrer when its `subject` is not a TOP-LEVEL `index.json` entry, without recursing into indexes, and without
+consulting `keepTags`. So, for every repo before it goes on the list:
+
+1. Run `scripts/zot-referrer-orphan-check.py <repo>...` on the registry LXC (usage in its header). It must report
+   `"safe": true` (`nested_not_top == 0`, `tagged_orphans == 0`); it exits 1 otherwise.
+2. Note one kept tag's index digest and its platform manifests, and their `GET /v2/<repo>/referrers/<digest>`.
+3. Apply (a reload, no restart). After the next GC cycle (`gcInterval` 1h), the orphan count should drop. Step 2's
+   referrers must be unchanged. Watch, per 1-min sample:
+   - ai-node1 host writes, `rate(node_disk_written_bytes_total{device="nvme0n1"}[1m])`;
+   - cp1 WAL fsync p99.
+   **Abort when** node1 writes stay above 150 MiB/s for 3 consecutive samples, or cp1 fsync p99 is above 1 s for 2
+   consecutive samples.
+   **Abort** = remove the repo from the list and apply. Then VERIFY that the reload took: the play's `Report how the
+   zot config was applied` shows `mode: reload`, and the live config.json no longer lists the repo. zot only stops
+   between GC passes, so a pass already running finishes its repo. If the disabling apply fails or is `blocked` (the
+   helper then restores the previous bytes, i.e. the canary stays ENABLED), **escalate**: `systemctl stop zot` on
+   the LXC. That is an outage, but it ends GC at once. Then apply with `-e registry_zot_config_allow_restart=true`
+   in a quiet window. Deletions already done are orphans and cannot be restored.
+4. Widen to `["strive/**"]` only after a clean canary.
+
+**Everything else the role converges still restarts zot**: htpasswd lines, certs, sync credentials, the unit and
+the binary. Batch those changes into one apply, in a quiet window.
 
 ## Enable Docker Hub upstream auth (recommended)
 
@@ -80,6 +180,11 @@ prefix (`read`/`create`/`update`, no `delete`), listed in `registry_zot_scoped_p
 |---|---|---|
 | `trueswarm-ci` | `trueswarm/**` | `cchifor/trueswarm` `.gitea/workflows/publish.yml` (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`) |
 | `workbricks-ci` | `workbricks/**` | `cchifor/workbricks` image-publish CI (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`; Workbricks OR-12). The cell pulls anonymously, like every other image; the registry is LAN-only. |
+| `strive-ci-push` | `strive/ci-build/**` | `cchifor/platform` e2e build-once (platform#2823): stack-smoke pushes `strive/ci-build/<image>:ci-<40-hex commit>` and the journey shards pull by digest. A `ci-` tag is kept while it is among the 10 most recently pushed in its repository OR was pushed within 24h (`registry_zot_strive_ci_build_keep_recent` / `_keep_within`); its retention policy precedes `strive/**`. NOT `strive/ci/**`: those 12 existing platform repos keep their `strive/**` rules. Entry carries `password_optional: true` until its SOPS key exists. |
+
+A logged-in scoped user has **no** rights outside its prefix, not even read: zot's `anonymousPolicy`
+applies only to unauthenticated requests. Use the credential for the push only (platform#2823 writes
+it into a throwaway `DOCKER_CONFIG`); pulls stay anonymous or use `pull`.
 
 zot authorizes a repo by its **longest matching pattern only** — policies are not merged — so each
 scoped entry repeats the `**` grants (anonymous read, `ci`, `pull`, admins) via the template macro.
@@ -88,7 +193,13 @@ The password is `registry_scoped_push_passwords[<user>]` in `registry.sops.yaml`
 **never projected to dev-workers**. An agent ships an image by pushing a `v*` tag (or
 `workflow_dispatch`) on its repo and then pinning the digest in the repo's deploy overlay, which
 Flux reconciles. Adding a project = a new list entry + a SOPS key + `just registry` + the two repo
-secrets (the role asserts the SOPS key exists before touching the htpasswd).
+secrets (the role asserts the SOPS key exists before touching the htpasswd). To merge the entry
+before the key exists, mark it `password_optional: true`: the play then skips that user with a
+`SKIPPED` message instead of failing, and REMOVES any htpasswd line it has, so the user cannot log
+in until the key exists. Drop the flag in the change that adds the key; while both exist, every
+run prints a `STALE FLAG` message. Add the key
+UNDER `registry_scoped_push_passwords` (the file's `encrypted_regex` covers that map; a new
+top-level key would be stored in plaintext).
 
 **Retiring a project:** removing the list entry drops its policy, but the htpasswd task only
 adds/updates, so the user would still AUTHENTICATE. Remove it explicitly, then the other homes:
@@ -123,8 +234,18 @@ path. Zot `gc` (every `gcInterval`, now 1h) reclaims the orphaned blobs.
 The store lives on the mp0 data disk; its desired size is `kubernetes/infra/registry-lxc`
 `data_gb` (including effective overrides). Check `pct config 5004` and the filesystem for the live size. A
 `storage.retention` policy (config.json.j2) bounds growth with policies evaluated **in order**,
-each more specific one listed before the catch-all it would otherwise fall through to:
+each more specific one listed before the catch-all it would otherwise fall through to (zot applies
+only the FIRST policy whose glob matches a repo):
 
+- `strive/ci-build/**` (listed before `strive/**`) keeps a `ci-<40-hex commit>` tag while it is
+  among the `registry_zot_strive_ci_build_keep_recent` (10) most recently pushed in its repo OR was
+  pushed within `registry_zot_strive_ci_build_keep_within` (24h). Both rules sit in ONE keepTags
+  entry, which zot ORs; the time floor stops a burst of pushes evicting a running pipeline's image.
+  Every other tag there is pruned. These are cchifor/platform's per-pipeline e2e images
+  (platform#2823); under `strive/**` a `ci-` tag would match no keep pattern and the hourly GC would
+  delete it mid-pipeline. Never widen it to `strive/ci/**`: that namespace already holds platform
+  repos (`strive/ci/platform-e2e-local`, ...) whose `latest`/`ailab*`/`sha-*` tags rely on
+  `strive/**`, and a first-match policy there would strip them.
 - `strive/**` keeps `latest` + the `registry_zot_strive_keep_recent` (100) most-recently-pushed
   `sha-<commit>` tags per repo and GC reclaims the rest.
 - `agentforge/**` keeps `latest` + the `registry_zot_agentforge_keep_recent` (40)
@@ -158,6 +279,8 @@ Zot's GC frees blobs inside the container, but the host's `fstrim.timer` never r
 points, so freed space stays allocated in ai-node1's `local-lvm` thin pool. By 2026-10-06 mp0 held
 377 GB allocated for 170 GB in use. That thin-pool fill measurably slowed the shared consumer QLC
 NVMe that also carries cp1's etcd WAL (plans/2026-10-07-etcd-leader-churn-plan.md).
+The pool's zeroing setting, which multiplies writes when trimmed chunks are reused, is a separate
+knob: node-maintenance.md "Thin-pool zeroing".
 
 `scripts/lxc-fstrim-chunked.sh <ctid> <mpN>` (tests: `scripts/tests/test-lxc-fstrim-chunked.sh`, run
 in CI) works **entirely host-side**:
@@ -186,9 +309,15 @@ Description=Chunked, IO-pressure-guarded fstrim of the registry LXC data volume 
 Type=oneshot
 ExecStart=/usr/local/sbin/lxc-fstrim-chunked.sh 5004 mp0
 Nice=10
-# On stop the script waits for the in-flight FITRIM, then unmounts (exit 143); leave it time to,
-# and record that deliberate stop as clean rather than a failed unit.
-TimeoutStopSec=180
+# The overall deadline. A oneshot is "activating" for its whole run, so RuntimeMaxSec= does nothing
+# here (checked on systemd 255): TimeoutStartSec= is the limit. Latest start 03:46 Sunday (03:30 +
+# 15 min RandomizedDelaySec + 1 min AccuracySec); SIGTERM by 23:31, done by 23:36 with the stop time
+# below, so a run that keeps waiting out IO pressure never reaches Monday's ai-node1 runner windows.
+TimeoutStartSec=19h45min
+# On stop the script waits for the in-flight FITRIM (8 GiB at up to ~23 s/GiB is ~3 min), then
+# unmounts (exit 143); leave it time to, and record that deliberate stop as clean rather than a
+# failed unit. (A stop at the deadline above still shows as failed, Result=timeout: by design.)
+TimeoutStopSec=300
 SuccessExitStatus=143 130
 UNIT
 cat > /etc/systemd/system/registry-lxc-fstrim.timer <<'UNIT'
@@ -202,6 +331,23 @@ WantedBy=timers.target
 UNIT
 systemctl daemon-reload && systemctl enable --now registry-lxc-fstrim.timer
 ```
+
+**The Sunday deadline (2026-11-19, #1858).** The script's pressure-wait budget (`PSI_WAIT_MAX_S`) is
+per chunk, so on this 384 GiB volume a run can wait for many hours. `TimeoutStartSec=19h45min` (with
+`TimeoutStopSec=300` for the in-flight chunk) ends it by 23:36 Sunday at the latest, whatever the
+pressure: systemd SIGTERMs it, and the script stops at once, even mid-wait, releases the mount and exits
+143. A run cut off there shows as failed (`Result=timeout`). The next week starts again from chunk 1.
+**The live unit on ai-node1 predates this:** after merge, re-run the `cat > …registry-lxc-fstrim.service`
+block above on the node (root, via `scripts/node-ssh.py`), then `systemctl daemon-reload`, and check
+`systemctl show -p TimeoutStartUSec,TimeoutStopUSec registry-lxc-fstrim.service`.
+
+ai-node1's CI runners trim their own disks nightly and stay off this trim's span: from 15 min before it
+can start to 15 min after that deadline ([ci-runners.md](ci-runners.md), "Thin-pool trim"). ci-runner-1
+and -4 end by 03:15 UTC, ci-runner-9 (04:15) skips Sundays (`gitea_runner_fstrim_days`), and the deadline
+keeps the trim out of Monday's 00:00 window. Moving this timer, or raising the deadline, means moving their
+windows or days too: `ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh` reads `OnCalendar`,
+`RandomizedDelaySec`, `TimeoutStartSec` and `TimeoutStopSec` above and fails if they collide, Sunday
+into Monday included.
 
 **Verify a run, including that it did not hurt etcd.** A trim is a discard burst on the same drive as
 cp1's etcd WAL.

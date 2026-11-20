@@ -13,7 +13,10 @@ pr_reviewer_llm_sudo_user: ""
 journal_ship_enabled: true
 # ---- ROUTER ONLY since 2026-10-26 (owner request; dev-workers.md § "Router seats") ----
 # The persona reviews through llm-router alone: seat `r`, key key_4fdbe2b833fe (routes
-# [codex-reviewer], default route codex-reviewer, a pointer to the Codex smart pool `pool-codex`).
+# [codex-reviewer], default route codex-reviewer). codex-reviewer is a pointer: since 2026-11-19
+# (owner request) it targets `pool-codex-api`, the smart pool over the OpenAI API accounts, with
+# `openai-2` excluded (it refuses gpt-6-astra); until then it targeted the subscription pool
+# `pool-codex`. Repointing is a live router change only, nothing here or on the key changes.
 # The seat sends the tier name (`gpt-6-astra`, no `models` map), which the key routes in model mode
 # through its default route; naming the route itself would get 400 MODEL_REQUIRED (the pool's
 # targets are any-model). Runbook llm-router.md § "Reviewer routes (2026-10-13)".

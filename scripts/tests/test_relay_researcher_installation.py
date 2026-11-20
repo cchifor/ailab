@@ -17,6 +17,7 @@ import importlib.util
 import ipaddress
 import json
 import re
+import shutil
 import tempfile
 import urllib.parse
 from unittest import mock
@@ -43,6 +44,17 @@ RUNTIME_CA_SHA256 = "3d109e83f3e144daf1022cff5af22cbeda668db9bb1f4b25fc42f179254
 INTERNAL_TLS = ROOT / "kubernetes/apps/relay-internal-tls"
 JOURNAL_RENDER = ROOT / "kubernetes/optional/relay-candidate-journal/render.py"
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# What Relay's preparation at the runtime's commit writes into 31-agent-config.json and (with
+# allowStandby false) 30-agent-values.json: it takes no timing input. The bundle tool's leadership
+# overlay replaces it; the synthetic bundles below carry it as the tool does.
+PREPARED_TIMING = {"leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2}
+
+
+def other_timing(overlay: dict) -> dict:
+    """A valid timing that is not the overlay: the prepared one, unless the overlay is set back to it
+    (the runbook's timing-only rollback), then T1's 30/20/2."""
+    return dict(PREPARED_TIMING) if overlay != PREPARED_TIMING else \
+        {"leaseDurationSeconds": 30, "renewDeadlineSeconds": 20, "retryPeriodSeconds": 2}
 LABELS = {
     "app.kubernetes.io/name": "relay-infrastructure-agent",
     "app.kubernetes.io/instance": "relay-infrastructure-agent",
@@ -527,8 +539,11 @@ class AgentStage(unittest.TestCase):
         dns, api, hub, *journal = np["egress"]
         if self.campaign:
             # The chart's journal egress rule: ipBlocks only, private and off the LAN, on the journal's
-            # port (its CIDRs are the one-time PR's, U9).
+            # port. Owner decision U9 (ailab #1818): exactly the journal Service address, which
+            # relay-candidate-run.py writes with the one-time structure.
             (rule,) = journal
+            self.assertEqual(rule, {"to": [{"ipBlock": {"cidr": f"{journal_render().CLUSTER_IP}/32"}}],
+                                    "ports": [{"protocol": "TCP", "port": 8443}]})
             origin = urllib.parse.urlsplit(journal_render().ORIGIN)
             self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": origin.port or 443}])
             self.assertTrue(rule["to"])
@@ -550,6 +565,20 @@ class AgentStage(unittest.TestCase):
         cnp = self.objects[("CiliumNetworkPolicy", CONTROL, "relay-infrastructure-agent-api-egress")]["spec"]
         self.assertEqual(cnp["egress"], [{"toEntities": ["kube-apiserver"],
                                           "toPorts": [{"ports": [{"port": str(p), "protocol": "TCP"} for p in net["apiServerPorts"]]}]}])
+        # ailab's journal addition (owner decision U9): an ipBlock never selects the journal Pod under
+        # Cilium, so this selector rule is what admits agent -> journal. Egress only, the agent Pod only,
+        # the journal service Pods only, TCP 8443 only: the same selector as the slot's qualification rule.
+        journal_np = self.objects[("NetworkPolicy", CONTROL, "relay-infrastructure-agent-journal-egress")]
+        self.assertEqual(journal_np["spec"], {
+            "podSelector": {"matchLabels": {"app.kubernetes.io/name": "relay-infrastructure-agent",
+                                            "app.kubernetes.io/instance": "relay-infrastructure-agent"}},
+            "policyTypes": ["Egress"],
+            "egress": [{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "relay-candidate-journal"}},
+                                "podSelector": {"matchLabels": {"app": "relay-candidate-journal"}}}],
+                        "ports": [{"protocol": "TCP", "port": 8443}]}]})
+        qualification = docs(EGRESS["qualification"])[0]["spec"]["egress"][2]
+        self.assertEqual(journal_np["spec"]["egress"][0], qualification,
+                         "the agent's journal rule must match the slot's qualification journal rule")
 
     def test_config_matches_the_template(self):
         config = json.loads((TREE / "agent/config.json").read_text(encoding="utf-8"))
@@ -558,11 +587,13 @@ class AgentStage(unittest.TestCase):
             "hub": {"caFile": "/run/relay/hub-ca/ca.crt", "origin": d["hub"]["origin"]},
             "kubernetes": {"caFile": "/run/relay/kubernetes/ca.crt", "origin": d["kubernetesOrigin"],
                            "tokenFile": "/run/relay/kubernetes/token"},
-            "leadership": {"leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2},
+            # The leadership overlay's timing (relay-researcher-bundle.py LEADERSHIP_OVERLAY), in place of
+            # the preparation's; the same JSON types too.
+            "leadership": bundle_module().LEADERSHIP_OVERLAY,
             "version": 1,
         }
         for k, v in expected.items():
-            self.assertEqual(config[k], v, k)
+            self.assertEqual(json.dumps(config[k], sort_keys=True), json.dumps(v, sort_keys=True), k)
         identity = config["identity"]
         for k in ("tenantId", "clusterUid", "controlNamespace"):
             self.assertEqual(identity[k], d["identity"][k])
@@ -631,8 +662,10 @@ class BundleCheck(unittest.TestCase):
         b = bundle_module()
         d = template()
         committed = json.loads((TREE / "agent/config.json").read_text(encoding="utf-8"))
+        # The tool's config is Relay's preparation: its own timing, which check() overlays (and without
+        # the campaign's values, which check() applies on top).
+        committed["leadership"] = dict(PREPARED_TIMING)
         if campaign():
-            # The tool's config is the I5 import: without the campaign's overlay, which check() applies.
             committed["policy"]["bootstrapSecrets"] = False
             committed.pop("candidateRuntime", None)
         key = self.committed(committed["identity"]["installationPublicKey"], self.KEY)
@@ -679,7 +712,7 @@ class BundleCheck(unittest.TestCase):
         values = {
             "image": {"reference": d["agentImage"], "pullPolicy": "IfNotPresent"},
             "controlNamespace": CONTROL, "executionSlots": d["executionSlots"], "replicas": 1,
-            "leadership": {"allowStandby": False, "leaseDurationSeconds": 15, "renewDeadlineSeconds": 10, "retryPeriodSeconds": 2},
+            "leadership": {"allowStandby": False, **PREPARED_TIMING},
             "hub": {"origin": d["hub"]["origin"], "caConfigMap": d["hub"]["caConfigMap"]},
             "kubernetes": {"origin": d["kubernetesOrigin"]},
             "identity": {"tenantId": d["identity"]["tenantId"], "installationId": self.IID,
@@ -1007,6 +1040,238 @@ class BundleCheck(unittest.TestCase):
         path = bundle / "20-containment.json"
         path.write_bytes(path.read_bytes().replace(b'"pods":"0"', b'"pods":"9"'))
         self.run_check(bundle, reason="20-containment.json does not match bundle-manifest.json")
+
+    # --- the (temporary) leadership timing overlay -------------------------------------------------
+
+    @staticmethod
+    def run_main(module, argv) -> tuple[int, str]:
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            code = module.main([str(a) for a in argv])
+        return code, err.getvalue()
+
+    @staticmethod
+    def rewrite(bundle: Path, name: str, body: bytes) -> None:
+        """A bundle file with other bytes and its manifest hash to match (the bundle stays self-consistent)."""
+        (bundle / name).write_bytes(body)
+        manifest = json.loads((bundle / "bundle-manifest.json").read_text(encoding="utf-8"))
+        manifest["files"][name] = hashlib.sha256(body).hexdigest()
+        (bundle / "bundle-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def tree_copy(self, module) -> Path:
+        """A private copy of kubernetes/apps/relay-researcher for `module` to check and import into."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        shutil.copytree(TREE, tmp / "tree")
+        self.addCleanup(setattr, module, "TREE", module.TREE)
+        module.TREE = tmp / "tree"
+        return tmp / "tree"
+
+    @staticmethod
+    def fake_run() -> dict:
+        """What candidate_config and candidate_values read of a validated campaign run."""
+        d16 = "0123456789abcdef"
+        return {"trustSha256": "a" * 64, "names": {"controlConfigMap": f"relay-candidate-control-{d16}",
+                                                   "trustConfigMap": f"relay-candidate-trust-{d16}",
+                                                   "pinConfigMap": f"relay-candidate-pin-{d16}"}}
+
+    def test_the_bundle_carries_the_prepared_timing_and_the_overlay_replaces_it(self):
+        b = bundle_module()
+        bundle = self.make_bundle()
+        config = json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8"))
+        values = json.loads((bundle / "30-agent-values.json").read_text(encoding="utf-8"))
+        self.assertEqual(b.PREPARED_LEADERSHIP, PREPARED_TIMING)
+        self.assertEqual(config["leadership"], PREPARED_TIMING)
+        # Exactly the three values change, in the config and in the chart values (allowStandby stays false).
+        # Any valid timing, the prepared one included: setting the overlay back to 15/10/2 is the
+        # runbook's timing-only rollback, which keeps the restart alert and the rest of T1.
+        self.assertEqual(b.validate_timing(dict(b.LEADERSHIP_OVERLAY), "LEADERSHIP_OVERLAY"), b.LEADERSHIP_OVERLAY)
+        self.assertEqual(b.with_leadership(config, "31-agent-config.json"), {**config, "leadership": b.LEADERSHIP_OVERLAY})
+        if campaign() is None:
+            self.assertEqual(b.committed_config(config), {**config, "leadership": b.LEADERSHIP_OVERLAY})
+            self.assertEqual(b.effective_values(values, b.committed_agent(), CONTROL),
+                             {**values, "leadership": {"allowStandby": False, **b.LEADERSHIP_OVERLAY}})
+        # The overlay never edits the bundle's own documents.
+        self.assertEqual(config["leadership"], PREPARED_TIMING)
+        self.assertEqual(values["leadership"], {"allowStandby": False, **PREPARED_TIMING})
+
+    def test_refuses_an_unexpected_prepared_timing(self):
+        # Anything but the runtime preparation's own timing, before the overlay: another preparation
+        # (or a bundle already carrying the overlay) is not what the overlay was reviewed against.
+        overlay = bundle_module().LEADERSHIP_OVERLAY
+        config, values = "31-agent-config.json", "30-agent-values.json"
+        cases = {
+            "config already overlaid": (config, lambda l: l.update(overlay)),
+            "config other timing": (config, lambda l: l.update(leaseDurationSeconds=20)),
+            "config float": (config, lambda l: l.update(leaseDurationSeconds=15.0)),
+            "config extra key": (config, lambda l: l.update(allowStandby=False)),
+            "config missing key": (config, lambda l: l.pop("retryPeriodSeconds")),
+            "values already overlaid": (values, lambda l: l.update(overlay)),
+            "values other timing": (values, lambda l: l.update(renewDeadlineSeconds=11)),
+            "values standby": (values, lambda l: l.update(allowStandby=True)),
+            "values standby 0": (values, lambda l: l.update(allowStandby=0)),
+            "values missing standby": (values, lambda l: l.pop("allowStandby")),
+        }
+        if overlay == PREPARED_TIMING:  # timing-only rollback: an overlaid bundle is the prepared one
+            del cases["config already overlaid"], cases["values already overlaid"]
+        for name, (target, mutate) in cases.items():
+            with self.subTest(name):
+                self.run_check(self.make_bundle(lambda f, t=target, m=mutate: m(f[t]["leadership"])),
+                               reason=f"{target} leadership = ")
+
+    def test_refuses_a_config_without_the_overlay_timing(self):
+        # The committed config carries LEADERSHIP_OVERLAY; with another reviewed overlay it no longer
+        # does, and check refuses it (import is what writes the overlay's timing).
+        module = bundle_module()
+        bundle = self.make_bundle()
+        other = {"leaseDurationSeconds": 40, "renewDeadlineSeconds": 25, "retryPeriodSeconds": 2}
+        with mock.patch.object(module, "LEADERSHIP_OVERLAY", other):
+            code, err = self.run_main(module, ["check", bundle])
+        self.assertEqual(code, 1)
+        self.assertIn("agent/config.json leadership = ", err)
+        self.assertIn(f"not LEADERSHIP_OVERLAY {other!r}", err)
+        # An overlay the agent would refuse is refused before it is applied.
+        for invalid, reason in (({**other, "renewDeadlineSeconds": 40}, "below leaseDurationSeconds"),
+                                ({**other, "retryPeriodSeconds": 13}, "at most half"),
+                                ({**other, "leaseDurationSeconds": 121}, "not an integer in 10..120")):
+            with self.subTest(invalid=invalid), mock.patch.object(module, "LEADERSHIP_OVERLAY", invalid):
+                code, err = self.run_main(module, ["check", bundle])
+                self.assertEqual(code, 1)
+                self.assertIn(reason, err)
+
+    def test_refuses_a_non_canonical_prepared_config(self):
+        # import re-serializes the config; that is byte-exact only for Relay's canonical form.
+        bundle = self.make_bundle()
+        config = json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8"))
+        self.rewrite(bundle, "31-agent-config.json", (json.dumps(config, indent=1, sort_keys=True) + "\n").encode())
+        self.run_check(bundle, reason="31-agent-config.json is not Relay canonical JSON")
+
+    def import_twice(self, module, bundle) -> list[bytes]:
+        """import into the module's tree copy twice (the chart render is the gated tests' part)."""
+        out = []
+        with mock.patch.object(module, "chart_compare", lambda *a: None):
+            for _ in range(2):
+                code, err = self.run_main(module, ["import", bundle, "--chart", "unused"])
+                self.assertEqual(code, 0, err)
+                out.append((module.TREE / "agent/config.json").read_bytes())
+                self.assertEqual(self.run_main(module, ["check", bundle]), (0, ""))
+        return out
+
+    def test_import_writes_the_overlay_and_reimports_byte_for_byte(self):
+        module = bundle_module()
+        bundle = self.make_bundle()
+        tree = self.tree_copy(module)
+        committed = (TREE / "agent/config.json").read_bytes()
+        prepared = json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8"))
+        if campaign() is not None:
+            self.skipTest("the committed tree runs a campaign: the campaign case below covers it")
+        # Re-import of the committed state: byte-stable, and the committed bytes.
+        self.assertEqual(self.import_twice(module, bundle), [committed, committed])
+        # From another timing (the preparation's before the overlay landed; T1's after a timing-only
+        # rollback): check refuses, import writes exactly the overlay's three values (nothing else), and a
+        # re-import keeps them.
+        start = {**prepared, "leadership": other_timing(module.LEADERSHIP_OVERLAY)}
+        (tree / "agent/config.json").write_text(json.dumps(start, sort_keys=True, separators=(",", ":")) + "\n",
+                                                 encoding="utf-8")
+        code, err = self.run_main(module, ["check", bundle])
+        self.assertEqual(code, 1)
+        self.assertIn("agent/config.json leadership = ", err)
+        written = self.import_twice(module, bundle)
+        self.assertEqual(written[0], written[1])
+        self.assertEqual(json.loads(written[0]), {**prepared, "leadership": module.LEADERSHIP_OVERLAY})
+        self.assertEqual(written[0], committed)
+
+    def test_import_with_the_campaign_overlay_keeps_both_byte_for_byte(self):
+        # The campaign's candidate_config on top of the leadership overlay: disjoint fields, both kept by
+        # every re-import, and the result is the canonical candidate config of the overlaid config.
+        module = bundle_module()
+        gen = module.candidate_generator()
+        bundle = self.make_bundle()
+        tree = self.tree_copy(module)
+        v = self.fake_run()
+        prepared = json.loads((bundle / "31-agent-config.json").read_text(encoding="utf-8"))
+        expected = gen.candidate_config({**prepared, "leadership": dict(module.LEADERSHIP_OVERLAY)}, v)
+        with mock.patch.object(module, "campaign_run", lambda: v):
+            for start in (expected, gen.candidate_config(prepared, v)):  # imported, then the preparation's timing
+                with self.subTest(start=start["leadership"]):
+                    (tree / "agent/config.json").write_text(gen.canonical(start) + "\n", encoding="utf-8")
+                    written = self.import_twice(module, bundle)
+                    self.assertEqual(written[0], written[1])
+                    self.assertEqual(written[0], (gen.canonical(expected) + "\n").encode())
+                    config = json.loads(written[0])
+                    self.assertEqual(config["leadership"], module.LEADERSHIP_OVERLAY)
+                    self.assertIs(config["policy"]["bootstrapSecrets"], True)
+                    self.assertEqual(config["candidateRuntime"], gen.candidate_runtime(v))
+            # The chart values carry both overlays as well (the agent policy as during a campaign: the three
+            # enrollment rules and the journal rule, whether or not the committed tree runs one).
+            agent = module.committed_agent()
+            policy = agent[("NetworkPolicy", CONTROL, "relay-infrastructure-agent")]["spec"]
+            policy["egress"] = policy["egress"][:3] + [
+                {"to": [{"ipBlock": {"cidr": "10.96.0.42/32"}}], "ports": [{"protocol": "TCP", "port": 8443}]}]
+            values = json.loads((bundle / "30-agent-values.json").read_text(encoding="utf-8"))
+            effective = module.effective_values(values, agent, CONTROL)
+        self.assertEqual(effective["leadership"], {"allowStandby": False, **module.LEADERSHIP_OVERLAY})
+        self.assertIs(effective["policy"]["bootstrapSecrets"], True)
+        self.assertEqual(effective["candidateRuntime"]["configMap"], v["names"]["controlConfigMap"])
+        self.assertEqual(effective["networkPolicy"]["candidateJournalCidrs"], ["10.96.0.42/32"])
+        # Without the run, the same values carry the timing overlay alone.
+        if campaign() is None:
+            self.assertEqual(module.effective_values(values, module.committed_agent(), CONTROL),
+                             {**values, "leadership": {"allowStandby": False, **module.LEADERSHIP_OVERLAY}})
+
+
+class LeadershipTiming(unittest.TestCase):
+    """relay-researcher-bundle.py validate_timing: Relay AgentConfig.leadership's rules (config.ts) and
+    the chart's agent.validate, for the overlay and the preparation's timing alike."""
+
+    def setUp(self):
+        self.b = bundle_module()
+
+    def timing(self, lease, renew, retry) -> dict:
+        return {"leaseDurationSeconds": lease, "renewDeadlineSeconds": renew, "retryPeriodSeconds": retry}
+
+    def test_accepts_the_reviewed_and_the_prepared_timing_and_the_bounds(self):
+        for lease, renew, retry in ((30, 20, 2), (15, 10, 2), (10, 5, 1), (120, 110, 30), (11, 10, 5)):
+            with self.subTest(timing=(lease, renew, retry)):
+                self.assertEqual(self.b.validate_timing(self.timing(lease, renew, retry), "t"),
+                                 self.timing(lease, renew, retry))
+        self.b.validate_timing(self.b.LEADERSHIP_OVERLAY, "LEADERSHIP_OVERLAY")
+        self.b.validate_timing(self.b.PREPARED_LEADERSHIP, "PREPARED_LEADERSHIP")
+
+    def test_refuses_each_invalid_value_and_relation(self):
+        cases = {
+            "lease below 10": (self.timing(9, 5, 1), "leaseDurationSeconds = 9 is not an integer in 10..120"),
+            "lease above 120": (self.timing(121, 20, 2), "leaseDurationSeconds = 121"),
+            "renew below 5": (self.timing(30, 4, 1), "renewDeadlineSeconds = 4"),
+            "renew above 110": (self.timing(120, 111, 2), "renewDeadlineSeconds = 111"),
+            "retry below 1": (self.timing(30, 20, 0), "retryPeriodSeconds = 0"),
+            "retry above 30": (self.timing(120, 110, 31), "retryPeriodSeconds = 31"),
+            "renew equal to lease": (self.timing(20, 20, 2), "renewDeadlineSeconds must be below leaseDurationSeconds"),
+            "renew above lease": (self.timing(30, 40, 2), "renewDeadlineSeconds must be below"),
+            "retry above half the renew": (self.timing(30, 20, 11), "retryPeriodSeconds must be at most half"),
+            "float": (self.timing(30.0, 20, 2), "leaseDurationSeconds = 30.0"),
+            "string": (self.timing(30, "20", 2), "renewDeadlineSeconds = '20'"),
+            "boolean": (self.timing(30, 20, True), "retryPeriodSeconds = True"),
+            "null": (self.timing(None, 20, 2), "leaseDurationSeconds = None"),
+            "missing key": ({"leaseDurationSeconds": 30, "renewDeadlineSeconds": 20}, "must have exactly the keys"),
+            "extra key": ({**self.timing(30, 20, 2), "allowStandby": False}, "must have exactly the keys"),
+            "not an object": ([30, 20, 2], "must have exactly the keys"),
+        }
+        for name, (timing, reason) in cases.items():
+            with self.subTest(name), self.assertRaises(self.b.Mismatch) as refused:
+                self.b.validate_timing(timing, "t")
+            self.assertIn(reason, str(refused.exception))
+
+    def test_the_overlay_is_declared_once(self):
+        # One reviewed declaration of the timing: every other tool reads it from the bundle script.
+        hits = {}
+        for path in sorted((ROOT / "scripts").rglob("*.py")):
+            if "tests" not in path.parts:
+                text = path.read_text(encoding="utf-8")
+                if "LEADERSHIP_OVERLAY = " in text:
+                    hits[str(path.relative_to(ROOT))] = text.count("LEADERSHIP_OVERLAY = ")
+        self.assertEqual(hits, {"scripts/relay-researcher-bundle.py": 1})
+        self.assertIn("TEMPORARY", (ROOT / "scripts/relay-researcher-bundle.py").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

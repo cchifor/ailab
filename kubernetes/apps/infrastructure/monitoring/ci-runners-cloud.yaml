@@ -71,7 +71,7 @@ metadata:
 # cloudlab ci-runners), registered + online in Gitea and answering on :9100 before these went in.
 subsets:
   - addresses:
-      - { ip: 192.168.0.13, hostname: cloud-ci-9 } # vmid 6109
+      # - { ip: 192.168.0.13, hostname: cloud-ci-9 } # vmid 6109. QUARANTINED 2026-11-17 (bad RAM; inventory/hosts.yml)
       - { ip: 192.168.0.44, hostname: cloud-ci-10 } # vmid 6110
       - { ip: 192.168.0.50, hostname: cloud-ci-11 } # vmid 6111
     ports:

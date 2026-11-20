@@ -31,11 +31,27 @@ registry_zot_pull_user: "pull"
 # is SOPS `registry_scoped_push_passwords[<user>]` (registry.sops.yaml), escrowed at af/estate/registry
 # `<user, - as _>_password` (trueswarm_ci_password), and handed to the app repo as Gitea Actions secrets REGISTRY_USERNAME /
 # REGISTRY_PASSWORD. Never projected to dev-workers (docs/runbooks/registry-cache.md).
+#
+# A scoped user has NO rights outside its prefix, not even read: zot's anonymousPolicy applies only
+# to UNAUTHENTICATED requests, so a client logged in as one of these users cannot pull other repos
+# (base images through the mirror, strive/* pins). Keep its credential confined to the push step.
+#
+# `password_optional: true` lets an entry merge before its SOPS key exists: the role then REMOVES the
+# user's htpasswd line (if any) with a message instead of failing the play. Its accessControl grant
+# still renders, but stays inert, because a user with no htpasswd line cannot log in. Remove the flag
+# in the change that adds the key, so the assert guards it like the others.
 registry_zot_scoped_push_users:
   - user: "trueswarm-ci"
     repositories: "trueswarm/**"   # cchifor/trueswarm .gitea/workflows/publish.yml
   - user: "workbricks-ci"
     repositories: "workbricks/**"  # cchifor/workbricks image-publish CI (Workbricks OR-12)
+  # cchifor/platform e2e build-once (platform#2823): stack-smoke pushes each commit's test images to
+  # strive/ci-build/<image>:ci-<40-hex commit> and the journey shards pull them by digest instead of
+  # rebuilding (NVMe write budget). A NEW namespace on purpose: strive/ci/* already holds 12 platform
+  # repos with latest/ailab/sha- tags under strive/** retention. Retention:
+  # registry_zot_strive_ci_build_keep_recent below.
+  - user: "strive-ci-push"
+    repositories: "strive/ci-build/**"
 
 # Web-UI SSO via Authelia (zot-native OIDC). Docker push (ci/htpasswd) + anonymous pull are
 # UNAFFECTED — only the browser UI gains a "Login with Authelia" button. The plaintext client
@@ -146,6 +162,14 @@ registry_zot_local_namespaces:
 registry_zot_sync_dockerhub_user: ""
 registry_zot_sync_credentials_file: "{{ registry_zot_config_dir }}/sync-credentials.json"
 
+# ---- Config apply (files/zot-config-apply.py) ----
+# When a change is reload-safe but zot cannot be reloaded (its watch on config.json is gone, e.g. the file was
+# replaced since zot started, or the live config.json is not valid JSON), the helper FAILS the play instead of
+# restarting: a restart is a 19 min registry outage (2026-11-17). Set true for ONE apply, in a quiet window, to
+# accept that restart: `-e registry_zot_config_allow_restart=true`. Restart-only changes (sync, auth, ports, ...)
+# and a first deploy restart regardless, as before. docs/runbooks/registry-cache.md "Reload or restart".
+registry_zot_config_allow_restart: false
+
 # ---- Retention (storage.retention in config.json.j2) ----
 # Without retention the store grows unbounded (~one sha-<commit> tag per repo per platform main
 # build) and eventually fills the data disk → 100%-full blob-write failures. The strive/** policy
@@ -160,6 +184,38 @@ registry_zot_sync_credentials_file: "{{ registry_zot_config_dir }}/sync-credenti
 # ~5-6 strive builds/day it pruned sha-b80a376c out from under the LIVE ailab pins in ~4 days,
 # causing registry-404 ImagePullBackOff on every reschedule (2026-06-28 incident).
 registry_zot_strive_keep_recent: 100
+
+# Repos (zot globs) whose retention also drops ORPHANED REFERRERS: buildx attestation manifests whose subject
+# image retention already deleted (deleteReferrers; zot GC removes a referrer whose subject is no longer in the
+# repo's index.json, pkg/storage/gc/gc.go removeReferrer). On 2026-11-18 they were 55-77% of every strive repo's
+# manifests (strive/web 1246 of 2300) and dominate zot's metaDB, which every restart rebuilds (19 min). Each listed
+# glob gets its own policy, rendered BEFORE strive/** with the SAME keepTags (one macro) plus deleteReferrers, so
+# only referrers change. Canary first (one repo; measure one GC cycle: zot writes, cp1 fsync), then widen to
+# ["strive/**"]. The change is reload-safe (files/zot-config-apply.py): no restart.
+# BEFORE adding a repo here, run scripts/zot-referrer-orphan-check.py on it: zot's GC checks a referrer's subject
+# against TOP-LEVEL index.json entries only and ignores keepTags, so the check must report nested_not_top == 0 and
+# tagged_orphans == 0 (2026-11-18: strive/web, strive/sentinel, strive/knowledge all safe; 2026-11-19 09:0xZ, B1:
+# strive/e2e-runner 1843 orphans, strive/keycloak-realm-sync 1836, strive/notification 1774, all safe, check-rc=0).
+# Widening, in batches (owner go 2026-11-19; ~4 MB of metaDB writes per deletion on node1, so ~100 GB in all):
+#   B1 e2e-runner, keycloak-realm-sync, notification (5.4k orphans) -> B2 profile, knowledge, tms, mcp (7.0k)
+#   -> B3 workflow, airlock, integration, sentinel (5.8k) -> B4 ["strive/**"] (the rest, 3.6k). One GC hour
+#   observed between batches, with the abort budget in docs/runbooks/registry-cache.md.
+registry_zot_strive_delete_referrers_repos: ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"]
+
+# strive/ci-build/** holds cchifor/platform's per-commit e2e images (`ci-<40-hex commit>`, pushed by
+# strive-ci-push above). Its policy is listed BEFORE strive/** in config.json.j2: zot applies only
+# the FIRST policy whose repositories glob matches a repo, and under strive/** a ci- tag matches no
+# keepTags entry, so the hourly GC would delete it while the pipeline's shards still need it. Keeps
+# the N most-recently-pushed ci- tags per repository; any other tag under strive/ci-build/** is
+# pruned. That is why it is a NEW namespace and not strive/ci/**: the existing strive/ci/* repos
+# keep latest/ailab/sha- tags under strive/**, and a first-match strive/ci/** policy would strip
+# them. These are throwaway build outputs, never deployed or pinned: the window only has to outlive
+# one pipeline (smoke pushes, the shards pull), so it is small on purpose.
+registry_zot_strive_ci_build_keep_recent: 10
+# ...OR pushed within this window (zot ORs the rules of one keepTags entry). A count alone can evict
+# a running pipeline's image when a busy repo takes 10 more pushes mid-run; the time floor keeps
+# every ci- tag at least this long. Go duration string, parsed like gcDelay.
+registry_zot_strive_ci_build_keep_within: "24h"
 
 # agentforge/** does NOT all push the same tag shape (verified against the live tag lists AND
 # both engine repos' workflows on 2026-09-02, see docs/decisions/0014-registry-pull-through-cache.md

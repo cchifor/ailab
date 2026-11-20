@@ -123,6 +123,17 @@ spec:
             description: >-
               See CIRunnerBuildkitHealRunnerHeld: the heal stopped gitea-act-runner on
               {{ $labels.nodename }} and every tick's start has not brought it back.
+        # Same rule as CIRunnerLeakedBuildxBuilders. No host gate: the series only exists while the runner
+        # is scraped.
+        - alert: CloudCIRunnerLeakedBuildxBuilders
+          expr: gitea_runner_buildx_leaked_bytes{job="ci-runner-cloud"} > 10e9
+          for: 1h
+          labels: { severity: warning }
+          annotations:
+            summary: "cloud CI runner {{ $labels.nodename }} holds {{ $value | humanize1024 }}B in leaked buildx builders"
+            description: >-
+              See CIRunnerLeakedBuildxBuilders: reap them by hand on an idle runner,
+              docs/runbooks/ci-runners.md, Troubleshooting, "Leaked buildx builders".
         # ---- shared-cache integrity + dead root filesystem, host-gated (see the CIRunner* twins in
         # ci-runners-rules.yaml). The cloud hosts boot daily and a missed 04:30 run catches up at boot
         # (Persistent=true + up to 2h random delay), so the beacon-missing wait is 6h after 4h of uptime.

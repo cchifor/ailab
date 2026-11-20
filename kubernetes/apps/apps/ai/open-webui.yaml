@@ -38,7 +38,12 @@ spec:
     spec:
       containers:
         - name: open-webui
-          image: ghcr.io/open-webui/open-webui:main
+          # Pinned to tag@digest (the 2026-11-17 `main` build, rev 0666e59d). With the bare floating tag and
+          # IfNotPresent, each node ran whatever `main` it had cached: on 2026-11-19 a pod on talos-cp2 ran the
+          # 11-17 build and migrated the shared openwebui database (alembic 9f6c2a8d1b43), and pods rescheduled
+          # onto nodes caching the 2026-09-04 build crash-looped ("Can't locate revision"). Bumping this digest
+          # runs one-way migrations on that database: Renovate opens it as no-automerge (renovate.json).
+          image: ghcr.io/open-webui/open-webui:main@sha256:d6c085678f7e3f474aa2a92ac9831cb68759dcfd951de250ebbb37dac5cd0255
           ports:
             - { name: http, containerPort: 8080 }
           env:

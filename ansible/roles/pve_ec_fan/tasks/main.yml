@@ -1,0 +1,12 @@
+---
+# EC fan driver + CPU-fan curve on the Bosgame M5 hosts (defaults/main.yml has the why).
+# `ansible-playbook site.yml --limit <host> --tags ec_fan` (`just ec-fan --limit <host>`) converges only
+# this; run it with --check --diff first. The role is not gated in site.yml: switched off, it still runs,
+# to take down what an earlier converge installed (and does nothing on a host that never had it).
+- name: Enabled -- driver, curve, metrics
+  ansible.builtin.import_tasks: enabled.yml
+  when: pve_ec_fan_enabled | bool
+
+- name: Disabled -- hand the fans back to the firmware and remove the units
+  ansible.builtin.import_tasks: disabled.yml
+  when: not (pve_ec_fan_enabled | bool)

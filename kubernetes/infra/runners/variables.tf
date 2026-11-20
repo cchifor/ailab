@@ -113,9 +113,37 @@ variable "runner_memory_floating_mib" {
   type        = number
   default     = 10240 # 10 GiB balloon floor = runner-service MemoryMax cap; was 12288 — see cchifor/platform#620
 }
+variable "runner_reboot_after_update" {
+  description = "Let bpg reboot a runner whose apply left non-hotpluggable config pending. false (default): changes stay pending until the runner is drained and stopped/started by hand (ADR 0042, docs/runbooks/ci-runners.md)."
+  type        = bool
+  default     = false
+}
+
+variable "runner_disk_cache" {
+  description = "Proxmox/QEMU cache mode for the runner root disks. \"unsafe\" drops guest flushes (ADR 0042); \"none\" is the old O_DIRECT behaviour with flushes passed through."
+  type        = string
+  default     = "unsafe"
+  validation {
+    condition     = contains(["none", "writethrough", "writeback", "directsync", "unsafe"], var.runner_disk_cache)
+    error_message = "runner_disk_cache must be one of none, writethrough, writeback, directsync, unsafe."
+  }
+}
+
 variable "runner_rootfs_gb" {
   description = <<-EOT
-    Runner root disk (GB). 200, was 120 — 120 was not enough and the shortfall was reding CI jobs.
+    Runner root disk (GB). 250 since 2026-11-17; 200 from 2026-08-12; 120 before.
+
+    250 (owner-approved 2026-11-17, NVMe wear): CI churn writes ~1 TB/day per runner, and ~1 TB/day of
+    the fleet's writes came from FULL wipes (build cache wiped 170x in 8 days, ~25 GB each; full image
+    prunes 118x) that the next jobs re-pull and rebuild. With the build-cache cap at 40 GB (#1832) and
+    the workbricks cache at 45 GiB (workbricks #445), 200 GB left only 4-15% free at the 7-day image
+    peak (~40 GB of images), so 7 of 8 runners would still cross the 88% full-prune line.
+    Applied 2026-11-17 the same way as the 08-12 growth below, so no runner rebooted: per runner
+    `qm resize <vmid> scsi0 250G` LIVE, then `just runners --tags rootfs --limit <runner>`
+    (roles/rootfs_grow: growpart + resize2fs online), then this value; `tofu plan` was a no-op.
+    Result: / at 242G on all eight, 56-74% used right after.
+
+    200 (2026-08-12, was 120): 120 was not enough, and the shortfall was reddening CI jobs.
 
     Measured 2026-08-12 over the ~2.2d Prometheus retains: root-fs peaks of 91/93/92/97/91% across
     ci-runner-1..5. gitea-runner-cleanup.sh treats >=92% as CRITICAL and will then prune THROUGH a
@@ -132,7 +160,13 @@ variable "runner_rootfs_gb" {
     200 GB takes the sawtooth peak from ~97% to ~58%, which puts CRITICAL_PCT (92) out of reach in
     normal operation. It is close to free: local-lvm is LVM-thin and allocate-on-write, measured at
     39.26% used on ai-node1 and 19.93% on ai-node3 with >1 TB free on each, so a larger declared size
-    consumes nothing until written.
+    consumes nothing until written. It does not give space back by itself, though: blocks the guest
+    frees stay allocated in the thin pool until they are trimmed. The cloud image's online `discard`
+    did not do that (2026-11-18: the cleanup freed ~50 GB in ci-runner-1 and its thin LV shrank by
+    1.2 GB; scattered small discards cannot free whole 64 KiB chunks, and ext4 then skips those groups
+    on fstrim). Since #1858 the gitea_runner role mounts / nodiscard and trims it nightly in chunks
+    (docs/runbooks/ci-runners.md, "Thin-pool trim"), so a runner's thin LV follows what the guest
+    holds rather than its high-water mark.
 
     RESIZE SEMANTICS, checked against the bpg provider docs rather than assumed. Increasing this is an
     IN-PLACE resize — it does NOT replace the VM. But it is not free either: the provider applies a
@@ -144,12 +178,13 @@ variable "runner_rootfs_gb" {
 
     The guest also needs `growpart /dev/sda 1 && resize2fs /dev/sda1` — cloud-init only grows the root
     fs on FIRST boot. The live runners were grown exactly that way on 2026-08-12 (qm disk resize, then
-    growpart + resize2fs online, ext4 grows mounted), so declared and actual already agree at 200G and
-    a plan is a no-op — no reboot is pending from this change. A rebuilt runner picks the size up from
-    cloud-init instead and needs neither step.
+    growpart + resize2fs online, ext4 grows mounted). The 2026-11-17 growth to 250G was applied the
+    same way, so declared and actual agree at 250 GB, the live size, and a plan is a no-op: no reboot
+    is pending from either change. A rebuilt runner picks the size up from cloud-init instead and needs
+    neither step.
   EOT
   type        = number
-  default     = 200
+  default     = 250
 }
 
 # ---- SSH public key seeded into the cloud-init `ubuntu` user, so Ansible can reach the guest ----
@@ -220,15 +255,71 @@ variable "runner_nodes" {
     hostname  = string
     # Optional per-runner balloon floor (MiB); null = runner_memory_floating_mib.
     memory_floating_mib = optional(number)
+    # Optional per-runner root-disk WRITE cap; null = uncapped. Rendered as bpg disk.speed (main.tf)
+    # with the burstable value equal to the cap, i.e. Proxmox mbps_wr = mbps_wr_max and
+    # iops_wr = iops_wr_max. Units: MiB/s (bpg says "megabytes", but 30 gives QEMU
+    # bps-write 31457280 = 30 x 1048576) and write IOPS. See the D1 note above ci-runner-1.
+    disk_write_mibps = optional(number)
+    disk_write_iops  = optional(number)
   }))
+  validation {
+    # A limit of 0 means "no limit" to QEMU (bpg reads an unset limit back as 0), so 0 is not how to
+    # remove a cap: delete the field instead.
+    condition     = alltrue([for v in values(var.runner_nodes) : coalesce(v.disk_write_mibps, 1) > 0 && coalesce(v.disk_write_iops, 1) > 0])
+    error_message = "runner_nodes[*].disk_write_mibps and disk_write_iops must be > 0, or omitted for no cap."
+  }
   default = {
     # ci-runner-1..5: consecutive IPs .14-.18, managed here. The commented 6..10 are out-of-band;
     # their real addresses are in the header note above and in docs/network-plan.md. cloud-init sets the IP at create
     # and lifecycle.ignore_changes=[initialization] makes editing `ip` here DOCUMENTATION ONLY — the live
     # IPs were changed in-guest via netplan (see docs/runbooks/ci-runners.md).
-    "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1" }
-    "ci-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "ci-runner-2" }
-    "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3" }
+    #
+    # 2026-11-19 later (owner): ai-node1's runners (ci-runner-1/-4/-9) UNCAPPED. node1's CPU fans now run an
+    # aggressive EC curve (ec_su_axb35 driver, Secure Boot off on node1) and its NVMe dropped from 78 C to
+    # ~50 C; this morning's 4-8 s cp1 stalls came with the drive above its 86 C warning temperature. The host's
+    # writeback bound (2 GiB dirty_bytes, pve_base) still limits how fast they can dirty page cache.
+    # This depends on the fan curve. The driver and the curve are managed by the pve_ec_fan role (#1869); until it is
+    # applied they are loaded by hand and a reboot loses them. Re-cap trigger: if node1 runs without the curve
+    # (driver not loaded or ec-fan-profile inactive; the role's EcFan* alerts), or its NVMe composite passes 70 C
+    # under load, put ci-runner-1/-4/-9 back to 60 MiB/s until the curve is back. The stall budget below applies too.
+    # 2026-11-19 (owner): ALL on-prem runners at 60 MiB/s (node1's are superseded by the entry above), no IOPS cap, with cache=unsafe
+    # (var.runner_disk_cache, ADR 0042). At 30 MiB/s, Postgres-heavy suites died on these runners
+    # (workbricks verify: 14/32 failed on node2 and 3/14 on node1 over 48 h, against 0/37 at 60 MiB/s on node3).
+    # Most of the I/O those suites need is fsync, which cache=unsafe takes off the drive. The cap stays
+    # as the host-memory guard: it bounds how fast a runner can dirty host page cache.
+    # The D1d rollback rule below ("a cp2 minute > 1 s -> node2 back to 30") is RETIRED: with cache=unsafe the
+    # runners' fsyncs no longer reach the drive, so a single slow etcd minute no longer points at CI. It is
+    # REPLACED by a stall budget: if a node's etcd member has more than 30 minutes a day with 1-min WAL fsync
+    # p99 > 0.5 s on two consecutive days (11-18/19 baseline: 18 / 14 / 8 per day), that node's runners go back
+    # to 30 MiB/s and the owner is told. Wear trigger: alert AiNodeNvmeWearHigh (ci-runners-rules.yaml)
+    # pauses that node's runners in Gitea. Both rules are in ADR 0042. History below.
+    # DISK WRITE CAPS (D1, owner-delegated 2026-11-17): 30 MiB/s, burstable 30, 1000 write IOPS,
+    # burstable 1000, on the six ai-node1/ai-node2 runners: ci-runner-1, -4, -9 (ai-node1) and
+    # ci-runner-2, -5, -10 (ai-node2). ci-runner-3 and ci-runner-6 (ai-node3) are NOT capped.
+    # Why: Kubernetes control-plane write stalls came from CI write bursts on the hosts' worn NVMe
+    # drives. cp1/cp2 etcd fsync p99 reached 1-6 s during 128-162 MB/s CI write bursts. At the 25-min
+    # checkpoint after the caps went on, cp1's stall-minutes went from 18 in the preceding 3 h to 0.
+    # How it was applied: LIVE, per VM, with no restart:
+    #   qm set <vmid> --scsi0 <existing>,mbps_wr=30,mbps_wr_max=30,iops_wr=1000,iops_wr_max=1000
+    # QEMU confirms bps-write 31457280, bps-write-max 31457280, iops-write 1000. These fields only
+    # record that state: `tofu plan` with them is a no-op, and without them it plans the caps away.
+    # To remove a cap: delete the runner's disk_write_* fields. The plan shows an in-place
+    # `- speed { ... } -> null` on that runner, and the apply clears it live (QEMU's
+    # block_set_io_throttle; no restart, as when relay-worker-1's throttle was removed in #1706).
+    # Do NOT set 0 to remove one: the validation above rejects it.
+    "ci-runner-1" = { node_name = "ai-node1", vm_id = 4101, ip = "192.168.0.14", hostname = "ci-runner-1", memory_floating_mib = 14336 } # floor: see ci-runner-4
+    # Cost of 30 MiB/s (why D1c, #1838, raised node2 to 45 at ~19:45Z on 2026-11-17): a workbricks stack Postgres on
+    # ci-runner-5 crashed into recovery (io pressure full avg10 85%, no OOM), cold workbricks jobs spend 8-14 min
+    # writing, and I/O-heavy suites time out (relay release/holder tests, 21 suite timeouts on ci-runner-10).
+    # Rolled back to 30 at 20:29Z (#1840) by the D1d rule "any cp2 minute with etcd WAL fsync p99 > 1 s -> node2 back
+    # to 30": cp2 hit 4.46 s at 20:27Z (node2 NVMe 79% busy). Raise again only after a clean night, one node at a
+    # time, in daytime, comparing cp2 stall-minutes against node2 job failures.
+    "ci-runner-2" = { node_name = "ai-node2", vm_id = 4102, ip = "192.168.0.15", hostname = "ci-runner-2", disk_write_mibps = 60 } # write cap: D1, above ci-runner-1
+    # D1d rule (2026-11-17 23:08Z): node3 runners capped at 60 MiB/s (no IOPS cap) after cp3 -- the etcd LEADER --
+    # hit a 1-min WAL fsync p99 of 0.51 s while these two uncapped runners burst to 109-220 MiB/s; that night the
+    # node1 runners were paused in Gitea (cp1 degraded), so CI load shifted here. node3 has the healthiest NVMe
+    # (55% life used), so 60 is twice the node1/node2 cap. Lift only after a clean daytime check of cp3.
+    "ci-runner-3" = { node_name = "ai-node3", vm_id = 4103, ip = "192.168.0.16", hostname = "ci-runner-3", disk_write_mibps = 60 }
     # ci-runner-4 and ci-runner-9 (both ai-node1): floor 14 GiB, raised live 2026-11-16 (owner-approved).
     # ai-node1 sits at pvestatd's ~80% auto-balloon line ALL DAY, so its runners never inflate above
     # their floor: the floor is their working size (Prometheus 2026-11-15 17Z to 2026-11-16 07Z: 7.4-9.8
@@ -236,11 +327,14 @@ variable "runner_nodes" {
     # full profile, ~20 containers) loses its file cache and swap-thrashes: ci-runner-9 hit 43% full
     # IO pressure and ~85% of node1's single NVMe (80% util), slowing ci-runner-4 and talos-cp1 too;
     # every workbricks stack-lane failure 2026-11-15 23:16Z onward ran on r4 or r9. 14 GiB matches what
-    # the node2 runners passed the same jobs with. +8 GiB committed on node1 (~25 -> ~17 GB available).
-    # ci-runner-1 (also node1) stays at the default; raise it the same way if it shows the pattern.
-    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336 }
-    "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5" }
-    "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6" }
+    # the node2 runners passed the same jobs with.
+    # ci-runner-1 (also node1): raised to 14 GiB live 2026-11-17 (owner-approved), for parity with r4/r9.
+    # Fleet-wide, workbricks' tenants stack lane failed ~30% of runs on runners under 11.4 GiB vs <1% above
+    # (dev-worker-2, 179 runs since 11-14); r1's own sample was small (1 failure in 5 runs). All three
+    # node1 runners now sit at 14 GiB. Check node1's free memory (`free -g` on the host) before raising more.
+    "ci-runner-4" = { node_name = "ai-node1", vm_id = 4104, ip = "192.168.0.17", hostname = "ci-runner-4", memory_floating_mib = 14336 } # uncapped 2026-11-19, see the note above ci-runner-1
+    "ci-runner-5" = { node_name = "ai-node2", vm_id = 4105, ip = "192.168.0.18", hostname = "ci-runner-5", disk_write_mibps = 60 }       # write cap: D1, above ci-runner-1
+    "ci-runner-6" = { node_name = "ai-node3", vm_id = 4106, ip = "192.168.0.19", hostname = "ci-runner-6", disk_write_mibps = 60 }
     # ci-runner-7 (vm_id 4107, .29, ai-node3) RETIRED 2026-09-16 — removed from this map so the next
     # apply destroys it. Retired to free ai-node3 for a qwen3.8-27b-ailab instance: the VM held a
     # MEASURED 10.40 GiB RSS, which takes node3's 7-day-minimum MemAvailable from 18.15 GiB to ~28.6
@@ -272,7 +366,7 @@ variable "runner_nodes" {
     # .30 returns to the free pool; docs/network-plan.md is the IPAM registry and records it.
     # ci-runner-9 MOVED ai-node2 -> ai-node1 on 2026-09-07 (offline qm migrate) to pull ~10 GiB off
     # ai-node2, which was floor-pinning its dev-workers. Placement here reflects the live estate.
-    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9", memory_floating_mib = 14336 } # floor: see ci-runner-4
-    "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10" }
+    "ci-runner-9"  = { node_name = "ai-node1", vm_id = 4109, ip = "192.168.0.31", hostname = "ci-runner-9", memory_floating_mib = 14336 } # floor: see ci-runner-4; uncapped 2026-11-19, see the note above ci-runner-1
+    "ci-runner-10" = { node_name = "ai-node2", vm_id = 4110, ip = "192.168.0.23", hostname = "ci-runner-10", disk_write_mibps = 60 }      # write cap: D1, above ci-runner-1
   }
 }

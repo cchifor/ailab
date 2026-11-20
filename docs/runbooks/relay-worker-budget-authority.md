@@ -18,13 +18,21 @@ Flux inventory. Merging the activation installs the empty, stopped ledger
 ESO objects for credential delivery, and nothing else: no database, no login
 password, authority row, witness, qualification, consumer or enabled plugin.
 
+**Current state (2026-11-18).** Steps 1-6 and step 7's File A are complete; the activation overlay now
+sets one database replica. Both consumer components are included (H4a and the first part of step 8),
+and the Router trust is included. The remaining step-8 proofs, Router drills A-D and independent
+review precede the production opening; File B follows H6, before any signed run. Resume through
+[relay-researcher-remaining-live-steps.md](relay-researcher-remaining-live-steps.md), whose steps 1-2
+are DONE, using the decisions recorded in [ailab #1820](https://git.chifor.me/cchifor/ailab/issues/1820).
+The table below records the original activation effects, not instructions to initialize again.
+
 | Source | Flux Kustomization | Merge effect |
 | --- | --- | --- |
 | `apps/backup/velero/helmrelease.yaml` | `backup` | Both schedules exclude `relay-budget-authority` |
 | `apps/relay-budget-authority/ledger/` | `relay-budget-authority` (wait, after `qnap-storage`, `cert-manager-config`, `apps`, `backup`) | Base applied, StatefulSet at 0 |
 | `apps/infrastructure/security/openbao/relay-budget-provision-job.yaml` | `openbao` | Policies + k8s-auth roles `af-app-relay-budget`, `af-app-router-budget`; no KV document |
 | `apps/relay-budget-authority/credentials/` | `relay-budget-credentials` (no wait) | SecretStore + ExternalSecret in `relay` and `llm-router`, not Ready until step 6 |
-| `components/relay-worker-budget-client`, `components/llm-router-worker-budget-reader` | none (not included) | Nothing until a later operator PR (see Consumer wiring) |
+| `components/relay-worker-budget-client`, `components/llm-router-worker-budget-reader` | `apps` (now included) | Client/reader files only; authority startup and plugin enablement have separate gates (see Consumer wiring) |
 
 `scripts/tests/test_relay_budget_authority_activation.py` pins these gates.
 
@@ -77,8 +85,9 @@ Relay app migration.
 The source commit is one reviewed pin:
 `RELAY_BUDGET_SOURCE_COMMIT` in
 `kubernetes/optional/relay-budget-authority/initialize/relay-source.env`. It is
-empty until the operator sets the full SHA of the reviewer-merged release commit
-in a reviewed PR. The bundle renderer reads it, and it ships in the script
+now `d1c77f876606976362d70f42973033d31ac913c6`. Its five SQL files are unchanged in the runtime's
+`c0fe50f0` and hub's `e77bd09a`; an agent-only release does not repin the ledger. The bundle renderer
+reads it, and it ships in the script
 ConfigMap, so both standalone Jobs refuse a bundle whose `source-commit` differs
 or a pin that is unset.
 
@@ -91,7 +100,7 @@ default-disabled runtime plugin and qualification-policy schema.
 The commands in this section are **operator-only Kubernetes writes**. A dev-worker
 must prepare/review the PR and evidence; its read-only `platform` credential cannot
 perform this ceremony. Use `--context admin@ai`, never the default home-lab context.
-Do not enable application consumers until every gate below is satisfied.
+Follow Consumer wiring for the early file mounts; the production gate and plugin wait for steps 8-9.
 
 1. Confirm reviewer-merged Relay/router releases, the exact ledger schema, resource
    capacity, `qnap-iscsi` retention, CA readiness, and actual app pod labels. Inspect
@@ -222,24 +231,413 @@ Do not enable application consumers until every gate below is satisfied.
    fixed: `docs/runbooks/relay-router-connection.md` records connection
    `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8` (issuer `relay.chifor.me`) and digest
    `547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad`, and orders
-   these rows within the connection's steps. The UUID is in git before Relay is
-   configured with it, so the `clients` row waits only for its `max_tokens`
-   (8 × (I + 8192), relay#277 comment 120818 D); allocation stays impossible until
-   that row exists.
+   these rows within the connection's steps. The `clients` row now uses `max_tokens` 7441536:
+   8 × (922,000 + 8,192), with I accepted in relay#277 comment 122095 and the matching trust
+   ceiling committed in ailab #1778. It no longer waits for an input-bound decision.
+   **File A and File B are separate.** File A (`clients` and `readers`) is complete. File B
+   (`qualifications`) follows H6 and the final Router rollout, before any candidate run is signed
+   (hub H7; owner decision 2026-11-17, ailab #1820). It is not a prerequisite of trust inclusion or
+   step 9's bootstrap opening.
 8. Include the router reader component (Consumer wiring) so the router's files
    can be verified; the plugin stays disabled.
    Prove TLS hostname verification, TLS-only login, different role permissions,
    current primary status, synchronous settings and checksum mode. Verify the
    current external witness, preserved allocation/outbox history, and independent
-   durability/recovery evidence. Run the four witness drills (External witness §
+   durability/recovery evidence (for the first `ready=true`: "Durability evidence
+   for the first `ready=true`" below). Run the four witness drills (External witness §
    Drills) and archive their evidence. Failure of any gate keeps `ready=false`.
    After independent review, set `worker_budget.authority.ready=true` explicitly.
    Authority readiness is an allocation gate; Kubernetes readiness only proves
    PostgreSQL is reachable and must never be treated as qualification.
-9. Only after step 8 and the qualification gates, enable the router plugin through
-   the authenticated admin API: `POST /admin/v1/plugins/worker-budget-authority`
-   with `{"enabled":true}`. Read back `GET /admin/v1/plugins` (state active) and the
-   router log line `Worker budget authority available`. No manifest enables it.
+9. **Bootstrap gates (owner decision 2026-11-17).** Enable the router plugin only
+   after these gates, each read back in the same window:
+   - **Step 8 complete:** its proofs; drills A–D reviewed (External witness §
+     Drills); the durability evidence accepted ("Durability evidence for the first
+     `ready=true`" below); `worker_budget.authority.ready=true` read back.
+   - **Router-side readbacks:** the Relay trust included (Router connection step 6:
+     `relay-keys` active, the mounted trust equal to the rendered one);
+     `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` equal to the `readers` row's
+     `deployment_digest` (today
+     `547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad`, Consumer
+     wiring); and the `clients` and `readers` rows of step 7 (File A) unchanged.
+
+   **File B, the `qualifications` rows, is not one of these gates.** The ledger
+   refuses every allocation that lacks a `qualifications` row, covering the
+   original deadline, for each of its policy digests: `prepare` raises `42501`
+   `Worker budget qualification unavailable` and writes nothing (Relay
+   `deploy/worker-budget-ledger/001-authority.sql:102-107`, replaced by the same
+   check in `005-provenance-purpose.sql:110-115`'s `prepare_token_only`, which every
+   allocating entry point reaches). An enabled plugin without File B therefore
+   cannot allocate, and an `available` Router proves availability only (the gate,
+   the witness and the reader mapping), never qualification. File B then becomes
+   mandatory: committed, read back and qualified by the Router (the preflight planned in
+   ailab #1753 comment 124071 §5) **before any candidate run is signed**
+   (`relay-researcher-hub-upgrade.md` H7).
+   Run `file_b_router_check` from the procedure below before signing R0 first,
+   then before each candidate run. Only its exit 0 (`signingReady: true`) satisfies this
+   signing prerequisite. The zero-write `file_b_check` stays available for ledger-only
+   evidence; it exits non-zero even when the ledger passes.
+
+   **Router qualification: one nonce write, accepted by the owner on 2026-11-19.** H6 cannot
+   provide the pre-signing check: `GET /api/worker-pools` stops at ordinary qualification during the
+   candidate campaign (`e77bd09a:server/workers/pool-readiness.ts:100-122,157-211`; R0 §2 F1). The
+   ledger half is read-only. The Router half cannot be: the pinned Router's authenticated
+   `worker-budget-preflight` first persists the delegation's nonce
+   (`5a5181b7:packages/plugins/relay-keys/service.ts:34-50`). The owner chose to accept that one
+   replay-set write per check instead of a Router change. `--router-preflight` is the explicit opt-in;
+   without it the tool still makes no Router request
+   ([Router half](#router-half-one-nonce-write-accepted-by-the-owner-on-2026-11-19)).
+
+   With the bootstrap gates above satisfied, enable it through the authenticated admin API:
+   `POST /admin/v1/plugins/worker-budget-authority` with `{"enabled":true}`. Read
+   back `GET /admin/v1/plugins` (state active) and the router log line
+   `Worker budget authority available`. No manifest enables it.
+
+### File B pre-signing readback
+
+**File A and File B are separate.** File A is step 7's `clients`/`readers`
+mapping. File B is the independently reviewed content committed to
+`worker_budget.qualifications`, not a release qualification registry, candidate
+run, or allocation. There is no qualifying File B file/template in this checkout:
+`kubernetes/components/relay-worker-budget-client` wires connection files only,
+and step 7 deliberately supplies no qualifying seed. The operator retains the
+reviewed SQL and its successful `COMMIT` receipt in the private evidence directory
+(`remaining-live-steps` step 0's `lwrite`). "Committed" here means the ledger
+transaction, not merely a git commit. Do not generate the expected file from the
+database readback: that would compare the database with itself.
+
+For this tool, retain the same reviewed rows as `$ev/file-b.json`, a JSON object
+with exactly `version: 1` and `qualifications: [...]`. Each array entry has exactly
+`deployment_digest`, `digest`, and `policy`, matching the table columns. It is an
+expected **complete table**, including other deployments if present; an extra,
+missing or duplicate row fails. Row order is immaterial. `policy` is the actual
+JSON object, with exactly these fields (no placeholders or synthetic evidence):
+
+| Fields | Source-derived meaning |
+| --- | --- |
+| `version`, `digest` | Version 1; `digest` is the canonical SHA-256 `tokenPolicyDigest` of every other policy field, and must equal the row's `digest`. |
+| `routerReleaseDigest`, `adapterDigest` | Hash of the executing compiled release plus dependency lockfile; hash of the executing provider adapter. These are distinct from the row's Router connection `deployment_digest`. |
+| `accountId`, `deploymentId`, `model`, `provider`, `providerGeneration`, `baseUrl`, `transport` | Exact provider target/endpoint and generation; transport is `chat-completions` or `anthropic-messages`. This does not by itself prove a requested route currently selects that target. |
+| `maximumInputTokens`, `maximumOutputTokens`, `outputIncludesReasoning`, `usageIncludesAllTokens` | Positive safe integer bounds; both coverage flags must be true, including reasoning and cached tokens. The bounds' sum must remain a safe integer. |
+| `qualificationExpiresAt`, `evidenceDigest` | Expiry as positive Unix milliseconds, covering the whole original worker lifetime; SHA-256 identifying independently retained review/test evidence. |
+
+Grounding (fixed revisions, not moving branches):
+
+- Relay ledger `d1c77f876606976362d70f42973033d31ac913c6`,
+  `deploy/worker-budget-ledger/001-authority.sql:20-36` defines mappings and rows;
+  `:188-198` sends all policies for the reader's deployment to the Router.
+- Router `5a5181b7`, `packages/plugins/worker-budget-authority/runtime.ts:9-30`
+  defines the strict policy schema and canonical digest (sorted keys, compact
+  UTF-8 JSON, excluding `digest`); `:35-58` derives release/adapter hashes;
+  `:89-96` verifies snapshot identity/digests; `:110-129` filters policies against
+  executing release, adapter, enabled account/deployment/model, endpoint, provider
+  generation, output-limit support and expiry. Availability alone is insufficient.
+  `packages/modules/inference-budget/index.ts:9-21,33-50` defines provider-enforced
+  context coverage (framing, tools and cache reads/writes), reasoning coverage and
+  per-attempt use of the exact target's qualified input/output bounds.
+- Relay hub `e77bd09a`, `server/workers/inference/budget-preparation.ts:119-140`
+  binds proof policy digests and original deadline to the profile; `:449-489`
+  supplies those digests and deadline to allocation/inspection. These allocating
+  paths are not invoked by the check. The ledger's
+  `005-provenance-purpose.sql:110-125,164-171` checks qualification expiry before
+  inserting allocation/outbox records. `003-scoped-requests.sql:117-127` and
+  `005-provenance-purpose.sql:214-224` also mutate allocation/outbox state.
+
+**Ledger half, zero-write (`file_b_check`), from this repository root.** It sends no
+Router request; the signing check is `file_b_router_check`
+([Router half](#router-half-one-nonce-write-accepted-by-the-owner-on-2026-11-19)), which reuses this
+pipeline. Set `FILE_B_REQUIRED_LIFETIME_SECONDS` to the planned interval from **this check**
+through the end of the original worker lifetime, including signing/start delays
+(1..604800 seconds, the ledger preflight's seven-day bound). Use the existing
+step-5 operator socket access; no credentials need to be read or printed here.
+Use a shell with `pipefail` (bash, including 3.2, or zsh); the subshell keeps
+that option local to the helper.
+This is a new read-only command, not authorization to execute it automatically:
+
+```sh
+file_b_check() (
+  set -o pipefail
+  python3 scripts/relay-worker-budget-file-b-check.py --print-ledger-sql \
+    | kubectl --context admin@ai -n relay-budget-authority exec -i relay-budget-postgres-0 -- \
+        env PSQL_HISTORY=/dev/null PGCLIENTENCODING=UTF8 psql -X -qAt -w -v ON_ERROR_STOP=1 \
+          -h /var/run/postgresql -U postgres -d relay_budget -f - \
+    | python3 scripts/relay-worker-budget-file-b-check.py \
+        --file-b "$ev/file-b.json" \
+        --required-lifetime-seconds "${FILE_B_REQUIRED_LIFETIME_SECONDS:?set the reviewed remaining lifetime}" \
+        --ledger-json - "$@"
+)
+file_b_check --json
+```
+
+The fixed SQL uses `BEGIN READ ONLY`, session-local statement/lock timeouts and
+`search_path=pg_catalog`, a single SELECT over the **whole** qualifications table,
+and `ROLLBACK`. It calls
+only PostgreSQL JSON/clock/settings builtins, with no worker-budget functions,
+row locks, reservations, counters, audit inserts, worker creation or allocation.
+It verifies exact field equality and canonical digests, a read-only receipt,
+readback age/clock disagreement of at most 15 seconds, and expiry through the
+requested deadline using the later of the database and operator clocks. It does
+not prove the authority gate, witness, File A, evidence quality, or live Router
+route/release/provider acceptance. Repeat after any change and immediately before
+signing; a readback does not freeze the table or extend policy expiry.
+`--print-router-ledger-sql`, used only by `file_b_router_check`, is the same transaction and
+SELECT plus one scalar subquery over `worker_budget.authority` (`001-authority.sql:14-19`): its
+`instance_id`, `recovery_epoch` and `ready`, never `witness_digest`, with no lock and no function.
+The Router's preflight requires that recovery epoch (`5a5181b7:packages/plugins/api-keys/meter.ts:121-125`).
+
+The existing `relay_budget_reader` is **not** a SELECT role:
+`001-authority.sql:200-206` grants only function execution. Both application logins
+lack table privileges; `kubernetes/optional/relay-budget-authority/pg_hba.conf:2-9`
+permits `postgres` only via local peer authentication and rejects remote owner
+connections. A port-forward alone therefore cannot give this tool table access.
+Where the operator already has a permitted local connection, direct mode is:
+
+```sh
+python3 scripts/relay-worker-budget-file-b-check.py \
+  --file-b "$ev/file-b.json" --required-lifetime-seconds "$FILE_B_REQUIRED_LIFETIME_SECONDS" \
+  --ledger-dsn-env FILE_B_LEDGER_DSN --json
+```
+
+`FILE_B_LEDGER_DSN` contains a PostgreSQL URL, or use `--ledger-dsn-file PATH`.
+The tool passes parsed connection fields only through psql's environment, never
+argv/output. TCP requires `sslmode=verify-full`; only `sslmode`, `sslrootcert` and
+`hostaddr` URL options are allowed. This does not create/grant a role or bypass
+the existing access rules. The deployed socket pipeline is the current path.
+
+**Ledger preflight side-effect review.** At the ledger pin,
+`002-preflight.sql:4-33`, replaced by `004-preflight-errors.sql:5-36`, performs
+reads and returns a proof; there are no audit/counter/reservation writes. Its
+`gate` callee (`001-authority.sql:60-66`) takes `FOR SHARE`, which PostgreSQL
+rejects inside a READ ONLY transaction. Neither it nor `runtime_snapshot` is
+called here. They also do not verify full policy content: preflight checks
+digest presence and expiry (`004:23-33`); the Router performs runtime qualification.
+
+#### Router half: one nonce write, accepted by the owner on 2026-11-19
+
+**What the Router offers.** The pinned Router has one non-allocating, authenticated qualification
+check: `POST /register/relay-keys`, action `worker-budget-preflight`. It requires an Ed25519-signed
+Bearer JWT, valid at most 60 seconds, binding the exact request bytes, action, operation ID, issuer,
+tenant, role and nonce; an ordinary Router admin token is insufficient
+(`5a5181b7:packages/plugins/relay-keys/contracts.ts:6-11,40,58-74`). The kernel leaves `/register`
+authentication to the plugin (`packages/kernel/http.ts:63-68`). `relay-keys/index.ts:18-25`
+verifies the delegation, then **always durably consumes its nonce before dispatch**
+(`service.ts:34-50`), then runs the check (`service.ts:69-88`): trust ceiling and route membership,
+exact runtime identity, policy set and lifetime (`packages/plugins/api-keys/meter.ts:121-131`), and
+at least one usable target of the requested route matching a qualified policy. The worker-budget
+plugin exposes no other HTTP diagnostic (`packages/plugins/worker-budget-authority/index.ts:39-71`).
+Relay records the same bookkeeping (`c0fe50f0:deploy/worker-budget-ledger/README.md:319-327`).
+
+**The write the owner accepted.** One SQLite transaction in the Router's store
+(`/data/router.sqlite`, `kubernetes/apps/apps/llm-router/router.yaml:156-157`; table
+`kv(ns, key, value, updated_at)`, `5a5181b7:packages/adapters/sqlite/sqlite-worker.mjs:38,261-267`):
+
+- the scope's `relay-key-nonces` row, key `sha256(JSON.stringify([issuer, tenant]))`
+  (`relay-keys/service.ts:11`), gains this nonce tagged `readiness: true`, and loses its expired
+  entries (`service.ts:39-49`);
+- the same transaction rewrites the unchanged `api-keys`/`state` row, as every
+  `managedTransaction` with operations does (`packages/plugins/api-keys/keys.ts:35,135-143`).
+
+Nothing else: no key, grant, allocation, operation receipt, audit row or ledger write; the
+preflight branch returns before the key transaction (`service.ts:69-89`). The entry is unexpired
+for 10 seconds, the delegation's lifetime, and occupies one of the scope's **12 readiness slots**
+(`service.ts:45-47`; the 120 management slots are counted apart). It stays stored, expired, until
+the scope's next nonce consumption prunes it. A refusal at the limit (429 `RATE_LIMITED`) writes
+nothing.
+
+**How the tool obtains a delegation the Router accepts.** Three ways were examined:
+
+- **(A) The hub's own pool-readiness route: not available before the ordinary registry.**
+  `GET /api/worker-pools` reaches the Router only through `inspectPoolReadiness`. Without an
+  ordinary qualification registry the hub's qualification mode stays `"refuse-fixture"`
+  (`e77bd09a:server/main.ts:260,267-273`), so every template gets
+  `runtime-qualification-unavailable` (`server/workers/pool-readiness.ts:100-122`), and the budget
+  preflight runs only `if (!reason && …)` (`:157`, the call at `:174-190`). That holds through the
+  whole candidate campaign (R0 §2 F1). Even when reachable it would report only `available`, for the
+  profile's digests and the template's deadline, not File B's. The hub's budget authority itself
+  starts only at H7 (`server/main.ts:337`), after File B. `origin/main` (`6869d4fe`) keeps the same
+  gate (`pool-readiness.ts:100-142,184`).
+- **(C) Other routes.** Exec into the hub Pod and sign there with its mounted key: the key would
+  stay in the Pod, but a second, unreviewed process would run inside the production hub container
+  with its identity, egress and memory limit, and before H7 Relay's own preflight code is not
+  instantiated there (`server/main.ts:337`), so it would be the same custom signer relocated, with
+  `pods/exec` on the hub added. A new operator signer in the Router trust needs a trust change and a
+  Router restart: new authority. The admin API has no worker-budget diagnostic (above). A Router
+  change is what the owner declined.
+- **(B) Chosen: the tool signs one `reconciler` delegation itself.** It is the least new authority:
+  the existing reconciler signer, which the Router trust maps to `relay-reconciler-2026-11` with role
+  `[reconciler]` only (Router connection runbook "Router trust mapping"), and whose Router role
+  cannot create, list, inspect or authorize; it is limited to `operation`, `delivery-ack`, `revoke`
+  of unacknowledged keys, `capabilities`, `lifetime-usage`, `worker-budget-inspect` and
+  `worker-budget-preflight` (`relay-keys/contracts.ts:70-71`, `service.ts:198`). The tool uses only
+  the last. Its claims are exactly the ones Relay's `SignedRouterBridge` signs
+  (`e77bd09a:server/router-credentials/transport.ts:160-198`, identical at `origin/main`):
+  `iss`, `kid` and `tenant` from the reviewed connection record, role `reconciler`, one fresh UUID
+  operation ID and 24-byte nonce, `exp - iat` = 10 seconds (Relay's own preflight signs with at most
+  10, `server/workers/inference/budget-authority.ts:130-137`). Only `sub` differs:
+  `operator:file-b-check` instead of Relay's `worker-pool-readiness`; the preflight branch records
+  no subject. The operator already holds this key's access: H5's readback reads the same Secret
+  ([remaining-live-steps](relay-researcher-remaining-live-steps.md) step 9).
+
+**The key never reaches argv, disk or output.** The tool reads it from an inherited descriptor
+(`--reconciler-key-fd 3`) and refuses anything but a pipe there, so `3< key.pem` fails. The pipe
+comes straight from `kubectl get secret relay-router-files -o jsonpath='{.data.reconciler-key\.pem}'
+| base64 -d`: the field Relay mounts as `/run/relay-router/reconciler-key.pem`
+(`kubernetes/apps/relay-router-connection/credentials/relay.yaml:89-97`;
+`kubernetes/components/relay-router-connection/deployment.yaml:31-32`). It accepts exactly one
+unencrypted PKCS#8 Ed25519 PEM (what step 1's `openssl genpkey -algorithm ed25519` wrote), signs in
+memory (RFC 8032, Python stdlib; RFC 8032 §7.1 known-answer tests in the test file), and prints
+only the public key's SHA-256 (`reconcilerPublicKeySha256`, the same value as step 1's
+`openssl pkey -pubout -outform DER | sha256sum` fingerprint). A wrong key is refused by the Router's
+signature check, before any write.
+
+**What it proves, and what it does not.** A valid proof shows that, at its `observedAt`, the Router
+accepted a reconciler delegation for this issuer and tenant (the hub's signer and the Router trust
+agree); the request fits the tenant's trust ceiling; its runtime ledger snapshot carries this
+deployment digest and the ledger's current recovery epoch; **every File B policy digest of this
+deployment** is runtime-qualified (executing release and adapter, account, deployment, model,
+endpoint, provider generation, transport and output-limit support) through `requiredUntil`; and
+the requested route has a usable target matching one of them. It does not prove the hub's own
+wiring (its profile's digests, model, limit or mounted file), it does not run the hub's
+ledger-before/after `worker_budget.preflight` as the client role (the ledger half here is the
+read-only full-table comparison plus the authority row), and it expires with the proof's
+`validUntil`, at most 10 seconds later. Run it immediately before signing.
+
+**Inputs.** Everything the tool needs is reviewed in git except the key, the run's token budget and
+its lifetime:
+
+| Input | Value | Source |
+| --- | --- | --- |
+| `--router-connection`, `--router-connection-id` | `kubernetes/components/relay-router-connection/connections.json`, `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8` | The record Relay mounts at H6. The tool derives issuer `relay.chifor.me`, kid `relay-reconciler-2026-11`, origin `https://router.chifor.me` and the deployment digest `547353ac…61ad` from it, with Relay's own digest (`e77bd09a:server/router-credentials/service.ts:41-54`) |
+| `--router-tenant` | `00000000-0000-4000-8000-000000000001` | The record's only tenant; the trust's tenant |
+| `--router-route`, `--router-requested-model` | `relay-researcher-luna` | The pool's selection model and the trust's only route ([Router connection](relay-router-connection.md) "Route precondition") |
+| `--router-access` | `api` | The trust's and the route's access |
+| `--router-limit` | the run's grant `inferenceTokenBudget` (`FILE_B_ROUTER_LIMIT`) | Per run, at most 1,000,000 in the campaign ([qualification campaign](relay-researcher-qualification-campaign.md) §3.6); the trust's `maxTokens` 7441536 is the Router's ceiling |
+| `--required-lifetime-seconds` | `FILE_B_REQUIRED_LIFETIME_SECONDS`, as for the ledger | The same `requiredUntil` goes to the Router, which also caps it at the trust's `maxLifetimeSeconds` 86400 |
+| `--reconciler-key-fd` | `3`, a pipe from Secret `relay/relay-router-files`, key `reconciler-key.pem` | Above |
+| `--router-store-json` | the Router store readback, before the call | Below |
+
+The tool refuses before signing when the ledger fails, when the authority row is not exactly one
+row with `ready=true` (the Router would answer 503 after its write), when a File B row belongs to
+another deployment or there are more than 32 policies (the Router's maximum), when the requested
+model is not one of the routes, when the key is not one Ed25519 PEM from a pipe, and when the
+scope has no free readiness slot.
+
+**Readiness slots, read-only.** The tool counts the scope's unexpired readiness nonces from the
+Router's own store, through a fixed program in the same pattern as `--print-ledger-sql`:
+`--print-router-store-script` prints it, `node -` runs it in the Router container. It opens
+`/data/router.sqlite` with `readOnly: true` (SQLite read-only; a missing file is never created)
+and `PRAGMA query_only`, runs one `SELECT key, value FROM kv WHERE ns = 'relay-key-nonces'` in a
+read transaction, and prints, per scope, only each entry's `exp`, readiness tag and the SHA-256 of
+its nonce. A WAL reader takes read locks only, never a checkpoint; the program has no inputs.
+`--router-slots` turns a readback into the report: remaining = 12 minus the readiness entries whose
+`exp` is after the readback's clock, the Router's own rule (`service.ts:37-40`).
+
+**Signing check (`file_b_router_check`), from this repository root.** It defines the ledger
+helper's Router twin and an after pass, and needs `jq`. Set `FILE_B_REQUIRED_LIFETIME_SECONDS` as
+above and `FILE_B_ROUTER_LIMIT` to the run's `inferenceTokenBudget`. Each run of
+`file_b_router_check` writes **one** nonce; never wrap it in a retry loop. The store readback is one
+short `node` process in the Router container, as `validate-live.mjs` is
+([llm-router](llm-router.md) step 8); it reads, never writes.
+
+```sh
+router_store_readback() (
+  set -o pipefail
+  python3 scripts/relay-worker-budget-file-b-check.py --print-router-store-script \
+    | kubectl --context admin@ai -n llm-router exec -i deploy/llm-router -c router -- node --no-warnings -
+)
+file_b_router_slots() (   # zero-write; optional argument: the call's nonceSha256
+  set -o pipefail
+  router_store_readback | python3 scripts/relay-worker-budget-file-b-check.py --router-slots --json \
+    --router-connection kubernetes/components/relay-router-connection/connections.json \
+    --router-connection-id babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8 \
+    --router-tenant 00000000-0000-4000-8000-000000000001 \
+    --router-store-json - ${1:+--router-nonce-sha256} ${1:+"$1"}
+)
+file_b_router_check() (
+  set -o pipefail
+  out="$(python3 scripts/relay-worker-budget-file-b-check.py --print-router-ledger-sql \
+    | kubectl --context admin@ai -n relay-budget-authority exec -i relay-budget-postgres-0 -- \
+        env PSQL_HISTORY=/dev/null PGCLIENTENCODING=UTF8 psql -X -qAt -w -v ON_ERROR_STOP=1 \
+          -h /var/run/postgresql -U postgres -d relay_budget -f - \
+    | python3 scripts/relay-worker-budget-file-b-check.py --router-preflight --json \
+        --file-b "$ev/file-b.json" \
+        --required-lifetime-seconds "${FILE_B_REQUIRED_LIFETIME_SECONDS:?set the reviewed remaining lifetime}" \
+        --ledger-json - \
+        --router-connection kubernetes/components/relay-router-connection/connections.json \
+        --router-connection-id babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8 \
+        --router-tenant 00000000-0000-4000-8000-000000000001 \
+        --router-route relay-researcher-luna --router-requested-model relay-researcher-luna \
+        --router-access api --router-limit "${FILE_B_ROUTER_LIMIT:?set the run inferenceTokenBudget}" \
+        --router-store-json <(router_store_readback) \
+        --reconciler-key-fd 3 3< <(kubectl --context admin@ai -n relay get secret relay-router-files \
+            -o jsonpath='{.data.reconciler-key\.pem}' | base64 -d))"
+  rc=$?
+  printf '%s\n' "$out"
+  nonce="$(printf '%s' "$out" | jq -r '.router.nonceSha256 // empty')"
+  file_b_router_slots "$nonce" || echo "after pass failed; rerun file_b_router_slots $nonce (zero-write)" >&2
+  return "$rc"
+)
+file_b_router_check
+```
+
+In order, the operator sees: on stderr, **before the call**, that exactly one request goes to
+`https://router.chifor.me/register/relay-keys`, that the Router durably writes its delegation nonce
+to its replay set for scope `relay.chifor.me/00000000-0000-4000-8000-000000000001`, and the readiness
+slots before (for example `12 of 12 remaining`); after it, whether the nonce was written, its SHA-256
+and the expected slots after (`11 of 12` until the delegation expires); then the report; then the
+after pass, read back from the store: the remaining slots and `callNonceRecorded`. Within the
+10-second lifetime the after pass counts the new entry; later the slot is free again and
+`callNonceRecorded` still shows the retained entry, unless a later consumption on the scope pruned
+it. The process substitutions' own exit codes are not checked by the shell, but an empty or failed
+readback or key fails the tool before any request.
+
+**Exactly one request, never retried.** The tool opens one verified TLS connection (system trust,
+TLS 1.2 or later, no proxy, no redirect followed) with `User-Agent:
+relay-worker-budget-file-b-check/1 (ailab operator)`, sends one POST and reads one answer. It
+validates a 200 strictly against the preflight branch's response (`service.ts:85-88`): exactly
+`version`, `action`, `operationId`, `requestDigest`, `issuer`, `tenant`, `deploymentDigest`,
+`recoveryEpoch`, `policyDigests` (File B's digests for this deployment, sorted, as sent),
+`requiredUntil`, `limit`, `observedAt`, `validUntil`, each equal to what was sent or read from the
+ledger; `observedAt` within 15 seconds of the operator clock, `validUntil` in the future, at most 15
+seconds after `observedAt` and not after the delegation's `exp`. Refusals are distinct and say
+whether the nonce was written; none is retried:
+
+| Answer | `router.status` | Nonce written |
+| --- | --- | --- |
+| 200, valid proof | `pass` | yes |
+| 200, invalid proof | `invalid-proof` | yes if it echoes this operation ID, else unknown |
+| 429 `RATE_LIMITED` (12 unexpired readiness nonces) | `rate-limited` | no (refused inside the transaction) |
+| 409 `ASSERTION_REPLAY` (this nonce already recorded: the same bytes arrived twice) | `replay` | yes, by the first delivery |
+| 403 `RELAY_DELEGATION_DENIED` (signature, kid, role, trust, binding or clock), or another code | `denied` | unknown: verification refuses before the write, but a delegation that expires between admission and execution is refused after it |
+| 403 `GRANT_DENIED` (outside the trust ceiling) / `WORKER_BUDGET_UNQUALIFIED` | `denied` | yes |
+| 503 `WORKER_BUDGET_UNAVAILABLE` (authority unavailable, or identity/epoch differ) | `unavailable` | yes |
+| any other status | `http-error` | unknown |
+| connection or TLS failure | `not-sent` | no |
+| no answer after sending | `outcome-unknown` | unknown |
+
+"Unknown" is settled by the after pass's `callNonceRecorded`. The operator clock must be within
+about five seconds of the Router's: the Router refuses `iat` more than 5 seconds ahead and an `exp`
+already past (`contracts.ts:69`), before any write. No Router message text, token, nonce or key
+reaches the output; only an allowlisted error code does.
+
+**Exit codes.** Verification exit 0 means **both** halves passed: only `--router-preflight` can
+return it, with `status: pass` and `signingReady: true`. Any failure exits 1, including invalid
+arguments, every Router refusal and, without `--router-preflight`, the uncalled Router half: the
+zero-write `file_b_check --json` exits 1 with `ledger: pass` if the readback passed and
+`router: unavailable`. For explicit collection of ledger-only evidence,
+`file_b_check --skip-router-preflight-unavailable --json` exits 2 only when every ledger check
+passes, reports `status: ledger-only`, and **always** `signingReady: false`: **evidence collected,
+not signable**. An evidence collector must deliberately check for exit 2; an `&& sign` chain cannot
+accept ledger-only evidence. The flags `--router-preflight`, `--router-slots` and
+`--skip-router-preflight-unavailable` exclude each other, and Router inputs without one of the first
+two are refused. The utilities `--print-ledger-sql`, `--print-router-ledger-sql` and
+`--print-router-store-script` exit 0 after printing and verify nothing; `--router-slots` exits 0
+for a valid readback (`status: router-slots`, `signingReady: false`). `file_b_router_check` returns
+the tool's exit code; a failed after pass only prints how to rerun it. Omitting `--json` gives a
+short human-readable report.
+File B must be **committed, read back and qualified by the Router before any candidate run is
+signed (R0 first)**: `file_b_router_check` exiting 0, immediately before signing. A ledger-only
+exit code must never become a signing gate.
 
 ### Credential delivery
 
@@ -289,9 +687,10 @@ mounts its namespace's ESO Secret as three read-only `subPath` files under `/run
 `scripts/tests/test-relay-budget-consumers-render.sh` proves each changes nothing
 else in its Deployment.
 
-- `kubernetes/components/llm-router-worker-budget-reader`: include it from
-  `kubernetes/apps/apps/llm-router/kustomization.yaml` after the router
-  ExternalSecret is Ready (steps 5-6). The same PR replaces the placeholder
+- `kubernetes/components/llm-router-worker-budget-reader`: included by
+  `kubernetes/apps/apps/llm-router/kustomization.yaml` since the first part of
+  step 8 (ailab #1807, rolled 2026-11-16 17:16Z), after the router
+  ExternalSecret was Ready (steps 5-6). The same PR replaced the placeholder
   `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` with the 64-hex digest of the reviewed
   Relay router deployment record: SHA-256 of canonical JSON of `{id, origin,
   issuer, baoOrigin, baoMount, baoPrefix}` (Relay `deploymentDigest`), the value of
@@ -301,9 +700,11 @@ else in its Deployment.
   (`docs/runbooks/relay-router-connection.md`, "Deployment digest"; recompute it
   before use). The activation test refuses the inclusion while the
   placeholder remains. Inclusion is a `Recreate` rollout of the router. The
-  plugin stays disabled until step 9.
+  plugin stays disabled until step 9: the reader files are mounted, and nothing
+  reads them until the plugin is enabled.
 - `kubernetes/components/relay-worker-budget-client`: included alone by hub upgrade
-  step H4a (`docs/runbooks/relay-researcher-hub-upgrade.md`). The live Relay
+  step H4a (`docs/runbooks/relay-researcher-hub-upgrade.md`; ailab #1805, rolled
+  2026-11-16 17:33Z). The live Relay
   (v0.10.4) reads these variables, but starts the authority only with
   `RELAY_INFRASTRUCTURE_INSTALLATIONS`, a router connection
   (`RELAY_ROUTER_CONNECTIONS_FILE`, from the reviewed
@@ -412,8 +813,11 @@ the production opening. That means no Relay router connection or credential
 binding exists yet, so no allocation is possible whatever the gate says.
 - **Why rotation is cheap here.** Rotating the epoch at this point fences no
   allocation, because none exists.
-- **Relay.** The Relay consumer cannot be wired yet (see Consumer wiring). Its
-  half of drills A–C runs when it is included, before Relay's first allocation.
+- **Relay.** H4a already mounts its files, but no profile source starts its budget authority until
+  H7. In this bootstrap window only the Router is rolled; Relay's Secret follows the injections but
+  its Pod keeps A until H6 mounts B. Relay's half of A-C runs in R0, after H6 and File B, before R1's
+  first allocation ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md), including
+  its §4 confirmations). R0 uses observer metrics and same-login controls, with no grant or create.
 - **Drills are not restores.** They inject witness states on purpose; § After
   an OpenBao restore does not apply inside a drill.
 
@@ -423,8 +827,8 @@ negative drill (A–C) therefore re-opens the gate for the drill alone and prove
 it is open, at the moment of the observation:
 
 1. **Install** the drill's witness state using "Changing the witness" steps
-   1–2 and 4–6, **skipping step 3's record entry**. It ends withdrawn, with both
-   consumers rolled onto the drill's file.
+   1–2 and 4–6, **skipping step 3's record entry**. In the bootstrap window it ends withdrawn with
+   only the Router rolled onto the drill's file (checklist step 5); R0 later rolls only Relay.
    - **Drill injections are never issuance entries.** That covers drill A's
      restored A, B's empty witness, C's malformed one and D's rewrite of B. Log
      each one in the drill captures only, never in the offline issuance record.
@@ -434,26 +838,31 @@ it is open, at the moment of the observation:
    - **Why it matters.** The record's latest entry stays the real current
      witness, which step 5 below and the restore procedure re-enter from.
 2. **Re-open for the drill only.** The owner sets `ready=true` and the operator
-   enables the Router plugin. Allocation stays impossible: no Relay connection
-   or binding exists.
+   requests Router plugin enablement (B/C's expected refusal is in step 3). Allocation stays impossible:
+   no Relay connection or credential binding exists.
 3. **Prove the gate is open, immediately before observing.** Capture:
    - `SELECT ready, instance_id, recovery_epoch, witness_digest FROM worker_budget.authority`
      shows `ready = t`;
-   - `GET /admin/v1/plugins` shows `worker-budget-authority` enabled;
+   - `GET /admin/v1/plugins` shows `worker-budget-authority` enabled for A and D. For B and C the
+     accepted bootstrap pass is a refused enable: HTTP 500 `PLUGIN_FAILED`, plugin `disabled`, while
+     the ledger gate is open and the positive control succeeds (ailab #1820, checklist point 4;
+     llm-router `5a5181b7:packages/plugins/worker-budget-authority/index.ts`,
+     `packages/kernel/manager.ts:108-116`);
    - a positive control: `worker_budget.current_epoch(<the record's CURRENT ids>)`
      as `relay_budget_router`, from the operator client Pod, returns the epoch.
 4. **Observe the refusal** (the Pass column). It must name the drill's witness:
-   `current_epoch(<the ids in the MOUNTED file>)` returns SQLSTATE 42501 while
-   step 3's control still succeeds.
+   for A, `current_epoch(<the ids in the MOUNTED file>)` returns SQLSTATE 42501 while
+   step 3's control still succeeds. B and C have no valid mounted IDs to query; their parse refusal
+   and the same-window positive control are the evidence.
 5. **Withdraw** (`ready=false`, plugin disabled). Restore the current witness
    from the record before the next drill.
 
 | Drill | Do | Pass, with the gate open (protocol step 3) |
 | --- | --- | --- |
-| A, stale | Issue A (step 6). Rotate to B: owner updates the row's `recovery_epoch` and `witness_digest`, operator records and writes B ("Changing the witness"). Then restore A in OpenBao (`bao kv rollback -mount=af -version=<A> relay-budget/witness`), force-sync and roll | Router log `Worker budget authority unavailable: …`, still unavailable after waiting ≥20 s. `worker_budget.current_epoch(<A ids>)` as `relay_budget_router` from an operator client Pod returns SQLSTATE 42501. Relay, once wired: `worker_budget_ledger_unavailable`, allocation refused |
-| B, missing | Write an empty `witness` (the only "missing" a running consumer can receive), force-sync and roll. Separately, soft-delete the document (`bao kv delete`) | Empty: Router unavailable, as in A; the positive control still succeeds. Soft-delete: the ExternalSecret goes not Ready while the Secret is retained (ESO Retain), and nothing changes until a deliberate roll |
-| C, malformed | Write JSON that fails the schema (for example `{"version":1}`, or an uppercase digest), force-sync and roll | Router unavailable, as in A |
-| D, older snapshot, unchanged witness | Write B again (a new KV version, same bytes; not a record entry). Roll back to the previous version, force-sync and roll; re-open as in protocol step 2 | What the window can show: the Router is `available`; the authority row is identical before and after; both mounted witness digests equal B and the record's latest entry. No allocation exists in this window, so the history comparison (allocations, `token_limit`, `original_deadline`, `recovery_epoch`, outbox sequences, receipts) runs when D is repeated with the Relay-wired drills, and after any real OpenBao restore |
+| A, stale | Issue A (step 6). Rotate to B: owner updates the row's `recovery_epoch` and `witness_digest`, operator records and writes B ("Changing the witness"). Then restore A in OpenBao (`bao kv rollback -mount=af -version=<A> relay-budget/witness`), force-sync and roll | Router log `Worker budget authority unavailable: …`, still unavailable after waiting ≥20 s. `worker_budget.current_epoch(<A ids>)` as `relay_budget_router` from an operator client Pod returns SQLSTATE 42501. Relay's later observation follows R0 §§7-8; no allocation is attempted |
+| B, missing | Write an empty `witness` (the only "missing" a running consumer can receive), force-sync and roll. Separately, soft-delete the document (`bao kv delete`) | Empty: enable refused as in protocol step 3; the positive control still succeeds. Soft-delete: the ExternalSecret goes not Ready while the Secret is retained (ESO Retain), and nothing changes until a deliberate roll |
+| C, malformed | Write JSON that fails the schema (for example `{"version":1}`, or an uppercase digest), force-sync and roll | Enable refused as in B, with the gate open and positive control succeeding |
+| D, older snapshot, unchanged witness | Write B again (a new KV version, same bytes; not a record entry). Roll back to the previous version, force-sync and roll; re-open as in protocol step 2 | What the window can show: the Router is `available`; the authority row is identical before and after; the Router's mounted witness equals B and the record's latest entry (Relay still mounts A until H6). No allocation exists in this window, so the history comparison (allocations, `token_limit`, `original_deadline`, `recovery_epoch`, outbox sequences, receipts) runs when D is repeated with Relay wired, and after any real OpenBao restore. R0 covers A-C only; the later D repeat still needs an owner-scheduled window |
 
 - **Restoring B.** After A–C, restore B from the record and verify `available`
   before the next drill.
@@ -575,7 +984,9 @@ Capture nonsecret evidence of `SHOW fsync`, `SHOW full_page_writes`,
 storage-cache/power-loss guarantees, and a test allocation acknowledged before
 controlled PostgreSQL/node/storage interruptions. Compare all immutable allocation
 IDs, limits, deadlines, epochs and outbox sequences afterward. Local Docker tests
-below verify startup/privilege/TLS behavior; they prove no QNAP durability.
+below verify startup/privilege/TLS behavior; they prove no QNAP durability. For the
+first production `ready=true`, "Durability evidence for the first `ready=true`"
+below is the procedure.
 
 Independently retained backup/WAL evidence must cover every acknowledged debit;
 nightly dumps are **not zero-loss recovery**. This initial design has no automatic
@@ -617,6 +1028,746 @@ domain. A PG_VERSION/schema marker only prevents empty reseeding; it cannot prov
 that a nonempty restored volume is current. That is the external witness and
 operator recovery boundary. Simultaneous rollback of ledger **and** independent
 witness is outside automatic recovery.
+
+### Durability evidence for the first `ready=true` (owner decision 2026-11-17)
+
+The gate above asks for a test allocation acknowledged before controlled
+interruptions. On the production ledger none can exist before hub step H6: there is
+no Relay router connection, so nothing allocates. The owner decided on 2026-11-17
+that the first production `ready=true` rests on three pieces of evidence instead,
+each posted on the ceremony thread (ailab #1753) and accepted there by the owner,
+and that one confirmation on production follows R1:
+
+| Part | What | Where |
+| --- | --- | --- |
+| (i) | the durability settings | production, read-only |
+| (ii) | a measured probe: synthetic acknowledged allocations through controlled interruptions | a disposable second ledger |
+| (iii) | a committed-row comparison across one planned restart | production, by the maintenance procedure above |
+| after R1 | the same comparison over R1's allocation history | production, by the same procedure |
+
+Checklist step 7 (`relay-researcher-remaining-live-steps.md`) does not run until
+(i)-(iii) are accepted. Every command below is NEW (not in this runbook before the
+decision) unless it names its source. They run in the session of the checklist's
+step 0 (its `cap`, `lsql` and `lwrite`) with step 5's `plugin` and `rlog`, always
+with `--context admin@ai`.
+
+**Limit.** Nothing here cuts power to the QNAP. (ii) interrupts PostgreSQL, the
+Kubernetes node and the iSCSI path, and relies on the NAS keeping every write it has
+acknowledged. The NAS side is the "storage-cache/power-loss guarantees" item above:
+the operator records what QuTS states for the ledger's LUN and pool
+(`<operator fills: where QuTS shows the LUN's write-cache setting and the pool's
+synchronous-write policy>`), and the owner accepts it, or not, with (i)-(iii).
+
+**The SQL files.** Write them once into `"$ev"`. The two `ledger-*` files only read
+and also serve production. The four `probe-*` files write, and run **only on the
+disposable ledger**: `probe-allocate.sql` and `probe-write.sql` act as the allocator
+through `SET SESSION AUTHORIZATION`, which the ledger accepts because it maps
+`session_user` to the `clients` row. The probe therefore needs no password.
+
+```sh
+# One "name|value" line per field (records of a multi-row result are separated by a blank line).
+cat > "$ev/ledger-identity.sql" <<'SQL'
+\set ON_ERROR_STOP on
+\set QUIET on
+\pset format unaligned
+\x on
+SELECT system_identifier FROM pg_control_system();
+SELECT pg_is_in_recovery() AS in_recovery;
+SELECT pg_postmaster_start_time() AS postmaster_started;
+SHOW fsync;
+SHOW full_page_writes;
+SHOW synchronous_commit;
+SHOW data_checksums;
+SELECT name, setting, source FROM pg_settings
+ WHERE name IN ('fsync', 'full_page_writes', 'synchronous_commit', 'data_checksums', 'wal_sync_method', 'data_sync_retry')
+ ORDER BY name;
+SELECT md5(string_agg(p.oid::regprocedure::text || E'\n' || pg_get_functiondef(p.oid), E'\n' ORDER BY p.oid::regprocedure::text)) AS functions_md5,
+       count(*) AS functions
+  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'worker_budget';
+SELECT r.rolname, m.rolname AS member_of FROM pg_auth_members am
+  JOIN pg_roles r ON r.oid = am.member JOIN pg_roles m ON m.oid = am.roleid
+ WHERE r.rolname LIKE 'relay_budget_%' ORDER BY 1, 2;
+SQL
+# Every row of every worker_budget table, one tab-separated line each: table, key, the row as JSON.
+cat > "$ev/ledger-rows.sql" <<'SQL'
+\set ON_ERROR_STOP on
+\set QUIET on
+\pset tuples_only on
+\pset format unaligned
+\pset fieldsep '\t'
+SELECT 'authority', 'singleton', to_jsonb(x)::text FROM worker_budget.authority x
+UNION ALL SELECT 'clients', x.login::text, to_jsonb(x)::text FROM worker_budget.clients x
+UNION ALL SELECT 'readers', x.login::text, to_jsonb(x)::text FROM worker_budget.readers x
+UNION ALL SELECT 'qualifications', x.deployment_digest || '/' || x.digest, to_jsonb(x)::text FROM worker_budget.qualifications x
+UNION ALL SELECT 'allocations', x.allocation_id::text, to_jsonb(x)::text FROM worker_budget.allocations x
+UNION ALL SELECT 'outbox', x.allocation_id || '/' || x.sequence, to_jsonb(x)::text FROM worker_budget.outbox x
+UNION ALL SELECT 'receipts', x.operation_id::text, to_jsonb(x)::text FROM worker_budget.receipts x
+UNION ALL SELECT 'scope_runs', x.run_digest, to_jsonb(x)::text FROM worker_budget.scope_runs x
+UNION ALL SELECT 'allocation_scopes', x.scope_digest, to_jsonb(x)::text FROM worker_budget.allocation_scopes x
+ORDER BY 1, 2;
+SQL
+# Probe only. Throwaway identities, generated here and used nowhere else; ready=true from the start.
+cat > "$ev/probe-seed.sql" <<'SQL'
+\set ON_ERROR_STOP on
+SELECT gen_random_uuid() AS instance, gen_random_uuid() AS epoch, gen_random_uuid() AS connection,
+       gen_random_uuid() AS tenant, gen_random_uuid() AS scoped_worker, gen_random_uuid() AS scoped_grant,
+       encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex') AS witness,
+       encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex') AS deployment,
+       encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex') AS policy,
+       encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex') AS run,
+       encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex') AS scope,
+       floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint + 7 * 86400000 AS until_ms \gset
+BEGIN;
+SET LOCAL ROLE relay_budget_owner;
+INSERT INTO worker_budget.authority (instance_id, recovery_epoch, witness_digest, ready)
+  VALUES (:'instance', :'epoch', :'witness', true);
+INSERT INTO worker_budget.clients
+  (login, issuer, connection_id, deployment_digest, tenant_ids, max_tokens, max_authority_ms, max_requests)
+  VALUES ('relay_budget_allocator', 'durability-probe.invalid', :'connection', :'deployment',
+          ARRAY[:'tenant']::uuid[], 1000000, 300000, 8);
+INSERT INTO worker_budget.readers (login, deployment_digest) VALUES ('relay_budget_router', :'deployment');
+INSERT INTO worker_budget.qualifications (deployment_digest, digest, policy)
+  VALUES (:'deployment', :'policy',
+          jsonb_build_object('synthetic', 'durability probe, not a ReviewedTokenPolicy', 'qualificationExpiresAt', :until_ms));
+INSERT INTO worker_budget.scope_runs
+  (run_digest, run_document, client_login, tenant_id, worker_ids, token_cap, request_cap, expires_at, recovery_epoch)
+  VALUES (:'run', '{"synthetic": "durability probe"}', 'relay_budget_allocator', :'tenant',
+          ARRAY[:'scoped_worker']::uuid[], 1000, 8, :until_ms, :'epoch');
+INSERT INTO worker_budget.allocation_scopes (scope_digest, run_digest, worker_id, grant_id, token_limit, request_limit)
+  VALUES (:'scope', :'run', :'scoped_worker', :'scoped_grant', 1000, 8);
+COMMIT;
+SQL
+# Probe only. The allocator's call sequence (prepare, then acknowledge with the returned operationId):
+# an ordinary allocation, a scoped one (R1's form), and one prepared but never acknowledged.
+cat > "$ev/probe-allocate.sql" <<'SQL'
+\set ON_ERROR_STOP on
+SELECT instance_id AS i, recovery_epoch AS e, witness_digest AS w FROM worker_budget.authority \gset
+SELECT connection_id AS c, deployment_digest AS d, tenant_ids[1] AS t FROM worker_budget.clients \gset
+SELECT digest AS q FROM worker_budget.qualifications \gset
+SELECT s.worker_id AS sw, s.grant_id AS sg, s.scope_digest AS sd, s.request_limit AS sr, r.expires_at AS sx
+  FROM worker_budget.allocation_scopes s JOIN worker_budget.scope_runs r USING (run_digest) \gset
+SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms \gset
+SET SESSION AUTHORIZATION relay_budget_allocator;
+SELECT worker_budget.prepare(:'i', :'e', :'w', jsonb_build_object(
+  'tenantId', :'t', 'workerId', gen_random_uuid(), 'connectionId', :'c', 'deploymentDigest', :'d',
+  'limit', 1000, 'originalDeadline', :now_ms + 3600000, 'authorityExpiresAt', :now_ms + 300000,
+  'grantId', gen_random_uuid(), 'grantRevision', 1,
+  'grantDigest', encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex'),
+  'tokenPolicyDigests', jsonb_build_array(:'q'))) AS r1 \gset
+SELECT worker_budget.acknowledge(:'i', :'e', :'w', (:'r1'::jsonb ->> 'operationId')::uuid);
+SELECT worker_budget.prepare(:'i', :'e', :'w', jsonb_build_object(
+  'tenantId', :'t', 'workerId', :'sw', 'connectionId', :'c', 'deploymentDigest', :'d',
+  'limit', 1000, 'requestLimit', :sr, 'allocationScopeDigest', :'sd',
+  'originalDeadline', least(:now_ms + 3600000, :sx), 'authorityExpiresAt', :now_ms + 300000,
+  'grantId', :'sg', 'grantRevision', 1,
+  'grantDigest', encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex'),
+  'tokenPolicyDigests', jsonb_build_array(:'q'))) AS r2 \gset
+SELECT worker_budget.acknowledge(:'i', :'e', :'w', (:'r2'::jsonb ->> 'operationId')::uuid);
+SELECT worker_budget.prepare(:'i', :'e', :'w', jsonb_build_object(
+  'tenantId', :'t', 'workerId', gen_random_uuid(), 'connectionId', :'c', 'deploymentDigest', :'d',
+  'limit', 1000, 'originalDeadline', :now_ms + 3600000, 'authorityExpiresAt', :now_ms + 300000,
+  'grantId', gen_random_uuid(), 'grantRevision', 1,
+  'grantDigest', encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex'),
+  'tokenPolicyDigests', jsonb_build_array(:'q'))) AS r3 \gset
+RESET SESSION AUTHORIZATION;
+SELECT count(*) AS allocations, (SELECT count(*) FROM worker_budget.outbox) AS outbox,
+       (SELECT count(*) FROM worker_budget.receipts) AS receipts,
+       count(*) FILTER (WHERE request_limit IS NOT NULL) AS scoped
+  FROM worker_budget.allocations;
+SQL
+# Probe only. One fresh ordinary allocation; each line is printed only after its commit returned,
+# with the server's UTC time of that line.
+cat > "$ev/probe-write.sql" <<'SQL'
+\set ON_ERROR_STOP on
+\set QUIET on
+\pset tuples_only on
+\pset format unaligned
+SELECT instance_id AS i, recovery_epoch AS e, witness_digest AS w FROM worker_budget.authority \gset
+SELECT connection_id AS c, deployment_digest AS d, tenant_ids[1] AS t FROM worker_budget.clients \gset
+SELECT digest AS q FROM worker_budget.qualifications \gset
+SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms \gset
+SET SESSION AUTHORIZATION relay_budget_allocator;
+SELECT worker_budget.prepare(:'i', :'e', :'w', jsonb_build_object(
+  'tenantId', :'t', 'workerId', gen_random_uuid(), 'connectionId', :'c', 'deploymentDigest', :'d',
+  'limit', 1000, 'originalDeadline', :now_ms + 3600000, 'authorityExpiresAt', :now_ms + 300000,
+  'grantId', gen_random_uuid(), 'grantRevision', 1,
+  'grantDigest', encode(sha256(convert_to(gen_random_uuid()::text, 'UTF8')), 'hex'),
+  'tokenPolicyDigests', jsonb_build_array(:'q'))) AS r \gset
+SELECT 'PREPARED ' || (:'r'::jsonb #>> '{authorization,allocationId}') || ' ' || (:'r'::jsonb ->> 'operationId')
+       || ' ' || to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"');
+SELECT worker_budget.acknowledge(:'i', :'e', :'w', (:'r'::jsonb ->> 'operationId')::uuid);
+SELECT 'ACKED ' || (:'r'::jsonb ->> 'operationId') || ' ' || to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"');
+SQL
+# Probe only. Needs the contrib amcheck extension, which the probe adds and production never gets.
+cat > "$ev/probe-integrity.sql" <<'SQL'
+\set ON_ERROR_STOP on
+SELECT pg_is_in_recovery() AS in_recovery;
+SELECT (SELECT count(*) FROM worker_budget.allocations a WHERE NOT EXISTS (
+          SELECT 1 FROM worker_budget.outbox o WHERE o.allocation_id = a.allocation_id AND o.sequence = 1)) AS allocations_without_outbox,
+       (SELECT count(*) FROM worker_budget.outbox o
+         WHERE o.request ->> 'operationId' IS DISTINCT FROM o.operation_id::text
+            OR o.request #>> '{authorization,allocationId}' IS DISTINCT FROM o.allocation_id::text) AS outbox_inconsistent,
+       (SELECT count(*) FROM worker_budget.receipts r WHERE NOT EXISTS (
+          SELECT 1 FROM worker_budget.outbox o WHERE o.operation_id = r.operation_id)) AS orphan_receipts;
+SELECT c.relname AS index_checked, bt_index_check(c.oid, true) FROM pg_index i
+  JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname = 'worker_budget' ORDER BY 1;
+SQL
+```
+
+These files were run against the pinned image and schema (Relay `d1c77f87`, 001-005,
+initialized by `initialize.sh` and served by `start.sh` in local Docker, with a
+writer loop and a `kill -9` of the checkpointer). `ledger-identity.sql` gave
+`functions_md5` `e2780ee57aabbc6bee166ec76e154fda` over 15 functions; `source` is
+`command line` for `fsync`, `full_page_writes` and `synchronous_commit`.
+
+#### (i) The settings
+
+The gate's `SHOW` and `pg_is_in_recovery()` reads, with the identity that (iii)
+compares, over the local socket:
+
+```sh
+cap durability-settings lsql < "$ev/ledger-identity.sql"
+```
+
+Expected: `fsync`, `full_page_writes`, `synchronous_commit` and `data_checksums` all
+`on`; `in_recovery` `f`; `source` `command line` for the first three (`start.sh`
+sets them) and `data_checksums` on from `initdb --data-checksums`. Checklist step 4
+captured the same values. Post the output on #1753 as "Durability evidence (i):
+settings".
+
+#### (ii) The measured probe on a disposable ledger
+
+A second ledger built from the same reviewed base: the same image, `start.sh`,
+`pg_hba.conf`, PostgreSQL flags and resources, the same pinned schema bundle (001-005,
+marker `5`) through the same `initialize.sh`, on a new `qnap-iscsi` LUN.
+
+**Its lifecycle.**
+- **Namespace** `relay-budget-durability-probe`, created and deleted by the operator,
+  outside Flux and git. Every object carries `velero.io/exclude-from-backup=true` and
+  the Pod keeps the base's volume exclusion; its PV is labelled too. No backup of any
+  kind, and no QNAP snapshot, clone or replication (the QNAP check made before step 6
+  for the ledger's LUN, repeated for the probe's). Keep its life clear of the Velero start times (`0 2 * * *` daily,
+  `0 3 * * 0` weekly, `apps/backup/velero/helmrelease.yaml`).
+- **PVC** from `qnap-iscsi`, whose class reclaim is `Retain`. Right after it binds,
+  its PV is patched to `Delete`, as `qnap-storage-setup.md` §9 does for a test PVC,
+  so deleting the namespace removes the LUN.
+- **Never a consumer's.** No ExternalSecret, no OpenBao document, no DSN, and no
+  password: both logins stay NULL-password. Of the base's NetworkPolicies only
+  `default-deny` stays, so nothing reaches the Service. The probe is driven through
+  the local socket only.
+- **Its witness** is the throwaway authority row that `probe-seed.sql` generates.
+  No witness JSON is written anywhere: not to OpenBao, not to the offline issuance
+  record (it is not an issuance), not to a consumer.
+- **Its node** is chosen for tier (b) below and pinned for the probe's life. It is
+  never the production ledger's node.
+- **Deleted afterwards**, with its PV and LUN, the same day.
+
+**Choosing the node (read-only).** Tier (b) resets the probe's node, so the probe is
+pinned to the node with the least collateral from the start. Only the three agent
+nodes qualify: `talos-agent-node-1..3`, vmid 4301-4303 on `ai-node1..3`
+(`kubernetes/infra/agent-nodes/variables.tf`; the VM name is `talos-<key>`). Never a
+control-plane node: it is an etcd member and carries Prometheus, Gitea, OpenBao and
+the CNPG clusters. Never `relay-worker-1`: its binding forbids NAS storage classes
+(`relay-worker-capacity.md`). The agent nodes carry, depending on scheduling, the
+singletons `llm-router` (all estate inference, a `qnap-iscsi` volume), `relay` and
+`relay-postgres` (`qnap-iscsi`), the production ledger, `llm-router-edge` (2
+replicas), the researcher agent and the DaemonSets. Read where they are now:
+
+```sh
+kubectl --context admin@ai get nodes -L ailab.io/agent-pool -o wide
+for n in talos-agent-node-1 talos-agent-node-2 talos-agent-node-3; do
+  echo "== $n"
+  kubectl --context admin@ai get pods -A -o wide --field-selector spec.nodeName="$n",status.phase=Running
+  kubectl --context admin@ai get volumeattachments -o json \
+    | jq -r --arg n "$n" '.items[] | select(.spec.nodeName == $n) | .spec.source.persistentVolumeName' \
+    | while read -r v; do kubectl --context admin@ai get pv "$v" -o json \
+        | jq -r '[.metadata.name, .spec.storageClassName, (.spec.claimRef // {} | "\(.namespace)/\(.name)")] | @tsv'; done
+  kubectl --context admin@ai describe node "$n" | grep -A8 'Allocated resources'
+done
+```
+
+Choose the agent node that runs none of `relay-budget-postgres-0`, `llm-router`,
+`relay` and `relay-postgres`, with the fewest `qnap-iscsi` attachments and room for
+the probe's requests (250m CPU, 1 Gi memory). If every agent node runs one of them,
+tier (b) costs that workload's outage, and the owner decides whether to accept it or
+skip (b). After a reset, the node's Pods restart on it once it is back.
+
+**Build.** From the reviewer-merged ailab commit in use, in a private directory:
+
+```sh
+PNS=relay-budget-durability-probe
+node='<operator fills: the agent node chosen above>'
+vmid='<operator fills: its vmid, kubernetes/infra/agent-nodes/variables.tf>'
+host='<operator fills: its Proxmox host address, the same file>'
+nodeip='<operator fills: its InternalIP, kubectl get node "$node" -o wide>'
+python scripts/node-ssh.py "$host" "qm config $vmid | grep -E '^name:'"   # name: $node, or stop
+commit='<operator fills: the reviewer-merged ailab commit in use, full SHA>'
+pd="$(mktemp -d)"
+git -C '<operator fills: the ailab checkout>' archive "$commit" \
+  kubernetes/optional/relay-budget-authority kubernetes/apps/relay-budget-authority | tar -x -C "$pd"
+# Budget step 3's command, run in a checkout at "$commit". The receipt must say "pinned": true,
+# "schemaVersion": 5 and the same manifestSha256 as the production initialization evidence.
+python3 scripts/relay-budget-schema-bundle.py /path/to/relay "$pd/bundle"
+manifest='<operator fills: the receipt manifestSha256>'
+mkdir "$pd/probe"
+cp "$pd/kubernetes/optional/relay-budget-authority/initialize/job.yaml" "$pd/probe/job.yaml"
+cp "$pd/bundle/configmap.json" "$pd/probe/schema-configmap.json"
+cat > "$pd/probe/issuer.yaml" <<'YAML'
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: durability-probe-selfsigned
+spec:
+  selfSigned: {}
+YAML
+cat > "$pd/probe/kustomization.yaml" <<YAML
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: $PNS
+resources:
+- ../kubernetes/optional/relay-budget-authority
+- ../kubernetes/optional/relay-budget-authority/initialize
+- schema-configmap.json
+- job.yaml
+- issuer.yaml
+labels:
+- pairs:
+    relay.chifor.me/durability-probe: "true"
+    velero.io/exclude-from-backup: "true"
+  includeSelectors: false
+  includeTemplates: true
+patches:
+- target: {kind: NetworkPolicy, name: "postgres-clients|operator-client|relay-independent-budget|router-independent-budget"}
+  patch: |-
+    \$patch: delete
+    apiVersion: networking.k8s.io/v1
+    kind: NetworkPolicy
+    metadata: {name: any}
+- target: {kind: Certificate, name: relay-budget-postgres-tls}
+  patch: |-
+    - {op: replace, path: /spec/issuerRef, value: {name: durability-probe-selfsigned, kind: Issuer}}
+    - {op: replace, path: /spec/dnsNames, value: [relay-budget-postgres.$PNS.svc, relay-budget-postgres.$PNS.svc.cluster.local]}
+- target: {kind: StatefulSet, name: relay-budget-postgres}
+  patch: |-
+    - {op: add, path: /spec/template/spec/nodeSelector, value: {kubernetes.io/hostname: $node}}
+- target: {kind: Job, name: relay-budget-initialize-once}
+  patch: |-
+    - {op: add, path: /spec/template/spec/nodeSelector, value: {kubernetes.io/hostname: $node}}
+    - {op: test, path: /spec/template/spec/containers/0/env/1/name, value: RELAY_BUDGET_SCHEMA_MANIFEST_SHA256}
+    - {op: replace, path: /spec/template/spec/containers/0/env/1/value, value: $manifest}
+YAML
+kubectl kustomize "$pd/probe" > "$pd/probe.yaml"
+kubectl kustomize "$pd/kubernetes/apps/relay-budget-authority/ledger" > "$pd/prod.yaml"
+sts() { yq 'select(.kind == "StatefulSet") | del(.metadata.namespace) | del(.metadata.labels["relay.chifor.me/durability-probe"])
+  | del(.spec.template.metadata.labels["relay.chifor.me/durability-probe"]) | del(.spec.replicas) | del(.spec.template.spec.nodeSelector)' "$1"; }
+cap probe-sts-diff diff <(sts "$pd/prod.yaml") <(sts "$pd/probe.yaml")   # no output: identical but for namespace, label, replicas, node
+grep -E '^kind: |^  name: ' "$pd/probe.yaml"   # Namespace, 3 ConfigMaps, Service, PVC, StatefulSet, Job, Certificate, Issuer, NetworkPolicy default-deny
+```
+
+The render was checked with ailab's pinned kustomize (v5.4.3) and with `kubectl
+kustomize` (v5.7.1): identical, and the StatefulSet differs from production's only in
+those four places (its ConfigMap name, a content hash, is the same). `yq` is
+mikefarah's v4.
+
+**Create, initialize, start.** Budget steps 2-4, in the probe namespace:
+
+```sh
+kubectl --context admin@ai create -f "$pd/probe.yaml"
+kubectl --context admin@ai -n "$PNS" wait --for=jsonpath='{.status.phase}'=Bound pvc/relay-budget-postgres-data --timeout=15m
+kubectl --context admin@ai -n "$PNS" wait --for=condition=Ready certificate/relay-budget-postgres-tls --timeout=5m
+pv=$(kubectl --context admin@ai -n "$PNS" get pvc relay-budget-postgres-data -o jsonpath='{.spec.volumeName}')
+kubectl --context admin@ai patch pv "$pv" -p '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}'
+kubectl --context admin@ai label pv "$pv" velero.io/exclude-from-backup=true
+pvinfo() { kubectl --context admin@ai get pv "$pv" -o json | jq -c '{name: .metadata.name,
+  reclaim: .spec.persistentVolumeReclaimPolicy, class: .spec.storageClassName, handle: .spec.csi.volumeHandle}'; }
+cap probe-pv pvinfo                                                 # reclaim Delete, class qnap-iscsi
+kubectl --context admin@ai -n "$PNS" get job relay-budget-initialize-once -o json | jq -c '{suspend: .spec.suspend,
+  image: .spec.template.spec.containers[0].image, node: .spec.template.spec.nodeSelector,
+  pin: (.spec.template.spec.containers[0].env[] | select(.name == "RELAY_BUDGET_SCHEMA_MANIFEST_SHA256") | .value)}'
+kubectl --context admin@ai -n "$PNS" patch job relay-budget-initialize-once --type=merge -p '{"spec":{"suspend":false}}'
+kubectl --context admin@ai -n "$PNS" wait --for=condition=Complete job/relay-budget-initialize-once --timeout=10m
+cap probe-init kubectl --context admin@ai -n "$PNS" logs job/relay-budget-initialize-once
+kubectl --context admin@ai -n "$PNS" delete job relay-budget-initialize-once
+kubectl --context admin@ai -n "$PNS" delete configmap relay-budget-reviewed-schema-once relay-budget-initialize
+kubectl --context admin@ai -n "$PNS" scale statefulset relay-budget-postgres --replicas=1   # no Flux owns the probe
+until kubectl --context admin@ai -n "$PNS" get pod relay-budget-postgres-0 >/dev/null 2>&1; do sleep 2; done
+kubectl --context admin@ai -n "$PNS" wait --for=condition=Ready pod/relay-budget-postgres-0 --timeout=15m
+```
+
+Stop if the Job fails: delete the namespace (the probe is disposable) and investigate
+before building another.
+
+**Helpers, seed and the acknowledged allocations.**
+
+```sh
+mkdir -m 0700 "$ev/probe"
+# lsql's form, in the probe namespace.
+psql_probe() {
+  kubectl --context admin@ai -n "$PNS" exec -i relay-budget-postgres-0 -- \
+    env PSQL_HISTORY=/dev/null psql -X -v ON_ERROR_STOP=1 -h /var/run/postgresql -U postgres -d relay_budget -f -
+}
+# probe_rows <label>: every row, sorted bytewise for comm.
+probe_rows() { local -; set -o pipefail; psql_probe < "$ev/ledger-rows.sql" | LC_ALL=C sort > "$ev/probe/rows-$1.tsv"; }
+# probe_writer <tier> <seconds>: fresh allocations one after another, each prepared then acknowledged.
+# Each call is bounded (timeout 120), so a call stuck on a reset node cannot hold the loop, and a
+# short pause keeps a failing call (Pod down) from flooding the API server.
+probe_writer() {
+  local end=$(( $(date +%s) + $2 ))
+  touch "$ev/probe/writer-$1.log" "$ev/probe/writer-$1.err"
+  while [ "$(date +%s)" -lt "$end" ]; do
+    timeout 120 kubectl --context admin@ai -n "$PNS" exec -i relay-budget-postgres-0 -- \
+      env PSQL_HISTORY=/dev/null psql -X -v ON_ERROR_STOP=1 -h /var/run/postgresql -U postgres -d relay_budget -f - \
+      < "$ev/probe-write.sql" 2>> "$ev/probe/writer-$1.err" | grep -E '^(PREPARED|ACKED) ' >> "$ev/probe/writer-$1.log"
+    sleep 0.2
+  done
+}
+# has <table> <key> <rows file>
+has() { awk -F'\t' -v t="$1" -v k="$2" '$1 == t && $2 == k { f = 1 } END { exit !f }' "$3"; }
+# probe_compare <tier>: every row from before survives unchanged; every write psql reported is present;
+# writes were acknowledged both before and after the interruption ($ti, set just before it); and the
+# writer met no SQL error (connection loss and recovery refusals are FATAL or psql errors, never ERROR:).
+probe_compare() {
+  local b="$ev/probe/rows-$1-before.tsv" a="$ev/probe/rows-$1-after.tsv" w="$ev/probe/writer-$1.log" e="$ev/probe/writer-$1.err"
+  local miss=0 x y lost other before after sqlerr
+  lost=$(LC_ALL=C comm -23 "$b" "$a" | wc -l)
+  other=$(LC_ALL=C comm -13 "$b" "$a" | cut -f1 | grep -cvxE 'allocations|outbox|receipts')
+  before=$(awk -v t="$ti" '$1 == "ACKED" && $3 < t' "$w" | wc -l)
+  after=$(awk -v t="$ti" '$1 == "ACKED" && $3 > t' "$w" | wc -l)
+  sqlerr=$(grep -c 'ERROR:' "$e")
+  echo "lost or changed: $lost"
+  echo "new rows by table (other tables: $other):"; LC_ALL=C comm -13 "$b" "$a" | cut -f1 | sort | uniq -c
+  while read -r _ x y _; do
+    { has allocations "$x" "$a" && has outbox "$x/1" "$a" && grep -qF "\"operation_id\": \"$y\"" "$a"; } \
+      || { echo "MISSING prepared $x $y"; miss=$((miss + 1)); }
+  done < <(grep '^PREPARED ' "$w")
+  while read -r _ y _; do has receipts "$y" "$a" || { echo "MISSING acknowledged $y"; miss=$((miss + 1)); }; done < <(grep '^ACKED ' "$w")
+  echo "prepared $(grep -c '^PREPARED ' "$w"), acknowledged $(grep -c '^ACKED ' "$w") ($before before $ti, $after after it), missing $miss"
+  echo "writer errors, SQL ERROR lines: $sqlerr"; sort "$e" | uniq -c | sort -rn | head -5
+  [ "$lost" -eq 0 ] && [ "$other" -eq 0 ] && [ "$miss" -eq 0 ] && [ "$before" -gt 0 ] && [ "$after" -gt 0 ] && [ "$sqlerr" -eq 0 ]
+}
+# node_ok: the vmid is this node's VM, the node has this address, the probe runs on it and the
+# production ledger does not. Tiers (b) and (c) call it first, right before the reset or the cut.
+node_ok() {
+  local prod probe ip
+  prod=$(kubectl --context admin@ai -n relay-budget-authority get pod relay-budget-postgres-0 -o jsonpath='{.spec.nodeName}') &&
+  probe=$(kubectl --context admin@ai -n "$PNS" get pod relay-budget-postgres-0 -o jsonpath='{.spec.nodeName}') &&
+  ip=$(kubectl --context admin@ai get node "$node" -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}') &&
+  [ "$(python scripts/node-ssh.py "$host" "qm config $vmid" | sed -n 's/^name: //p')" = "$node" ] &&
+  [ "$probe" = "$node" ] && [ -n "$prod" ] && [ "$prod" != "$node" ] && [ "$ip" = "$nodeip" ] &&
+  echo "node $node ($ip, vmid $vmid on $host): the probe is here, the production ledger on $prod"
+}
+cap probe-amcheck psql_probe <<<'CREATE EXTENSION amcheck;'
+cap probe-seed psql_probe < "$ev/probe-seed.sql"                    # ends COMMIT
+cap probe-allocate psql_probe < "$ev/probe-allocate.sql"            # 3 | 3 | 2 | 1
+cap probe-identity psql_probe < "$ev/ledger-identity.sql"           # as (i); functions_md5 equal to production's
+cap probe-not-production psql_probe <<<'SELECT instance_id, recovery_epoch, witness_digest FROM worker_budget.authority;'
+cap probe-integrity-0 psql_probe < "$ev/probe-integrity.sql"
+```
+
+`probe-not-production` must differ in all three IDs from production's authority row
+(the checklist's step-0 readback).
+
+**Each tier** follows one pattern: rows before, a writer running across the
+interruption, the interruption, recovery, rows after, comparison, integrity. Each
+tier is one `&&` chain: a failed capture stops it before the interruption, or
+before the next capture. If a chain stops after `probe_tier`, run `wait "$wpid"` and
+stop.
+
+```sh
+probe_tier() {   # probe_tier <tier> <writer seconds>: the baseline, then the writer in the background
+  t0=$(date -u +%FT%TZ)
+  probe_rows "$1-before" || { echo "STOP: no baseline for tier $1"; return 1; }
+  probe_writer "$1" "$2" & wpid=$!
+}
+probe_after() {  # probe_after <tier>: fails at the first failed capture or comparison
+  wait "$wpid"
+  kubectl --context admin@ai -n "$PNS" wait --for=condition=Ready pod/relay-budget-postgres-0 --timeout=15m &&
+  cap "probe-$1-log" kubectl --context admin@ai -n "$PNS" logs relay-budget-postgres-0 --since-time="$t0" &&
+  cap "probe-$1-identity" psql_probe < "$ev/ledger-identity.sql" &&
+  probe_rows "$1-after" &&
+  cap "probe-$1-compare" probe_compare "$1" &&
+  cap "probe-$1-integrity" psql_probe < "$ev/probe-integrity.sql"
+}
+```
+
+**Expected after every tier.** `lost or changed: 0`. New rows only in
+`allocations`, `outbox` and `receipts`. `missing 0`. Acknowledged writes both before
+and after the interruption, and no SQL `ERROR` in the writer's errors. A write in flight at the
+interruption may exist or not, never in part: `allocations_without_outbox`,
+`outbox_inconsistent` and `orphan_receipts` are 0, and every `worker_budget` index
+passes `bt_index_check`. `in_recovery` `f`. **Stop** on any other result, on
+`PANIC`, `could not fsync`, `invalid page` or `checksum` in the log, or the probe not Ready within 15 minutes (and, for tiers
+(a) and (b), no `database system is ready to accept connections` in the tier's
+log): no further tier runs, and the result goes to the owner.
+
+**Tier (a): `kill -9` of PostgreSQL (owner-approved).** The postmaster is PID 1 of
+its container and ignores a SIGKILL sent from inside its own PID namespace (`kill -9
+1` returns 0 and changes nothing). A SIGKILL of a server child such as the
+checkpointer makes the postmaster end every process and run crash recovery from the
+WAL, which is the path a killed postmaster takes on its next start:
+
+```sh
+probe_tier a 120 && sleep 20 && ti=$(date -u +%FT%TZ) &&
+cap probe-a-kill kubectl --context admin@ai -n "$PNS" exec relay-budget-postgres-0 -- \
+  sh -c 'pgrep -f "^postgres: checkpointer"; kill -9 "$(pgrep -f "^postgres: checkpointer")"' &&
+probe_after a
+```
+
+The log shows, in order: `checkpointer process (PID n) was terminated by signal 9:
+Killed`, `terminating any other active server processes`, `all server processes
+terminated; reinitializing`, `database system was interrupted`, `database system was
+not properly shut down; automatic recovery in progress`, `redo starts at`, `redo
+done at`, `database system is ready to accept connections`. A local run of these
+blocks (Docker, the pinned image and bundle, `kubectl` replaced by `docker`) gave 297
+writes prepared and acknowledged across the kill (67 before it, 227 after),
+`lost or changed: 0` and `missing 0`. An earlier run also had one write prepared and
+never acknowledged, the one in flight: present, with its outbox row.
+
+**Tier (b): hard reset of the probe's node. Runs only with the owner's explicit OK
+on #1753 naming the node, its vmid and the window.** It is a `qm reset` of the
+node's VM: no guest shutdown and no flush, so the guest loses whatever it had not
+sent to the NAS, and every write the NAS acknowledged must survive. A reset of the
+Proxmox host `ai-nodeN` is **not** proposed: the iSCSI initiator runs in the guest
+and the host only routes its packets, so a host reset shows nothing more about the
+ledger's data path, while it would also stop every other guest of that host: its
+control-plane VM and, depending on the host, LLM or registry LXCs, CI runners, dev
+workers and reviewer VMs. The VM reset is disruptive for everything on the node:
+each Pod restarts after the reboot, each `qnap-iscsi` volume there is re-staged and
+crash-recovered by its own workload, and a singleton on the node is down until then.
+
+```sh
+cap probe-b-node-ok node_ok &&
+cap probe-b-collateral kubectl --context admin@ai get pods -A -o wide --field-selector spec.nodeName="$node" &&
+probe_tier b 600 && sleep 20 && ti=$(date -u +%FT%TZ) &&
+cap probe-b-reset python scripts/node-ssh.py "$host" "qm reset $vmid && date -u +%FT%TZ" &&
+probe_after b
+cap probe-b-node-after kubectl --context admin@ai get node "$node"
+cap probe-b-collateral-after kubectl --context admin@ai get pods -A -o wide --field-selector spec.nodeName="$node"
+```
+
+Also expected: the probe's log has `database system was interrupted` and `automatic
+recovery in progress`; every Pod of the `collateral` capture is Running again (a Job
+Pod may be Completed).
+**Stop** also when the node or the probe is not Ready within 15 minutes after the
+writer ends: escalate to the owner, and do not force-delete Pods.
+
+**Tier (c): an iSCSI path cut. Runs only with the owner's explicit OK on #1753
+naming the form below, the node and the window.**
+
+*Blast radius.* `qnap-iscsi` is the QNAP Trident CSI driver (`csi.trident.qnap.io`,
+backend `qts`, driver `qnap-nas`, `kubernetes/apps/qnap-storage/`). Each PVC is its
+own thin LUN, `trident-pvc-<uuid>`, mapped into an iSCSI target. A target can hold
+more than one LUN: the retired test pool's golden clones shared one (ADR 0037). All
+targets share one portal, `10.55.0.254:3260` (ADR 0011). The node logs in per target
+when it stages a volume (`iscsiadm -m node -T <iqn> -p <portal>`,
+`apps/infrastructure/storage/iscsi-recovery-tmo.yaml`), so it holds one session per
+target it uses (six on `talos-cp1` on 2026-08-30), all over one path: the node's /32
+route to `10.55.0.254` through its Proxmox host. Nothing else on a Talos node
+uses iSCSI; the other classes are `nfs-csi` (the same address, TCP 2049) and
+`local-path`. A session waits `recovery_tmo` before failing its device: 120 s once
+the reconciler has corrected it, 2 s for a session staged within its last 30 s poll
+(the driver bug that file describes). After that, ext4 stays mounted over a dead
+device, every read is EIO, and recovery needs a manual Pod delete and an iSCSI
+logout.
+- **Node-wide** is any cut on the network path (host firewall, route, link): it
+  stalls every `qnap-iscsi` volume attached to that node, and kills any whose
+  session timeout is shorter than the cut. Limiting it to TCP 3260 spares the node's
+  NFS mounts. The node's storage-fabric probe fails meanwhile;
+  `StorageFabricUnreachable` fires only after 2 minutes.
+- **Per-target** is possible only on the NAS: acting on the probe's target alone
+  confines the I/O effect to the LUNs mapped into that target, which is the probe's
+  LUN alone only if the NAS's mapping shows no other LUN there. No ailab runbook
+  documents that action or Trident's reaction to it, and NAS-side mapping changes
+  have gone wrong here: the 2026-08-30 incident left LUNs unmapped from their targets
+  (`apps/backup/velero/helmrelease.yaml`), and one stale Trident transaction stops
+  every `qnap-iscsi` provision and attach estate-wide until removed
+  (`qnap-storage-setup.md` §9). Its blast radius is that target's LUNs for I/O, and
+  Trident's control plane if it goes wrong.
+
+Read the node's sessions first (read-only; the reconciler Pod mounts the node's
+`/sys`):
+
+```sh
+tmo=$(kubectl --context admin@ai -n trident get pod -l app.kubernetes.io/name=iscsi-recovery-tmo \
+  --field-selector spec.nodeName="$node" -o jsonpath='{.items[0].metadata.name}')
+sessions() { kubectl --context admin@ai -n trident exec "$tmo" -- sh -c '
+  for s in /host/sys/class/iscsi_session/session*; do
+    echo "$(basename "$s") $(cat "$s/targetname") $(cat "$s/state") recovery_tmo=$(cat "$s/recovery_tmo")"; done
+  cat /host/sys/class/scsi_device/*/device/state | sort | uniq -c'; }
+# sessions_ok: prints them; fails unless every session is LOGGED_IN at recovery_tmo=120 and every device running.
+sessions_ok() {
+  local out; out=$(sessions) || return 1; printf '%s\n' "$out"
+  printf '%s\n' "$out" | grep -q '^session' &&
+  ! printf '%s\n' "$out" | grep '^session' | grep -qv ' LOGGED_IN recovery_tmo=120$' &&
+  ! printf '%s\n' "$out" | grep -v '^session' | grep -qvE '^ *[0-9]+ running$'
+}
+# sessions_cut [<target IQN>]: prints them; fails while that target's session (default: any) is LOGGED_IN.
+sessions_cut() {
+  local out; out=$(sessions) || return 1; printf '%s\n' "$out"
+  printf '%s\n' "$out" | grep -q "^session[0-9]* ${1:-}" &&
+  ! printf '%s\n' "$out" | grep "^session[0-9]* ${1:-}" | grep -q ' LOGGED_IN '
+}
+```
+
+Both forms start only when `sessions_ok` passes, and are judged with
+`sessions_cut` during the cut (with the probe's target IQN for the per-target form).
+The NAS's target and LUN lists map each session's `targetname` to its
+LUNs (`<operator fills: the read-only qcli target and LUN listing, as
+qnap-storage-setup.md §9 reads the LUN list>`); keep that mapping in the evidence.
+
+The per-target form: `<operator fills: the QuTS action that disables only the
+probe's target, and its reversal, named in the owner's OK>`. Go only if the mapping
+shows the probe's LUN, `trident-<the probe's PV name>`, as the **only** LUN of that
+target.
+
+The node-wide form, TCP 3260 only, on the host that routes the node, 60 s (half the
+corrected timeout). The whole cut runs in **one detached host process**, marked with
+this cut's own token: it inserts the rule, waits 60 s, then retries the deletion
+until `iptables -C` reports the rule absent (exit 1). No insertion can happen without
+the removal that follows it in the same process, whatever happens to the session or
+to the timing. The foreground only starts that process and reads whether the rule
+is in place; if it reads `NOT-CUT`, the process still removes any rule it inserts.
+
+```sh
+rule="FORWARD -s $nodeip/32 -d 10.55.0.254/32 -p tcp --dport 3260 -j DROP"
+cut="iptables -w 5 -I $rule || exit 1; sleep 60; while :; do iptables -w 5 -D $rule 2>/dev/null; iptables -w 5 -C $rule 2>/dev/null; [ \$? -eq 1 ] && break; sleep 1; done"
+check="iptables -w 5 -C $rule 2>/dev/null; rc=\$?; case \$rc in 0) echo STILL-PRESENT; exit 2;; 1) echo removed;; *) echo CHECK-FAILED rc=\$rc; exit 3;; esac"
+tok="probe-cut-$(date -u +%Y%m%dT%H%M%SZ)"
+cap probe-c-node-ok node_ok &&
+cap probe-c-sessions-before sessions_ok &&
+probe_tier c 300 && sleep 20 && ti=$(date -u +%FT%TZ) &&
+cap probe-c-cut python scripts/node-ssh.py "$host" "nohup sh -c ': $tok; $cut' </dev/null >/dev/null 2>&1 &
+  sleep 2; iptables -w 5 -C $rule 2>/dev/null || { echo NOT-CUT; exit 1; }
+  pgrep -f '^sh -c : $tok' >/dev/null || { echo NO-REMOVER; exit 1; }
+  echo cut-in-place; date -u +%FT%TZ" &&
+{ sleep 43; cap probe-c-sessions-during sessions_cut; held=$?             # the rule check runs either way
+  sleep 47; cap probe-c-rule python scripts/node-ssh.py "$host" "$check" && [ "$held" -eq 0 ]; } &&
+probe_after c &&
+cap probe-c-sessions-after sessions_ok
+```
+
+Also expected: during the cut the node's sessions are not `LOGGED_IN` (the cut
+holds; `sessions_cut` fails the chain otherwise, since the tier then proves nothing);
+the writer stalls and resumes; PostgreSQL does not restart (`postmaster_started` equal to the previous
+tier's after-identity, and no recovery lines); afterwards every
+session is `LOGGED_IN` and every device `running`. **Stop** also on `NOT-CUT` (the
+rule was not in place 2 s after the start; the tier proves nothing, and the process
+removes any rule it still inserts: read `$check` after 70 s), and on `NO-REMOVER`,
+`STILL-PRESENT` or `CHECK-FAILED` (remove the rule at once with `iptables -w 5 -D
+$rule` on the host and read `$check` again until it says `removed`), or on any
+session or device in another state: escalate to the owner with the list of volumes
+on the node.
+
+**Teardown, the same day.**
+
+```sh
+kubectl --context admin@ai delete namespace "$PNS" --timeout=30m
+kubectl --context admin@ai get pv "$pv"        # NotFound once Trident has deleted the LUN (minutes per sweep)
+```
+
+Then confirm on the NAS that LUN `trident-<pv>` is gone, as `qnap-storage-setup.md`
+§9 reads the LUN list (`<operator fills: the read-only qcli LUN listing used
+there>`). If the PV or the LUN is still there after 30 minutes, stop and hand it to
+the storage owner (Trident's logs, the LUN list). That section's NAS-first cleanup
+is for PVs set to `Retain` with no VolumeAttachment left; it applies only after the
+storage owner has established both, never while Trident may still delete the LUN.
+
+**Evidence on #1753**, one comment titled "Durability evidence (ii): disposable
+ledger probe", no secret (the probe has none):
+- the ailab commit, the bundle receipt, the `probe-sts-diff` result and the render's
+  object list;
+- the node, its collateral readback, the owner's OK for (b) and (c) where run;
+- `probe-pv`, `probe-identity` and `probe-not-production`;
+- per tier: the interruption's command and UTC time, the PostgreSQL log lines,
+  `probe_compare`'s output, the integrity output and, for (b) and (c), the
+  after-captures;
+- the teardown: namespace, PV and LUN gone.
+
+#### (iii) One planned restart of the production ledger
+
+The maintenance procedure above, once, with the committed rows compared across it.
+Run it after the drills (checklist step 5), in checklist step 6a before 6b's review,
+in the state the drills leave: `ready=f` with B's IDs, the plugin disabled, no Relay
+router connection.
+
+```sh
+markers() { kubectl --context admin@ai -n relay-budget-authority exec relay-budget-postgres-0 -- sh -c \
+  'cd "$PGDATA" && cat PG_VERSION relay-budget-schema-version relay-budget-schema-source-commit &&
+   sha256sum relay-budget-schema-SHA256SUMS relay-budget-schema-source-commit && ls -d ../.initialization-started'; }
+ledger_capture() {   # ledger_capture <label>
+  local -; set -o pipefail
+  lsql < "$ev/ledger-identity.sql" > "$ev/prod-identity-$1.txt" &&
+  lsql < "$ev/ledger-rows.sql" | LC_ALL=C sort > "$ev/prod-rows-$1.tsv" &&
+  markers > "$ev/prod-markers-$1.txt" &&
+  kubectl --context admin@ai -n relay-budget-authority get pod relay-budget-postgres-0 -o json \
+    | jq -c '{uid: .metadata.uid, node: .spec.nodeName}' > "$ev/prod-pod-$1.json"
+}
+# The maintenance procedure's preconditions, asserted: one authority row, withdrawn; the plugin disabled.
+withdrawn() { lsql <<<"SELECT 'WITHDRAWN' FROM worker_budget.authority HAVING count(*) = 1 AND bool_and(NOT ready);" | grep -q WITHDRAWN; }
+plugin_off() { plugins | jq -e 'select(.id == "worker-budget-authority") | .state == "disabled"' >/dev/null; }
+prod_compare() {    # prod_compare <before> <after>: fails unless everything but the start time is identical
+  cmp "$ev/prod-rows-$1.tsv" "$ev/prod-rows-$2.tsv" && echo "rows identical" &&
+  cmp "$ev/prod-markers-$1.txt" "$ev/prod-markers-$2.txt" && echo "markers identical" &&
+  diff <(grep -v '^postmaster_started|' "$ev/prod-identity-$1.txt") \
+       <(grep -v '^postmaster_started|' "$ev/prod-identity-$2.txt") && echo "identity identical" &&
+  grep -h '^postmaster_started|' "$ev/prod-identity-$1.txt" "$ev/prod-identity-$2.txt" &&
+  cat "$ev/prod-pod-$1.json" "$ev/prod-pod-$2.json"
+}
+withdrawn && plugin_off && sleep 20 &&
+cap prod-restart-rlog rlog &&                                # no budget activity since the withdrawal
+ledger_capture before &&
+cap prod-restart-delete kubectl --context admin@ai -n relay-budget-authority delete pod relay-budget-postgres-0 --timeout=5m &&
+{ until kubectl --context admin@ai -n relay-budget-authority get pod relay-budget-postgres-0 >/dev/null 2>&1; do sleep 2; done; } &&
+kubectl --context admin@ai -n relay-budget-authority wait --for=condition=Ready pod/relay-budget-postgres-0 --timeout=15m &&
+ledger_capture after &&
+cap prod-restart-log kubectl --context admin@ai -n relay-budget-authority logs relay-budget-postgres-0 &&
+cap prod-restart-compare prod_compare before after
+```
+
+The `OnDelete` StatefulSet recreates its only Pod; the `preStop` hook stops
+PostgreSQL cleanly first. Expected:
+- the rows (authority, `clients`, `readers` and every other table) and the markers
+  (`17`, `5`, the source commit, the SHA-256 of the copied `SHA256SUMS` equal to the
+  manifest pin of budget step 3) are byte-identical;
+- `identity identical` apart from `postmaster_started`, which is later after the
+  restart: `system_identifier`, the settings, `functions_md5` and the role memberships
+  are unchanged, `in_recovery` `f`;
+- a new Pod UID (the node may differ; a move re-attaches the LUN, minutes per
+  Trident sweep);
+- the log has `database system was shut down at` (a clean shutdown) and `database
+  system is ready to accept connections`, and no `interrupted`.
+
+**Stop** on any other difference: `ready` stays false and the owner investigates.
+Reopening stays the separately reviewed checklist step 7. Post the captures on #1753
+as "Durability evidence (iii): production restart".
+
+#### After R1 settles: the confirmation on production
+
+R1 makes the first real allocation. After R1 has settled (campaign §3.10: worker
+removed, journal slot settled, run withdrawn) and before R2 is signed, repeat (iii)
+by the same maintenance procedure: `lwrite withdraw`, `plugin false`, Relay
+allocating nothing (no active worker, no next run signed); then the chain of (iii)
+with the labels `r1-before` and `r1-after`: `withdrawn && plugin_off && sleep 20`,
+`rlog`, `ledger_capture r1-before`, the same Pod restart, `ledger_capture r1-after`
+and `prod_compare r1-before r1-after`. The rows now hold R1's `allocations`, `outbox`
+sequences, `receipts`, `scope_runs` and `allocation_scopes`, and must be
+byte-identical across the restart, with the same markers, identity and log
+expectations as (iii). Reopening is separately reviewed. Post it on #1753 as
+"Post-R1 ledger confirmation".
+
+**If it fails, the ledger is uncertain** ("If the ledger is lost, rolled back or
+uncertain" above). Every consumer stays disabled: authority withdrawn, plugin
+disabled, Relay allocating nothing. The cost, stated in advance:
+- the campaign stops after R1, with nothing reopened on this ledger;
+- there is no restore: the ledger has no backup and archive mode is off, and no
+  snapshot may be used;
+- the only way forward is the separately reviewed ceremony that permanently fences
+  the old identity domain. No runbook writes it yet, so it needs its own design and
+  review first;
+- R1's allocation, and every other allocation of that domain, stays fenced forever;
+- (i)-(iii) no longer hold for this ledger: what replaces them before any later
+  `ready=true` is the owner's decision, with that ceremony.
 
 ## Local validation
 

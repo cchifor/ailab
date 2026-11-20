@@ -64,6 +64,27 @@ case "\$1 \$2" in
     elif [ "\${MOCK_CACHE:-0}" != 0 ]; then printf 'Build Cache|%sGB\n' "\$MOCK_CACHE"; fi
     if [ "\${MOCK_IMAGES:-0}" != 0 ]; then printf 'Images|%sGB\n' "\$MOCK_IMAGES"; fi ;;
   "ps") : ;;          # 'docker ps -q' -> no containers
+  # buildx builders, for the read-only leak metric (case [V]), from the fixture tree MOCK_BX:
+  #   containers/<cid>  the line the script's inspect format renders (name|volumes)
+  #   volumes/<name>    the volume's mountpoint;  refs/<name>  present = some container uses it
+  # The name-filtered listings IGNORE the filter, as a careless daemon would: the script's own name checks
+  # must hold. dangling=true is honoured. MOCK_BX_PSFAIL=1: the container listing fails.
+  # (No backticks in this heredoc: it is unquoted.)
+  "ps -aq")
+    [ "\${MOCK_BX_PSFAIL:-0}" = 1 ] && exit 1
+    [ -n "\${MOCK_BX:-}" ] && ls "\$MOCK_BX/containers" 2>/dev/null
+    exit 0 ;;
+  "inspect -f")
+    if [ -n "\${MOCK_BX:-}" ] && [ -f "\$MOCK_BX/containers/\$4" ]; then cat "\$MOCK_BX/containers/\$4"; exit 0; fi
+    exit 1 ;;
+  "volume ls")
+    if [ -n "\${MOCK_BX:-}" ]; then
+      for f in "\$MOCK_BX"/volumes/*; do [ -f "\$f" ] || continue; v="\${f##*/}"; [ -e "\$MOCK_BX/refs/\$v" ] || echo "\$v"; done
+    fi
+    exit 0 ;;
+  "volume inspect")
+    v="\${!#}"; [ -n "\${MOCK_BX:-}" ] && [ -f "\$MOCK_BX/volumes/\$v" ] && { cat "\$MOCK_BX/volumes/\$v"; exit 0; }
+    exit 1 ;;
   *) : ;;
 esac
 exit 0
@@ -190,6 +211,15 @@ cat >"$BIN/sort" <<EOF
 exec "$REAL_SORT" "\$@"
 EOF
 
+# du: the real one, logged to the call log, so a case can tell a volume that was walked from one whose size
+# came from the cache ([V]).
+REAL_DU="$(command -v du)"
+cat >"$BIN/du" <<EOF
+#!/usr/bin/env bash
+echo "du \$*" >> "$CALLS"
+exec "$REAL_DU" "\$@"
+EOF
+
 # findmnt -no OPTIONS --target <root>: the mount options section 6 checks for atime. MOCK_MNT_OPTS
 # (default rw,relatime); MOCK_MNT_FAIL=1 = the read fails with no output.
 cat >"$BIN/findmnt" <<EOF
@@ -216,6 +246,9 @@ EOF
 chmod +x "$BIN"/*
 
 run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUSY_DROP_AFTER, CACHECAP)
+  # CACHECAP unset passes an EMPTY value, which the script reads as unset: the cases then run against the
+  # script's own default, which [M] pins to the role default that ships (40 GB, so a cache "over the cap"
+  # below is MOCK_CACHE=46).
   # IDLE_WAIT_SEC is forced tiny here: the real default is 600s, because under pressure the busy gate
   # WAITS for the between-jobs gap instead of pruning through a live job. Left at its default, every
   # busy+pressure case below would stall this suite for 10 minutes.
@@ -234,7 +267,8 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     GITEA_RUNNER_WORKDIR_PARENT="${WSP:-/nonexistent/work}" \
     GITEA_CLEANUP_WS_PRUNE_AGE_H="${WSAGE:-48}" \
     GITEA_CLEANUP_IDLE_WAIT_SEC="${IDLEWAIT:-2}" GITEA_CLEANUP_IDLE_POLL_SEC=1 \
-    GITEA_CLEANUP_CACHE_MAX_BYTES="${CACHECAP:-20000000000}" \
+    GITEA_CLEANUP_CACHE_MAX_BYTES="${CACHECAP:-}" \
+    MOCK_BX="${MOCK_BX:-}" MOCK_BX_PSFAIL="${MOCK_BX_PSFAIL:-0}" \
     GITEA_CLEANUP_CRITICAL_UNTIL="${CRITUNTIL:-4h}" \
     GITEA_CLEANUP_MIN_UNTIL_SEC="${MINUNTIL-14400}" \
     GITEA_CLEANUP_BEACON="${BEACON:-0}" GITEA_CLEANUP_TEXTFILE_DIR="${TEXTDIR:-/nonexistent}" \
@@ -249,6 +283,8 @@ run_case() { # <busy> <pct>  (optional globals: WSP, WSAGE, MOCK_CACHE, MOCK_BUS
     GITEA_CLEANUP_TARGET_ROOTS="${TROOTS-/nonexistent/targets}" GITEA_CLEANUP_TARGET_MAXDEPTH="${TDEPTH:-4}" \
     GITEA_CLEANUP_TARGET_KEEP_H="${TKEEP:-72}" GITEA_CLEANUP_TARGET_KEEP_CRITICAL_H="${TKEEPCRIT:-24}" \
     GITEA_CLEANUP_TARGET_MIN_FREE_MB="${TMINFREE:-1024}" GITEA_CLEANUP_BUILDKIT_DB="${BKDB:-/nonexistent/cache.db}" \
+    GITEA_CLEANUP_TARGET_AGE_SWEEP="${TAGE:-0}" GITEA_CLEANUP_TARGET_AGE_MIN_FREE_MB="${TAGEMINFREE:-1024}" \
+    GITEA_CLEANUP_TARGET_AGE_EVERY_H="${TAGEEVERY:-6}" GITEA_CLEANUP_TARGET_AGE_STAMP="${TAGESTAMP-$WORK/age.stamp}" \
     MOCK_MNT_OPTS="${MOCK_MNT_OPTS:-rw,relatime}" MOCK_MNT_FAIL="${MOCK_MNT_FAIL:-0}" \
     bash "$SCRIPT" ${SCRIPT_ARGS:-} >/dev/null 2>&1 &
   local pid=$! i=0
@@ -304,22 +340,22 @@ echo "[H] build-cache SIZE cap"
 # The `until=` windows cannot bound a continuously-REUSED cache (measured: until=1h reclaimed 1.7GB of
 # 26GB), so an over-cap idle sweep escalates to a full `builder prune -af`. It must NEVER do that while
 # a job runs, and must fail CLOSED when the size is unreadable.
-MOCK_CACHE=26 run_case 0 85
+MOCK_CACHE=46 run_case 0 85
 assert_has "builder prune -af" "H1: over-cap + idle + pressure -> full prune"
 
 MOCK_CACHE=12 run_case 0 85
 if grep -q 'builder prune -af' "$CALLS"; then bad "H2: under-cap must NOT full-prune"; else ok "H2: under-cap leaves warm cache alone"; fi
 
-MOCK_CACHE=26 run_case 0 50
+MOCK_CACHE=46 run_case 0 50
 if grep -q 'builder prune -af' "$CALLS"; then bad "H3: healthy disk must NOT full-prune"; else ok "H3: over-cap but disk healthy -> no full prune"; fi
 
-MOCK_CACHE=26 run_case 1 95
+MOCK_CACHE=46 run_case 1 95
 if grep -q 'builder prune -af' "$CALLS"; then bad "H4: full prune must never run on the mid-job path"; else ok "H4: busy+critical (mid-job path) never full-prunes"; fi
 
 MOCK_CACHE=0 run_case 0 85
 if grep -q 'builder prune -af' "$CALLS"; then bad "H5: unreadable cache size must fail closed"; else ok "H5: unparseable size -> no full prune (fails closed)"; fi
 
-CACHECAP=0 MOCK_CACHE=26 run_case 0 85
+CACHECAP=0 MOCK_CACHE=46 run_case 0 85
 if grep -q 'builder prune -af' "$CALLS"; then bad "H6: cap=0 must disable the size cap"; else ok "H6: cap=0 disables the size cap"; fi
 unset MOCK_CACHE CACHECAP
 
@@ -327,10 +363,10 @@ echo "[H7/H8] the size cap's busy RE-CHECKS (mutation-proven, not merely present
 # The #253 review mutation-tested the first re-check and found the suite stayed green without it —
 # H4 short-circuits on midjob=1 long before the re-check runs, so nothing covered it. Both cases here
 # start IDLE (the busy gate lets the sweep proceed) and a job appears at a named phase afterwards.
-MOCK_CACHE=26 MOCK_BUSY_FROM=container run_case 0 85
+MOCK_CACHE=46 MOCK_BUSY_FROM=container run_case 0 85
 if grep -q 'builder prune -af' "$CALLS"; then bad "H7: a job arriving before the cap must abort the full prune"; else ok "H7: job arriving mid-sweep aborts the full prune"; fi
 
-MOCK_CACHE=26 MOCK_BUSY_FROM=afprune run_case 0 85
+MOCK_CACHE=46 MOCK_BUSY_FROM=afprune run_case 0 85
 if ! grep -q 'builder prune -af' "$CALLS"; then bad "H8: the default-builder prune should still have run"
 elif grep -q 'buildx prune -af' "$CALLS"; then bad "H8: a job arriving after the default prune must abort the per-builder prunes"
 else ok "H8: job arriving after the default prune aborts the per-builder prunes"; fi
@@ -344,7 +380,7 @@ echo "[H9] the midjob GATE itself (not the re-check that shadows it)"
 # exactly a job that looks idle at cap time while a critical mid-job sweep is in flight.
 # Busy at the gate (-> wait -> still busy -> critical -> midjob=1), then idle from the image prune on,
 # so the re-check would say "go". Only the midjob gate stops the unwindowed prune here.
-MOCK_CACHE=26 MOCK_BUSY_UNTIL=container run_case 1 95
+MOCK_CACHE=46 MOCK_BUSY_UNTIL=container run_case 1 95
 if grep -q 'builder prune -af' "$CALLS"; then bad "H9: the midjob gate must block the full prune even when the re-check reads idle"; else ok "H9: midjob gate blocks the full prune when the re-check reads idle"; fi
 unset MOCK_BUSY_UNTIL MOCK_CACHE
 
@@ -836,13 +872,13 @@ echo "[S] pinned build cache: cap prunes that free nothing count up, and HEAL_ST
 # builder prune -af) cleared it. Here MOCK_CACHE stays the size after the prune unless MOCK_CACHE_AFTER
 # says otherwise, which is exactly the pinned case.
 pinned() { rm -f "$WORK/heal.state" "$BEACONDIR/gitea_runner_buildkit_heal.prom"; }
-pinned; MOCK_CACHE=26 run_beacon 0 85
+pinned; MOCK_CACHE=46 run_beacon 0 85
 check "S1: a cap prune that leaves the cache over cap counts one (cap_stuck=1)" \
   'calls_has "docker builder prune -af" && [ "$(state_val cap_stuck)" = 1 ]'
 check "S1: ...and does not heal yet" '! heal_ran'
-MOCK_CACHE=26 KEEP_RUNNER_STATE=1 run_beacon 0 85; MOCK_CACHE=26 KEEP_RUNNER_STATE=1 run_beacon 0 85
+MOCK_CACHE=46 KEEP_RUNNER_STATE=1 run_beacon 0 85; MOCK_CACHE=46 KEEP_RUNNER_STATE=1 run_beacon 0 85
 check "S2: three pinned cap prunes in a row -> cap_stuck=3, still no heal" '[ "$(state_val cap_stuck)" = 3 ] && ! heal_ran'
-MOCK_CACHE=26 MOCK_CACHE_AFTER=1 KEEP_RUNNER_STATE=1 run_beacon 0 85
+MOCK_CACHE=46 MOCK_CACHE_AFTER=1 KEEP_RUNNER_STATE=1 run_beacon 0 85
 in_order "S3: the next tick heals in the record heal's order" \
   "systemctl stop gitea-act-runner.service" "docker image prune -af" "systemctl restart docker.service" \
   "docker builder prune -af" "systemctl start --no-block gitea-act-runner.service"
@@ -854,43 +890,43 @@ check "S3: ...and no record was marked failed (a pinned-cache heal has no record
 check "S3: ...a heal that got the cache under the cap is not a failed one (beacon pinned_cache_failed=0)" \
   '[ "$(state_val stuck_failed)" = 0 ] && [ "$(heal_field pinned_cache_failed)" = 0 ]'
 
-pinned; printf 'cap_stuck=2\n' > "$WORK/heal.state"; MOCK_CACHE=26 MOCK_CACHE_AFTER=5 run_beacon 0 85
+pinned; printf 'cap_stuck=2\n' > "$WORK/heal.state"; MOCK_CACHE=46 MOCK_CACHE_AFTER=5 run_beacon 0 85
 check "S4: a cap prune that gets the cache under cap resets the count (the after-prune path)" \
   'calls_has "docker builder prune -af" && [ "$(state_val cap_stuck)" = 0 ] && ! heal_ran'
 pinned; printf 'cap_stuck=2\n' > "$WORK/heal.state"; MOCK_CACHE=12 run_beacon 0 85
 check "S5: a cache already under cap resets the count, with no prune" \
   '[ "$(state_val cap_stuck)" = 0 ] && ! calls_has "docker builder prune -af"'
-pinned; printf 'cap_stuck=2\n' > "$WORK/heal.state"; MOCK_CACHE=26 MOCK_CACHE_AFTER=0 run_beacon 0 85
+pinned; printf 'cap_stuck=2\n' > "$WORK/heal.state"; MOCK_CACHE=46 MOCK_CACHE_AFTER=0 run_beacon 0 85
 check "S6: a size unreadable after the prune counts nothing either way" '[ "$(state_val cap_stuck)" = 2 ]'
 
-pinned; printf 'cap_stuck=3\nlast_heal=%s\nheals_total=1\n' "$(( $(date +%s) - 60 ))" > "$WORK/heal.state"; MOCK_CACHE=26 run_beacon 0 85
+pinned; printf 'cap_stuck=3\nlast_heal=%s\nheals_total=1\n' "$(( $(date +%s) - 60 ))" > "$WORK/heal.state"; MOCK_CACHE=46 run_beacon 0 85
 check "S7: the heal cooldown holds for the pinned cache too -> no heal, the sweep runs" '! heal_ran && swept'
-pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; IDLEWAIT=2 MOCK_CACHE=26 run_beacon 1 85
+pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; IDLEWAIT=2 MOCK_CACHE=46 run_beacon 1 85
 check "S8: no job gap -> no heal and no runner stop" '! heal_ran && ! calls_has "systemctl stop"'
-pinned; printf 'cap_stuck=9\n' > "$WORK/heal.state"; STUCKTICKS=0 MOCK_CACHE=26 run_beacon 0 85
+pinned; printf 'cap_stuck=9\n' > "$WORK/heal.state"; STUCKTICKS=0 MOCK_CACHE=46 run_beacon 0 85
 check "S9: HEAL_STUCK_TICKS=0 disables it" '! heal_ran && swept'
-pinned; printf 'cap_stuck=9\n' > "$WORK/heal.state"; HEALON=0 MOCK_CACHE=26 run_beacon 0 85
+pinned; printf 'cap_stuck=9\n' > "$WORK/heal.state"; HEALON=0 MOCK_CACHE=46 run_beacon 0 85
 check "S10: HEAL_DANGLING=0 disables it too (it is the same heal)" '! heal_ran && swept'
 # A count at the threshold is HISTORY: the heal re-reads disk and cache first (review of #1426), since
 # the count's resets only run behind 3b's pressure gate.
 pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; MOCK_CACHE=12 run_beacon 0 85
 check "S11: count at threshold but the cache is under the cap now -> no heal, count reset" \
   '! heal_ran && [ "$(state_val cap_stuck)" = 0 ] && swept'
-pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; MOCK_CACHE=26 run_beacon 0 50
+pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; MOCK_CACHE=46 run_beacon 0 50
 check "S12: count at threshold but the disk is below pressure -> no heal, count kept" \
   '! heal_ran && [ "$(state_val cap_stuck)" = 3 ] && swept'
-pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; CACHECAP=0 MOCK_CACHE=26 run_beacon 0 85
+pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; CACHECAP=0 MOCK_CACHE=46 run_beacon 0 85
 check "S13: count at threshold but the cap is disabled -> no heal" '! heal_ran && swept'
 pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; MOCK_CACHE=0 run_beacon 0 85
 check "S14: count at threshold but the size is unreadable -> no heal, count kept" \
   '! heal_ran && [ "$(state_val cap_stuck)" = 3 ] && swept'
 # A heal that leaves the cache over the cap is TERMINAL, as failed_<Y> is for a record (review of
 # #1426, round 2): otherwise 3b counts back up and dockerd restarts every cooldown, forever.
-pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; MOCK_CACHE=26 run_beacon 0 85
+pinned; printf 'cap_stuck=3\n' > "$WORK/heal.state"; MOCK_CACHE=46 run_beacon 0 85
 check "S15: a full heal that leaves the cache over the cap marks stuck_failed=1 (beacon pinned_cache_failed=1)" \
   'heal_ran && [ "$(state_val stuck_failed)" = 1 ] && [ "$(state_val cap_stuck)" = 0 ] && [ "$(heal_field pinned_cache_failed)" = 1 ]'
 printf 'cap_stuck=3\nstuck_failed=1\nlast_heal=%s\nheals_total=1\n' "$(( $(date +%s) - 99999 ))" > "$WORK/heal.state"
-MOCK_CACHE=26 run_beacon 0 85
+MOCK_CACHE=46 run_beacon 0 85
 check "S15b: ...and is not healed again after the cooldown, while it stays on the beacon; the sweep runs" \
   '! heal_ran && [ "$(heal_field pinned_cache_failed)" = 1 ] && swept'
 pinned; printf 'cap_stuck=2\nstuck_failed=1\n' > "$WORK/heal.state"; MOCK_CACHE=12 run_beacon 0 85
@@ -901,7 +937,7 @@ check "S16: a cache seen under the cap clears stuck_failed (and the count)" \
 pinned; printf 'stuck_failed=1\n' > "$WORK/heal.state"; MOCK_CACHE=12 run_beacon 0 50
 check "S17: below pressure, a cache under the cap still clears stuck_failed, on the same tick's beacon" \
   '[ "$(state_val stuck_failed)" = 0 ] && [ "$(heal_field pinned_cache_failed)" = 0 ] && ! heal_ran'
-pinned; printf 'stuck_failed=1\n' > "$WORK/heal.state"; MOCK_CACHE=26 run_beacon 0 50
+pinned; printf 'stuck_failed=1\n' > "$WORK/heal.state"; MOCK_CACHE=46 run_beacon 0 50
 check "S17b: below pressure, a cache still over the cap keeps it" \
   '[ "$(state_val stuck_failed)" = 1 ] && [ "$(heal_field pinned_cache_failed)" = 1 ] && ! heal_ran'
 pinned
@@ -1089,7 +1125,7 @@ TR="$WORK/troot"
 mb() { mkdir -p "$(dirname "$1")"; head -c $(( ${2:-2} * 1048576 )) /dev/zero > "$1"; }
 age() { touch -a -d "$2" "$1"; } # atime only: what the sweep reads
 mk_targets() {
-  rm -rf "$TR"
+  rm -rf "$TR"; rm -f "$WORK/age.stamp"
   local t="$TR/repo-ci/pull_request/target"
   mb "$t/CACHEDIR.TAG" 0; echo '{}' > "$t/.rustc_info.json"; age "$t/CACHEDIR.TAG" '30 days ago'
   mb "$t/debug/deps/libold-1.rlib"; age "$t/debug/deps/libold-1.rlib" '5 days ago'
@@ -1269,6 +1305,195 @@ rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; IDLEWAIT=2 BKDB="$BKF" BEACON=1 TE
 rm -f "$BEACONDIR/gitea_runner_cleanup.prom"; BEACON=1 TEXTDIR="$BEACONDIR" run_case 1 50
 [ "$(beacon_field buildkit_db_bytes)" = 0 ] && ok "T18: no cache.db -> 0, not a missing line" || bad "T18: no cache.db (got '$(beacon_field buildkit_db_bytes)')"
 rm -f "$BKF"
+
+# T19: TARGET_AGE_SWEEP=1 sweeps BELOW pressure by age alone, with the same guards (2026-11-18: the 250 GB
+# root disks never reached 75%, so the targets piled up unswept).
+mk_targets; TAGE=1 TROOTS="$TR" TAGEMINFREE=1 run_case 0 50
+gone "$T/debug/deps/libold-1.rlib" "T19: age sweep at 50% deletes a file unread for 5 days"
+kept "$T/debug/deps/libday-3.rlib" "T19: ...keeps one unread for 30h (the 72h window, not the critical 24h)"
+kept "$T/CACHEDIR.TAG" "T19: ...keeps the markers"
+assert_has "systemctl stop gitea-act-runner" "T19: the runner is held for an age sweep too"
+assert_has "systemctl start" "T19: ...and started again"
+grep -q "target sweep: disk 50%, .* -> deleting (age sweep)" "$WORK/logger.log" \
+  && ok "T19: the log keeps the 'target sweep: disk N%,' prefix and names the age sweep" || bad "T19: the age-sweep log line"
+[ -f "$WORK/age.stamp" ] && ok "T19: a completed age sweep writes the cadence stamp" || bad "T19: a completed age sweep writes the cadence stamp"
+# The age path has its OWN floor; the pressure path keeps TARGET_MIN_FREE_MB (reviewer-claude, #1857).
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1 TAGEMINFREE=1024 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: below pressure the AGE floor (1024 MB) gates, not TARGET_MIN_FREE_MB (1)"
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1 TAGEMINFREE=1024 run_case 0 85
+gone "$T/debug/deps/libold-1.rlib" "T19: at pressure TARGET_MIN_FREE_MB (1) gates, not the age floor"
+# Cadence: a walk that found too little stamps; the next age tick inside TARGET_AGE_EVERY_H does not walk.
+mk_targets; TAGE=1 TROOTS="$TR" TAGEMINFREE=1024 run_case 0 50
+[ -f "$WORK/age.stamp" ] && ok "T19: a walk below the age floor writes the cadence stamp" || bad "T19: a walk below the age floor writes the cadence stamp"
+TAGE=1 TROOTS="$TR" TAGEMINFREE=1 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: inside TARGET_AGE_EVERY_H the age path does not sweep"
+grep -q "age sweep looked less than 6h ago -> not this tick" "$WORK/logger.log" && ok "T19: ...and says so" || bad "T19: ...and says so"
+TAGE=1 TAGEEVERY=0 TROOTS="$TR" TAGEMINFREE=1 run_case 0 50
+gone "$T/debug/deps/libold-1.rlib" "T19: TARGET_AGE_EVERY_H=0 lifts the cadence limit"
+# The PRODUCTION stamp path (env empty -> the script's default beside HEAL_STATE), with that dir not yet
+# created on a fresh host: the dir is made and the stamp lands there (reviewer-claude, #1857 round 2).
+mk_targets; rm -rf "$WORK/fresh"; TAGESTAMP="" HEALSTATE="$WORK/fresh/heal.state" TAGE=1 TROOTS="$TR" TAGEMINFREE=1024 run_case 0 50
+[ -f "$WORK/fresh/target-age-sweep.stamp" ] && ok "T19: with the stamp env unset it lands beside HEAL_STATE, its dir created" \
+  || bad "T19: default stamp path (want $WORK/fresh/target-age-sweep.stamp)"
+rm -rf "$WORK/fresh"
+# The stamp never limits the pressure path.
+mk_targets; touch "$WORK/age.stamp"; TAGE=1 TROOTS="$TR" TMINFREE=1 run_case 0 85
+gone "$T/debug/deps/libold-1.rlib" "T19: a fresh age stamp does not stop the pressure sweep"
+# The busy early exit below pressure still wins: a job is running, so nothing is read for deletion.
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1 run_case 1 50
+kept "$T/debug/deps/libold-1.rlib" "T19: busy below pressure -> no age sweep"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T19: busy -> the runner must not be stopped"; else ok "T19: busy -> the runner is not stopped"; fi
+# The age floor decides whether the runner is held below pressure.
+mk_targets; TAGE=1 TROOTS="$TR" TAGEMINFREE=1024 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: under TARGET_AGE_MIN_FREE_MB the age sweep deletes nothing"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T19: under TARGET_AGE_MIN_FREE_MB the runner must not be stopped"; else ok "T19: under TARGET_AGE_MIN_FREE_MB the runner is not stopped"; fi
+# A value other than 1 is not "on" (the template only ever renders 1 or 0).
+mk_targets; TAGE=true TROOTS="$TR" TMINFREE=1 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: TARGET_AGE_SWEEP=true (not 1) does not enable it"
+# The mid-job critical path (busy, no gap) still never sweeps, age sweep or not (codex impl review).
+mk_targets; TAGE=1 TROOTS="$TR" TMINFREE=1 run_case 1 95
+kept "$T/debug/deps/libold-1.rlib" "T19: the mid-job path never deletes Cargo targets with the age sweep on"
+if grep -q "stop gitea-act-runner" "$CALLS"; then bad "T19: the mid-job path must not stop the runner"; else ok "T19: the mid-job path does not stop the runner"; fi
+# A runner that did not stop: nothing is deleted below pressure either.
+mk_targets; MOCK_STOP_FAIL=1 TAGE=1 TROOTS="$TR" TAGEMINFREE=1 run_case 0 50
+kept "$T/debug/deps/libold-1.rlib" "T19: an age sweep whose runner did not stop deletes nothing"
+
+echo "[V] leaked buildx builders are MEASURED (read-only metric), never removed"
+# 2026-11-17: builders that cancelled jobs left behind held 20.1 GB on ci-runner-9 and 20.5 GB on
+# ci-runner-10. The cleanup cannot remove one safely (a build can attach between any check and the
+# removal), so it publishes gitea_runner_buildx_leaked_bytes/_builders for CIRunnerLeakedBuildxBuilders,
+# and an operator reaps by hand in an idle window. Leaked = a buildx_buildkit_*_state volume no container
+# uses, or a builder container whose own state volume BuildKit has not written for 12h: by INACTIVITY, not
+# by the container's age, because a builder later jobs reuse by name can be old and busy. A read that fails
+# writes nothing (the last value stays). The listings ignore the name filter: the script's checks must hold.
+BX="$WORK/bx"; MOCK_BX="$BX"; LEAKF="$BEACONDIR/gitea_runner_buildx_leak.prom"; SIZEC="$WORK/buildx-size.cache"
+bx_reset() { rm -rf "$BX" "$LEAKF" "$SIZEC"; mkdir -p "$BX/containers" "$BX/volumes" "$BX/refs" "$BX/data"; }
+walked() { grep -q "^du -sxB1 $BX/data/$1\$" "$CALLS"; } # the metric walked this volume this tick
+bx_at() { printf '@%s' "$(( $(date +%s) - $1 ))"; } # <s> ago, for touch -d
+bx_volume() { # <name> <MiB> <seconds since BuildKit last wrote it> [used]: a state dir like buildkitd's
+  local d="$BX/data/$1"
+  mkdir -p "$d/runc-overlayfs"; head -c $(( $2 * 1048576 )) /dev/zero > "$d/blob"
+  : > "$d/cache.db"; : > "$d/runc-overlayfs/metadata_v2.db"
+  touch -d "$(bx_at "$3")" "$d/cache.db" "$d/runc-overlayfs/metadata_v2.db" "$d/runc-overlayfs" "$d"
+  printf '%s\n' "$d" > "$BX/volumes/$1"
+  [ -z "${4:-}" ] || : > "$BX/refs/$1"
+}
+bx_container() { printf '%s|%s\n' "$2" "${3:+$3 }" > "$BX/containers/$1"; } # <cid> </name> [<volume>]
+bx_du() { du -sxB1 "$BX/data/$1" | cut -f1; }
+leak() { sed -n "s/^gitea_runner_buildx_leaked_$1 \(.*\)$/\1/p" "$LEAKF" 2>/dev/null; }
+D2=$(( 2 * 86400 ))
+bx_fixture() {
+  bx_reset
+  # Idle: nothing written for 2 days -> leaked.
+  bx_volume buildx_buildkit_builder-bbbb0_state 3 "$D2" used; bx_container cidle /buildx_buildkit_builder-bbbb0 buildx_buildkit_builder-bbbb0_state
+  # Active: written 1h ago -> not leaked, however old the container is.
+  bx_volume buildx_buildkit_builder-aaaa0_state 2 3600 used; bx_container cactive /buildx_buildkit_builder-aaaa0 buildx_buildkit_builder-aaaa0_state
+  # Reused by name (rmv-builder on ci-runner-9): cache.db untouched for 9 days, but a build wrote the
+  # snapshot metadata (two levels down) 30 min ago -> not leaked.
+  bx_volume buildx_buildkit_rmv-builder0_state 1 777600 used; bx_container creused /buildx_buildkit_rmv-builder0 buildx_buildkit_rmv-builder0_state
+  touch -d "$(bx_at 1800)" "$BX/data/buildx_buildkit_rmv-builder0_state/runc-overlayfs/metadata_v2.db"
+  # No database at all, in a dir untouched for 2 days: activity UNKNOWN -> not counted (a dir's mtime says
+  # nothing about writes to the files in it).
+  mkdir -p "$BX/data/buildx_buildkit_builder-dddd0_state"; head -c 1048576 /dev/zero > "$BX/data/buildx_buildkit_builder-dddd0_state/blob"
+  touch -d "$(bx_at "$D2")" "$BX/data/buildx_buildkit_builder-dddd0_state/blob" "$BX/data/buildx_buildkit_builder-dddd0_state"
+  printf '%s\n' "$BX/data/buildx_buildkit_builder-dddd0_state" > "$BX/volumes/buildx_buildkit_builder-dddd0_state"
+  : > "$BX/refs/buildx_buildkit_builder-dddd0_state"; bx_container cnodb /buildx_buildkit_builder-dddd0 buildx_buildkit_builder-dddd0_state
+  # An unsupported layout: its databases sit four levels down, past the bounded search -> unknown, not counted.
+  mkdir -p "$BX/data/buildx_buildkit_builder-eeee0_state/a/b/c"; head -c 1048576 /dev/zero > "$BX/data/buildx_buildkit_builder-eeee0_state/blob"
+  : > "$BX/data/buildx_buildkit_builder-eeee0_state/a/b/c/cache.db"
+  touch -d "$(bx_at "$D2")" "$BX/data/buildx_buildkit_builder-eeee0_state/a/b/c/cache.db" "$BX/data/buildx_buildkit_builder-eeee0_state"
+  printf '%s\n' "$BX/data/buildx_buildkit_builder-eeee0_state" > "$BX/volumes/buildx_buildkit_builder-eeee0_state"
+  : > "$BX/refs/buildx_buildkit_builder-eeee0_state"; bx_container cdeep /buildx_buildkit_builder-eeee0 buildx_buildkit_builder-eeee0_state
+  bx_container cnovol /buildx_buildkit_builder-nnnn0                  # no state volume: not counted
+  bx_volume buildx_buildkit_builder-cccc0_state 4 3600               # unattached: leaked, even if recent
+  bx_volume pin_data 1 "$D2" used; bx_container cdsh /dsh-conductor-image-pin pin_data
+  bx_volume platform_pgdata 5 "$D2"                                  # a job's dangling volume: not a builder's
+  bx_volume buildx_buildkit__state 1 "$D2"                           # an empty builder name: not the shape
+}
+
+bx_fixture; run_beacon 0 50
+want=$(( $(bx_du buildx_buildkit_builder-bbbb0_state) + $(bx_du buildx_buildkit_builder-cccc0_state) ))
+check "V1: leaked_bytes = the idle builder + the unattached volume (${want}B)" '[ "$(leak bytes)" = "$want" ]'
+check "V1: leaked_builders = 2: old-but-active, reused by name, no database, and an unsupported layout are not counted" \
+  '[ "$(leak builders)" = 2 ]'
+check "V1: an unknown-activity builder is not even sized" '! walked buildx_buildkit_builder-dddd0_state && ! walked buildx_buildkit_builder-eeee0_state'
+check "V1: the metric file is world-readable (node_exporter is not root)" '[ "$(stat -c %a "$LEAKF")" = 644 ]'
+check "V1: nothing is removed, and the runner is neither stopped nor started" \
+  '! grep -qE "^docker (rm|volume rm|stop|kill) " "$CALLS" && ! calls_has "systemctl stop" && ! calls_has "systemctl start"'
+
+bx_reset; bx_volume buildx_buildkit_builder-aaaa0_state 2 3600 used; bx_container cactive /buildx_buildkit_builder-aaaa0 buildx_buildkit_builder-aaaa0_state
+run_beacon 0 50
+check "V1b: an old-but-active builder alone -> 0 leaked" '[ "$(leak builders)" = 0 ] && [ "$(leak bytes)" = 0 ]'
+bx_reset; bx_volume buildx_buildkit_builder-bbbb0_state 3 "$D2" used; bx_container cidle /buildx_buildkit_builder-bbbb0 buildx_buildkit_builder-bbbb0_state
+run_beacon 0 50
+check "V1b: an old-and-idle builder alone -> leaked" '[ "$(leak builders)" = 1 ] && [ "$(leak bytes)" = "$(bx_du buildx_buildkit_builder-bbbb0_state)" ]'
+bx_reset; bx_volume buildx_buildkit_builder-cccc0_state 4 60
+run_beacon 0 50
+check "V1b: an unattached state volume alone -> leaked, however recent" '[ "$(leak builders)" = 1 ]'
+
+bx_fixture; run_beacon 1 50
+check "V2: written on a busy tick too (the healthy busy skip exits before the sweep)" \
+  '[ "$(leak builders)" = 2 ] && [ "$(beacon_field busy_skip)" = 1 ]'
+
+# A read that fails writes nothing: the last value stays.
+stale() { printf 'gitea_runner_buildx_leaked_bytes 111\ngitea_runner_buildx_leaked_builders 1\n' > "$LEAKF"; }
+bx_fixture; stale; MOCK_BX_PSFAIL=1 run_beacon 0 50
+check "V3: the container listing failing -> the last value stays" '[ "$(leak bytes)" = 111 ] && [ "$(leak builders)" = 1 ]'
+bx_fixture; printf '%s\n' "$BX/data/gone" > "$BX/volumes/buildx_buildkit_builder-cccc0_state"; stale; run_beacon 0 50
+check "V3: an unattached volume that cannot be found -> the last value stays" '[ "$(leak bytes)" = 111 ]'
+bx_fixture; printf '%s\n' "$BX/data/gone" > "$BX/volumes/buildx_buildkit_builder-aaaa0_state"; stale; run_beacon 0 50
+check "V3: a builder's volume whose directory is gone (activity unreadable) -> the last value stays" '[ "$(leak bytes)" = 111 ]'
+bx_fixture; rm -f "$BX/volumes/buildx_buildkit_builder-bbbb0_state"; stale; run_beacon 0 50
+check "V3: a builder's volume docker cannot inspect -> the last value stays" '[ "$(leak bytes)" = 111 ]'
+
+bx_reset; bx_volume buildx_buildkit_builder-aaaa0_state 2 3600 used; bx_container cactive /buildx_buildkit_builder-aaaa0 buildx_buildkit_builder-aaaa0_state
+stale; run_beacon 0 50
+check "V4: nothing leaked -> 0 bytes, 0 builders (a real zero replaces the last value)" '[ "$(leak bytes)" = 0 ] && [ "$(leak builders)" = 0 ]'
+
+bx_fixture; BEACON=0 TEXTDIR="$BEACONDIR" run_case 0 50
+check "V5: BEACON=0 -> no metric file" '[ ! -e "$LEAKF" ]'
+bx_fixture; GITEA_CLEANUP_BUILDX_LEAK_IDLE_SEC=junk run_beacon 0 50
+check "V6: a non-numeric idle window falls back to 12h (a builder written 1h ago is not leaked)" '[ "$(leak builders)" = 2 ]'
+bx_fixture; GITEA_CLEANUP_BUILDX_LEAK_IDLE_SEC=600 run_beacon 0 50
+check "V6: the window is honoured (10 min: the 30-min reuse and the 1h builder count too)" '[ "$(leak builders)" = 4 ]'
+
+# V7: SIZES ARE CACHED. du walks the whole volume, so a leaked volume is sized at most once per hour, and
+# again sooner only when its activity changes. Proof: the next tick walks nothing, and bytes added to a
+# volume behind the cache's back do not show until the entry is stale.
+IDLEV=buildx_buildkit_builder-bbbb0_state; ORPHV=buildx_buildkit_builder-cccc0_state
+bx_fixture; run_beacon 0 50; first="$(leak bytes)"
+check "V7: the first tick walks both leaked volumes and records them" \
+  'walked "$IDLEV" && walked "$ORPHV" && [ "$(grep -c . "$SIZEC")" = 2 ]'
+head -c 1048576 /dev/zero >> "$BX/data/$ORPHV/blob" # grows, its databases untouched
+run_beacon 0 50
+check "V7: the next tick walks nothing and reports the cached sizes" \
+  '! grep -q "^du -sxB1 " "$CALLS" && [ "$(leak bytes)" = "$first" ] && [ "$(leak builders)" = 2 ]'
+touch -d "$(bx_at 129600)" "$BX/data/$IDLEV/cache.db" # BuildKit wrote it (36h ago: still idle)
+run_beacon 0 50
+check "V7: a changed activity re-walks that volume only" 'walked "$IDLEV" && ! walked "$ORPHV"'
+sed -i "s/^\($ORPHV [^ ]*\) [0-9]* /\1 $(( $(date +%s) - 7200 )) /" "$SIZEC" # sized 2h ago: past the 1h TTL
+run_beacon 0 50
+want=$(( $(bx_du "$IDLEV") + $(bx_du "$ORPHV") ))
+check "V7: an entry past the TTL is re-walked, and the grown volume shows (${want}B)" \
+  'walked "$ORPHV" && ! walked "$IDLEV" && [ "$(leak bytes)" = "$want" ]'
+printf 'garbage line\n%s none notanumber 5\n' "$ORPHV" > "$SIZEC"
+run_beacon 0 50
+check "V7: a corrupt cache is ignored and rebuilt" \
+  'walked "$IDLEV" && walked "$ORPHV" && [ "$(leak bytes)" = "$want" ] && [ "$(grep -c . "$SIZEC")" = 2 ]'
+# Digit-only but not a canonical bounded decimal, in an entry whose volume and activity both match: bash
+# arithmetic reads 08 as a bad octal number (and aborts), and 2^63 wraps negative. Each must be a miss.
+for bad in 08 9223372036854775808; do
+  bx_reset; bx_volume "$ORPHV" 4 3600; run_beacon 0 50
+  sed -i "s/^\($ORPHV [^ ]* [0-9]*\) [0-9]*\$/\1 $bad/" "$SIZEC"
+  planted="$(grep -c "^$ORPHV [^ ]* [0-9]* $bad\$" "$SIZEC")"
+  run_beacon 0 50
+  check "V7: a cached size of $bad with matching volume and activity is a miss: re-walked, counted right" \
+    '[ "$planted" = 1 ] && walked "$ORPHV" && [ "$(leak bytes)" = "$(bx_du "$ORPHV")" ] && [ "$(leak builders)" = 1 ]'
+done
+bx_reset; bx_volume "$ORPHV" 4 3600; run_beacon 0 50
+rm -rf "$BX/volumes/$ORPHV" "$BX/data/$ORPHV"; run_beacon 0 50
+check "V7: a volume gone since the last tick drops out of the cache" '[ ! -s "$SIZEC" ] && [ "$(leak builders)" = 0 ]'
+unset MOCK_BX
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL PASS"; exit 0; else echo "$fails CHECK(S) FAILED"; exit 1; fi

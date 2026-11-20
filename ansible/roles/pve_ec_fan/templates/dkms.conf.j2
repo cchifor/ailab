@@ -1,0 +1,12 @@
+# Managed by ansible (role: pve_ec_fan). github.com/cmetz/ec-su_axb35-linux at {{ pve_ec_fan_commit }}.
+PACKAGE_NAME="ec_su_axb35"
+PACKAGE_VERSION="{{ pve_ec_fan_dkms_version }}"
+BUILT_MODULE_NAME[0]="ec_su_axb35"
+# Debian's DKMS installs under updates/dkms/ whatever this says; modinfo -n shows the real path.
+DEST_MODULE_LOCATION[0]="/updates"
+AUTOINSTALL="yes"
+# The repository's own Makefile, pointed at the target kernel's headers: `make modules` runs
+# `make -C $(KERNEL_BUILD) M=$(CURDIR) modules`, and the top-level Kbuild builds src/ec_su_axb35.c into
+# ec_su_axb35.ko at the top of the tree, where DKMS looks for it by default.
+MAKE[0]="make KERNEL_BUILD=${kernel_source_dir} modules"
+CLEAN="make KERNEL_BUILD=${kernel_source_dir} clean"

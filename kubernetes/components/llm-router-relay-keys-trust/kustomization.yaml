@@ -16,10 +16,10 @@ kind: Component
 # keys can sign, and until the Relay component is included nothing holds them in a running process.
 # Trust changes need a router restart (subPath, and the plugin reads the file once).
 #
-# NOT INCLUDED by kubernetes/apps/apps/llm-router. Its name contains `llm-router-relay-keys`, which
-# scripts/tests/test_relay_v060_activation_gate.py refuses in the live Router overlay, and
-# scripts/tests/test_relay_router_connection.py refuses any inclusion while the ExternalSecret template
-# still carries the workerBudgets.maxTokens placeholder (8 x (I + 8192), where I is the
-# provider-enforced input bound that qualification proves; relay#277 comment 120818 D).
+# INCLUDED by kubernetes/apps/apps/llm-router since Router connection step 6 (remaining-live-steps
+# step 2), after the trust document was read back. scripts/tests/test_relay_v060_activation_gate.py
+# still refuses the retired llm-router-relay-keys bridge by exact name, and
+# scripts/tests/test_relay_router_connection.py refused any inclusion while the ExternalSecret template
+# carried the workerBudgets.maxTokens placeholder; it has been 7441536 since ailab #1778.
 patches:
 - path: deployment.yaml

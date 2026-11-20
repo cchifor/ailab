@@ -13,10 +13,18 @@
 #                   It names the enrollment gate (relay-enrollment-<id>) and labels both namespaces,
 #                   exactly as Relay's scripts/prepare-pod-installation.ts renders them.
 #   agentImage      registry.chifor.me/relay/infrastructure-agent@sha256:<64 hex>, copied from the
-#                   `publication.image` of the agent's deploy/worker-images/publish.py receipt for the
-#                   pinned source. Digest only; never a tag.
-#   sourceCommit    The reviewer-merged 40-hex Relay commit that the agent image, the worker runtime
-#                   image, the chart mirrored in ../agent and the hub release were all built from.
+#                   `publication.image` of the agent's deploy/worker-images/publish.py receipt: the
+#                   receipt of docs/relay-workers/researcher-binding-inputs.json `release`, or, for an
+#                   agent-only update (runbook "Agent-only update"), of its `agentRelease`, a LATER
+#                   release that published only the agent image. Digest only; never a tag.
+#   sourceCommit    The reviewer-merged 40-hex Relay commit of the RUNTIME (`release.sourceCommit`):
+#                   the worker runtime image, the definition and binding, and the chart mirrored in
+#                   ../agent were built from it, and Relay's preparation requires the definition's to
+#                   equal the runtime manifest's. Without an agent-only update the agent image comes
+#                   from it too. An agent-only update never changes it: the agent's own source commit
+#                   is `agentRelease.sourceCommit` (inputs) and docs/relay-workers/researcher-i4/
+#                   summary.json `agentRelease`, and the agent Pod's chifor.me/source-commit
+#                   annotation keeps recording this, the installation's commit.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -25,5 +33,5 @@ metadata:
     config.kubernetes.io/local-config: "true"
 data:
   installationId: "b380ff7f-0716-478d-8b01-3d39f30e750b"
-  agentImage: "registry.chifor.me/relay/infrastructure-agent@sha256:ba4cdd9cf94362a0ab8f06565460c48dbe2a1262ae87e50a77bd145c8811a4ef"
+  agentImage: "registry.chifor.me/relay/infrastructure-agent@sha256:1b17c32f4743865451a3af936b2acb9ed4765e5baf9cc8535c3607a5040474a2"
   sourceCommit: "c0fe50f030eac65d78a113e42797c5fe8c395233"

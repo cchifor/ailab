@@ -1,0 +1,7 @@
+---
+# Thin-pool trim window, UTC (#1858). ai-node1 slots: ci-runner-1 00:00-01:25, ci-runner-4 01:30-03:10,
+# ci-runner-9 04:15-05:25 (not on Sundays). Runners on one node share its NVMe with etcd, so their windows
+# must not overlap. The node's registry LXC trim starts Sunday 03:30-03:45 and can run for hours
+# (docs/runbooks/registry-cache.md): this window, with its 5-min tail, ends by 03:15, before it, every day.
+gitea_runner_fstrim_window_start: "01:30"
+gitea_runner_fstrim_window_end: "03:10"
