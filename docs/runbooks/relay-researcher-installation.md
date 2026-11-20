@@ -40,15 +40,21 @@ RuntimeClass, the internal TLS and journal manifests, the release pins and the d
 | --- | --- | --- |
 | Control namespace | `relay-infra-control` | The agent, its key Secret, its Lease and its fence ConfigMap. One installation per cluster; later slots join it. |
 | Execution slot | `relay-researcher-1` | One slot, one role, one Pod at most (plan: "one worker per slot"). |
-| Agent node | `talos-agent-node-3` (`ailab.io/agent-pool=true`, tolerates `dedicated=agent`) | Off the worker pool; least-loaded agent node on 2026-11-10. |
+| Agent node | any agent node, `talos-agent-node-1/2/3` (`ailab.io/agent-pool=true`, `ailab.io/relay-worker-pool=false`, tolerates `dedicated=agent`) | Off the worker pool. Until 2026-11-20 it was pinned to `talos-agent-node-3` (the least-loaded agent node on 2026-11-10) by `kubernetes.io/hostname`; the drain of that node on 2026-11-19 left the Pod unschedulable from 14:17:30Z to 14:48:25Z. The agent has no node-local state (ConfigMaps, one Secret, a projected token, a 16Mi `emptyDir`; leadership is a Lease), so any agent node will do. The `ailab.io/relay-worker-pool=false` label comes from `kubernetes/infra/agent-nodes/node-labels.tf`. |
 | Worker node | `relay-worker-1`, RuntimeClass `relay-gvisor` (overhead 80m / 24Mi) | The dedicated pool. |
 | Cluster UID | `faf3a521-bd08-4d6d-ba5c-9dc7da903819` (`kube-system` UID) | The installation's cluster pin. Re-read it (step I2). |
 | Tenant | `00000000-0000-4000-8000-000000000001` | The only tenant. |
 
 Relay's preparation refuses a control placement that does not conflict with every worker placement
-on some nodeSelector key. The researcher binding's placement must therefore carry
-`kubernetes.io/hostname: relay-worker-1` next to `ailab.io/relay-worker-pool: "true"`. This is a
-requirement on the release's binding; the template says so.
+on some nodeSelector key (`control-placement-not-disjoint`). The agent's selector sets
+`ailab.io/relay-worker-pool: "false"`, and the researcher binding's placement carries
+`ailab.io/relay-worker-pool: "true"` (next to `kubernetes.io/hostname: relay-worker-1`); that is the
+conflict. A hostname pin on the agent would also satisfy it, but makes a drain of that one node an
+agent outage, so the agent placement carries no `kubernetes.io/hostname` (the tests refuse both a
+hostname key and a placement without a conflicting key). Because the agent selects
+`ailab.io/relay-worker-pool=false`, the three agent nodes must carry that label
+(`kubernetes/infra/agent-nodes/node-labels.tf`) BEFORE a Deployment with this selector rolls out,
+or the Pod stays Pending.
 
 It must also carry `ailab.io/runtime-gvisor: "true"`. RuntimeClass admission merges `relay-gvisor`'s
 `scheduling.nodeSelector` (`ailab.io/relay-worker-pool` and `ailab.io/runtime-gvisor`) into every Pod
@@ -285,7 +291,8 @@ kubectl --context admin@ai get runtimeclass relay-gvisor -o jsonpath='{.overhead
 kubectl --context admin@ai get node relay-worker-1 --show-labels; kubectl --context admin@ai describe node relay-worker-1 | grep Taints
 kubectl --context admin@ai get endpointslices -n default -l kubernetes.io/service-name=kubernetes -o jsonpath='{.items[*].endpoints[*].addresses}{" "}{.items[*].ports[*].port}'   # .41 .42 .43, 6443
 kubectl --context admin@ai -n kube-system get pods -l k8s-app=kube-dns -o wide
-kubectl --context admin@ai top node talos-agent-node-3                           # headroom for 200m / 256Mi
+kubectl --context admin@ai get nodes -l ailab.io/agent-pool=true,ailab.io/relay-worker-pool=false   # talos-agent-node-1, -2, -3
+kubectl --context admin@ai top node -l ailab.io/agent-pool=true                  # headroom for 200m / 256Mi on each of the three
 dig +short @1.1.1.1 relay.chifor.me A; dig +short @1.1.1.1 router.chifor.me A    # exactly 104.21.86.245 and 172.67.138.98
 ```
 
@@ -418,7 +425,10 @@ slot. The probe is restricted-compliant on purpose: Pod Security admission runs 
 a non-compliant probe would be refused by PSA and prove nothing about the gate, and the quota is
 evaluated after the policy. Only the gate's own message is this proof.
 
-**I7. Agent stage PR.** Re-check `talos-agent-node-3` headroom. One PR:
+**I7. Agent stage PR.** Re-check headroom for 200m / 256Mi on each of `talos-agent-node-1/2/3`, and
+that `kubectl --context admin@ai get nodes -l ailab.io/agent-pool=true,ailab.io/relay-worker-pool=false`
+lists all three (the label is applied from `kubernetes/infra/agent-nodes`, before the agent's
+selector reaches the cluster). One PR:
 `git mv kubernetes/apps/relay-researcher/flux/relay-researcher-agent.yaml kubernetes/apps/clusters/ai/`.
 After merge the Pod waits in ContainerCreating: its two Secrets do not exist yet, by design, so that
 the one-use token of step I8 is minted only when a Pod is waiting to consume it.

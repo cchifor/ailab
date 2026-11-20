@@ -172,6 +172,12 @@ class JournalBundle(unittest.TestCase):
         db = next(o for o in objects if o['kind'] == 'StatefulSet')
         self.assertEqual(db['spec']['replicas'], 0)
         self.assertEqual(db['spec']['template']['spec']['affinity'], render.AFFINITY)
+        # Off the worker pool via NotIn ['true']: agent nodes carry ailab.io/relay-worker-pool=false, which
+        # DoesNotExist would exclude.
+        (term,) = render.AFFINITY['nodeAffinity']['requiredDuringSchedulingIgnoredDuringExecution']['nodeSelectorTerms']
+        self.assertEqual(term['matchExpressions'],
+                         [{'key': 'ailab.io/relay-worker-pool', 'operator': 'NotIn', 'values': ['true']},
+                          {'key': 'kubernetes.io/arch', 'operator': 'In', 'values': ['amd64']}])
         namespaces = list(yaml.safe_load_all((BUNDLE / 'namespace.yaml').read_text()))
         self.assertEqual({n['metadata']['name']: n['metadata']['labels']['pod-security.kubernetes.io/enforce'] for n in namespaces},
                          {render.DB_NS: 'restricted', render.SERVICE_NS: 'baseline'})
