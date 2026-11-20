@@ -1,0 +1,11 @@
+# Only the role's thin_textfile tasks (tasks_from), with the role's defaults, against the container.
+- name: Converge the thin pool metrics
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  tasks:
+    - name: The thin_textfile tasks of pve_base
+      ansible.builtin.import_role:
+        name: pve_base
+        tasks_from: thin_textfile

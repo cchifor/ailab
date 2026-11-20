@@ -201,6 +201,61 @@ Tier-B RWO singletons recover in ~2–3 min instead of ~13. **Remove the taint o
 kubectl --context admin@ai taint nodes <node> node.kubernetes.io/out-of-service=nodeshutdown:NoExecute-
 ```
 
+## Thin pool fill (`pve_thin_textfile`, all three ai-nodes)
+
+Every guest disk on a host is a thin LV in `pve/data` (`local-lvm`). A full pool fails every guest's writes
+on that host, and a pool with full metadata goes read-only. Space a guest frees stays allocated until it is
+trimmed. On 2026-11-20 about 1.1 TiB of the three pools was freed-but-untrimmed space, and nothing showed
+it. `pve_base` (tag `thin_textfile`, on by default) installs a read-only exporter.
+`/usr/local/sbin/pve-thin-textfile` runs every 2 min and turns one `lvs` call into node_exporter textfile
+metrics (`pve_thin.prom`, job `proxmox-node`):
+
+- `pve_thin_pool_data_percent`, `pve_thin_pool_metadata_percent` and the pool's sizes;
+- per thin volume, `pve_thin_lv_size_bytes`, `pve_thin_lv_data_percent` and `pve_thin_lv_allocated_bytes`
+  (labels `lv` and `vmid`);
+- `pve_thin_textfile_read_errors` and `pve_thin_textfile_timestamp_seconds`.
+
+The recording rule `pve:lxc_volume_untrimmed_bytes` is, for a container volume whose guest runs
+node_exporter (the LLM containers), the pool allocation minus the guest filesystem's use. That is what a
+trim would give back, joined on the `/dev/mapper/pve-vm--<id>--disk--<n>` name both sides see. For a VM,
+compare `pve_thin_lv_allocated_bytes{vmid="<id>"}` with the guest's own `node_filesystem_*`.
+
+Alerts (`kubernetes/apps/infrastructure/monitoring/thin-pool-rules.yaml`):
+
+- `ProxmoxThinPoolDataHigh` (data over 85 % for 15m, warning) and `...DataCritical` (over 95 % for 5m).
+- `ProxmoxThinPoolMetadataHigh` (metadata over 80 % for 15m) and `...MetadataCritical` (over 90 % for 5m).
+- `ProxmoxThinTextfileStale` (no update for 15 min), `ProxmoxThinTextfileMissing` (the role's
+  `pve_thin_textfile_enabled` marker is there but the file's series are not: never written, removed or
+  unparsable) and `ProxmoxThinTextfileReadErrors`. A read error leaves the affected series out, so the fill
+  alerts could not fire for them; the exporter says why on stderr (`journalctl -u pve-thin-textfile`), with
+  lvs's message or the rejected row.
+- `ProxmoxLxcTrimNotSucceeding` and `DevWorkerTrimNotSucceeding`: the nightly LXC volume trim, or a dev
+  worker's daily trim, has not completed a pass for 50 h. Each keys on its `enabled` marker, whose mtime
+  gives a new install 50 h first. The Talos node trim alerts from kube-state-metrics
+  (`node-fstrim-rules.yaml`).
+
+When the pool fills, find what holds it, then free it:
+
+```bash
+python scripts/node-ssh.py <host-ip> "lvs -o lv_name,lv_size,data_percent --sort -data_percent pve | head -20; lvs -o lv_name,data_percent,metadata_percent pve/data"
+```
+
+In Prometheus, `topk(10, pve:lxc_volume_untrimmed_bytes)` and
+`topk(10, pve_thin_lv_allocated_bytes{job="proxmox-node"})` show the same thing.
+
+- Untrimmed space: check the trims ran (`journalctl -u pve-lxc-fstrim` on the host, the `node-fstrim`
+  CronJobs, a worker's `dev-worker-fstrim`, a runner's `gitea-runner-fstrim`), or trim by hand off-hours.
+- Metadata: grow it online, `lvextend --poolmetadatasize +1G pve/data`.
+
+Rollout: `ansible-playbook site.yml --limit <host> --tags thin_textfile --check --diff`, then without `--check`.
+Then `cat /var/lib/prometheus/node-exporter/pve_thin.prom` on the host. Off: `pve_thin_textfile_enabled: false`
+removes the timer, the script and the file. Tests: `scripts/tests/test_pve_thin_textfile.py` (script-tests),
+promtool fixtures in `thin-pool-rules.test.yaml`, and the manual Docker converge
+`bash ansible/roles/pve_base/tests/test-thin-textfile-converge-docker.sh`. Docker Desktop's kernel has no
+dm-thin-pool, so the converge runs the real `lvs` against a real VG with a linear LV (its output format, and
+the unit's hardening under real LVM locking) and takes the thin numbers from a stub thin listing in that
+format: it is not thin-pool coverage.
+
 ## Thin-pool zeroing (`pve_thin_pool_zero`, OFF on ai-node1/2 since 2026-11-17)
 
 The LVM thin pool `pve/data` (64 KiB chunks) zero-fills the rest of each newly provisioned chunk

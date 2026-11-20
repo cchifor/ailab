@@ -11,6 +11,15 @@ pve_base_packages: [bolt, iperf3, ethtool, fio, nfs-common, chrony, curl, jq, ir
 # PCIe-tunnel boot params its TB->10G storage NIC needs to enumerate (see host_vars/ai-node3.yml).
 pve_grub_cmdline_linux_default: "quiet"
 
+# The LVM thin pool's fill as node_exporter textfile metrics (tag thin_textfile; files/pve-thin-textfile.sh):
+# the pool's data and metadata use, and each thin volume's size and allocation, every 2 min, read-only (`lvs`).
+# On 2026-11-20 about 1.1 TiB of the three pools was freed-but-untrimmed space and nothing showed it; a full
+# pool fails every guest's writes on the host. The alerts: kubernetes/apps/infrastructure/monitoring/
+# thin-pool-rules.yaml. Off = the timer, the script and the metrics file are removed.
+pve_thin_textfile_enabled: true
+pve_thin_textfile_pools: ["{{ pve_thin_pool }}"]
+pve_thin_textfile_dir: /var/lib/prometheus/node-exporter
+
 # LVM thin-pool zeroing: the `zero` flag on the pool that holds the guests' disks (local-lvm).
 # With it ON, the first write to a newly provisioned 64 KiB chunk zero-fills the rest of the chunk.
 # These drives have no Write Zeroes (write_zeroes_max_bytes = 0), so the zeros are real NAND writes.

@@ -1,0 +1,261 @@
+# `promtool test rules` fixtures for thin-pool-rules.yaml. Run by scripts/rules-lint.sh on every PR.
+# `rule_files` is the extracted spec name (rules-lint.sh hands promtool each PrometheusRule's `spec:`
+# body under the manifest's basename). promtool's clock starts at 0: a timestamp series of 0 means "at the
+# start of the fixture", and time() is the eval time.
+rule_files:
+  - thin-pool-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ------------------------------------------------------------------ pool fill
+  - interval: 1m
+    name: data over 85 % for 15m warns; over 95 % for 5m is critical
+    input_series:
+      - series: 'pve_thin_pool_data_percent{job="proxmox-node", instance="192.168.0.3:9100", pool="pve/data"}'
+        values: "80x5 86x20 96x20"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ProxmoxThinPoolDataHigh
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: ProxmoxThinPoolDataHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, job: proxmox-node, instance: "192.168.0.3:9100", pool: pve/data}
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.3:9100: thin pool pve/data data at 86%"
+              description: "The LVM thin pool pve/data on 192.168.0.3:9100 has had more than 85% of its data space allocated for 15m. When it fills, every guest's writes on the host fail. Check what holds it: `lvs -o lv_name,lv_size,data_percent --sort -data_percent pve` on the host, and the freed-but-untrimmed space (pve:lxc_volume_untrimmed_bytes, and the trims' journals: pve-lxc-fstrim, the node-fstrim CronJobs, dev-worker-fstrim, gitea-runner-fstrim). Runbook: docs/runbooks/node-maintenance.md \"Thin pool fill\"."
+      - eval_time: 28m
+        alertname: ProxmoxThinPoolDataCritical
+        exp_alerts: []
+      - eval_time: 32m
+        alertname: ProxmoxThinPoolDataCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, job: proxmox-node, instance: "192.168.0.3:9100", pool: pve/data}
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.3:9100: thin pool pve/data data at 96%, about to fill"
+              description: "The LVM thin pool pve/data on 192.168.0.3:9100 is over 95% allocated. A full pool fails every guest's writes on the host. Free space now: trim (the trims' units, or `pct fstrim`/`fstrim` by hand off-hours), delete unused volumes or snapshots, or move a guest. Runbook: docs/runbooks/node-maintenance.md \"Thin pool fill\"."
+
+  - interval: 1m
+    name: a pool at 85 % or below never warns, nor a non-host job
+    input_series:
+      - series: 'pve_thin_pool_data_percent{job="proxmox-node", instance="192.168.0.2:9100", pool="pve/data"}'
+        values: "85x40"
+      - series: 'pve_thin_pool_data_percent{job="something-else", instance="10.0.0.1:9100", pool="pve/data"}'
+        values: "99x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ProxmoxThinPoolDataHigh
+        exp_alerts: []
+      - eval_time: 35m
+        alertname: ProxmoxThinPoolDataCritical
+        exp_alerts: []
+
+  - interval: 1m
+    name: metadata over 80 % for 15m warns; over 90 % for 5m is critical
+    input_series:
+      - series: 'pve_thin_pool_metadata_percent{job="proxmox-node", instance="192.168.0.4:9100", pool="pve/data"}'
+        values: "81x20 91x20"
+    alert_rule_test:
+      - eval_time: 17m
+        alertname: ProxmoxThinPoolMetadataHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, job: proxmox-node, instance: "192.168.0.4:9100", pool: pve/data}
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.4:9100: thin pool pve/data metadata at 81%"
+              description: "The LVM thin pool pve/data on 192.168.0.4:9100 has used more than 80% of its metadata space for 15m. Full metadata switches the pool read-only. Grow it (`lvextend --poolmetadatasize +1G pve/data`, online) before it fills. Runbook: docs/runbooks/node-maintenance.md \"Thin pool fill\"."
+      - eval_time: 27m
+        alertname: ProxmoxThinPoolMetadataCritical
+        exp_alerts:
+          - exp_labels: {severity: critical, job: proxmox-node, instance: "192.168.0.4:9100", pool: pve/data}
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.4:9100: thin pool pve/data metadata at 91%, about to fill"
+              description: "The LVM thin pool pve/data on 192.168.0.4:9100 has used more than 90% of its metadata space. Full metadata switches the pool read-only. Grow it now: `lvextend --poolmetadatasize +1G pve/data` (online). Runbook: docs/runbooks/node-maintenance.md \"Thin pool fill\"."
+
+  # ------------------------------------------------------------------ the textfile itself
+  - interval: 1m
+    name: a textfile older than 15 min warns at once
+    input_series:
+      - series: 'pve_thin_textfile_timestamp_seconds{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "0x30"
+    alert_rule_test:
+      - eval_time: 14m
+        alertname: ProxmoxThinTextfileStale
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ProxmoxThinTextfileStale
+        exp_alerts:
+          - exp_labels: {severity: warning, job: proxmox-node, instance: "192.168.0.2:9100"}
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.2:9100: thin pool metrics not updated for 20m 0s"
+              description: "pve-thin-textfile has not rewritten pve_thin.prom on 192.168.0.2:9100 for over 15m, so the thin pool fill alerts are judging old numbers. Check `systemctl status pve-thin-textfile.timer pve-thin-textfile.service` and `journalctl -u pve-thin-textfile`, or converge `ansible-playbook site.yml --limit <host> --tags thin_textfile`."
+
+  - interval: 1m
+    name: metrics enabled but the file missing warns after the install grace and 10m
+    input_series:
+      - series: 'pve_thin_textfile_enabled{job="proxmox-node", instance="192.168.0.4:9100"}'
+        values: "1x60"
+      - series: 'node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.4:9100", file="/var/lib/prometheus/node-exporter/pve_thin_textfile_enabled.prom"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ProxmoxThinTextfileMissing
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: ProxmoxThinTextfileMissing
+        exp_alerts:
+          - exp_labels: {severity: warning, job: proxmox-node, instance: "192.168.0.4:9100"}
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.4:9100: no thin pool metrics"
+              description: "The pve_base role has the thin pool metrics on for 192.168.0.4:9100, but node_exporter serves none of them: pve_thin.prom was never written, was removed, or could not be parsed (node_textfile_scrape_error). The thin pool fill alerts cannot fire for this host. Check `systemctl status pve-thin-textfile.timer pve-thin-textfile.service`, `journalctl -u pve-thin-textfile` and `ls -l /var/lib/prometheus/node-exporter/pve_thin.prom`, or converge `ansible-playbook site.yml --limit <host> --tags thin_textfile`."
+
+  - interval: 1m
+    name: metrics enabled and the file there, a fresh install, or metrics off never warn as missing
+    input_series:
+      - series: 'pve_thin_textfile_enabled{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "1x60"
+      - series: 'node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.2:9100", file="/var/lib/prometheus/node-exporter/pve_thin_textfile_enabled.prom"}'
+        values: "0x60"
+      - series: 'pve_thin_textfile_timestamp_seconds{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "1800+60x60"
+      - series: 'pve_thin_textfile_enabled{job="proxmox-node", instance="192.168.0.3:9100"}'
+        values: "1x60"
+      - series: 'node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.3:9100", file="/var/lib/prometheus/node-exporter/pve_thin_textfile_enabled.prom"}'
+        values: "1500x60"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ProxmoxThinTextfileMissing
+        exp_alerts: []
+
+  - interval: 1m
+    name: read errors for 15m warn (the fill series they hide cannot alert)
+    input_series:
+      - series: 'pve_thin_textfile_read_errors{job="proxmox-node", instance="192.168.0.3:9100"}'
+        values: "0x5 1x20"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: ProxmoxThinTextfileReadErrors
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: ProxmoxThinTextfileReadErrors
+        exp_alerts:
+          - exp_labels: {severity: warning, job: proxmox-node, instance: "192.168.0.3:9100"}
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.3:9100: thin pool metrics incomplete (1 read errors)"
+              description: "pve-thin-textfile on 192.168.0.3:9100 could not read the thin pool (lvs failed, the pool is not in the listing, or a row did not parse) for 15m, and leaves those series out, so the fill alerts cannot fire for them. Run `lvs --noheadings --units b --nosuffix --separator '|' -o lv_name,pool_lv,segtype,lv_size,data_percent,metadata_percent,lv_metadata_size pve` on the host and `journalctl -u pve-thin-textfile`."
+
+  # ------------------------------------------------------------------ the LXC gap (recording)
+  - interval: 1m
+    name: a container volume's allocation minus its guest's use is what a trim would give back
+    input_series:
+      - series: 'pve_thin_lv_allocated_bytes{job="proxmox-node", instance="192.168.0.3:9100", pool="pve/data", lv="vm-5002-disk-1", vmid="5002"}'
+        values: "100000000000x5"
+      - series: 'pve_thin_lv_allocated_bytes{job="proxmox-node", instance="192.168.0.3:9100", pool="pve/data", lv="vm-4002-disk-0", vmid="4002"}'
+        values: "50000000000x5"
+      - series: 'node_filesystem_size_bytes{job="ai-llm-node", instance="192.168.0.45:9100", device="/dev/mapper/pve-vm--5002--disk--1", mountpoint="/models-local", fstype="ext4"}'
+        values: "160000000000x5"
+      - series: 'node_filesystem_free_bytes{job="ai-llm-node", instance="192.168.0.45:9100", device="/dev/mapper/pve-vm--5002--disk--1", mountpoint="/models-local", fstype="ext4"}'
+        values: "120000000000x5"
+    promql_expr_test:
+      - expr: pve:lxc_volume_untrimmed_bytes
+        eval_time: 3m
+        exp_samples:
+          - labels: 'pve:lxc_volume_untrimmed_bytes{job="proxmox-node", instance="192.168.0.3:9100", pool="pve/data", lv="vm-5002-disk-1", vmid="5002", device="/dev/mapper/pve-vm--5002--disk--1"}'
+            value: 60000000000
+
+  # ------------------------------------------------------------------ the trims
+  - interval: 1m
+    name: an LXC sweep without a complete pass for 50 h warns (enabled for longer than that)
+    input_series:
+      - series: 'node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.3:9100", file="/var/lib/prometheus/node-exporter/pve_lxc_fstrim_enabled.prom"}'
+        values: "0x3200"
+      - series: 'pve_lxc_fstrim_enabled{job="proxmox-node", instance="192.168.0.3:9100"}'
+        values: "1x3200"
+      - series: 'pve_lxc_fstrim_last_success_timestamp_seconds{job="proxmox-node", instance="192.168.0.3:9100"}'
+        values: "0x3200"
+    alert_rule_test:
+      - eval_time: 50h30m
+        alertname: ProxmoxLxcTrimNotSucceeding
+        exp_alerts: []
+      - eval_time: 51h10m
+        alertname: ProxmoxLxcTrimNotSucceeding
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: proxmox-node
+              instance: "192.168.0.3:9100"
+              file: /var/lib/prometheus/node-exporter/pve_lxc_fstrim_enabled.prom
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.3:9100: the nightly LXC volume trim has not completed a pass for over 50 h"
+              description: "pve-lxc-fstrim on 192.168.0.3:9100 has not covered every running container's local-lvm volumes for over 50 h (two nights), so what the containers free stays allocated in the thin pool. The beacon says why: `cat /var/lib/prometheus/node-exporter/pve_lxc_fstrim.prom` (reason partial = the slot ran out or the registry trim held the lock; failed = a volume's exit code), and `journalctl -u pve-lxc-fstrim`. Runbook: docs/runbooks/node-maintenance.md \"LXC volume trim (nightly)\"."
+
+  - interval: 1m
+    name: an LXC sweep that never succeeded since it was enabled warns too
+    input_series:
+      - series: 'node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.4:9100", file="/var/lib/prometheus/node-exporter/pve_lxc_fstrim_enabled.prom"}'
+        values: "0x3200"
+      - series: 'pve_lxc_fstrim_enabled{job="proxmox-node", instance="192.168.0.4:9100"}'
+        values: "1x3200"
+    alert_rule_test:
+      - eval_time: 52h
+        alertname: ProxmoxLxcTrimNotSucceeding
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: proxmox-node
+              instance: "192.168.0.4:9100"
+              file: /var/lib/prometheus/node-exporter/pve_lxc_fstrim_enabled.prom
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.4:9100: the nightly LXC volume trim has not completed a pass for over 50 h"
+              description: "pve-lxc-fstrim on 192.168.0.4:9100 has not covered every running container's local-lvm volumes for over 50 h (two nights), so what the containers free stays allocated in the thin pool. The beacon says why: `cat /var/lib/prometheus/node-exporter/pve_lxc_fstrim.prom` (reason partial = the slot ran out or the registry trim held the lock; failed = a volume's exit code), and `journalctl -u pve-lxc-fstrim`. Runbook: docs/runbooks/node-maintenance.md \"LXC volume trim (nightly)\"."
+
+  - interval: 1m
+    name: a recent complete pass, a new install, or the trim switched off never warn
+    input_series:
+      # recent success (at 40 h)
+      - series: 'node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.2:9100", file="/var/lib/prometheus/node-exporter/pve_lxc_fstrim_enabled.prom"}'
+        values: "0x3600"
+      - series: 'pve_lxc_fstrim_enabled{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "1x3600"
+      - series: 'pve_lxc_fstrim_last_success_timestamp_seconds{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "144000x3600"
+      # installed at ~42 h, no success yet
+      - series: 'node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.3:9100", file="/var/lib/prometheus/node-exporter/pve_lxc_fstrim_enabled.prom"}'
+        values: "150000x3600"
+      - series: 'pve_lxc_fstrim_enabled{job="proxmox-node", instance="192.168.0.3:9100"}'
+        values: "1x3600"
+      # switched off: no marker, an old beacon
+      - series: 'pve_lxc_fstrim_last_success_timestamp_seconds{job="proxmox-node", instance="192.168.0.4:9100"}'
+        values: "0x3600"
+    alert_rule_test:
+      - eval_time: 58h
+        alertname: ProxmoxLxcTrimNotSucceeding
+        exp_alerts: []
+
+  - interval: 1m
+    name: a dev worker without a complete trim for 50 h warns; a recent one does not
+    input_series:
+      - series: 'node_textfile_mtime_seconds{job="dev-worker-node", instance="192.168.0.9:9100", file="/var/lib/prometheus/node-exporter/dev_worker_fstrim_enabled.prom"}'
+        values: "0x3200"
+      - series: 'dev_worker_fstrim_enabled{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "1x3200"
+      - series: 'node_fstrim_last_success_timestamp_seconds{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "0x3200"
+      - series: 'node_textfile_mtime_seconds{job="dev-worker-node", instance="192.168.0.8:9100", file="/var/lib/prometheus/node-exporter/dev_worker_fstrim_enabled.prom"}'
+        values: "0x3200"
+      - series: 'dev_worker_fstrim_enabled{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "1x3200"
+      - series: 'node_fstrim_last_success_timestamp_seconds{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "170000x3200"
+    alert_rule_test:
+      - eval_time: 52h
+        alertname: DevWorkerTrimNotSucceeding
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.9:9100"
+              file: /var/lib/prometheus/node-exporter/dev_worker_fstrim_enabled.prom
+            exp_annotations:
+              summary: "Dev worker 192.168.0.9:9100: the daily trim has not completed for over 50 h"
+              description: "dev-worker-fstrim on 192.168.0.9:9100 has not trimmed all of its mounts for over 50 h (two nights), so what the worker frees stays allocated in its host's thin pool. The beacon says why: `cat /var/lib/prometheus/node-exporter/node_fstrim.prom` (partial = the slot ran out; failed with exit 3 = IO pressure stayed high), and `journalctl -u dev-worker-fstrim`. Runbook: docs/runbooks/dev-workers.md \"Daily trim\"."
