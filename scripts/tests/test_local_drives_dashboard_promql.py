@@ -26,6 +26,7 @@ Needs docker (fails closed without it, like rules-lint.sh).
 """
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -288,6 +289,9 @@ class DashboardPromQL(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "dash.test.yaml").write_text(yaml.safe_dump(doc, sort_keys=False, width=100000),
                                                     encoding="utf-8")
+            # As rules-lint.sh: the temp dir is 0700 and the image runs promtool as `nobody`.
+            os.chmod(d, 0o755)
+            os.chmod(Path(d) / "dash.test.yaml", 0o644)
             proc = subprocess.run(
                 ["docker", "run", "--rm", "--network", "none", "-v", f"{d}:/t:ro", "--entrypoint", "promtool",
                  _image(), "test", "rules", "/t/dash.test.yaml"],
