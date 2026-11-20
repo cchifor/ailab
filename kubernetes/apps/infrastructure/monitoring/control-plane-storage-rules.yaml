@@ -1,12 +1,12 @@
-# Control-plane storage: the two signals plans/2026-10-07-etcd-leader-churn-plan.md (step E) adds
-# while the CP disks still share each host's consumer QLC NVMe with the CI runners.
+# Control-plane storage: plans/2026-10-07-etcd-leader-churn-plan.md (step E) added two signals while
+# the CP disks shared each host's consumer QLC NVMe with the CI runners.
 #
-# EtcdLeaderOnWorstMember: etcd has no leader priority, so any election can land on cp1, the
-# member whose disk stalls the longest (WAL fsyncs over 8.192 s in 7 d to 2026-10-07: cp1 126,
-# cp2 4, cp3 1). A leader blocked in fsync stops heartbeating and every write waits on it, so cp1
-# leading turns its stalls into cluster-wide write stalls and elections. 15m keeps it from firing
-# on a transient hand-off. Forfeit moves leadership to the lowest member ID (cp3). RETIRE this
-# rule once cp1's disk is on dedicated PLP storage (the plan's step C, node1 first).
+# EtcdLeaderOnWorstMember was RETIRED on 2026-11-20, as its own comment prescribed. It fired whenever cp1
+# led, because cp1's disk had by far the worst WAL-fsync tail (126 fsyncs over 8.192 s in the week to
+# 2026-10-07, against 4 on cp2 and 1 on cp3). Since 2026-11-20 all three CP disks are raw images on the same
+# qnap-nfs datastore (ADR 0043), so no member is the structural outlier any more: WAL fsync p99 is 2-4 ms
+# on every member. Leader placement is now chosen for lease latency (etcdctl move-leader), and cp1 leading
+# is intended. The generic etcd fsync, commit and leader-change alerts still cover a slow leader.
 #
 # ProxmoxNvmeTemperatureHigh: the drives' controller sensor (hwmon temp2, "Sensor 1") reaches
 # 92-101 C at peak (24 h maxima on 2026-10-07; at rest 82-92). node2's drive logged thermal-throttle
@@ -26,14 +26,6 @@ spec:
   groups:
     - name: control-plane-storage
       rules:
-        - alert: EtcdLeaderOnWorstMember
-          expr: etcd_server_is_leader{job="kube-etcd", instance="192.168.0.41:2381"} == 1
-          for: 15m
-          labels:
-            severity: warning
-          annotations:
-            summary: "etcd leader is cp1 (192.168.0.41), the member with the worst WAL-fsync tail"
-            description: "cp1 has held etcd leadership for 15m. Its disk stalls are the longest in the cluster (126 WAL fsyncs over 8 s in a week, vs 4 on cp2 and 1 on cp3), so while it leads, every one of them stalls every write and can trigger an election. Move leadership off it: `kubernetes/infra/_out/talosctl-1142.exe -n 192.168.0.41 etcd forfeit-leadership` (Talos hands it to the lowest member ID, cp3), then check with `etcd status`. Retire this alert once cp1's disk is on dedicated PLP storage (plans/2026-10-07-etcd-leader-churn-plan.md step C)."
         - alert: ProxmoxNvmeTemperatureHigh
           expr: node_hwmon_temp_celsius{job="proxmox-node", chip="nvme_nvme0", sensor="temp2"} > 95
           for: 15m
