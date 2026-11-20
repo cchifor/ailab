@@ -523,6 +523,28 @@ NVME_ROW_H = 8
 LOCAL_DRIVES = "/d/ailab-local-drives/?${__url_time_range}"
 
 
+# The hosts' own colours, on every line a panel draws for a host (the disk usage totals, the throughput and pressure
+# lines): Grafana's classic palette, first three, as the host lines had before any were pinned.
+HOST_COLORS = (("ai-node1", "green"), ("ai-node2", "semi-dark-yellow"), ("ai-node3", "blue"))
+
+
+# The host's own colour on every line of it; what the line is (read or write, which resource) is its line style.
+def by_host_colour():
+    return [{"matcher": {"id": "byRegexp", "options": f"{node} .*"},
+             "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": color}}]}
+            for node, color in HOST_COLORS]
+
+
+def line_style(ref, style):
+    return {"matcher": {"id": "byFrameRefID", "options": ref},
+            "properties": [{"id": "custom.lineStyle", "value": style}]}
+
+
+DASHED = {"fill": "dash", "dash": [10, 10]}
+DOTTED = {"fill": "dot", "dash": [0, 3]}  # dense: at 1 px a sparser dot pattern breaks into scattered points
+NVME_DEVICES = f'{HOSTS}, device=~"nvme[0-9]+n[0-9]+"'
+
+
 def drive_latency_ms():
     """Average time per completed I/O on each host's NVMe, queueing included, reads and writes together:
     (Δ read time + Δ write time) / (Δ reads + Δ writes) over 5 m, in ms. No series while the drive is idle."""
@@ -596,28 +618,6 @@ def disk_usage(x, y, w, h):
                           "Drives.")
 
 
-# The hosts' own colours, on every line a panel draws for a host (the disk usage totals, the throughput and pressure
-# lines): Grafana's classic palette, first three, as the host lines had before any were pinned.
-HOST_COLORS = (("ai-node1", "green"), ("ai-node2", "semi-dark-yellow"), ("ai-node3", "blue"))
-
-
-# The host's own colour on every line of it; what the line is (read or write, which resource) is its line style.
-def by_host_colour():
-    return [{"matcher": {"id": "byRegexp", "options": f"{node} .*"},
-             "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": color}}]}
-            for node, color in HOST_COLORS]
-
-
-def line_style(ref, style):
-    return {"matcher": {"id": "byFrameRefID", "options": ref},
-            "properties": [{"id": "custom.lineStyle", "value": style}]}
-
-
-DASHED = {"fill": "dash", "dash": [10, 10]}
-DOTTED = {"fill": "dot", "dash": [0, 3]}  # dense: at 1 px a sparser dot pattern breaks into scattered points
-NVME_DEVICES = 'job="proxmox-node", device=~"nvme[0-9]+n[0-9]+"'
-
-
 def disk_throughput(x, y, w, h):
     """Bytes/s each host reads from (up) and writes to (down) its NVMe drives, as Network per Hypervisor draws
     receive and transmit. Utilisation, in the USE sense, next to the latency panel (owner, 2026-11-20)."""
@@ -629,15 +629,14 @@ def disk_throughput(x, y, w, h):
               description="Bytes per second each host reads from its NVMe drives (up) and writes to them (down, "
                           "dashed), whole drives only: no partitions and no device-mapper layers, so nothing is "
                           "counted twice. Activity, not headroom: the drive's limit is not on this axis. Context "
-                          "for the latency panel: a latency rise with no throughput rise is the drive, not the "
-                          "load.")
+                          "for the latency panel.")
 
 
 def pressure_stall(x, y, w, h):
     """Pressure stall information ("some") of each host for CPU, memory and I/O: saturation, in the USE sense
     (owner, 2026-11-20). Colour = host, line style = resource (CPU solid, memory dashed, I/O dotted)."""
     return ts("Pressure Stall per Hypervisor (CPU / memory / I/O)", x, y, w, h,
-              [hn(f'100 * rate(node_pressure_{res}_waiting_seconds_total{{job="proxmox-node"}}[5m])')
+              [hn(f'100 * rate(node_pressure_{res}_waiting_seconds_total{{{HOSTS}}}[5m])')
                for res in ("cpu", "memory", "io")], "percent",
               legends=["{{nodename}} CPU", "{{nodename}} memory", "{{nodename}} I/O"], fill=0, minv=0,
               soft_max=10, line_width=1,
