@@ -12,9 +12,9 @@ nothing checked that the committed file is what the generator writes (reviewer-c
     16x10 block the tiles filled, half each, and nothing repeats; the latency view is one ms line per host
     (reads and writes together), no fill, legend `nvme0n1 @ <host>`; the usage view is ONE panel drawing each
     host's pool used bytes and one dashed red capacity line (the max over the hosts), with the consumers as
-    `<host> · <consumer>` rows of a Name-sorted legend table of last values, hidden from the graph; its guests
-    are named by the Local Drives generator's own query, not a copy (which reads $host: a hidden, always-All
-    `host` variable);
+    `<host> · <consumer>` 1 px lines, also rows of a Name-sorted legend table of last values, and the host
+    totals as 4 px lines in pinned colours; its guests are named by the Local Drives generator's own query, not a
+    copy (which reads $host: a hidden, always-All `host` variable);
   * both views link to the Local Drives dashboard (uid ailab-local-drives) with the time range; the dashboard
     header links there too.
 
@@ -162,15 +162,31 @@ class DriveViews(unittest.TestCase):
         self.assertEqual(capacity["color"], {"mode": "fixed", "fixedColor": "red"})
         self.assertEqual(capacity["custom.lineStyle"]["fill"], "dash")
 
-    def test_consumers_are_legend_and_tooltip_rows_only(self):
+    def test_consumers_are_thin_lines_and_the_host_totals_thick(self):
+        # Owner, 2026-11-20: every consumer drawn (and still in the legend and the tooltip), the totals highlighted.
         p = _panel(USAGE)
-        hidden = [o for o in p["fieldConfig"]["overrides"] if o["matcher"] == {"id": "byFrameRefID", "options": "C"}]
-        self.assertEqual(len(hidden), 1)
-        self.assertEqual(hidden[0]["properties"],
-                         [{"id": "custom.hideFrom", "value": {"viz": True, "legend": False, "tooltip": False}}])
-        # nothing else is hidden: the host lines and capacity are drawn
-        self.assertEqual([o for o in p["fieldConfig"]["overrides"]
-                          if "custom.hideFrom" in [x["id"] for x in o["properties"]]], hidden)
+        overrides = p["fieldConfig"]["overrides"]
+        self.assertEqual([o for o in overrides if "custom.hideFrom" in [x["id"] for x in o["properties"]]], [])
+        consumers = [o for o in overrides if o["matcher"] == {"id": "byFrameRefID", "options": "C"}]
+        self.assertEqual(consumers, [{"matcher": {"id": "byFrameRefID", "options": "C"},
+                                      "properties": [{"id": "custom.lineWidth", "value": 1}]}])
+        # every host total is 4 px: by query (refId A, the per-host used bytes), so a host added later is too
+        self.assertEqual(p["targets"][0]["legendFormat"], "{{nodename}}")
+        self.assertEqual([o for o in overrides if o["matcher"] == {"id": "byFrameRefID", "options": "A"}],
+                         [{"matcher": {"id": "byFrameRefID", "options": "A"},
+                           "properties": [{"id": "custom.lineWidth", "value": 4}]}])
+        # the current hosts keep the colours they had (Grafana's classic palette, first three), pinned and distinct
+        pinned = {}
+        for node, color in (("ai-node1", "green"), ("ai-node2", "semi-dark-yellow"), ("ai-node3", "blue")):
+            with self.subTest(node):
+                self.assertEqual(_props(p, node), {"color": {"mode": "fixed", "fixedColor": color}})
+                pinned[node] = color
+        self.assertEqual(len(set(pinned.values())), len(pinned))
+        self.assertEqual(p["fieldConfig"]["defaults"]["custom"]["fillOpacity"], 0)
+        # the capacity line is as before: dashed red, 2 px
+        self.assertEqual(_props(p, "capacity"), {"color": {"mode": "fixed", "fixedColor": "red"},
+                                                 "custom.lineWidth": 2,
+                                                 "custom.lineStyle": {"fill": "dash", "dash": [10, 10]}})
 
     def test_legend_is_a_name_sorted_table_of_last_values(self):
         legend = _panel(USAGE)["options"]["legend"]
