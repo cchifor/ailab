@@ -1,18 +1,20 @@
 """What the AI Lab Fleet dashboard's two drive views RETURN, evaluated by promtool on synthetic series.
 
 test_reporting_dashboard.py checks the panels' shape; this checks their answers. The queries are read from the
-committed ConfigMap (which that test pins to the generator), $host substituted, and run as
+committed ConfigMap (which that test pins to the generator), $host expanded as Grafana expands the hidden
+variable's All, and run as
 `promql_expr_test`s by `promtool test rules` in the pinned Prometheus image scripts/rules-lint.sh uses
 (Docker, no network), through the Local Drives PromQL test's harness. Pinned here:
 
   * disk latency: (Δ read time + Δ write time) / (Δ reads + Δ writes) in ms, one series per host labelled by
     host name; a host whose drive did nothing in the window has no series (not 0/0); a second drive on the host
     does not mix in;
-  * disk usage, on the host the repeated panel is for: every guest's disk volumes (not its cloud-init drive)
-    summed into its consumer group (each dev worker by name, ci-runners, registry, talos-cp, talos-workers
-    for the agent nodes and relay workers, llm, other for the rest and for a vmid pve-exporter does not know);
-    a cloudlab guest that reuses a vmid does not rename an ailab one; the other hosts' guests are left out;
-    the pool's used figure and its size, one series each.
+  * disk usage, one panel for the three hosts: each host's pool used bytes (the pool's own figure), labelled by
+    host; ONE capacity series, the max of the hosts' pool sizes; the consumer rows, per host, every guest's disk
+    volumes (not its cloud-init drive) summed into its consumer group (each dev worker by name, ci-runners,
+    registry, talos-cp, talos-workers for the agent nodes and relay workers, llm, other for the rest and for a
+    vmid pve-exporter does not know), each on the host its volumes are on; a cloudlab guest that reuses a vmid
+    does not rename an ailab one.
 
 Needs docker (fails closed without it, like rules-lint.sh).
 
@@ -39,6 +41,10 @@ DASH = json.loads(json.loads((ROOT / "kubernetes/apps/infrastructure/monitoring/
 
 GiB = 1073741824
 H1, H2, H3 = "192.168.0.2:9100", "192.168.0.3:9100", "192.168.0.4:9100"
+ALL = "(ai-node1|ai-node2|ai-node3)"    # what Grafana puts for the hidden $host variable's All
+# Each host's pool used % and size; ai-node3's pool is one GiB bigger, so the capacity line must be the max.
+USED_PCT = {"ai-node1": 20, "ai-node2": 30, "ai-node3": 40}
+POOL_GIB = {"ai-node1": 1755, "ai-node2": 1755, "ai-node3": 1756}
 
 
 def expr(title_prefix, ref="A", host=None):
@@ -53,8 +59,8 @@ def estate():
     for inst, node in ((H1, "ai-node1"), (H2, "ai-node2"), (H3, "ai-node3")):
         s.add("node_uname_info", {"job": "proxmox-node", "instance": inst, "nodename": node}, "1x70")
         pool = {"job": "proxmox-node", "instance": inst, "pool": "pve/data"}
-        s.add("pve_thin_pool_size_bytes", pool, f"{1755 * GiB}x70")
-        s.add("pve_thin_pool_data_percent", pool, "20x70")
+        s.add("pve_thin_pool_size_bytes", pool, f"{POOL_GIB[node] * GiB}x70")
+        s.add("pve_thin_pool_data_percent", pool, f"{USED_PCT[node]}x70")
 
     # Drive counters, per minute. ai-node1: 600 reads at 1 ms and 1200 writes at 10 ms -> 12.6 s / 1800 = 7 ms;
     # its second drive (nvme1n1) is slow and must not count. ai-node2: idle. ai-node3: reads only, 0.5 ms each.
@@ -94,7 +100,7 @@ def estate():
     lv(H1, "vm-4204-disk-1", "4204", 20 * GiB)
     lv(H1, "vm-5004-disk-0", "5004", 5 * GiB)
     lv(H1, "vm-4301-disk-0", "4301", 40 * GiB)
-    lv(H2, "vm-4102-disk-0", "4102", 77 * GiB)                  # another host: not on ai-node1's or ai-node3's panel
+    lv(H2, "vm-4102-disk-0", "4102", 77 * GiB)                  # ai-node2's: its own row, not ai-node1's
     lv(H3, "vm-4003-disk-0", "4003", 60 * GiB)
     lv(H3, "vm-4303-disk-0", "4303", 40 * GiB)
     lv(H3, "vm-4304-disk-0", "4304", 30 * GiB)
@@ -107,19 +113,20 @@ def estate():
 def expr_tests():
     lat = "Disk Latency per Hypervisor"
     use = "Disk Usage by Consumer"
-    n1, n3 = {"nodename": "ai-node1"}, {"nodename": "ai-node3"}
+    n1, n2, n3 = {"nodename": "ai-node1"}, {"nodename": "ai-node2"}, {"nodename": "ai-node3"}
     return [
         ("latency, ms", f"round({expr(lat)}, 0.001)", "60m",
          [sample({"instance": H1, "nodename": "ai-node1"}, 7), sample({"instance": H3, "nodename": "ai-node3"}, 0.5)]),
-        ("usage by consumer, ai-node1", expr(use, "A", "ai-node1"), "60m",
+        ("pool used per host", expr(use, "A", ALL), "60m",
+         [sample({"nodename": n}, USED_PCT[n] / 100 * (POOL_GIB[n] * GiB)) for n in USED_PCT]),
+        ("one capacity line, the max over the hosts", expr(use, "B", ALL), "60m", [sample({}, 1756 * GiB)]),
+        ("consumer rows", expr(use, "C", ALL), "60m",
          [sample({**n1, "consumer": "ci-runners"}, 150 * GiB), sample({**n1, "consumer": "dev-worker-1"}, 130 * GiB),
           sample({**n1, "consumer": "dev-worker-3"}, 20 * GiB), sample({**n1, "consumer": "registry"}, 5 * GiB),
-          sample({**n1, "consumer": "talos-workers"}, 40 * GiB)]),
-        ("usage by consumer, ai-node3", expr(use, "A", "ai-node3"), "60m",
-         [sample({**n3, "consumer": "talos-cp"}, 60 * GiB), sample({**n3, "consumer": "talos-workers"}, 70 * GiB),
+          sample({**n1, "consumer": "talos-workers"}, 40 * GiB),
+          sample({**n2, "consumer": "ci-runners"}, 77 * GiB),
+          sample({**n3, "consumer": "talos-cp"}, 60 * GiB), sample({**n3, "consumer": "talos-workers"}, 70 * GiB),
           sample({**n3, "consumer": "other"}, 8 * GiB), sample({**n3, "consumer": "llm"}, 9 * GiB)]),
-        ("pool used, ai-node1", expr(use, "B", "ai-node1"), "60m", [sample(n1, 351 * GiB)]),
-        ("capacity, ai-node3", expr(use, "C", "ai-node3"), "60m", [sample(n3, 1755 * GiB)]),
     ]
 
 
