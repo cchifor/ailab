@@ -343,6 +343,49 @@ Grounding (fixed revisions, not moving branches):
   inserting allocation/outbox records. `003-scoped-requests.sql:117-127` and
   `005-provenance-purpose.sql:214-224` also mutate allocation/outbox state.
 
+#### Generating File B (`file-b.json` and `ledger-step7b.sql`)
+
+`scripts/relay-worker-budget-file-b-generate.py` writes both reviewed files from one JSON
+inputs object, offline (no ledger, Router or network request). Its fields are exactly
+`deployment_digest` (File A's `547353ac…`; any other value also needs
+`--deployment-digest-override <same value>`), the live readings `routerReleaseDigest`,
+`adapterDigest`, `accountId`, `deploymentId`, `model`, `provider`, `providerGeneration`,
+`baseUrl`, `transport`, `maximumInputTokens`, `maximumOutputTokens`, and the decided
+`qualificationExpiresAt` (ISO-8601 UTC, `YYYY-MM-DDTHH:MM:SS[.fff]Z`, stored as Unix ms) and
+`evidenceDigest`. `version` is 1 and both coverage flags are always `true`. Unknown, missing or
+duplicate fields, and anything the Router schema (or the transport/provider pairing it filters
+on) would refuse, are rejected. It is stricter in one way: strings may not contain control
+characters, and `baseUrl` must be a plain `http(s)` URL with no whitespace, query or fragment,
+exactly the Router account's `baseUrl`.
+
+```sh
+python3 scripts/relay-worker-budget-file-b-generate.py --inputs "$ev/file-b-inputs.json" --output-dir "$ev"
+```
+
+It prints the policy `digest`, E in ms and ISO, the SHA-256 of the readback line, and the
+SHA-256 of `file-b.json` and `ledger-step7b.sql`. Reruns are byte-identical; an existing output
+with different content is never overwritten. The digest is the checker's `canonical()` (the
+Router's `tokenPolicyDigest`); its tests cross-check a golden value against the Router's own
+`runtime.ts` at `5a5181b7` and replay the SQL on a throwaway PostgreSQL 17 with the ledger schema.
+
+- **Take the live readings after the final Router rollout.** Every rollout changes
+  `providerGeneration`, and any image change changes `routerReleaseDigest`; either one
+  silently disqualifies the row (`runtime.ts:115-124`). No Router change may follow File B
+  before the canary.
+- **D and E are fixed with the owner at generation:** D is the canary's original deadline and
+  E = D + 48 h is `qualificationExpiresAt`. Record both with the owner's confirmation of the
+  printed digest.
+
+`ledger-step7b.sql` runs exactly like File A (`step7b.out`, success = psql exit 0 and a literal
+`COMMIT` line). Under the authority lock it requires exactly one authority row, `clients` and
+`readers` equal to File A's rows, an empty `qualifications` table and E in the future on the
+ledger clock. It then inserts the one row and asserts it whole-row (`IS NOT DISTINCT FROM`). It
+also re-serializes the stored policy in the database and requires it to match the reviewed
+canonical text byte for byte, with its SHA-256 (without `digest`) equal to the digest. A second
+run refuses. The line of `step7b.out` that begins `{"` is the stored policy as compact canonical
+JSON: `grep '^{"' step7b.out | tr -d '\n' | sha256sum` must print the generator's
+`readback-line-sha256`. Then run `file_b_check` below against the same `$ev/file-b.json`.
+
 **Ledger half, zero-write (`file_b_check`), from this repository root.** It sends no
 Router request; the signing check is `file_b_router_check`
 ([Router half](#router-half-one-nonce-write-accepted-by-the-owner-on-2026-11-19)), which reuses this
