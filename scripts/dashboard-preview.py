@@ -200,9 +200,11 @@ def _row_inventory(page, base, uid, row_text):
 
 def _mounted(model_title, titles):
     """Whether a panel of the model is among the mounted titles. A repeated panel mounts as clones whose titles
-    have its variables filled in ("... $host ..." -> "... ai-node1 ..."), so a $var or ${var} matches any text."""
+    have its variables filled in ("... $host ..." -> "... ai-node1 ..."), so a $var or ${var} matches any text
+    without a "$": a panel still titled "... $host ..." is a repeat that never expanded, not a clone
+    (reviewer-claude on #1896)."""
     parts = re.split(r"\$\{?\w+\}?", model_title)
-    pattern = re.compile(".+".join(re.escape(p) for p in parts))
+    pattern = re.compile("[^$]+".join(re.escape(p) for p in parts))
     return any(pattern.fullmatch(t) for t in titles)
 
 

@@ -5,7 +5,8 @@ nothing checked that the committed file is what the generator writes (reviewer-c
 
   * the committed ConfigMap is byte for byte what the generator writes now (run in a scratch copy of the
     tree: the generator writes its output next to itself when imported, and it reads the Local Drives
-    generator beside it);
+    generator beside it), and a run writes nothing else (loading the Local Drives generator does not write
+    that dashboard's ConfigMap);
   * the Hypervisors row's two drive views (owner, 2026-11-20), which replaced #1891's four NVMe tiles, which
     had replaced two mixed-unit NVMe panels: all of those are gone; the latency view is one ms line per host
     (reads and writes together), no fill, legend `nvme0n1 @ <host>`; the usage view is repeated per host over a
@@ -64,19 +65,34 @@ def _props(panel, name):
     return {p["id"]: p["value"] for p in o["properties"]}
 
 
+def _run_generator(d):
+    """Run the generator in the scratch tree `d` (it writes its output next to itself), the Local Drives generator
+    beside it."""
+    (Path(d) / "scripts").mkdir()
+    (Path(d) / OUT_REL).parent.mkdir(parents=True)
+    for g in (GEN, LD_GEN):
+        shutil.copy(g, Path(d) / "scripts" / g.name)
+    return subprocess.run([sys.executable, str(Path(d) / "scripts" / GEN.name)], capture_output=True, text=True,
+                          timeout=120)
+
+
 class GeneratedFile(unittest.TestCase):
     def test_committed_configmap_is_the_generator_output(self):
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "scripts").mkdir()
-            (Path(d) / OUT_REL).parent.mkdir(parents=True)
-            for g in (GEN, LD_GEN):
-                shutil.copy(g, Path(d) / "scripts" / g.name)
-            proc = subprocess.run([sys.executable, str(Path(d) / "scripts" / GEN.name)], capture_output=True,
-                                  text=True, timeout=120)
+            proc = _run_generator(d)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             fresh = (Path(d) / OUT_REL).read_bytes().replace(b"\r\n", b"\n")
         self.assertEqual(COMMITTED.read_bytes().replace(b"\r\n", b"\n"), fresh,
                          "re-run python scripts/gen-reporting-dashboard.py and commit the result")
+
+    def test_it_writes_its_own_configmap_only(self):
+        # It loads the Local Drives generator for that dashboard's queries. Loading must not write the Local Drives
+        # ConfigMap too (reviewer-claude on #1896); that generator writes only under `if __name__ == "__main__"`.
+        with tempfile.TemporaryDirectory() as d:
+            proc = _run_generator(d)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            written = {p.relative_to(d).as_posix() for p in (Path(d) / "kubernetes").rglob("*") if p.is_file()}
+        self.assertEqual(written, {OUT_REL.as_posix()})
 
 
 class DriveViews(unittest.TestCase):

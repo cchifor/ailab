@@ -26,7 +26,9 @@ import pathlib
 
 def _local_drives():
     """The Local Drives generator, for its per-guest thin-pool queries: the disk usage panel names each guest the
-    way that dashboard does (vmid -> name from pve-exporter) instead of keeping a second copy of the mapping."""
+    way that dashboard does (vmid -> name from pve-exporter) instead of keeping a second copy of the mapping.
+    Loading it is pure: it writes its own ConfigMap only under `if __name__ == "__main__"`, so running this
+    generator writes this dashboard's ConfigMap and nothing else (test_reporting_dashboard.py pins that)."""
     src = pathlib.Path(__file__).resolve().with_name("gen-local-drives-dashboard.py")
     spec = importlib.util.spec_from_file_location("gen_local_drives_dashboard", src)
     mod = importlib.util.module_from_spec(spec)
