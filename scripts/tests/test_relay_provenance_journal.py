@@ -1,5 +1,6 @@
 """Offline rendering contracts for the inactive provenance source."""
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -320,6 +321,20 @@ class RendererTest(unittest.TestCase):
         result = subprocess.run(['sh', str(script)], env={**env, 'SCHEMA_009_SHA256': 'invalid'}, text=True, capture_output=True)
         self.assertEqual(result.returncode, 78)
         self.assertFalse(marker.exists())
+
+    def test_database_and_jobs_stay_off_the_worker_pool_but_may_use_agent_nodes(self):
+        # NotIn ['true'], not DoesNotExist: agent nodes carry ailab.io/relay-worker-pool=false
+        # (kubernetes/infra/agent-nodes/node-labels.tf), which DoesNotExist would exclude.
+        expected = {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [
+            {'matchExpressions': [{'key': 'ailab.io/relay-worker-pool', 'operator': 'NotIn', 'values': ['true']},
+                                  {'key': 'kubernetes.io/arch', 'operator': 'In', 'values': ['amd64']}]}]}}}
+        spec = importlib.util.spec_from_file_location('provenance_journal_render', RENDER)
+        render = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(render)
+        self.assertEqual(render.AFFINITY, expected)
+        objects = list(yaml.safe_load_all((RENDER.parent / 'postgres.yaml').read_text(encoding='utf-8')))
+        db = next(o for o in objects if o and o['kind'] == 'StatefulSet')
+        self.assertEqual(db['spec']['template']['spec']['affinity'], expected)
 
     def test_listener_remains_inactive_and_uses_regular_file_mounts(self):
         config = self.service_config()

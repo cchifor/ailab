@@ -27,7 +27,7 @@
   "controlPlacement": {
     "nodeSelector": {
       "ailab.io/agent-pool": "true",
-      "kubernetes.io/hostname": "talos-agent-node-3"
+      "ailab.io/relay-worker-pool": "false"
     },
     "tolerations": [
       {

@@ -162,7 +162,9 @@ spec:
             nodeSelectorTerms:
             - matchExpressions:
               - key: ailab.io/relay-worker-pool
-                operator: DoesNotExist
+                operator: NotIn
+                values:
+                - "true"
               - key: kubernetes.io/arch
                 operator: In
                 values:

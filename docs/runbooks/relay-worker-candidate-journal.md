@@ -41,8 +41,11 @@ runs as UID/GID 0 with all capabilities dropped, no privilege escalation,
 RuntimeDefault seccomp, no host access, no RBAC and no service-account token. This
 exception does not apply to database or worker namespaces. Its immutable image
 filesystem remains read-only. Both namespaces' workloads explicitly exclude
-`ailab.io/relay-worker-pool` through required node affinity; they have no
-`dedicated=relay-worker` toleration. They must stay off the VM spike worker pool.
+`ailab.io/relay-worker-pool=true` through required node affinity (`NotIn ["true"]`,
+which also matches nodes without the label; not `DoesNotExist`, because the agent
+nodes carry `ailab.io/relay-worker-pool=false` for the researcher agent's placement);
+they have no `dedicated=relay-worker` toleration. They must stay off the VM spike
+worker pool.
 
 Each namespace starts with default-deny ingress and egress. The service renderer
 admits only the signed control namespace's infrastructure-agent selector and the

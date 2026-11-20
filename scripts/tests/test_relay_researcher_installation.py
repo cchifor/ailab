@@ -489,8 +489,10 @@ class AgentStage(unittest.TestCase):
         pod = dep["spec"]["template"]["spec"]
         self.assertEqual(pod["nodeSelector"], self.d["controlPlacement"]["nodeSelector"])
         self.assertEqual(pod["tolerations"], self.d["controlPlacement"]["tolerations"])
-        self.assertNotIn("ailab.io/relay-worker-pool", pod["nodeSelector"])
-        self.assertNotEqual(pod["nodeSelector"]["kubernetes.io/hostname"], "relay-worker-1")
+        # Off the worker pool, on any agent node: never a hostname pin (a drain of the pinned node was a
+        # 31-minute agent outage on 2026-11-19), and never the worker pool's label value.
+        self.assertEqual(pod["nodeSelector"], {"ailab.io/agent-pool": "true", "ailab.io/relay-worker-pool": "false"})
+        self.assertNotIn("kubernetes.io/hostname", pod["nodeSelector"])
         for field in ("automountServiceAccountToken", "enableServiceLinks", "hostNetwork", "hostPID", "hostIPC"):
             self.assertIs(pod[field], False, field)
         self.assertEqual(pod["securityContext"], {"runAsNonRoot": True, "runAsUser": 65532, "runAsGroup": 65532,
