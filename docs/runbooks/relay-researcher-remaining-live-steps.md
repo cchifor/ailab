@@ -717,12 +717,27 @@ valid now: no Relay router connection or credential binding exists, because H6 i
 - **Kubernetes**:
   - `force-sync` annotations on `relay/relay-worker-budget` and `llm-router/llm-router-worker-budget`
     (ESO re-renders both Secrets);
-  - `kubectl rollout restart` of `llm-router/llm-router`, which writes its Pod template annotation;
+  - `roll_router`'s restart of `llm-router/llm-router`. It writes the Pod template annotation
+    `kubectl.kubernetes.io/restartedAt` under field manager `relay-runbook`, which Flux leaves alone
+    (see `roll_deploy`). The annotation stays in the template afterwards, by design;
   - at the end, deleting step 4's client Pod.
 - **Offline issuance record**: one entry, for B only.
 
 **Restarts:** **the Router**, 8 times on the normal path (A1, A2, A4, B1, B4, C1, C3, D2). Each is a
-Recreate outage of all Router traffic, so announce the window.
+Recreate outage of all Router traffic, so announce the window. Each `roll_router` is exactly one
+outage: it fails unless the Deployment revision rose by exactly 1 and one Pod of that revision runs.
+On 2026-11-20 the helper still used kubectl's default field manager, and Flux reverted each restart
+at its next reconcile: a second outage up to 10 minutes later (ailab #1897).
+The cause is kustomize-controller v1.8.5's field-manager cleanup: before each apply it renames every
+`Update` entry whose manager starts with `kubectl` (prefix match, so `kubectl-rollout` too) to its own
+`Apply` entry, then its server-side apply drops the `restartedAt` it now owns but does not declare
+([kustomization_controller.go:862-912](https://github.com/fluxcd/kustomize-controller/blob/v1.8.5/internal/controller/kustomization_controller.go#L862-L912);
+fluxcd/pkg [ssa/patch.go:62-80, 114-171](https://github.com/fluxcd/pkg/blob/ssa/v0.67.5/ssa/patch.go#L62-L171),
+[ssa/manager_apply.go:239-244](https://github.com/fluxcd/pkg/blob/ssa/v0.67.5/ssa/manager_apply.go#L239-L244)).
+Rejected alternatives: the `kustomize.toolkit.fluxcd.io/reconcile: disabled` annotation only defers
+the revert to its removal; `kubectl scale` 0/1 races Flux, which declares `replicas: 1` and can scale the
+same ReplicaSet back up while the old Pod still terminates on the ReadWriteOnce volume; suspending
+Kustomization `apps` pauses every app.
 
 Relay is not rolled here; see the open points. Relay is wired since H4a, but its budget authority
 does not start before H7, because it has no profile source (hub runbook H4a,
@@ -848,12 +863,64 @@ SELECT 'readers' AS row, login, deployment_digest FROM worker_budget.readers;
 SELECT 'authority' AS row, instance_id FROM worker_budget.authority;
 SQL
 }
-# Keeps the outgoing Router Pod's budget log lines, then rolls it (Recreate) and waits.
+# rollstate <namespace> <deployment> <pod selector>: one JSON line. The Deployment revision, its Pod template's
+# restartedAt and the managedFields entries that own it, and every Pod of the selector with its ReplicaSet's
+# revision and creation time.
+rollstate() {
+  local dj rj pj
+  dj="$(kubectl --context admin@ai -n "$1" get deploy "$2" --show-managed-fields -o json)" || return 1
+  rj="$(kubectl --context admin@ai -n "$1" get rs -l "$3" -o json)" || return 1
+  pj="$(kubectl --context admin@ai -n "$1" get pod -l "$3" -o json)" || return 1
+  printf '%s\n%s\n%s\n' "$dj" "$rj" "$pj" | jq -sc '.[0] as $d | .[1] as $r | .[2] as $p
+    | ($r.items | map({key: .metadata.name, value: (.metadata.annotations["deployment.kubernetes.io/revision"] | tonumber)}) | from_entries) as $rev
+    | {revision: ($d.metadata.annotations["deployment.kubernetes.io/revision"] | tonumber),
+       restartedAt: $d.spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"],
+       restartedAtOwners: [$d.metadata.managedFields[] | select(.fieldsV1["f:spec"]["f:template"]["f:metadata"]["f:annotations"]["f:kubectl.kubernetes.io/restartedAt"] != null) | {manager, operation}],
+       pods: [$p.items[] | {pod: .metadata.name, revision: $rev[.metadata.ownerReferences[0].name], created: .metadata.creationTimestamp,
+                            phase: .status.phase, deleting: .metadata.deletionTimestamp}]}'
+}
+# roll_deploy <namespace> <deployment> <pod selector> <label>: exactly one Recreate roll of a Flux-owned Deployment, with proof.
+# Why the field manager (ailab #1897): `kubectl rollout restart` records restartedAt under manager `kubectl-rollout`
+# (operation Update). Before every apply, kustomize-controller v1.8.5 renames each Update entry whose manager STARTS
+# WITH `kubectl` to its own Apply entry (prefix match), so it then owns restartedAt without declaring it, and its
+# server-side apply deletes it: a second Recreate roll at the next `apps` reconcile, up to 10 minutes later. An entry
+# under `relay-runbook` is not renamed, so the annotation stays and Flux sees no drift. Never remove the annotation
+# afterwards: that changes the Pod template, which is itself a roll. The next roll_deploy only replaces its value.
+# Recreate scales the old ReplicaSet to 0 and creates the new Pod only when no old Pod is left in a non-terminal
+# phase, so the old and new Pods never run together on the ReadWriteOnce volume.
+# It refuses to roll while a revert is pending (a `kubectl*` Update entry owns restartedAt), or when the revision moved
+# since this session's last roll_deploy of the Deployment (something else rolled it). It fails unless, after the roll,
+# the revision rose by exactly 1, `relay-runbook` alone owns restartedAt, and exactly one non-terminal Pod runs, of
+# that revision. It keeps the rollout status and the after-state as `cap` files <label>-rollout and <label>-roll.
+# Call it directly, never under `cap`: `cap` runs its command in a subshell, which would lose ROLLREV.
+declare -A ROLLREV   # <namespace>/<deployment> -> revision this session's last roll_deploy left
+roll_deploy() {
+  local ns="$1" dep="$2" sel="$3" label="$4" s0 s1 r0
+  s0="$(rollstate "$ns" "$dep" "$sel")" || return 1
+  r0="$(jq -er .revision <<<"$s0")" || return 1
+  if jq -e '[.restartedAtOwners[] | select(.operation == "Update" and (.manager | startswith("kubectl")))] | length > 0' <<<"$s0" >/dev/null; then
+    echo "$ns/$dep: a kubectl* Update entry owns restartedAt, so Flux reverts it (one more roll) at its next reconcile (#1897)."
+    echo "Not rolling. Wait for that roll (rollstate: no kubectl* owner, revision +1, its Pod Ready), then retry."
+    printf '%s\n' "$s0"; return 1
+  fi
+  if [ -n "${ROLLREV[$ns/$dep]:-}" ] && [ "${ROLLREV[$ns/$dep]}" != "$r0" ]; then
+    echo "$ns/$dep: revision $r0, but this session's last roll left ${ROLLREV[$ns/$dep]}: something else rolled it. Stop and investigate."
+    printf '%s\n' "$s0"; return 1
+  fi
+  kubectl --context admin@ai -n "$ns" rollout restart deploy/"$dep" --field-manager=relay-runbook || return 1
+  cap "$label-rollout" kubectl --context admin@ai -n "$ns" rollout status deploy/"$dep" --timeout=10m || return 1
+  s1="$(rollstate "$ns" "$dep" "$sel")" || return 1
+  cap "$label-roll" printf '%s\n' "$s1"
+  ROLLREV[$ns/$dep]="$(jq -r .revision <<<"$s1")"
+  jq -e --argjson r "$r0" '.revision == $r + 1 and .restartedAtOwners == [{manager: "relay-runbook", operation: "Update"}]
+      and ([.pods[] | select(.phase != "Succeeded" and .phase != "Failed")] | length == 1 and .[0].revision == $r + 1 and .[0].deleting == null)' \
+      <<<"$s1" >/dev/null || { echo "$ns/$dep: not exactly one roll (expected revision $((r0 + 1)), one Pod of it, relay-runbook owning restartedAt)"; return 1; }
+}
+# roll_router: keeps the outgoing Router Pod's budget log lines, then rolls it once (Recreate) and proves it.
 # It refuses to roll if the log capture failed: a roll destroys that Pod's log.
 roll_router() {
   cap router-log-before-roll rlog || { echo "log capture failed: not rolling"; return 1; }
-  kubectl --context admin@ai -n llm-router rollout restart deploy/llm-router &&
-  kubectl --context admin@ai -n llm-router rollout status deploy/llm-router --timeout=10m
+  roll_deploy llm-router llm-router app=llm-router router
 }
 ledger_state() {
   lsql <<'SQL'
@@ -1088,6 +1155,13 @@ A ledger pass alone does not prove Router qualification.
 - **Ledger and plugin.** `cap final ledger_state`: the authority row has B's IDs and `ready=f`. The plugin
   is `disabled`.
 - **History.** Step 4's five history counts are unchanged (0).
+- **One outage per roll.** At least 11 minutes after the last `roll_router` (one `apps` interval of
+  10m, so Flux has reconciled the Router since), run
+  `cap router-final rollstate llm-router llm-router app=llm-router`. The revision equals
+  `${ROLLREV[llm-router/llm-router]}`, the one Pod has that revision and the last roll's creation time,
+  and `restartedAtOwners` is only `relay-runbook`/`Update`. Across this step's `router-roll` captures
+  the revision rises by exactly 1 per roll, 8 on the normal path. A higher final revision means
+  something else rolled the Router: record it on #1753.
 - **Clean up.** Run `kubectl --context admin@ai -n relay-budget-authority delete pod relay-budget-operator-client`.
 - **Evidence.** Post one comment per drill on ailab #1753, titled "Witness drill A", "… B", "… C" and
   "… D". Build each from that drill's files in `$ev/cap`:
