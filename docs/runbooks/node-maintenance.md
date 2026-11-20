@@ -212,13 +212,16 @@ metrics (`pve_thin.prom`, job `proxmox-node`):
 
 - `pve_thin_pool_data_percent`, `pve_thin_pool_metadata_percent` and the pool's sizes;
 - per thin volume, `pve_thin_lv_size_bytes`, `pve_thin_lv_data_percent` and `pve_thin_lv_allocated_bytes`
-  (labels `lv` and `vmid`);
+  (labels `lv` and `vmid`), and `pve_thin_lv_open` (1 while its device is open: an attached disk or a mounted
+  volume; 0 for a source kept after a disk move or an unused disk);
 - `pve_thin_textfile_read_errors` and `pve_thin_textfile_timestamp_seconds`.
 
 The recording rule `pve:lxc_volume_untrimmed_bytes` is, for a container volume whose guest runs
 node_exporter (the LLM containers), the pool allocation minus the guest filesystem's use. That is what a
 trim would give back, joined on the `/dev/mapper/pve-vm--<id>--disk--<n>` name both sides see. For a VM,
-compare `pve_thin_lv_allocated_bytes{vmid="<id>"}` with the guest's own `node_filesystem_*`.
+compare `pve_thin_lv_allocated_bytes{vmid="<id>"}` with the guest's own `node_filesystem_*`. The Local Drives
+dashboard (uid `ailab-local-drives`) shows that per guest as the "untrimmed gap", for a VM only when its disks
+are provably its open local volumes.
 
 Alerts (`kubernetes/apps/infrastructure/monitoring/thin-pool-rules.yaml`):
 

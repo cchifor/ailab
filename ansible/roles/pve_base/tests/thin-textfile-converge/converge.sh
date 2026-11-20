@@ -56,8 +56,9 @@ LOOP=$(losetup -f --show /pv/pv.img) || { echo "no loop device"; exit 1; }
 VG_CREATED=1
 lvcreate -q -y -an -Zn -L 64M -n root "$VG" > /tmp/lvm.log 2>&1 || { cat /tmp/lvm.log; echo "cannot build the test LV"; exit 1; }
 real="$(lvs --noheadings --units b --nosuffix --separator '|' \
-  -o lv_name,pool_lv,segtype,lv_size,data_percent,metadata_percent,lv_metadata_size "$VG")"
-eq "real lvs: the line the script parses" "  root||linear|67108864|||" "$real"
+  -o lv_name,pool_lv,segtype,lv_size,data_percent,metadata_percent,lv_metadata_size,lv_device_open "$VG")"
+eq "real lvs: the line the script parses (an inactive volume's open state is unknown)" \
+  "  root||linear|67108864||||unknown" "$real"
 
 # ---- --check, apply, idempotence ----
 run check-fresh --check --diff || { bad "fresh --check failed"; show check-fresh; }
@@ -83,7 +84,7 @@ eq "no lvs complaint in the journal" 0 "$(journalctl -u pve-thin-textfile --no-p
 # ---- 2. a Proxmox-like thin listing, in the format the real lvs printed above ----
 cat > /usr/local/sbin/lvs << 'STUB'
 #!/bin/bash
-printf '  data||thin-pool|1884114714624|61.23|2.29|16106127360\n  root||linear|103079215104|||\n  vm-5002-disk-1|data|thin|171798691840|80.50||\n  base-9000-disk-0|data|thin|3758096384|||\n'
+printf '  data||thin-pool|1884114714624|61.23|2.29|16106127360|open\n  root||linear|103079215104||||open\n  vm-5002-disk-1|data|thin|171798691840|80.50|||open\n  vm-5002-disk-2|data|thin|8589934592|10.00|||\n  base-9000-disk-0|data|thin|3758096384||||\n'
 STUB
 chmod +x /usr/local/sbin/lvs
 systemctl start pve-thin-textfile.service
@@ -92,6 +93,8 @@ eq "pool data%" 61.23 "$(metric "pve_thin_pool_data_percent\\{pool=\"$VG/data\"\
 eq "pool metadata%" 2.29 "$(metric "pve_thin_pool_metadata_percent\\{pool=\"$VG/data\"\\}")"
 eq "the volume's allocation (171798691840 x 80.50 %)" 138297946931 \
   "$(metric "pve_thin_lv_allocated_bytes\\{pool=\"$VG/data\",lv=\"vm-5002-disk-1\",vmid=\"5002\"\\}")"
+eq "an attached volume is open" 1 "$(metric "pve_thin_lv_open\\{pool=\"$VG/data\",lv=\"vm-5002-disk-1\",vmid=\"5002\"\\}")"
+eq "an unused volume is not" 0 "$(metric "pve_thin_lv_open\\{pool=\"$VG/data\",lv=\"vm-5002-disk-2\",vmid=\"5002\"\\}")"
 eq "the inactive template volume is left out" 0 "$(grep -c base-9000 "$TF/pve_thin.prom")"
 eq "readable by node_exporter" 644 "$(stat -c %a "$TF/pve_thin.prom")"
 rm -f /usr/local/sbin/lvs

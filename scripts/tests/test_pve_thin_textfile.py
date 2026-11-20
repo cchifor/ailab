@@ -3,8 +3,10 @@
 Runs the role's real script (ansible/roles/pve_base/files/pve-thin-textfile.sh) with a fake `lvs` on PATH that
 prints a canned listing in the format the script asks for, and renders the role's real units. Pinned here:
 
-  * the pool's data and metadata use and sizes, and per thin volume its size, allocation share and allocated
-    bytes (size x share), with the vmid taken from vm-/base- names (empty for a snapshot);
+  * the pool's data and metadata use and sizes, and per thin volume its size, allocation share, allocated
+    bytes (size x share) and whether its device is open (1 / 0), with the vmid taken from vm-/base- names
+    (empty for a snapshot); lv_device_open's "unknown" (an inactive volume) reads 0, and a value other than
+    "open", "unknown" or nothing is a row that does not parse;
   * linear volumes (root, swap) and other pools' volumes are not reported; an inactive volume (no data
     percent: a template's base-* volume) is skipped without counting an error;
   * a failing lvs, a pool missing from the listing, or a row that does not parse is counted in
@@ -31,15 +33,15 @@ SCRIPT = ROLE / "files/pve-thin-textfile.sh"
 BASH = shutil.which("bash")
 
 LISTING = """\
-  data||thin-pool|1884114714624|61.23|2.29|16106127360
-  root||linear|103079215104|||
-  swap||linear|8589934592|||
-  vm-4001-disk-0|data|thin|85899345920|45.10||
-  vm-5002-disk-0|data|thin|25769803776|30.00||
-  vm-5002-disk-1|data|thin|171798691840|80.50||
-  base-9000-disk-0|data|thin|3758096384|||
-  snap_vm-5002-disk-0_pre|data|thin|25769803776|10.00||
-  vm-7000-disk-0|otherpool|thin|1073741824|50.00||
+  data||thin-pool|1884114714624|61.23|2.29|16106127360|open
+  root||linear|103079215104||||open
+  swap||linear|8589934592||||open
+  vm-4001-disk-0|data|thin|85899345920|45.10|||
+  vm-5002-disk-0|data|thin|25769803776|30.00|||unknown
+  vm-5002-disk-1|data|thin|171798691840|80.50|||open
+  base-9000-disk-0|data|thin|3758096384||||
+  snap_vm-5002-disk-0_pre|data|thin|25769803776|10.00|||
+  vm-7000-disk-0|otherpool|thin|1073741824|50.00|||open
 """
 
 
@@ -89,13 +91,19 @@ class TextfileScript(unittest.TestCase):
         self.assertEqual(str(round(85899345920 * 45.10 / 100)),
                          s['pve_thin_lv_allocated_bytes{pool="pve/data",lv="vm-4001-disk-0",vmid="4001"}'])
         self.assertIn('pve_thin_lv_data_percent{pool="pve/data",lv="snap_vm-5002-disk-0_pre",vmid=""}', s)
+        self.assertEqual("1", s["pve_thin_lv_open" + v], "an attached disk is open")
+        self.assertEqual("0", s['pve_thin_lv_open{pool="pve/data",lv="vm-4001-disk-0",vmid="4001"}'],
+                         "a volume nothing holds (a source kept after a move) is not")
+        self.assertEqual("0", s['pve_thin_lv_open{pool="pve/data",lv="vm-5002-disk-0",vmid="5002"}'],
+                         "lvs says unknown for an inactive volume")
         self.assertEqual("0", s["pve_thin_textfile_read_errors"])
         self.assertEqual("", self.stderr, "a clean read says nothing on stderr")
         self.assertEqual("1795160000", s["pve_thin_textfile_timestamp_seconds"])
         for absent in ("root", "swap", "base-9000-disk-0", "vm-7000-disk-0"):
             self.assertNotIn(f'lv="{absent}"', text)
         self.assertEqual("--noheadings --units b --nosuffix --separator | -o "
-                         "lv_name,pool_lv,segtype,lv_size,data_percent,metadata_percent,lv_metadata_size pve",
+                         "lv_name,pool_lv,segtype,lv_size,data_percent,metadata_percent,lv_metadata_size,"
+                         "lv_device_open pve",
                          (self.tmp / "calls").read_text(encoding="utf-8").strip())
 
     def test_every_sample_has_help_and_type(self):
@@ -120,7 +128,10 @@ class TextfileScript(unittest.TestCase):
         self.assertNotIn('pve_thin_pool_data_percent{pool="pve/data"}', s)
         _, s = self.run_script(listing=LISTING.replace("|45.10|", "|4x.10|"))
         self.assertEqual("1", s["pve_thin_textfile_read_errors"])
-        self.assertIn("cannot parse a volume's row:   vm-4001-disk-0|data|thin|85899345920|4x.10||", self.stderr)
+        self.assertIn("cannot parse a volume's row:   vm-4001-disk-0|data|thin|85899345920|4x.10|||", self.stderr)
+        _, s = self.run_script(listing=LISTING.replace("|80.50|||open", "|80.50|||yes"))
+        self.assertEqual("1", s["pve_thin_textfile_read_errors"])
+        self.assertNotIn('pve_thin_lv_open{pool="pve/data",lv="vm-5002-disk-1",vmid="5002"}', s)
         _, s = self.run_script(pools="not-a-pool")
         self.assertEqual("1", s["pve_thin_textfile_read_errors"])
         self.assertIn("'not-a-pool' is not a VG/LV name", self.stderr)
