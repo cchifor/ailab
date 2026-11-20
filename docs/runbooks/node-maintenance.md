@@ -296,7 +296,9 @@ script headers: the sweep exits 1 when a volume's trim failed (the beacon's
 `pve_lxc_fstrim_volume_exit_code` names it; 3 pressure never dropped, 4 pressure unreadable, 5 fstrim
 failed, 6 mount not released), and exits 3 when the stop file was already there at the start.
 `pve_lxc_fstrim_last_success_timestamp_seconds` is the oldest of the volumes' last complete passes
-(`pve_lxc_fstrim_volume_last_complete_timestamp_seconds`): every volume has completed a pass since then.
+(`pve_lxc_fstrim_volume_last_complete_timestamp_seconds`): every volume has completed a pass since then. It does not move on a night
+whose discovery skipped a container (a lock, or a config that could not be read), whose volumes it
+cannot vouch for.
 
 Kill switch: `pve_lxc_fstrim_enabled: false` in the host's host_vars, then `just lxc-fstrim --limit
 <host>`. It stops a running sweep cleanly and removes the timer, the unit, the settings and the metrics;

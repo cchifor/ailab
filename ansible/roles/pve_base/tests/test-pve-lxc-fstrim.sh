@@ -150,7 +150,19 @@ has "and the shared stop file" "STOP_FILE=$CTL/stop" "$(sed -n 1p "$CTL/inner_ca
 
 echo "== a locked container is a partial pass, an unlocked host a complete one =="
 eq "a lock makes it partial" 1 "$(metric 'pve_lxc_fstrim_last_run_reason\{reason="partial"\}')"
-eq "the success time covers the volumes found (the locked container is not among them)" 1000 "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)"
+eq "no success time: the locked container's volumes are unknown, so nothing says they are covered" "" \
+  "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)"
+new_case lockedkeep; printf 'pve_lxc_fstrim_last_success_timestamp_seconds 777\n' > "$CTL/textfile/pve_lxc_fstrim.prom"; run
+eq "a skipped (locked) container keeps the previous success time" 777 "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)"
+new_case alllocked; printf 'pve_lxc_fstrim_last_success_timestamp_seconds 777\n' > "$CTL/textfile/pve_lxc_fstrim.prom"
+for c in 5002 5006; do sed -i 's/^hostname: \(.*\)$/hostname: \1\nlock: backup/' "$CTL/config.$c"; done
+run
+eq "every container locked: nothing trimmed" "" "$(calls)"
+eq "every container locked: not counted as a success now (777 kept)" 777 "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)"
+new_case cfgfail; printf 'pve_lxc_fstrim_last_success_timestamp_seconds 777\n' > "$CTL/textfile/pve_lxc_fstrim.prom"
+echo 1 > "$CTL/config.5006.fail_from"; run
+eq "a container whose first config read fails: exit 1" 1 "$(cat "$CTL/rc")"
+eq "and the success time is kept, not advanced" 777 "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)"
 new_case complete; printf 'hostname: backup-me\nrootfs: local-lvm:vm-5005-disk-0,size=8G\n' > "$CTL/config.5005"
 sed -i 's/ backup       backup-me/              backup-me/' "$CTL/pct_list"
 echo 2048 > "$CTL/bytes.5002.mp1"; echo 30 > "$CTL/trim_s"
@@ -277,16 +289,20 @@ eq "reason failed" 1 "$(metric 'pve_lxc_fstrim_last_run_reason\{reason="failed"\
 echo "== progress across nights: least recently completed first, so every volume gets its turn =="
 # One volume fits a night: budget 100 s, a chunk costs 4 x 10 s, each volume takes 70 s.
 new_case nights; echo 70 > "$CTL/trim_s"
-for night in 1 2 3 4; do
+# No locked container here (a lock keeps the success time from moving at all; see the lock cases above).
+printf 'hostname: backup-me\nrootfs: local-lvm:vm-5005-disk-0,size=8G\n' > "$CTL/config.5005"
+sed -i 's/ backup       backup-me/              backup-me/' "$CTL/pct_list"
+for night in 1 2 3 4 5; do
   run PVE_LXC_FSTRIM_RUN_MAX_S=100 SEC_PER_GB=10
   tail -1 "$CTL/inner_calls" | cut -d' ' -f1,2 >> "$CTL/firsts"
+  echo "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)" >> "$CTL/successes"
   echo $(( $(cat "$CTL/clock") + 86400 )) > "$CTL/clock"
 done
-eq "night by night: 5002 mp1, 5002 rootfs, 5006 rootfs, then 5002 mp1 again (the oldest)" \
-  "5002 mp1,5002 rootfs,5006 rootfs,5002 mp1" "$(tr '\n' ',' < "$CTL/firsts" | sed 's/,$//')"
-eq "one volume a night" 4 "$(wc -l < "$CTL/inner_calls" | tr -d ' ')"
-eq "after night 4: success = the oldest last complete pass (night 2's, 5002 rootfs, at 87470 + 70)" 87540 \
-  "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)"
+eq "night by night: each volume in turn, then 5002 mp1 again (the oldest)" \
+  "5002 mp1,5002 rootfs,5005 rootfs,5006 rootfs,5002 mp1" "$(tr '\n' ',' < "$CTL/firsts" | sed 's/,$//')"
+eq "one volume a night" 5 "$(wc -l < "$CTL/inner_calls" | tr -d ' ')"
+eq "success only once every volume has completed (night 4), then the oldest pass (night 1's, then night 2's)" \
+  ",,,1070,87540" "$(tr '\n' ',' < "$CTL/successes" | sed 's/,$//')"
 new_case order; mkdir -p "$CTL/state"; echo 900 > "$CTL/state/5002-mp1.complete"; echo 950 > "$CTL/state/5002-rootfs.complete"
 run
 eq "never completed first, then the oldest" "5006 rootfs,5002 mp1,5002 rootfs" "$(calls)"

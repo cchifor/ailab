@@ -34,7 +34,8 @@
 # and, per volume, the bytes ext4 reported trimmed, the exit code and the last complete pass.
 # pve_lxc_fstrim_last_success_timestamp_seconds is the oldest of the volumes' last complete passes, i.e.
 # every volume has completed a pass since then (now when there is nothing to trim); while a volume has
-# never completed one, the previous value is kept.
+# never completed one, or when the discovery skipped a container (a lock, or a config that could not be read:
+# its volumes are unknown, so they cannot be counted as covered), the previous value is kept.
 #
 # Exit codes:
 #   0    no volume failed (a complete pass, or a partial one: deadline, lock held, stop file)
@@ -91,6 +92,9 @@ deadline=$(( start + RUN_MAX_S ))
 # Per-volume results, "<ctid> <key> <rc> <bytes>" (rc - = not attempted).
 declare -a RESULTS=() VOLS=()
 total=0; failed=0; incomplete=0
+# 1 when the discovery skipped a running container whose volumes it therefore does not know (a lock, or an
+# unreadable config): the freshness of the volumes it did find then says nothing about that container's.
+discovery_incomplete=0
 
 complete_of() { # <ctid> <key> -> the time its last pass completed, or nothing
   local t
@@ -104,7 +108,7 @@ write_beacon() { # <rc> <reason>
   local f="$TEXTFILE_DIR/pve_lxc_fstrim.prom" tmp end last_ok r v t min all=1
   end="$(now_s)"
   last_ok="$(sed -nE 's/^pve_lxc_fstrim_last_success_timestamp_seconds ([0-9]+)$/\1/p' "$f" 2>/dev/null | tail -1)"
-  if [ "${listed:-0}" = 1 ]; then
+  if [ "${listed:-0}" = 1 ] && [ "$discovery_incomplete" = 0 ]; then
     if [ "${#VOLS[@]}" -eq 0 ]; then
       # nothing to trim is a success, unless a container's config could not be read
       [ "$failed" -eq 0 ] && last_ok="$end"
@@ -205,9 +209,11 @@ for ct in "${running[@]}"; do
   [[ "$ct" =~ ^[0-9]+$ ]] || continue
   # shellcheck disable=SC2086
   if in_list "$ct" $EXCLUDE; then log "ct $ct excluded (PVE_LXC_FSTRIM_EXCLUDE)"; continue; fi
-  cfg="$(pct config "$ct" 2>/dev/null)" || { log "pct config $ct failed"; failed=$((failed + 1)); continue; }
+  cfg="$(pct config "$ct" 2>/dev/null)" || {
+    log "pct config $ct failed"; failed=$((failed + 1)); discovery_incomplete=1; continue
+  }
   lock="$(sed -nE '/^\[/q; s/^lock: (.*)$/\1/p' <<< "$cfg")"
-  if [ -n "$lock" ]; then log "ct $ct holds lock '$lock' - skipped tonight"; incomplete=1; continue; fi
+  if [ -n "$lock" ]; then log "ct $ct holds lock '$lock' - skipped tonight"; incomplete=1; discovery_incomplete=1; continue; fi
   # The main section only (a snapshot's copy follows a `[name]` line); rootfs and mpN, nothing else.
   while IFS= read -r line; do
     [[ "$line" =~ ^\[ ]] && break
