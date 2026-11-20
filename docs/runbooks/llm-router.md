@@ -4726,3 +4726,67 @@ and it needs its own go-ahead.
 - **Revert.** Run `configure_route` on that route with `native: null`, which removes the setting, or restore its
   previous configuration revision. `GET /v1/routes` then no longer lists the marker, and Relay's holder stops
   admitting `codex-responses` there.
+
+## Worker-budget authority release (2026-11-20, llm-router #192)
+
+Release `router-0.1.0-20261120-budget-runtime-get`: source `1d65206575251e3f450a3b6c41650b40d17f42b8` (llm-router branch
+`release/router-20261120-budget-runtime-get`: the live `5a5181b7` plus the one-line fix of
+[#192](https://git.chifor.me/cchifor/llm-router/pulls/192) and its test), archive
+`router-0.1.0-20261120-budget-runtime-get.tar.gz`, SHA-256
+`791e9ee726f8c1d5fb4fde704e86bfae9d9b6ace0332bd4949c0918edcc4e382`, Relay branch
+`release/router-20261120-budget-runtime-get`, [Relay run 143129](https://git.chifor.me/cchifor/relay/actions/runs/143129),
+packaging commit `8a69c44cebd5b114f8d80d555529a1097c08f25e`, image
+`registry.chifor.me/llm-router/router@sha256:f923c13a40de9e52948c122eb1528d77886cf0d431581ebce93da2b0a4a87647`.
+An anonymous pull by digest succeeded; the image's `org.opencontainers.image.revision` label and `SOURCE_COMMIT` are the
+source commit.
+
+**Why.** On 2026-11-20 at 19:27:16Z the File B Router check (ailab #1753) sent one signed `worker-budget-preflight` to
+`/register/relay-keys` and got HTTP 500 `INVALID_REQUEST`, after the Router had consumed its nonce.
+- **The bug.** The api-keys plugin built its `KeyMeter` with `workerBudgetRuntime: () => c.routerWorkerBudgetAuthority`.
+  - `c` does not inject that service; the separate `worker-budget-authority` plugin provides it.
+  - cordis 4.0.0-rc.10 throws a plain `Error('cannot get property … without inject')` on such a read.
+  - `kernel/http.ts:465` turns any non-`RouterError` into a 500.
+- **The effect.** Every worker-budget path through the meter threw on `5a5181b7`: preflight, authorize, inspect and
+  revoke. No worker budget could be used. Step 8's "available" readback only observed the plugin's own refresh loop.
+
+**What it changes.** One line: the meter reads the authority with `c.get('routerWorkerBudgetAuthority')`. It returns
+the service while the plugin is enabled and `undefined` otherwise. With no authority, the meter refuses with
+`RouterError` `WORKER_BUDGET_UNAVAILABLE` (503). Nothing else changes.
+- Against the live archive, only `dist/packages/plugins/api-keys/index.js` and its map differ, apart from
+  `SOURCE_COMMIT`, pnpm's own bookkeeping files and the `.bin` shims that name the staging directory.
+- No schema, migration, KV, plugin-settings or configuration change.
+
+**Verified on the release tree.**
+- **New test.** `tests/worker-budget-runtime-wiring.test.ts` boots the real router (`createRuntime` +
+  `createHttpServer`) with a fake authority from a separate plugin. It fails 3/3 on `5a5181b7` with the live error and
+  passes with the fix.
+- **Suite.** Node 26.10.0: `tsc --noEmit` clean, 2,657 passed, 14 skipped.
+- **Archive.** Built from `git archive 1d652065` in the pinned Node 26.10.0 runtime. The production smoke passed with
+  no network, uid 1000, a read-only root and all capabilities dropped. The publisher's smoke and backup checks passed
+  again in run 143129.
+- **Contents.** The archive has the live archive's 18,214 entries, with the same paths, modes and owner 1000:1000.
+
+**Worker budgets: the release changes the qualification.** `executingRelease` on the published image gives
+`routerReleaseDigest` `414e8520031dae7fb20cc3548c3fbb837cb8f446b64e397335205b63556af6a5` (the live image:
+`597e19f5…2dc0`). `adapterDigests.openai` is unchanged (`bae4379d…61ba`). The committed File B row (`02d0ddb1…`) names
+the old release digest, so after the roll the Router filters it out (`runtime.ts:115-124`). In order:
+1. Retake readings R1-R5 after the roll.
+2. Reissue File B with `--supersede` (budget runbook, "Reissuing File B (supersede)").
+3. Run `file_b_router_check` once.
+
+No other Router change may follow before the canary.
+
+**Rollback.** Revert the image, the three-line comment above it and both annotations together, to image
+`registry.chifor.me/llm-router/router@sha256:54735b64a017d46c2828d1d421acf7696e036e0259eefae827785fcb8db0eb0b`,
+source `5a5181b78350a6f740cc65fb7412e1c009732a32`, release `router-0.1.0-20261114-adapted-codex`. That brings the 500
+back, and a rolled-back release digest needs File B reissued again.
+
+**At the roll.** Roll once with `roll_deploy` (relay-researcher-remaining-live-steps.md, step 5 helpers): one replica,
+`Recreate`, one outage, and streams in flight are cut. A merge rolls through Flux as well; do one or the other, not
+both.
+
+**After the roll.**
+1. `validate-live`: 6/9, the known baseline.
+2. The release gate (router-ab) on the live router.
+3. The worker-budget plugin reports `available` again, with the reader on the ledger.
+4. Then File B as above. `file_b_router_check` must return exit 0, `status: pass`, `signingReady: true`.
