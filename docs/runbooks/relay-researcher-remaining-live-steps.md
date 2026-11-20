@@ -1,6 +1,6 @@
 # Relay researcher: remaining live steps before the first qualification run
 
-Status: **checklist, updated 2026-11-18. Steps 1-2 are DONE; resume at step 3 after the readbacks in steps 0-2 pass.**
+Status: **checklist, updated 2026-11-20. Steps 1-3 are DONE; resume at step 4 after the readbacks in steps 0-3 pass.**
 Merging this file changes nothing live. It puts in execution order
 the owner and operator live steps that are still open between today's state and lifting the hold on
 hub step H6 (ailab #1811). It does not replace the runbooks it cites. Each step is an operator action on
@@ -86,7 +86,7 @@ the other live values below still require that readback.
 **Tags.** Each step has a **Writes** line, naming any write to OpenBao, the budget ledger, Kubernetes
 objects or the Router admin API, and a **Restarts** line, naming every rollout. A `force-sync`
 annotation is a Kubernetes write, and ESO then re-renders the ExternalSecret's Secret.
-For DONE steps 1-2, the Writes/Restarts in the step bodies are historical; only the readbacks are current.
+For DONE steps 1-3, the Writes/Restarts in the step bodies are historical; only the readbacks are current.
 
 **Owner decisions come first.** The decisions below are recorded in
 [ailab #1820](https://git.chifor.me/cchifor/ailab/issues/1820) and repeated at the end of this file.
@@ -108,7 +108,7 @@ Each of those steps repeats the requirement as a pre-check.
 | 0 | Session, helpers, baseline | (this checklist) | none | none |
 | 1 | **DONE**: Signer keys and the Router trust document (H5, first half) | Router connection step 3 | completed; readback only now | none |
 | 2 | **DONE**: Router trust inclusion | Router connection step 6 | completed; readback only now | none |
-| 3 | Control-metrics collector Secrets | control monitoring, activation step 2 | **OpenBao**: 1 document (NEW path); **Kubernetes**: 2 Secrets | none |
+| 3 | **DONE**: Control-metrics collector Secrets | control monitoring, activation step 2 | completed; readback only now | none |
 | 4 | Budget step 8 proofs | budget step 8 | **Kubernetes**: one temporary client Pod | none |
 | 5 | Witness drills A-D | budget, "Drills before production `ready=true`" | **OpenBao**: witness versions; **ledger**: the rotation to B and the `ready` flips; **Router admin API**: plugin on and off; **Kubernetes**: ExternalSecret annotations, Deployment restarts, the client Pod's deletion | **Router**, 8 times |
 | 6 | Durability evidence (6a), then the independent review (6b) | budget step 8; budget, "Durability evidence for the first `ready=true`" | **Kubernetes**: the disposable probe namespace and its objects, created and deleted; the ledger Pod's deletion. With the owner's OK only: a `qm reset` of the probe's node (tier b), a 60 s host firewall rule (tier c) | **the ledger Pod**, once (`OnDelete`); the probe's node VM if tier (b) runs |
@@ -209,7 +209,8 @@ wsha_bao; wsha_secret relay relay-worker-budget; wsha_secret llm-router llm-rout
   `llm-router-relay-trust` is Ready. Both `*-worker-budget` ExternalSecrets are
   `SecretSynced`, and both SecretStores are Ready.
 - **OpenBao.** `af/relay-router` lists `relay/` and `router/`; step 1's signer/trust readbacks hold.
-- **Collector Secrets.** Neither Secret exists.
+- **Collector Secrets.** Both exist (step 3 DONE): `relay/relay-control-metrics` with keys
+  `expires-at`, `tenant-id`, `token-sha256`, and `monitoring/relay-control-collector` with key `token`.
 - **Provision objects.** The policy and the token role read back exactly as Router connection step 1
   says: `allowed_policies [relay-router-escrow]`, `orphan true`, `renewable false`,
   `token_no_default_policy true`, `token_explicit_max_ttl 720h`.
@@ -414,6 +415,13 @@ Relay connection exists, reverting an inclusion PR is enough (`relay-router-conn
 
 ## Step 3. Control-metrics collector Secrets
 
+**DONE.** The two Secrets were created on 2026-11-17 at 10:39:37Z (`kubectl create`, both in the same
+second, after step 1) and the token was escrowed at `af/relay-control/collector`. The full readback
+passed on 2026-11-20: token shape, `MATCH`, the escrow's sha256 equal to `token-sha256`, the tenant row
+present in Relay, the expiry and pattern, and the discovery and RBAC checks. Re-run the readback only.
+The commented-out creation block below is the historical record and must not be run again: `bao kv put` would replace the
+escrowed token, so it would no longer match the two Secrets.
+
 **Purpose.** Create the two Secrets that H6's `relay-control-monitoring` component needs
 (`relay-control-monitoring.md:10-22` and activation step 2 at `:55-56`):
 
@@ -457,15 +465,17 @@ The token is 32 random bytes in unpadded base64url: 43 characters, no newline. R
 `server/agent-sessions/metrics.ts:164-182`).
 
 ```sh
-openssl rand 32 | basenc --base64url | tr -d '=\n' | bao kv put -mount=af relay-control/collector token=-
-bao kv get -mount=af -field=token relay-control/collector \
-  | kubectl --context admin@ai -n monitoring create secret generic relay-control-collector --from-file=token=/dev/stdin
-sha="$(bao kv get -mount=af -field=token relay-control/collector | tr -d '\n' | sha256sum | cut -d' ' -f1)"
-kubectl --context admin@ai -n relay create secret generic relay-control-metrics \
-  --from-literal=tenant-id=00000000-0000-4000-8000-000000000001 \
-  --from-literal=token-sha256="$sha" \
-  --from-literal=expires-at='2027-02-15T00:00:00Z'
-unset sha
+# HISTORICAL RECORD, step 3 DONE. DO NOT RUN: it would replace the escrowed collector token, which
+# would then no longer match the two Secrets. Every line is commented out so a paste does nothing.
+# openssl rand 32 | basenc --base64url | tr -d '=\n' | bao kv put -mount=af relay-control/collector token=-
+# bao kv get -mount=af -field=token relay-control/collector \
+#   | kubectl --context admin@ai -n monitoring create secret generic relay-control-collector --from-file=token=/dev/stdin
+# sha="$(bao kv get -mount=af -field=token relay-control/collector | tr -d '\n' | sha256sum | cut -d' ' -f1)"
+# kubectl --context admin@ai -n relay create secret generic relay-control-metrics \
+#   --from-literal=tenant-id=00000000-0000-4000-8000-000000000001 \
+#   --from-literal=token-sha256="$sha" \
+#   --from-literal=expires-at='2027-02-15T00:00:00Z'
+# unset sha
 ```
 
 **Readback.** This block is NEW. It prints keys, `MATCH` or `OK` lines and the two values that are not
