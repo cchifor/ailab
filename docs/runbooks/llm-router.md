@@ -4745,7 +4745,7 @@ source commit.
 - **The bug.** The api-keys plugin built its `KeyMeter` with `workerBudgetRuntime: () => c.routerWorkerBudgetAuthority`.
   - `c` does not inject that service; the separate `worker-budget-authority` plugin provides it.
   - cordis 4.0.0-rc.10 throws a plain `Error('cannot get property … without inject')` on such a read.
-  - `kernel/http.ts:465` turns any non-`RouterError` into a 500.
+  - `5a5181b7:packages/kernel/http.ts:465` turns any non-`RouterError` into a 500.
 - **The effect.** Every worker-budget path through the meter threw on `5a5181b7`: preflight, authorize, inspect and
   revoke. No worker budget could be used. Step 8's "available" readback only observed the plugin's own refresh loop.
 
@@ -4768,26 +4768,40 @@ the service while the plugin is enabled and `undefined` otherwise. With no autho
 
 **Worker budgets: the release changes the qualification.** `executingRelease` on the published image gives
 `routerReleaseDigest` `414e8520031dae7fb20cc3548c3fbb837cb8f446b64e397335205b63556af6a5` (the live image:
-`597e19f5…2dc0`). `adapterDigests.openai` is unchanged (`bae4379d…61ba`). The committed File B row (`02d0ddb1…`) names
-the old release digest, so after the roll the Router filters it out (`runtime.ts:115-124`). In order:
-1. Retake readings R1-R5 after the roll.
-2. Reissue File B with `--supersede` (budget runbook, "Reissuing File B (supersede)").
-3. Run `file_b_router_check` once.
-
-No other Router change may follow before the canary.
+`597e19f5acf12dd9c774df934a18b02b4b7a08793b6c1128383f0e62a4b22dc0`). `adapterDigests.openai` is unchanged (`bae4379dd7e924b2cf045475101955b54a8fd92993037f8cb5a31331be0061ba`). The committed File B row (`02d0ddb1501c851b58183ff2427f32e811598b6e35724595b94677d1efac1ff7`)
+names the old release digest, so after the roll the Router filters it out
+(`1d652065:packages/plugins/worker-budget-authority/runtime.ts:115-124`). The steps are under "The roll and what follows" below.
 
 **Rollback.** Revert the image, the three-line comment above it and both annotations together, to image
 `registry.chifor.me/llm-router/router@sha256:54735b64a017d46c2828d1d421acf7696e036e0259eefae827785fcb8db0eb0b`,
 source `5a5181b78350a6f740cc65fb7412e1c009732a32`, release `router-0.1.0-20261114-adapted-codex`. That brings the 500
 back, and a rolled-back release digest needs File B reissued again.
 
-**At the roll.** The merge is the roll: Flux applies the new image, and `Recreate` replaces the one replica, so there
-is one outage and streams in flight are cut. Do not also run `roll_deploy`, which would be a second outage. Read back
-with `rollstate llm-router llm-router app=llm-router` (relay-researcher-remaining-live-steps.md, step 5 helpers): the
-revision rises by exactly 1, and one Pod of the new image runs.
+**Before the roll.** Take the `validate-live` baseline and save `GET /v1/routes` as the administrator.
 
-**After the roll.**
-1. `validate-live`: 6/9, the known baseline.
-2. The release gate (router-ab) on the live router.
-3. The worker-budget plugin reports `available` again, with the reader on the ledger.
-4. Then File B as above. `file_b_router_check` must return exit 0, `status: pass`, `signingReady: true`.
+**The roll and what follows, in this order.** Stop at the first step that fails.
+1. **Merge = the roll.** Flux applies the new image and `Recreate` replaces the one replica: one outage, and streams in
+   flight are cut. Do not also run `roll_deploy`, which would be a second outage. Read back with
+   `rollstate llm-router llm-router app=llm-router` (relay-researcher-remaining-live-steps.md, step 5 helpers):
+   - the revision rises by exactly 1, and one Pod of image `f923c13a40de9e52948c122eb1528d77886cf0d431581ebce93da2b0a4a87647` runs;
+   - after Flux's next reconcile of `apps` (at least 11 minutes later), the revision and the Pod are the same.
+2. **Router readback.**
+   - Plugins: `provider-openai` `active` with generation 1, `relay-keys` `active`, `worker-budget-authority` `active`.
+   - The ledger reader: `rreader` shows the new pid, stable, with `query_start` advancing.
+   - `lerrors` since the roll is empty.
+   - `rident`: `ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST` is still `547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad`.
+   - `validate-live`: 6/9, the known baseline. The three failures are `codex text`, `codex stream` and
+     `codex tool call`, which send a bare `model: 'codex'` and get `MODEL_REQUIRED`. Any other failure stops here.
+   - `GET /v1/routes` matches the pre-roll copy.
+3. **Release gate (router-ab) on the live router.** Codex and Claude. The qwen hosts are off at night, so qwen is
+   recorded as "not verified" until the morning run. A FAIL means: roll back ("Rollback" above) and stop.
+4. **Readings R1-R5 again** and a new File B evidence file (budget runbook, "Generating File B"). Expected:
+   `routerReleaseDigest` `414e8520031dae7fb20cc3548c3fbb837cb8f446b64e397335205b63556af6a5`, the same openai adapter
+   digest, and `providerGeneration` 1.
+5. **Reissue File B** with `--supersede` (budget runbook, "Reissuing File B (supersede)"):
+   - the owner confirms the new digest;
+   - one transaction, then the readback-line check;
+   - `file_b_check` passes.
+6. **`file_b_router_check`, once** (a second nonce). It must return exit 0, `status: pass` and `signingReady: true`.
+
+No other Router change may follow before the canary.
