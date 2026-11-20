@@ -28,7 +28,11 @@
 # of record stay on the QNAP at /models/, so both are re-stageable):
 #   * gpt-oss-120b, 60 GiB  — DELETED 2026-09-08, after verifying all three shards byte-for-byte
 #     against NFS. Took the volume from 88% to 49% full.
-#   * qwen3.5-122b, 72 GiB  — STILL STAGED.
+#   * qwen3.5-122b, 72 GiB  — GONE by 2026-11-20: the volume held 2 MB when inspected (how it was
+#     removed is unrecorded). The volume was then trimmed back to the thin pool (~130 GiB returned).
+# node2's /models-local (ctid 5002) held only the retired qwen3.6-35b-a3b copy (22.1 + 0.9 GB), referenced
+# by nothing but the disabled llama-swap.service. DELETED 2026-11-20 after a byte-size match against
+# /models/qwen3.6-35b-a3b/, and the volume trimmed. Both /models-local volumes are now EMPTY.
 # Removing an entry here does NOT by itself stop a running unit — this file is intent, read only when
 # provision.sh is deliberately re-run — so a retirement is always paired with a manual unit stop.
 #
@@ -42,9 +46,10 @@
 # single-model constraint binds again: bringing gpt-oss back means giving that up.
 #
 # ttl semantics (llama-swap): 0 = pinned (load once, never idle-unload); >0 = idle seconds before unload
-# (returning GTT to the host). swap:false => direct llama-server.service (no llama-swap). Managed models
-# are STAGED on local NVMe (/models-local — an out-of-band `pct set` mount) so cold reload is ~2-4 GB/s
+# (returning GTT to the host). swap:false => direct llama-server.service (no llama-swap). A managed model
+# CAN be staged on local NVMe (/models-local — an out-of-band `pct set` mount) so cold reload is ~2-4 GB/s
 # (~30-60s) vs ~300 MB/s over NFS; `gguf` = local copy, `stage_from` = NFS source (provision.sh rsyncs it).
+# As of 2026-11-20 NONE is: qwen3.8-27b loads straight from NFS (its `gguf` below is a /models/ path).
 
 models:
   # ---- On-prem quality tier: qwen3.8-27b, MANAGED on node2 + node3 (dense, vision-capable) ----
