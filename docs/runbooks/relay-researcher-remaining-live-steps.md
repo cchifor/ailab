@@ -108,7 +108,7 @@ Each of those steps repeats the requirement as a pre-check.
 | 0 | Session, helpers, baseline | (this checklist) | none | none |
 | 1 | **DONE**: Signer keys and the Router trust document (H5, first half) | Router connection step 3 | completed; readback only now | none |
 | 2 | **DONE**: Router trust inclusion | Router connection step 6 | completed; readback only now | none |
-| 3 | **DONE**: Control-metrics collector Secrets | control monitoring, activation step 2 | **OpenBao**: 1 document (NEW path); **Kubernetes**: 2 Secrets | none |
+| 3 | **DONE**: Control-metrics collector Secrets | control monitoring, activation step 2 | completed; readback only now | none |
 | 4 | Budget step 8 proofs | budget step 8 | **Kubernetes**: one temporary client Pod | none |
 | 5 | Witness drills A-D | budget, "Drills before production `ready=true`" | **OpenBao**: witness versions; **ledger**: the rotation to B and the `ready` flips; **Router admin API**: plugin on and off; **Kubernetes**: ExternalSecret annotations, Deployment restarts, the client Pod's deletion | **Router**, 8 times |
 | 6 | Durability evidence (6a), then the independent review (6b) | budget step 8; budget, "Durability evidence for the first `ready=true`" | **Kubernetes**: the disposable probe namespace and its objects, created and deleted; the ledger Pod's deletion. With the owner's OK only: a `qm reset` of the probe's node (tier b), a 60 s host firewall rule (tier c) | **the ledger Pod**, once (`OnDelete`); the probe's node VM if tier (b) runs |
@@ -419,7 +419,7 @@ Relay connection exists, reverting an inclusion PR is enough (`relay-router-conn
 second, after step 1) and the token was escrowed at `af/relay-control/collector`. The full readback
 passed on 2026-11-20: token shape, `MATCH`, the escrow's sha256 equal to `token-sha256`, the tenant row
 present in Relay, the expiry and pattern, and the discovery and RBAC checks. Re-run the readback only.
-The commands below are the historical record and must not be run again: `bao kv put` would replace the
+The commented-out creation block below is the historical record and must not be run again: `bao kv put` would replace the
 escrowed token, so it would no longer match the two Secrets.
 
 **Purpose.** Create the two Secrets that H6's `relay-control-monitoring` component needs
