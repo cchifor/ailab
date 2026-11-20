@@ -230,6 +230,75 @@ just thinpool --limit ai-node1                              # changed=0
 Rollback: `pve_thin_pool_zero: true` in that host's host_vars (or `lvchange --zero y pve/data`).
 Re-enabling does NOT scrub chunks provisioned while zeroing was off.
 
+## LXC volume trim (nightly; `pve_lxc_fstrim`, all three ai-nodes)
+
+The host's `fstrim.timer` never reaches a container's volumes, so what a container frees stays allocated
+in `pve/data`. On 2026-11-20 the LLM containers held 62 GiB (5002, ai-node2) and 134 GiB (5003, ai-node3)
+of freed-but-untrimmed blocks, mostly from model swaps on `/models-local`. `pve_base` (tag `lxc_fstrim`)
+installs a nightly sweep that trims them:
+
+- `/usr/local/sbin/pve-lxc-fstrim` (`ansible/roles/pve_base/files/pve-lxc-fstrim.sh`) picks the
+  `rootfs` and `mpN` volumes on `local-lvm` of every **running** container without a lock, minus
+  `pve_lxc_fstrim_exclude`. Bind mounts, read-only mount points and stopped containers are never touched.
+- Each volume goes through `/usr/local/sbin/lxc-fstrim-chunked.sh` (`scripts/lxc-fstrim-chunked.sh`, the
+  registry's weekly trim, now installed by the role): host-side only, 4 GiB chunks, waiting while host IO
+  pressure is above 45 %, 15 s between chunks (1 s after a chunk that trimmed nothing).
+- A deadline: no chunk starts after the slot's 13 min unless it can end by then. ext4 skips the block
+  groups it has already trimmed since the container mounted the volume, so a cut-short night is
+  continued by the next one and a quiet night costs seconds.
+- It shares `/run/lxc-fstrim-chunked.lock` and `/run/lxc-fstrim-chunked.stop` with the registry trim:
+  the two never trim at once, and `touch /run/lxc-fstrim-chunked.stop` stops both.
+
+**Slots (UTC, every day).** The hosts take turns, 20 min each including the unit's stop allowance:
+
+| Host | Sweep | What it trims today |
+|---|---|---|
+| ai-node2 | 04:30-04:49 | 5002 (rootfs, `/models-local`) |
+| ai-node3 | 04:50-05:09 | 5003 (rootfs, `/models-local`) |
+| ai-node1 | 05:10-05:29 | nothing: 5004 is excluded, its weekly unit trims it ([registry-cache.md](registry-cache.md)) |
+
+`scripts/tests/test_pve_lxc_fstrim_schedule.py` (run by script-tests) fails if a slot leaves 00:30-05:30,
+two hosts overlap (worst case: TimeoutStartSec plus TimeoutStopSec), the timeouts do not cover a chunk, or
+the registry container is not excluded on its host.
+
+**Other trims on the same drives.** The CI runners trim inside their VMs every night
+([ci-runners.md](ci-runners.md), "Thin-pool trim"). On ai-node2 (ci-runner-10, 03:40-05:25) and ai-node1
+(ci-runner-9, 04:15-05:25, not Sundays) a runner window covers this slot; ai-node2 has no runner-free
+time between 00:00 and 05:30 at all. The sweep does not see a runner's slices; it waits while host IO
+pressure is high, which a runner slice raises. After the one-time cleanup a night's work is small (what
+a container freed that day). That overlap is the same class of residual risk as the runners' own, and the
+interlock that ci-runners.md requires on its triggers would cover this sweep too.
+
+**Rollout, one host at a time** (from WSL with `ANSIBLE_CONFIG` set):
+
+```bash
+# 0. What is untrimmed now: a container's thin LV against its filesystem's use.
+python scripts/node-ssh.py 192.168.0.3 "lvs -o lv_name,lv_size,data_percent pve; pct df 5002"
+# 1. Preview. On ai-node1 this also shows the diff against the hand-installed lxc-fstrim-chunked.sh.
+just lxc-fstrim --limit ai-node2 --check --diff
+# 2. Apply; a second run changes nothing. The converge never starts a trim, only the timer.
+just lxc-fstrim --limit ai-node2
+just lxc-fstrim --limit ai-node2                       # changed=0
+python scripts/node-ssh.py 192.168.0.3 "systemctl list-timers pve-lxc-fstrim.timer; cat /etc/default/pve-lxc-fstrim"
+# 3. After its first night: the sweep's log, the beacon, the LV.
+python scripts/node-ssh.py 192.168.0.3 "journalctl -u pve-lxc-fstrim --since -1d --no-pager | tail -30; cat /var/lib/prometheus/node-exporter/pve_lxc_fstrim.prom; lvs pve/vm-5002-disk-1"
+```
+
+Verify it did not hurt etcd the same way as the registry trim (registry-cache.md, "Verify a run"): WAL
+fsync p99 per member over the slot against the slot before, and leader changes. Exit codes are in the
+script headers: the sweep exits 1 when a volume's trim failed (the beacon's
+`pve_lxc_fstrim_volume_exit_code` names it; 3 pressure never dropped, 4 pressure unreadable, 5 fstrim
+failed, 6 mount not released).
+
+Kill switch: `pve_lxc_fstrim_enabled: false` in the host's host_vars, then `just lxc-fstrim --limit
+<host>`. It stops a running sweep cleanly and removes the timer, the unit, the settings and the metrics;
+`lxc-fstrim-chunked.sh` stays for the registry unit.
+
+Tests: `bash scripts/tests/test-lxc-fstrim-chunked.sh` and `bash ansible/roles/pve_base/tests/test-pve-lxc-fstrim.sh`
+(stubs, run in CI by manifests.yaml), the schedule test above, and the manual Docker converge
+`bash ansible/roles/pve_base/tests/test-lxc-fstrim-converge-docker.sh` (systemd, idempotence, `--check`, a real
+trim of a loop-backed ext4 volume, disable).
+
 ## EC fan curve (`pve_ec_fan`, all three ai-nodes since 2026-11-19)
 
 The Bosgame M5's embedded controller (ITE IT5570E on the Sixunited AXB35-02 board) runs the fans on its

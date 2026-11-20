@@ -13,3 +13,12 @@ pve_thin_pool_zero: false
 # This host's fan3 (the system fan, not managed by the role) reads 0 rpm even at a fixed 100 %: a hardware
 # fault (unplugged or failed), not the driver.
 pve_ec_fan_enabled: true
+
+# Nightly trim of the running containers' local-lvm volumes (role pve_base, tag lxc_fstrim;
+# docs/runbooks/node-maintenance.md "LXC volume trim (nightly)"). The hosts take turns, 20 min each,
+# deadline and stop allowance included: ai-node2 04:30, ai-node3 04:50, this host 05:10 (ends by 05:29).
+# 5004 (the registry) is left out: its own weekly unit trims it (docs/runbooks/registry-cache.md); the
+# two share a lock, so a Sunday registry run that is still going makes this host's sweep skip, not wait.
+pve_lxc_fstrim_enabled: true
+pve_lxc_fstrim_start: "05:10"
+pve_lxc_fstrim_exclude: [5004]

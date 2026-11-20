@@ -31,6 +31,43 @@ pve_grub_cmdline_linux_default: "quiet"
 pve_thin_pool: pve/data
 pve_thin_pool_zero: true
 
+# Nightly trim of the containers' volumes (tag lxc_fstrim; files/pve-lxc-fstrim.sh has the how).
+# The host's fstrim.timer never reaches an LXC's volumes, so what a container frees stays allocated in
+# pve/data: on 2026-11-20 the LLM containers held 62 GiB (5002, ai-node2) and 134 GiB (5003, ai-node3) of
+# freed-but-untrimmed blocks, mostly from model swaps on /models-local. Every night, from the host only,
+# the sweep trims the rootfs and mpN volumes of every RUNNING container on these storages, one volume at
+# a time, through scripts/lxc-fstrim-chunked.sh (installed as /usr/local/sbin/lxc-fstrim-chunked.sh, the
+# same path ai-node1's weekly registry trim runs): chunked, waiting out host IO pressure, with a
+# deadline. ext4 skips block groups it has trimmed since the mount, so a night that runs out of time is
+# continued by the next one, and a quiet night costs a few seconds per volume.
+# OFF by default; host_vars turns it on per host with its own slot. Off again = the kill switch: the timer
+# and the sweep are removed (the inner script stays: the registry unit uses it). `touch
+# /run/lxc-fstrim-chunked.stop` stops a running sweep and the registry trim.
+# docs/runbooks/node-maintenance.md "LXC volume trim (nightly)".
+pve_lxc_fstrim_enabled: false
+pve_lxc_fstrim_storages: [local-lvm]
+# Container ids the sweep never touches. ai-node1 lists 5004: the registry LXC has its own weekly unit
+# (registry-lxc-fstrim.timer, docs/runbooks/registry-cache.md), and two trims of one volume are waste.
+pve_lxc_fstrim_exclude: []
+# The slot, HH:MM UTC (quoted: YAML 1.1 reads an unquoted 04:30 as a number). The timer starts the sweep
+# there, every day; no chunk starts after start + run_max_min (less one chunk's worst case). The hosts'
+# slots must not overlap, nor run past 05:30, counting the unit's whole stop allowance:
+# scripts/tests/test_pve_lxc_fstrim_schedule.py checks every host's slot.
+pve_lxc_fstrim_start: "04:30"
+pve_lxc_fstrim_run_max_min: 13
+# lxc-fstrim-chunked.sh's settings for the sweep. A 4 GiB chunk is ~1.5 min of TRIM at the measured worst
+# (23 s per GiB); SEC_PER_GB (30) costs it for the deadline. A chunk that trimmed nothing is followed by
+# the 1 s idle pause, not the 15 s one, so a volume with nothing new to trim is walked quickly.
+pve_lxc_fstrim_chunk_gb: 4
+pve_lxc_fstrim_pause_s: 15
+pve_lxc_fstrim_pause_idle_s: 1
+pve_lxc_fstrim_sec_per_gb: 30
+pve_lxc_fstrim_psi_max: 45
+# The longest wait for host IO pressure before one chunk; the deadline ends a wait earlier.
+pve_lxc_fstrim_psi_wait_max_s: 600
+# node_exporter's textfile directory (the Debian package reads it by default; see pve_ec_fan).
+pve_lxc_fstrim_textfile_dir: /var/lib/prometheus/node-exporter
+
 # Host writeback bounds (ADR 0042, 2026-11-19). The CI runner and reviewer disks run cache=unsafe, so their
 # writes land in this host's page cache and the kernel writes them back later. With the stock ratios
 # (dirty 20% / background 10% of available memory, ~20-25 GiB free here) a runner could build a multi-GiB

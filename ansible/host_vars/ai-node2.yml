@@ -10,3 +10,10 @@ pve_thin_pool_zero: false
 # same curve as ai-node1 (the role defaults). Secure Boot disabled here 2026-11-19 (mokutil: disabled,
 # lockdown [none]), which the unsigned ec_su_axb35 module needs.
 pve_ec_fan_enabled: true
+
+# Nightly trim of the running containers' local-lvm volumes (role pve_base, tag lxc_fstrim;
+# docs/runbooks/node-maintenance.md "LXC volume trim (nightly)"): the LLM container 5002's rootfs and
+# /models-local (62 GiB freed but untrimmed on 2026-11-20). The hosts take turns, 20 min each: this host
+# 04:30, ai-node3 04:50, ai-node1 05:10.
+pve_lxc_fstrim_enabled: true
+pve_lxc_fstrim_start: "04:30"

@@ -35,3 +35,10 @@ pve_grub_cmdline_linux_default: "quiet thunderbolt.host_reset=false pcie_aspm=of
 # lockdown [none]), which the unsigned ec_su_axb35 module needs. All three fans verified controllable on this
 # host the same day (fan1/fan2 ~1,500 rpm at 20% and ~4,750 at 100%; fan3 541 / 2,450 rpm, left on the EC curve).
 pve_ec_fan_enabled: true
+
+# Nightly trim of the running containers' local-lvm volumes (role pve_base, tag lxc_fstrim;
+# docs/runbooks/node-maintenance.md "LXC volume trim (nightly)"): the LLM container 5003's rootfs and
+# /models-local (134 GiB freed but untrimmed on 2026-11-20). The hosts take turns, 20 min each: ai-node2
+# 04:30, this host 04:50, ai-node1 05:10.
+pve_lxc_fstrim_enabled: true
+pve_lxc_fstrim_start: "04:50"

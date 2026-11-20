@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Pressure-guarded, chunked fstrim of one LXC mount point's volume (plans/2026-10-07-etcd-leader-churn-
-# plan.md step E).
+# Pressure-guarded, chunked fstrim of one LXC volume (plans/2026-10-07-etcd-leader-churn-plan.md step E).
 #
-#   lxc-fstrim-chunked.sh <ctid> <mpN>
-#   e.g. lxc-fstrim-chunked.sh 5004 mp0     (the Zot registry LXC's data volume on ai-node1)
+#   lxc-fstrim-chunked.sh <ctid> <rootfs|mpN>
+#   e.g. lxc-fstrim-chunked.sh 5004 mp0     (the Zot registry LXC's data volume on ai-node1, weekly)
+#   The nightly sweep of every running container (role pve_base, files/pve-lxc-fstrim.sh) calls it once
+#   per local-lvm volume, with a DEADLINE.
 #
 # WHY. The host's fstrim.timer never reaches LXC mount points. The registry LXC's thin volume on
 # ai-node1 grew to 377 GB allocated for 170 GB in use, and the extra thin-pool fill measurably slows
@@ -21,11 +22,16 @@
 # - The volume is mounted privately on the host (nosuid,nodev,noexec). The kernel shares the
 #   superblock with the container's own mount. The host's fstrim then trims that mount.
 # - It waits while host IO pressure (some avg10) is above PSI_MAX, refuses to run when pressure is
-#   unreadable, and pauses PAUSE_S between chunks.
+#   unreadable, and pauses PAUSE_S between chunks (PAUSE_IDLE_S after a chunk that trimmed 0 bytes: ext4
+#   skips the block groups it has trimmed since the mount and seen no free in since, so such a chunk sent
+#   no discard at all. The default is PAUSE_S, i.e. no difference).
+# - DEADLINE (Unix seconds, optional): no chunk starts unless it can end by then at SEC_PER_GB, and a
+#   pressure wait ends there too. The run then stops cleanly (exit 8). A chunk already running is never
+#   cut short; the caller's unit allows for one (TimeoutStartSec, TimeoutStopSec).
 #
 # Exit codes:
 #   0 = done, or stopped by STOP_FILE (checked before each chunk and during pressure waits)
-#   1 = mount point/volume not resolvable, not a block device, or not ext2/3/4; mount failed
+#   1 = rootfs/mount point/volume not resolvable, not a block device, or not ext2/3/4; mount failed
 #   2 = usage or invalid settings
 #   3 = IO pressure stayed above PSI_MAX for PSI_WAIT_MAX_S
 #   4 = IO pressure unreadable
@@ -33,17 +39,21 @@
 #   6 = the run succeeded but the host-side mount could not be released (the volume stays mounted)
 #   143/130 = stopped by SIGTERM/SIGINT (after the in-flight trim/sleep finished and the mount was released)
 #   7 = another run holds the lock (LOCK_FILE)
+#   8 = DEADLINE reached before the whole volume was covered (stopped cleanly, mount released)
 # Deploy (ai-node1, via scripts/node-ssh.py): docs/runbooks/registry-cache.md, "Thin-volume trim".
 set -uo pipefail
 
 CTID="${1:-}"; MPKEY="${2:-}"
-usage() { echo "usage: $0 <ctid> <mpN>   (settings: CHUNK_GB PAUSE_S PSI_MAX PSI_WAIT_MAX_S PSI_FILE STOP_FILE)"; exit 2; }
-[[ "$CTID" =~ ^[0-9]+$ && "$MPKEY" =~ ^mp[0-9]+$ ]] || usage
+usage() { echo "usage: $0 <ctid> <rootfs|mpN>   (settings: CHUNK_GB PAUSE_S PAUSE_IDLE_S PSI_MAX PSI_WAIT_MAX_S PSI_FILE STOP_FILE DEADLINE SEC_PER_GB)"; exit 2; }
+[[ "$CTID" =~ ^[0-9]+$ && "$MPKEY" =~ ^(rootfs|mp[0-9]+)$ ]] || usage
 
 CHUNK_GB="${CHUNK_GB:-8}"
 PAUSE_S="${PAUSE_S:-15}"
 PSI_MAX="${PSI_MAX:-45}"                 # host IO "some avg10" percent above which we wait
 PSI_WAIT_MAX_S="${PSI_WAIT_MAX_S:-1800}" # give up (exit 3) after waiting this long for one chunk
+PAUSE_IDLE_S="${PAUSE_IDLE_S:-$PAUSE_S}" # pause after a chunk that trimmed 0 bytes
+DEADLINE="${DEADLINE:-}"                 # Unix seconds; empty = none (the registry's weekly unit)
+SEC_PER_GB="${SEC_PER_GB:-30}"           # a chunk's worst case for DEADLINE (measured 17-23 s per GiB)
 PSI_FILE="${PSI_FILE:-/proc/pressure/io}"
 STOP_FILE="${STOP_FILE:-/run/lxc-fstrim-chunked.stop}"
 MOUNT_BASE="${MOUNT_BASE:-/run}"
@@ -55,6 +65,9 @@ posint() { [[ "$1" =~ ^[1-9][0-9]*$ ]] && [ "${#1}" -le 6 ]; }
 posint "$CHUNK_GB"       && [ "$CHUNK_GB" -le 1024 ] || die 2 "invalid CHUNK_GB='$CHUNK_GB' (1-1024)"
 posint "$PAUSE_S"        || die 2 "invalid PAUSE_S='$PAUSE_S' (positive integer seconds)"
 posint "$PSI_WAIT_MAX_S" || die 2 "invalid PSI_WAIT_MAX_S='$PSI_WAIT_MAX_S' (positive integer seconds)"
+posint "$PAUSE_IDLE_S"   || die 2 "invalid PAUSE_IDLE_S='$PAUSE_IDLE_S' (positive integer seconds)"
+posint "$SEC_PER_GB"     || die 2 "invalid SEC_PER_GB='$SEC_PER_GB' (positive integer seconds)"
+[ -z "$DEADLINE" ] || [[ "$DEADLINE" =~ ^[1-9][0-9]{0,11}$ ]] || die 2 "invalid DEADLINE='$DEADLINE' (Unix seconds)"
 [[ "$PSI_MAX" =~ ^[0-9]+(\.[0-9]+)?$ ]] && awk -v m="$PSI_MAX" 'BEGIN { exit !(m >= 0 && m <= 100) }' \
   || die 2 "invalid PSI_MAX='$PSI_MAX' (0-100)"
 
@@ -63,6 +76,8 @@ psi() { awk '$1 == "some" { for (i = 2; i <= NF; i++) if ($i ~ /^avg10=[0-9]+(\.
 above() { awk -v a="$1" -v m="$PSI_MAX" 'BEGIN { exit !(a > m) }'; }
 pool() { lvs --noheadings -o data_percent "$POOL" 2>/dev/null | tr -d ' ' || echo "?"; }
 stopped() { [ -e "$STOP_FILE" ]; }
+# True when a chunk started now could not end by DEADLINE at SEC_PER_GB (never true without a DEADLINE).
+past_deadline() { [ -n "$DEADLINE" ] && [ $(( $(date +%s) + CHUNK_GB * SEC_PER_GB )) -gt "$DEADLINE" ]; }
 
 # One run at a time (reviewer-claude on #1130): a hand-run supervised trim overlapping the timer's run
 # would mount the LV twice and double the discard bursts on cp1's WAL drive. The lock is released when
@@ -72,7 +87,8 @@ exec 9>"$LOCK_FILE" || die 1 "cannot open lock file $LOCK_FILE"
 flock -n 9 || die 7 "another run holds $LOCK_FILE - not starting a second, overlapping trim"
 
 # --- resolve the volume from host-side metadata only ----------------------------------------------
-volid="$(pct config "$CTID" 2>/dev/null | sed -nE "s/^${MPKEY}: ([^,]+),.*/\1/p")"
+# The main section only: a snapshot's copy of the key follows a `[name]` line.
+volid="$(pct config "$CTID" 2>/dev/null | sed -nE "/^\[/q; s/^${MPKEY}: ([^,]+)(,.*)?$/\1/p")"
 [ -n "$volid" ] || die 1 "$MPKEY not found in 'pct config $CTID'"
 dev="$(pvesm path "$volid" 2>/dev/null)"
 [ -n "$dev" ] || die 1 "pvesm path $volid returned nothing"
@@ -124,6 +140,7 @@ log "start: $volid ($dev) size=$size bytes chunks=$chunks chunk=${CHUNK_GB}GiB p
 
 for (( i = 0; i < chunks; i++ )); do
   stopped && { log "stop file $STOP_FILE present - stopping before chunk $((i + 1)) trimmed_total=$total"; exit 0; }
+  past_deadline && die 8 "deadline reached - stopping before chunk $((i + 1))/$chunks trimmed_total=$total"
   waited=0
   while :; do
     p="$(psi)"
@@ -133,6 +150,7 @@ for (( i = 0; i < chunks; i++ )); do
       || die 3 "host IO pressure stayed above ${PSI_MAX}% (now $p) for ${waited}s - giving up at chunk $((i + 1)) trimmed_total=$total"
     run_child sleep "$PAUSE_S"; waited=$(( waited + PAUSE_S ))
     stopped && { log "stop file $STOP_FILE present - stopping during the pressure wait before chunk $((i + 1)) trimmed_total=$total"; exit 0; }
+    past_deadline && die 8 "deadline reached during the pressure wait before chunk $((i + 1))/$chunks trimmed_total=$total"
   done
   off=$(( i * chunk ))
   if ! run_child fstrim -v -o "$off" -l "$chunk" "$mnt" > "$outf" 2>&1; then
@@ -142,7 +160,7 @@ for (( i = 0; i < chunks; i++ )); do
   bytes="$(sed -nE 's/.*\(([0-9]+) bytes\) trimmed.*/\1/p' <<< "$out")"
   total=$(( total + ${bytes:-0} ))
   log "chunk=$((i + 1))/$chunks off=$off waited=${waited}s psi=$p ${out#*: }"
-  run_child sleep "$PAUSE_S"
+  if [ "${bytes:-0}" -eq 0 ]; then run_child sleep "$PAUSE_IDLE_S"; else run_child sleep "$PAUSE_S"; fi
 done
 
 log "end: trimmed_total=$total pool=$(pool)%"

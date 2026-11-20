@@ -146,6 +146,11 @@
   when: (pve_thin_pool_zero_state.stdout | trim == '1') != (pve_thin_pool_zero | bool)
   tags: [thinpool]
 
+# ---- Nightly trim of the running containers' local-lvm volumes (pve_lxc_fstrim_*) ----
+# `just lxc-fstrim --limit <host>` (tags: lxc_fstrim) converges only this. Its tasks carry the tag.
+- name: Nightly LXC volume trim
+  ansible.builtin.import_tasks: lxc_fstrim.yml
+
 # ---- Host writeback bounds (pve_base_writeback_sysctl; ADR 0042, see defaults/main.yml) ----
 # `ansible-playbook site.yml --limit <host> --tags writeback` converges only this. Live; no reboot.
 - name: Bound host writeback (dirty page cache)
