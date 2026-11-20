@@ -85,6 +85,10 @@ python scripts/node-ssh.py <host-ip> "for i in \$(seq 1 90); do qm status <vmid>
 # 5. boot race: the AI LXC often fails its first autostart (amdgpu device appears ~6 s after LXC start).
 python scripts/node-ssh.py <host-ip> "pct start <ctid>"
 
+# 5b. the CP's disk is on qnap-nfs: the boot-order guard must have said "ready" (section "Boot-order guard").
+#     A WARNING instead means the CP may be stopped: `qm start <vmid>` once the share is back.
+python scripts/node-ssh.py <host-ip> "journalctl -b -u pve-guests --no-pager | grep pve-nfs-disk-gate; qm status <vmid>"
+
 # 6. gates before the next node: see the post-maintenance checklist below.
 ```
 
@@ -200,6 +204,83 @@ Tier-B RWO singletons recover in ~2–3 min instead of ~13. **Remove the taint o
 ```bash
 kubectl --context admin@ai taint nodes <node> node.kubernetes.io/out-of-service=nodeshutdown:NoExecute-
 ```
+
+## Boot-order guard (`pve_nfs_disk_gate`, all three ai-nodes)
+
+Since 2026-11-20 each host's Talos CP disk is a raw file on `qnap-nfs` (ADR 0043). `pve-guests.service` starts the
+onboot guests once per boot and never retries. PVE refuses to start a VM whose storage is offline (`storage
+'qnap-nfs' is not online`). The hosts reach the NAS over the storage link (Thunderbolt on node1/2, the 10G adapter
+on node3), which comes up during boot. After the 2026-10-30 power cut the NAS served NFS ~6 min after the hosts.
+Either way a CP could stay stopped until someone started it by hand.
+
+`pve_base` (tag `nfs_disk_gate`, on by default) adds a drop-in, `pve-guests.service.d/10-ailab-nfs-disk-gate.conf`.
+It runs `/usr/local/sbin/pve-nfs-disk-gate` as a `-` ExecStartPre, after the stock `pve-startall-delay` and before
+startall. For each storage in `pve_nfs_disk_gate_storages` that holds a disk of an onboot VM on the host, the gate
+waits until the storage is:
+
+1. **mounted:** an NFS mount exactly at its path, read from `/proc/self/mountinfo`, never a stat. pvestatd mounts the
+   storage once the server answers. Meanwhile the gate asks PVE to activate it (`pvesm status --storage`), as
+   `qm start` would.
+2. **writable:** `<path>/.pve-nfs-disk-gate/<node>` is written, fsync'ed and read back.
+3. **serving the disk:** the first 4 KiB of each such disk image is read, so an empty export does not pass.
+
+The wait is bounded by `pve_nfs_disk_gate_timeout_s` (600 s) across all storages. Each probe runs in a process group of
+its own: a hung one is SIGKILLed with everything it started (a `dd`, pvesm's `mount.nfs`) and never waited for, so
+only a process stuck in uninterruptible NFS I/O can outlive it. With the share up it passes in seconds. A host with nothing on these storages passes at once.
+
+**After a timeout the CPs are started anyway, not skipped.** The gate logs a WARNING and pve-guests starts every
+guest as before. PVE's own storage check then fails a CP's start while the share is offline, so a CP never boots
+against a missing disk. If the share came back after the deadline, the CP starts with nobody involved. On PVE 9.2,
+startall runs starts in parallel worker slots (up to 8), so a CP start stuck on a hung share holds no other guest.
+The full reasoning is in `ansible/roles/pve_base/defaults/main.yml`. **A CP that PVE refused stays stopped:** run
+`qm start <vmid>` once the share is back, then check etcd 3/3.
+
+Reading it after any host boot:
+
+```bash
+python scripts/node-ssh.py <host-ip> "journalctl -b -u pve-guests -o short-iso --no-pager | grep -E 'pve-nfs-disk-gate|Starting (VM|CT)'"
+# ready:   pve-nfs-disk-gate: waiting up to 600s for qnap-nfs at /mnt/pve/qnap-nfs (VM 4001)
+#          pve-nfs-disk-gate: qnap-nfs ready after 7s: mounted, writable, serving the disks of VM 4001
+#          ...then the "Starting VM/CT" lines
+# timeout: pve-nfs-disk-gate: WARNING: qnap-nfs not ready after 600s: <the last check that failed>. Handing over ...
+#          (priority warning: `journalctl -b -u pve-guests -p warning` shows it alone)
+```
+
+**Rollout, one host at a time.** The drop-in only takes effect at the next boot. Nothing is restarted: the role runs
+a daemon-reload and never touches pve-guests or a guest.
+
+```bash
+# 0. What the host runs now: the stock unit, no drop-in yet.
+python scripts/node-ssh.py <host-ip> "systemctl show -p ExecStartPre --value pve-guests.service; ls /etc/systemd/system/pve-guests.service.d/ 2>&1"
+# 1. Preview (from WSL, ANSIBLE_CONFIG set; see the ailab-ansible notes in CLAUDE.md): the script and the drop-in.
+just nfs-disk-gate --limit ai-node1 --check --diff
+# 2. Apply, then a second run must change nothing.
+just nfs-disk-gate --limit ai-node1
+just nfs-disk-gate --limit ai-node1                          # changed=0
+# 3. Verify that systemd loaded it (the role asserts this too), and dry-run the gate on the live host. The run is
+#    safe: it writes only its probe file on the share and reads the first 4 KiB of the running CP's disk image.
+python scripts/node-ssh.py <host-ip> "systemctl show -p ExecStartPre --value pve-guests.service | grep -c 'pve-nfs-disk-gate ; ignore_errors=yes'; WAIT_S=30 /usr/local/sbin/pve-nfs-disk-gate; echo rc=\$?"
+#    expect 1, "qnap-nfs ready after 0s: mounted, writable, serving the disks of VM 400N", rc=0
+# 4. The next host.
+```
+
+Rollback: `pve_nfs_disk_gate_enabled: false` (removes the drop-in and the script), or remove the drop-in by hand and
+`systemctl daemon-reload`.
+
+**The owner-gated test: one host reboot.** The owner picks the host and the window: the ai-nodes are processing
+data. This test has not been run; the timeout path is covered only by the Docker test (below).
+
+1. The rollout above is done on that host, and step 3 said ready.
+2. Take the host down as in "Planned drain / host reboot" (steps 0-4, with the CP shut down gracefully), and reboot it.
+3. Read the boot as above. **Pass** = the gate's "waiting" and "ready after Ns" lines come before every
+   "Starting VM/CT" line, the CP is `running` without a hand `qm start`, and etcd is 3/3 (post-maintenance
+   checklist). Record N, the storage link's bring-up time on that host.
+4. **Fail** = no gate line (the drop-in was not loaded) or a WARNING. Start the CP by hand if it is stopped, finish
+   the checklist, and report before the next host.
+
+Tests: `scripts/tests/test_pve_nfs_disk_gate.py` (the real script against a fake `/etc/pve`, mountinfo and `pvesm`;
+in script-tests CI) and `bash ansible/roles/pve_base/tests/test-nfs-disk-gate-converge-docker.sh` (manual: the role
+converged into a systemd container, then a stand-in pve-guests booted with the share ready, late and never there).
 
 ## Thin pool fill (`pve_thin_textfile`, all three ai-nodes)
 

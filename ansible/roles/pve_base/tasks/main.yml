@@ -168,3 +168,9 @@
   loop_control:
     label: "{{ item.key }}={{ item.value }}"
   tags: [writeback]
+
+# ---- Boot-order guard: onboot VMs with a disk on NFS (pve_nfs_disk_gate_*; see defaults/main.yml) ----
+# `just nfs-disk-gate --limit <host>` (tags: nfs_disk_gate) converges only this, one host at a time. It installs a
+# pve-guests drop-in and never touches pve-guests itself: the gate first runs at the next boot.
+- name: Boot-order guard for VM disks on NFS
+  ansible.builtin.import_tasks: nfs_disk_gate.yml

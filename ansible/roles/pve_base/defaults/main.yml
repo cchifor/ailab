@@ -86,3 +86,28 @@ pve_lxc_fstrim_textfile_dir: /var/lib/prometheus/node-exporter
 pve_base_writeback_sysctl:
   vm.dirty_background_bytes: 268435456 # 256 MiB: background writeback starts here
   vm.dirty_bytes: 2147483648 # 2 GiB: writers are throttled above this
+
+# Boot-order guard for onboot VMs whose disks live on NFS (tag nfs_disk_gate; files/pve-nfs-disk-gate.sh).
+# Since 2026-11-20 the three Talos control-plane disks are on qnap-nfs (ADR 0043). pve-guests starts the onboot
+# guests once per boot and never retries, and PVE refuses a VM whose storage is offline. The storage link comes
+# up during boot, and after a power cut the NAS served NFS ~6 min after the hosts (2026-10-30). So a CP could
+# stay down until someone started it by hand. The gate is an ExecStartPre of pve-guests. It waits until each
+# listed storage that holds an onboot VM's disk on this host is mounted, writable and serving that disk, for at
+# most pve_nfs_disk_gate_timeout_s, and then pve-guests starts every guest as before. It never fails pve-guests.
+# - The wait holds back every guest on the host, but only while the share is not ready: a reboot with the NAS up
+#   passes in seconds. A host with no onboot VM on these storages passes at once. 600 s covers the ~6 min the NAS
+#   took after the 2026-10-30 power cut; it is also (to the second) the longest a local-only guest waits.
+# - After a timeout the CPs are STARTED ANYWAY (left to pve-guests), not skipped:
+#   * PVE's own `qm start` checks the storage first (rpcinfo, 10 s, then a TCP ping to 2049) and fails the start
+#     with "storage 'qnap-nfs' is not online". So it never boots a CP against a missing disk, and with the NAS down
+#     "start anyway" IS a skip, done by PVE (Storage.pm activate_storage, read on PVE 9.2.2).
+#   * If the share came back after the deadline, the CP starts with no operator. A skip would leave it down.
+#   * It holds no local-only guest: PVE 9.2's startall starts guests in parallel worker slots (up to 8 here), and
+#     no guest on these hosts has a startup order, so a CP start stuck on a hung share takes one slot.
+#   * A skip has no clean mechanism: it needs an override of the stock ExecStart (startall --vms) or a boot
+#     script writing onboot or a lock into /etc/pve, which is cluster-wide and owned by tofu.
+#   A CP that PVE refused stays stopped: `qm start <vmid>` once the share is back (the WARNING says so).
+# Off = the script and the drop-in are removed. Either way it takes effect at the next boot.
+pve_nfs_disk_gate_enabled: true
+pve_nfs_disk_gate_storages: [qnap-nfs]
+pve_nfs_disk_gate_timeout_s: 600
