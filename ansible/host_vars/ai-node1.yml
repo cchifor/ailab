@@ -6,6 +6,15 @@
 # zeroing ON. Rollout and verification: docs/runbooks/node-maintenance.md "Thin-pool zeroing".
 pve_thin_pool_zero: false
 
+# Nightly trim of the running containers' local-lvm volumes (role pve_base, tag lxc_fstrim;
+# docs/runbooks/node-maintenance.md "LXC volume trim (nightly)"). The hosts take turns, 20 min each,
+# deadline and stop allowance included: ai-node2 04:30, ai-node3 04:50, this host 05:10 (ends by 05:29).
+# 5004 (the registry) is left out: its own weekly unit trims it (docs/runbooks/registry-cache.md); the
+# two share a lock, so a Sunday registry run that is still going makes this host's sweep skip, not wait.
+pve_lxc_fstrim_enabled: true
+pve_lxc_fstrim_start: "05:10"
+pve_lxc_fstrim_exclude: [5004]
+
 # EC fan driver + CPU-fan curve (role pve_ec_fan; docs/runbooks/node-maintenance.md "EC fan curve").
 # On here and on ai-node2, whose Secure Boot is off (both since 2026-11-19): the ec_su_axb35 module is
 # unsigned, and a kernel in Secure Boot lockdown refuses it. ai-node3 still boots with Secure Boot on; turning

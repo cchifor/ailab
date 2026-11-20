@@ -409,6 +409,13 @@ UNIT
 systemctl daemon-reload && systemctl enable --now registry-lxc-fstrim.timer
 ```
 
+**The script is under the role now (2026-11-20).** `pve_base` (tag `lxc_fstrim`, on for ai-node1) installs
+`/usr/local/sbin/lxc-fstrim-chunked.sh` from the repo with the nightly LXC sweep
+([node-maintenance.md](node-maintenance.md), "LXC volume trim (nightly)"), so the `install` line above is
+for a host without it. The weekly unit above is still hand-installed; it runs the role's copy, whose
+defaults are unchanged (no deadline, the same chunk and pauses). The sweep excludes 5004 on ai-node1 and
+shares this script's lock and stop file, so the two never trim at once.
+
 **The Sunday deadline (2026-11-19, #1858).** The script's pressure-wait budget (`PSI_WAIT_MAX_S`) is
 per chunk, so on this 384 GiB volume a run can wait for many hours. `TimeoutStartSec=19h45min` (with
 `TimeoutStopSec=300` for the in-flight chunk) ends it by 23:36 Sunday at the latest, whatever the

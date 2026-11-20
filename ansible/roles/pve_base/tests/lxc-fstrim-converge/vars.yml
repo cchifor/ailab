@@ -1,0 +1,3 @@
+# ai-node2's settings (host_vars/ai-node2.yml): on, 04:30.
+pve_lxc_fstrim_enabled: true
+pve_lxc_fstrim_start: "04:30"

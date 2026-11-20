@@ -1,0 +1,21 @@
+# Managed by ansible (role: pve_base, tag lxc_fstrim). The nightly trim of the running containers'
+# local-lvm volumes; started by pve-lxc-fstrim.timer. docs/runbooks/node-maintenance.md
+# "LXC volume trim (nightly)".
+{% set inflight = (pve_lxc_fstrim_chunk_gb | int) * (pve_lxc_fstrim_sec_per_gb | int) %}
+[Unit]
+Description=Nightly chunked, IO-pressure-guarded trim of the running containers' local-lvm volumes
+After=pve-guests.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pve-lxc-fstrim
+# /var/lib/pve-lxc-fstrim: each volume's cursor and last complete pass (created by systemd).
+StateDirectory=pve-lxc-fstrim
+Nice=10
+# The deadline. No chunk starts after start + {{ pve_lxc_fstrim_run_max_min | int }} min unless it can end by
+# then; this allows one chunk more ({{ inflight }} s) and a minute to unmount. A oneshot is "activating" for
+# its whole run, so TimeoutStartSec= is the limit (RuntimeMaxSec= does nothing on a oneshot).
+TimeoutStartSec={{ (pve_lxc_fstrim_run_max_min | int) * 60 + inflight + 60 }}
+# On stop the sweep waits for the in-flight chunk and the unmount; a deliberate stop is not a failure.
+TimeoutStopSec={{ inflight + 60 }}
+SuccessExitStatus=143 130
