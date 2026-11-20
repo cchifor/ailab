@@ -12,7 +12,9 @@
 # - a failed trim is a failed run, and bad settings or an unknown volume are errors;
 # - for the nightly sweep (role pve_base): a rootfs works like an mpN, a snapshot's copy of a key is never
 #   used, a DEADLINE stops it cleanly (exit 8) before a chunk that could not end in time, also during a
-#   pressure wait, and a chunk that trimmed nothing is followed by the short PAUSE_IDLE_S.
+#   pressure wait, and a chunk that trimmed nothing is followed by the short PAUSE_IDLE_S;
+# - with CURSOR_FILE, a volume the deadline cuts every night still reaches its tail: the cursor is kept on
+#   every exit before the last chunk and removed when the pass completes.
 #
 # Run: bash scripts/tests/test-lxc-fstrim-chunked.sh   (Linux, WSL or Git Bash)
 set -u
@@ -275,6 +277,39 @@ new_case busy; run PAUSE_S=7 PAUSE_IDLE_S=2
 eq "three full pauses" "7 7 7" "$(tr '\n' ' ' < "$CTL/sleep_args" | sed 's/ $//')"
 new_case idledefault; touch "$CTL/zero_bytes"; run PAUSE_S=7
 eq "PAUSE_IDLE_S defaults to PAUSE_S (the registry unit's behaviour)" "7 7 7" "$(tr '\n' ' ' < "$CTL/sleep_args" | sed 's/ $//')"
+
+echo "== CURSOR_FILE: a volume the deadline cuts every night still reaches its tail =="
+# One chunk a night: a chunk is costed at 8 GiB x 10 s = 80 s and takes 60 s; DEADLINE = now + 100.
+new_case nights; echo 1000 > "$CTL/clock"; echo 60 > "$CTL/trim_s"
+for night in 1 2 3 4; do
+  run DEADLINE=$(( $(cat "$CTL/clock") + 100 )) SEC_PER_GB=10 CURSOR_FILE="$CTL/cursor"
+  echo "$(cat "$CTL/rc"):$( [ -e "$CTL/cursor" ] && cut -d' ' -f1 "$CTL/cursor" || echo none)" >> "$CTL/nights"
+  echo $(( $(cat "$CTL/clock") + 86400 )) > "$CTL/clock"
+done
+eq "offsets night by night: 0, 8 GiB, 16 GiB (the pass is complete), then 0 again" \
+  "0 $((8 * GiB)) $((16 * GiB)) 0" "$(sed -E 's/^-v -o ([0-9]+) .*/\1/' "$CTL/fstrim_calls" | tr '\n' ' ' | sed 's/ $//')"
+eq "exit and cursor after each night" "8:next=1 8:next=2 0:none 8:next=1" "$(tr '\n' ' ' < "$CTL/nights" | sed 's/ $//')"
+eq "the cursor's geometry" "next=1 chunks=3 size=$((20 * GiB)) chunk=$((8 * GiB))" "$(cat "$CTL/cursor")"
+eq "unmounted every night" 4 "$(calls umount_calls)"
+
+echo "== CURSOR_FILE: kept at the chunk a stop or a failure left; a cursor for another geometry starts over =="
+new_case cstop; echo "next=2 chunks=3 size=$((20 * GiB)) chunk=$((8 * GiB))" > "$CTL/cursor"; touch "$CTL/stop"
+run CURSOR_FILE="$CTL/cursor"
+eq "stop file: nothing trimmed" 0 "$(calls fstrim_calls)"
+eq "stop file: the cursor still says chunk 3" "next=2" "$(cut -d' ' -f1 "$CTL/cursor")"
+new_case cfail; echo 2 > "$CTL/fail_on"; run CURSOR_FILE="$CTL/cursor"
+eq "a failed chunk 2: exit 5" 5 "$(cat "$CTL/rc")"
+eq "a failed chunk 2: the cursor says chunk 2" "next=1" "$(cut -d' ' -f1 "$CTL/cursor")"
+new_case cresume; echo "next=2 chunks=3 size=$((20 * GiB)) chunk=$((8 * GiB))" > "$CTL/cursor"; run CURSOR_FILE="$CTL/cursor"
+eq "resume: only the last chunk" "-v -o $((16 * GiB)) -l $((8 * GiB))" "$(sed -E 's| [^ ]*$||' "$CTL/fstrim_calls")"
+eq "resume: exit 0, the pass complete, the cursor gone" "0 absent" "$(cat "$CTL/rc") $([ -e "$CTL/cursor" ] && echo present || echo absent)"
+for cur in "next=1 chunks=3 size=$((24 * GiB)) chunk=$((8 * GiB))" "next=7 chunks=3 size=$((20 * GiB)) chunk=$((8 * GiB))" "junk"; do
+  new_case cbad; echo "$cur" > "$CTL/cursor"; run CURSOR_FILE="$CTL/cursor"
+  eq "cursor '${cur:0:22}...': a new pass from chunk 1" 3 "$(calls fstrim_calls)"
+done
+has "and says so" "does not fit this volume" "$(cat "$CTL/out")"
+new_case cnone; run
+eq "without CURSOR_FILE (the registry unit) no cursor is written" "" "$(ls "$CTL" | grep -i cursor)"
 
 echo "== invalid settings are rejected before anything is mounted (exit 2) =="
 for bad in "CHUNK_GB=-1" "CHUNK_GB=0" "PAUSE_S=0" "PSI_MAX=abc" "PSI_WAIT_MAX_S=x" "PAUSE_IDLE_S=0" "SEC_PER_GB=x" "DEADLINE=soon" "DEADLINE=-5"; do

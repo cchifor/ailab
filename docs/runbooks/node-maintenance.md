@@ -243,11 +243,17 @@ installs a nightly sweep that trims them:
 - Each volume goes through `/usr/local/sbin/lxc-fstrim-chunked.sh` (`scripts/lxc-fstrim-chunked.sh`, the
   registry's weekly trim, now installed by the role): host-side only, 4 GiB chunks, waiting while host IO
   pressure is above 45 %, 15 s between chunks (1 s after a chunk that trimmed nothing).
-- A deadline: no chunk starts after the slot's 13 min unless it can end by then. ext4 skips the block
-  groups it has already trimmed since the container mounted the volume, so a cut-short night is
-  continued by the next one and a quiet night costs seconds.
+- A deadline: no chunk starts after the slot's 13 min unless it can end by then. Progress is kept in
+  `/var/lib/pve-lxc-fstrim` (the unit's `StateDirectory`): per volume a cursor, so a cut-short night is
+  continued at that chunk and every pass reaches the end of the volume, and the time of its last complete
+  pass. Volumes go least recently completed first, so no volume is starved by another that keeps running out
+  of time. ext4 also skips the block groups it has trimmed since the container mounted the volume, so a
+  quiet night costs seconds.
 - It shares `/run/lxc-fstrim-chunked.lock` and `/run/lxc-fstrim-chunked.stop` with the registry trim:
-  the two never trim at once, and `touch /run/lxc-fstrim-chunked.stop` stops both.
+  the two never trim at once, and `touch /run/lxc-fstrim-chunked.stop` stops both. **Remove it afterwards**
+  (`rm -f /run/lxc-fstrim-chunked.stop`): a stop file still there when the sweep starts fails it (exit 3)
+  instead of letting every night skip quietly. `/run` is a tmpfs, so a reboot clears it too.
+- The inner script's chunk lines go to the unit's journal as they happen (`journalctl -fu pve-lxc-fstrim`).
 
 **Slots (UTC, every day).** The hosts take turns, 20 min each including the unit's stop allowance:
 
@@ -288,7 +294,9 @@ Verify it did not hurt etcd the same way as the registry trim (registry-cache.md
 fsync p99 per member over the slot against the slot before, and leader changes. Exit codes are in the
 script headers: the sweep exits 1 when a volume's trim failed (the beacon's
 `pve_lxc_fstrim_volume_exit_code` names it; 3 pressure never dropped, 4 pressure unreadable, 5 fstrim
-failed, 6 mount not released).
+failed, 6 mount not released), and exits 3 when the stop file was already there at the start.
+`pve_lxc_fstrim_last_success_timestamp_seconds` is the oldest of the volumes' last complete passes
+(`pve_lxc_fstrim_volume_last_complete_timestamp_seconds`): every volume has completed a pass since then.
 
 Kill switch: `pve_lxc_fstrim_enabled: false` in the host's host_vars, then `just lxc-fstrim --limit
 <host>`. It stops a running sweep cleanly and removes the timer, the unit, the settings and the metrics;

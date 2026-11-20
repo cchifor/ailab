@@ -142,8 +142,11 @@ class PveLxcFstrimSchedule(unittest.TestCase):
         self.assertEqual(["ai-node1", "ai-node2", "ai-node3"], sorted(self.vars))
         self.assertEqual({"ai-node1": [5004]}, self.registry)
 
-    def test_every_host_runs_the_sweep(self):
-        self.assertEqual([], [h for h, v in self.vars.items() if not v.get("pve_lxc_fstrim_enabled")])
+    def test_a_host_switched_off_is_not_a_failure(self):
+        # The kill switch is pve_lxc_fstrim_enabled: false in one host's host_vars: no test may require it on.
+        # problems() checks every host that has it on, and ignores the others.
+        self.assertEqual([], self.mutated("ai-node2", pve_lxc_fstrim_enabled=False))
+        self.assertEqual([], self.mutated("ai-node1", pve_lxc_fstrim_enabled=False))
 
     def test_the_schedule_is_sound(self):
         self.assertEqual([], problems(self.vars, self.registry))

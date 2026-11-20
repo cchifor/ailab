@@ -94,11 +94,22 @@ bytes=$(metric 'pve_lxc_fstrim_volume_trimmed_bytes\{ctid="5002",volume="mp1"\}'
 eq "the bind mount was skipped" 1 "$(journalctl -u pve-lxc-fstrim --no-pager | grep -c 'mp0: bind mount')"
 eq "the host-side mount was released" 0 "$(findmnt -rn -o TARGET | grep -c lxc-fstrim)"
 eq "the container's own mount is untouched" /ctmnt "$(findmnt -rn -o TARGET "$LOOP")"
+[ -s /var/lib/pve-lxc-fstrim/5002-mp1.complete ] && [ ! -e /var/lib/pve-lxc-fstrim/5002-mp1.cursor ] \
+  && ok "the state dir (StateDirectory) records the complete pass, no cursor left" || bad "state: $(ls -la /var/lib/pve-lxc-fstrim 2>&1)"
+journalctl -u pve-lxc-fstrim --no-pager | grep -q 'lxc-fstrim-chunked\[5002/mp1\]: chunk=1/1' \
+  && ok "the inner script's chunk lines are in the unit's journal" || bad "no chunk line in the journal"
 
 # ---- the next night: ext4 remembers what it trimmed (shared superblock), so nothing is sent again ----
 systemctl start pve-lxc-fstrim.service
 eq "second night: 0 bytes" 0 "$(metric 'pve_lxc_fstrim_volume_trimmed_bytes\{ctid="5002",volume="mp1"\}')"
 eq "second night: reason done" 1 "$(metric 'pve_lxc_fstrim_last_run_reason\{reason="done"\}')"
+
+# ---- a stop file left over from a hand stop: the unit fails instead of skipping quietly ----
+touch /run/lxc-fstrim-chunked.stop
+systemctl start pve-lxc-fstrim.service
+eq "leftover stop file: the unit failed, exit 3" "failed 3" "$(systemctl show -p Result --value pve-lxc-fstrim.service | sed 's/exit-code/failed/') $(systemctl show -p ExecMainStatus --value pve-lxc-fstrim.service)"
+rm -f /run/lxc-fstrim-chunked.stop
+systemctl reset-failed pve-lxc-fstrim.service
 
 # ---- a new slot ----
 run newslot -e pve_lxc_fstrim_start=04:45 || { bad "new slot failed"; show newslot; }
@@ -107,6 +118,7 @@ eq "the timer moved" "*-*-* 04:45:00 UTC" "$(systemctl show -p TimersCalendar --
 # ---- refused settings ----
 run badstart -e pve_lxc_fstrim_start=4:30 && bad "an unpadded start was accepted" || ok "an unpadded start is refused"
 run badexclude -e '{"pve_lxc_fstrim_exclude": ["abc"]}' && bad "a non-numeric exclude was accepted" || ok "a non-numeric exclude is refused"
+run badpsi -e pve_lxc_fstrim_psi_max=45% && bad "psi_max 45% was accepted" || ok "psi_max 45% is refused"
 
 # ---- disable: the kill switch ----
 run disable -e pve_lxc_fstrim_enabled=false || { bad "disable failed"; show disable; }
@@ -116,6 +128,7 @@ eq "settings gone" absent "$(exists /etc/default/pve-lxc-fstrim)"
 eq "sweep gone" absent "$(exists /usr/local/sbin/pve-lxc-fstrim)"
 eq "marker gone" absent "$(exists "$TF/pve_lxc_fstrim_enabled.prom")"
 eq "beacon gone" absent "$(exists "$TF/pve_lxc_fstrim.prom")"
+eq "state gone" absent "$(exists /var/lib/pve-lxc-fstrim)"
 eq "the chunked trim stays (the registry unit runs it)" present "$(exists /usr/local/sbin/lxc-fstrim-chunked.sh)"
 eq "systemd no longer knows the timer" "" "$(systemctl list-unit-files pve-lxc-fstrim.timer --no-legend)"
 run disable-again -e pve_lxc_fstrim_enabled=false || { bad "second disable failed"; show disable-again; }

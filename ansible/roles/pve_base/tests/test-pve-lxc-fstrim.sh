@@ -11,10 +11,15 @@
 #   stopped (or took a lock) since the listing is skipped;
 # - the deadline, an inner exit 8 or 7, and the stop file make a partial pass (exit 0); an inner failure
 #   makes the sweep fail (exit 1) but the other volumes are still trimmed;
-# - the beacon: per-volume exit code and bytes, the total, and a last-success time that moves only on a
-#   complete pass (carried over otherwise);
-# - the lock (exit 7, no beacon), bad settings (exit 2), and SIGTERM (waits for the volume in flight,
-#   exit 143, beacon says terminated).
+# - the beacon: per-volume exit code, bytes and last complete pass, the total, and a last-success time that
+#   is the oldest of the volumes' last complete passes (carried over while one has never completed);
+# - progress across nights: a CURSOR_FILE per volume in the state dir, a .complete only when the inner script
+#   reached the last chunk (exit 0, no cursor left), volumes least recently completed first, so a run the
+#   deadline cuts every night still reaches every volume;
+# - a failed late read of a container's config skips that volume as a failure (never assumed unlocked);
+# - the inner script's lines reach the sweep's output (the journal) while the volume is still in flight;
+# - the lock (exit 7, no beacon), bad settings (exit 2), a stop file already there at the start (exit 3), an
+#   unusable state dir (exit 1), and SIGTERM to the unit's processes (waits for the volume in flight, exit 143).
 #
 # Run: bash ansible/roles/pve_base/tests/test-pve-lxc-fstrim.sh   (Linux; bash, flock, awk, sed)
 set -u
@@ -31,6 +36,7 @@ has()  { case "$3" in *"$2"*) ok "$1" ;; *) bad "$1" "expected to contain '$2', 
 hasnt(){ case "$3" in *"$2"*) bad "$1" "expected NOT to contain '$2', got: $3" ;; *) ok "$1" ;; esac; }
 calls(){ [ -f "$CTL/inner_calls" ] && cut -d' ' -f1,2 "$CTL/inner_calls" | tr '\n' ',' | sed 's/,$//' || echo ""; }
 metric(){ sed -nE "s/^$1 (.*)$/\1/p" "$CTL/textfile/pve_lxc_fstrim.prom" 2>/dev/null; }
+tree() { local p; echo "$1"; for p in $(pgrep -P "$1"); do tree "$p"; done; } # a pid and all its descendants
 
 ROOT=$(mktemp -d)
 trap 'rm -rf "$ROOT"' EXIT
@@ -44,6 +50,7 @@ case "$1" in
   config)
     [ -f "$CTL/config.$2" ] || exit 2
     n=$(( $(cat "$CTL/reads.$2" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$CTL/reads.$2"
+    [ -f "$CTL/config.$2.fail_from" ] && [ "$n" -ge "$(cat "$CTL/config.$2.fail_from")" ] && exit 2
     if [ "$n" -ge 2 ] && [ -f "$CTL/config.$2.late" ]; then cat "$CTL/config.$2.late"; else cat "$CTL/config.$2"; fi ;;
   status) if [ -f "$CTL/status.$2" ]; then cat "$CTL/status.$2"; else echo "status: running"; fi ;;
   *) exit 2 ;;
@@ -53,7 +60,12 @@ cat > "$BIN/inner" <<'STUB'
 #!/usr/bin/env bash
 # The inner script: records its call and the settings it inherited, takes $CTL/trim_s of the fake clock,
 # prints its end line and exits with $CTL/rc.<ct>.<key> (default 0).
-echo "$1 $2 DEADLINE=${DEADLINE:-} CHUNK_GB=${CHUNK_GB:-} PAUSE_IDLE_S=${PAUSE_IDLE_S:-} PSI_MAX=${PSI_MAX:-} STOP_FILE=${STOP_FILE:-}" >> "$CTL/inner_calls"
+echo "$1 $2 DEADLINE=${DEADLINE:-} CHUNK_GB=${CHUNK_GB:-} PAUSE_IDLE_S=${PAUSE_IDLE_S:-} PSI_MAX=${PSI_MAX:-} STOP_FILE=${STOP_FILE:-} CURSOR_FILE=${CURSOR_FILE:-}" >> "$CTL/inner_calls"
+# hold: print a chunk line, then wait for $CTL/release (the live-output case)
+if [ -f "$CTL/hold" ]; then
+  echo "lxc-fstrim-chunked[$1/$2]: chunk=1/3 off=0 (in flight)"
+  for _ in $(seq 1 100); do [ -f "$CTL/release" ] && break; /bin/sleep 0.1; done
+fi
 [ -f "$CTL/clock" ] && echo $(( $(cat "$CTL/clock") + $(cat "$CTL/trim_s" 2>/dev/null || echo 0) )) > "$CTL/clock"
 if [ -f "$CTL/block" ]; then
   # an in-flight trim that finishes its chunk (1 s) when terminated, then exits 143
@@ -62,7 +74,14 @@ if [ -f "$CTL/block" ]; then
 fi
 [ -f "$CTL/touch_stop_on.$1.$2" ] && touch "$CTL/stop"
 echo "lxc-fstrim-chunked[$1/$2]: end: trimmed_total=$(cat "$CTL/bytes.$1.$2" 2>/dev/null || echo 1024) pool=50%"
-exit "$(cat "$CTL/rc.$1.$2" 2>/dev/null || echo 0)"
+rc="$(cat "$CTL/rc.$1.$2" 2>/dev/null || echo 0)"
+# The cursor protocol of lxc-fstrim-chunked.sh: kept when the pass stopped short (the deadline, or a stop file:
+# leave_cursor), removed when it reached the last chunk.
+if [ -n "${CURSOR_FILE:-}" ]; then
+  if [ "$rc" = 8 ] || [ -f "$CTL/leave_cursor.$1.$2" ]; then echo "next=1 chunks=3 size=1 chunk=1" > "$CTL/state-cursor-written.$1.$2"; cp "$CTL/state-cursor-written.$1.$2" "$CURSOR_FILE"
+  elif [ "$rc" = 0 ]; then rm -f "$CURSOR_FILE"; fi
+fi
+exit "$rc"
 STUB
 cat > "$BIN/date" <<'STUB'
 #!/usr/bin/env bash
@@ -106,6 +125,7 @@ EOF
 run() { # extra VAR=value settings may be passed as arguments
   env PATH="$BIN:$PATH" PVE_LXC_FSTRIM_ENV_FILE=/dev/null PVE_LXC_FSTRIM_INNER="$BIN/inner" \
     PVE_LXC_FSTRIM_LOCK_FILE="$CTL/lock" PVE_LXC_FSTRIM_TEXTFILE_DIR="$CTL/textfile" STOP_FILE="$CTL/stop" \
+    PVE_LXC_FSTRIM_STATE_DIR="$CTL/state" \
     PVE_LXC_FSTRIM_EXCLUDE=5004 PVE_LXC_FSTRIM_RUN_MAX_S=780 CHUNK_GB=4 SEC_PER_GB=30 TMPDIR="$CTL" \
     "$@" bash "$SCRIPT" > "$CTL/out" 2>&1
   echo $? > "$CTL/rc"
@@ -130,7 +150,7 @@ has "and the shared stop file" "STOP_FILE=$CTL/stop" "$(sed -n 1p "$CTL/inner_ca
 
 echo "== a locked container is a partial pass, an unlocked host a complete one =="
 eq "a lock makes it partial" 1 "$(metric 'pve_lxc_fstrim_last_run_reason\{reason="partial"\}')"
-eq "no success time on a partial pass" "" "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)"
+eq "the success time covers the volumes found (the locked container is not among them)" 1000 "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)"
 new_case complete; printf 'hostname: backup-me\nrootfs: local-lvm:vm-5005-disk-0,size=8G\n' > "$CTL/config.5005"
 sed -i 's/ backup       backup-me/              backup-me/' "$CTL/pct_list"
 echo 2048 > "$CTL/bytes.5002.mp1"; echo 30 > "$CTL/trim_s"
@@ -138,7 +158,9 @@ run
 eq "exit 0" 0 "$(cat "$CTL/rc")"
 eq "four volumes" "5002 mp1,5002 rootfs,5005 rootfs,5006 rootfs" "$(calls)"
 eq "reason done" 1 "$(metric 'pve_lxc_fstrim_last_run_reason\{reason="done"\}')"
-eq "success time = the end of the run (1000 + 4 x 30 s)" 1120 "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)"
+eq "success time = the oldest volume's complete pass (the first, at 1000 + 30 s)" 1030 "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)"
+eq "per volume: its last complete pass" 1120 "$(metric 'pve_lxc_fstrim_volume_last_complete_timestamp_seconds\{ctid="5006",volume="rootfs"\}')"
+has "each volume gets its own cursor file in the state dir" "CURSOR_FILE=$CTL/state/5002-mp1.cursor" "$(sed -n 1p "$CTL/inner_calls")"
 eq "the total is the sum of the volumes' trimmed_total" $((2048 + 3 * 1024)) "$(metric pve_lxc_fstrim_trimmed_bytes)"
 eq "volumes found" 4 "$(metric pve_lxc_fstrim_volumes)"
 eq "per-volume bytes" 2048 "$(metric 'pve_lxc_fstrim_volume_trimmed_bytes\{ctid="5002",volume="mp1"\}')"
@@ -196,11 +218,12 @@ run
 eq "5006 not trimmed" "5002 mp1,5002 rootfs" "$(calls)"
 has "says why" "now holds a lock (status: running, lock backup)" "$(cat "$CTL/out")"
 
-echo "== the stop file: none before, or after the volume that saw it =="
+echo "== the stop file: one already there at the start is a leftover (exit 3); one that appears stops after the volume =="
 new_case stop; touch "$CTL/stop"; run
-eq "exit 0" 0 "$(cat "$CTL/rc")"
+eq "exit 3" 3 "$(cat "$CTL/rc")"
 eq "nothing trimmed" "" "$(calls)"
 eq "reason stopped" 1 "$(metric 'pve_lxc_fstrim_last_run_reason\{reason="stopped"\}')"
+has "says it is a leftover and how to clear it" "a leftover? remove it (rm -f $CTL/stop)" "$(cat "$CTL/out")"
 new_case stopmid; touch "$CTL/touch_stop_on.5002.mp1"; run
 eq "stops after that volume" "5002 mp1" "$(calls)"
 eq "reason stopped" 1 "$(metric 'pve_lxc_fstrim_last_run_reason\{reason="stopped"\}')"
@@ -244,18 +267,66 @@ for setting in "PVE_LXC_FSTRIM_RUN_MAX_S=0" "PVE_LXC_FSTRIM_RUN_MAX_S=x" "PVE_LX
   eq "$setting -> nothing trimmed" "" "$(calls)"
 done
 
+echo "== a failed late read of the config skips the volume as a failure, never as unlocked =="
+new_case latefail; echo 2 > "$CTL/config.5006.fail_from"; run
+eq "exit 1" 1 "$(cat "$CTL/rc")"
+eq "5006 not trimmed" "5002 mp1,5002 rootfs" "$(calls)"
+has "says why" "ct 5006: pct config failed - rootfs skipped (its lock could not be checked)" "$(cat "$CTL/out")"
+eq "reason failed" 1 "$(metric 'pve_lxc_fstrim_last_run_reason\{reason="failed"\}')"
+
+echo "== progress across nights: least recently completed first, so every volume gets its turn =="
+# One volume fits a night: budget 100 s, a chunk costs 4 x 10 s, each volume takes 70 s.
+new_case nights; echo 70 > "$CTL/trim_s"
+for night in 1 2 3 4; do
+  run PVE_LXC_FSTRIM_RUN_MAX_S=100 SEC_PER_GB=10
+  tail -1 "$CTL/inner_calls" | cut -d' ' -f1,2 >> "$CTL/firsts"
+  echo $(( $(cat "$CTL/clock") + 86400 )) > "$CTL/clock"
+done
+eq "night by night: 5002 mp1, 5002 rootfs, 5006 rootfs, then 5002 mp1 again (the oldest)" \
+  "5002 mp1,5002 rootfs,5006 rootfs,5002 mp1" "$(tr '\n' ',' < "$CTL/firsts" | sed 's/,$//')"
+eq "one volume a night" 4 "$(wc -l < "$CTL/inner_calls" | tr -d ' ')"
+eq "after night 4: success = the oldest last complete pass (night 2's, 5002 rootfs, at 87470 + 70)" 87540 \
+  "$(metric pve_lxc_fstrim_last_success_timestamp_seconds)"
+new_case order; mkdir -p "$CTL/state"; echo 900 > "$CTL/state/5002-mp1.complete"; echo 950 > "$CTL/state/5002-rootfs.complete"
+run
+eq "never completed first, then the oldest" "5006 rootfs,5002 mp1,5002 rootfs" "$(calls)"
+new_case cursorleft; touch "$CTL/leave_cursor.5002.mp1"; run
+eq "a volume left with a cursor (exit 0 at a stop file) is not complete" absent \
+  "$([ -e "$CTL/state/5002-mp1.complete" ] && echo present || echo absent)"
+eq "the others are" "present present" \
+  "$([ -e "$CTL/state/5002-rootfs.complete" ] && echo present) $([ -e "$CTL/state/5006-rootfs.complete" ] && echo present)"
+eq "so the pass is partial" 1 "$(metric 'pve_lxc_fstrim_last_run_reason\{reason="partial"\}')"
+new_case nostate; run PVE_LXC_FSTRIM_STATE_DIR=/proc/nonexistent/state
+eq "an unusable state dir: exit 1" 1 "$(cat "$CTL/rc")"
+eq "an unusable state dir: nothing trimmed" "" "$(calls)"
+
+echo "== the inner script's lines reach the journal while the volume is in flight =="
+new_case live; touch "$CTL/hold"
+env PATH="$BIN:$PATH" PVE_LXC_FSTRIM_ENV_FILE=/dev/null PVE_LXC_FSTRIM_INNER="$BIN/inner" \
+  PVE_LXC_FSTRIM_LOCK_FILE="$CTL/lock" PVE_LXC_FSTRIM_TEXTFILE_DIR="$CTL/textfile" STOP_FILE="$CTL/stop" \
+  PVE_LXC_FSTRIM_STATE_DIR="$CTL/state" PVE_LXC_FSTRIM_EXCLUDE=5004 TMPDIR="$CTL" bash "$SCRIPT" > "$CTL/out" 2>&1 &
+lpid=$!
+for _ in $(seq 1 50); do grep -q "chunk=1/3 off=0 (in flight)" "$CTL/out" 2>/dev/null && break; /bin/sleep 0.1; done
+has "the in-flight chunk line is already in the output" "chunk=1/3 off=0 (in flight)" "$(cat "$CTL/out")"
+eq "while the inner script is still running" absent "$(grep -q 'trimmed_total' "$CTL/out" && echo present || echo absent)"
+touch "$CTL/release"; wait "$lpid"; echo $? > "$CTL/rc"
+eq "then the sweep completes (exit 0)" 0 "$(cat "$CTL/rc")"
+eq "and still reads each volume's total from it" $((3 * 1024)) "$(metric pve_lxc_fstrim_trimmed_bytes)"
+
 echo "== SIGTERM while a volume is in flight: waits for it to release its mount, exit 143 =="
 new_case sigterm; touch "$CTL/block"; rm -f "$CTL/clock"
 env PATH="$BIN:$PATH" PVE_LXC_FSTRIM_ENV_FILE=/dev/null PVE_LXC_FSTRIM_INNER="$BIN/inner" \
   PVE_LXC_FSTRIM_LOCK_FILE="$CTL/lock" PVE_LXC_FSTRIM_TEXTFILE_DIR="$CTL/textfile" STOP_FILE="$CTL/stop" \
-  PVE_LXC_FSTRIM_EXCLUDE=5004 TMPDIR="$CTL" bash "$SCRIPT" > "$CTL/out" 2>&1 &
+  PVE_LXC_FSTRIM_STATE_DIR="$CTL/state" PVE_LXC_FSTRIM_EXCLUDE=5004 TMPDIR="$CTL" bash "$SCRIPT" > "$CTL/out" 2>&1 &
 spid=$!
 for _ in $(seq 1 100); do [ -f "$CTL/inner_running" ] && break; /bin/sleep 0.1; done
-# What systemd's default KillMode=control-group does: SIGTERM to every process of the unit.
-kill -TERM "$spid" $(pgrep -P "$spid") 2>/dev/null
+# What systemd's default KillMode=control-group does: SIGTERM to every process of the unit (the sweep, its
+# subshell, the inner script and its sleep, and tee, which ignores it).
+kill -TERM $(tree "$spid") 2>/dev/null
 wait "$spid"; echo $? > "$CTL/rc"
 eq "exit 143" 143 "$(cat "$CTL/rc")"
 eq "the volume in flight released its mount first" present "$([ -e "$CTL/inner_released" ] && echo present || echo absent)"
+has "its last line still reached the journal (tee outlived the TERM)" "inner: terminated, mount released" "$(cat "$CTL/out")"
 eq "only that volume ran" "5002 mp1" "$(calls)"
 eq "reason terminated" 1 "$(metric 'pve_lxc_fstrim_last_run_reason\{reason="terminated"\}')"
 

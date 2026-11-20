@@ -9,6 +9,8 @@ After=pve-guests.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/pve-lxc-fstrim
+# /var/lib/pve-lxc-fstrim: each volume's cursor and last complete pass (created by systemd).
+StateDirectory=pve-lxc-fstrim
 Nice=10
 # The deadline. No chunk starts after start + {{ pve_lxc_fstrim_run_max_min | int }} min unless it can end by
 # then; this allows one chunk more ({{ inflight }} s) and a minute to unmount. A oneshot is "activating" for

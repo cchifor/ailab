@@ -17,9 +17,12 @@
       - pve_lxc_fstrim_pause_idle_s | int >= 1
       - pve_lxc_fstrim_sec_per_gb | int >= 1
       - pve_lxc_fstrim_psi_wait_max_s | int >= 1
+      - pve_lxc_fstrim_psi_max | string is match('^[0-9]+(\.[0-9]+)?$')
+      - pve_lxc_fstrim_psi_max | float <= 100
     fail_msg: >-
-      pve_lxc_fstrim_*: need a quoted HH:MM start, run_max_min >= 5, storage ids, numeric container ids and
-      positive integers (start={{ pve_lxc_fstrim_start | to_json }}, exclude={{ pve_lxc_fstrim_exclude | to_json }})
+      pve_lxc_fstrim_*: need a quoted HH:MM start, run_max_min >= 5, storage ids, numeric container ids, positive
+      integers and psi_max a number 0-100 (start={{ pve_lxc_fstrim_start | to_json }},
+      exclude={{ pve_lxc_fstrim_exclude | to_json }}, psi_max={{ pve_lxc_fstrim_psi_max | to_json }})
     quiet: true
   when: pve_lxc_fstrim_enabled | bool
   tags: [lxc_fstrim]
@@ -136,6 +139,7 @@
         - /etc/systemd/system/pve-lxc-fstrim.service
         - /etc/default/pve-lxc-fstrim
         - /usr/local/sbin/pve-lxc-fstrim
+        - /var/lib/pve-lxc-fstrim
       register: pve_lxc_fstrim_removed
 
     - name: Reload systemd after removing the units
