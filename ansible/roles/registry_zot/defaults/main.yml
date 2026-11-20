@@ -206,8 +206,10 @@ registry_zot_config_allow_restart: false
 # does not list, so they are never re-fetched. They rank 11th-20th among workflow's protect tags by
 # push time. 20 passes with no spare rank; 30 leaves 10 (workflow gained 24 protect tags in the 30
 # days before, 3 in the last 14). Lower it to 10 once the platform protects those admissions and the
-# gate passes at 10. Until then a new workflow pin moves them one rank down: re-run the gate before
-# every apply.
+# gate passes at 10. The FIRST REAL (non-dry-run) apply of this policy waits for that platform change.
+# Once live, GC re-evaluates every hour, and each new workflow pin moves those 8 one rank down, with or
+# without another apply: the 10 spare ranks are a buffer of about two weeks at October's pin rate, not
+# protection.
 registry_zot_strive_keep_recent: 30
 # ...OR pushed within this window (and, for ailab-<digest>, pulled within it). A Go duration string
 # (zot parses it like gcDelay): 336h = 14 days.

@@ -161,7 +161,12 @@ step is a reload (`storage.retention` is on the apply helper's allowlist). Alway
    agentforge/** deletions are filtered out above. Tags pushed, or crossing the 14-day line, between the two make
    small differences. Any listed tag that the scan's `--json` keeps, or that holds a digest the scan reports as in
    use, is a stop. Untagged and referrer deletions log `"dry-run":true` too, with other messages.
-3. **Apply for real**: the same play without the `-e`. Watch the GC hour with the abort budget of "Dropping orphaned
+3. **Apply for real**: the same play without the `-e`. **Precondition (2026-11-20):** platform
+   `scripts/ci/list-ailab-pins.py` lists airlock's `processingRuntimeAdmissions` images, so the daily protect job
+   re-fetches them and `pulledWithin` covers them, and the gate passes. Until then the 8 admitted workflow runtimes
+   survive only by `registry_zot_strive_keep_recent` (30) headroom. A live policy keeps re-evaluating every GC hour,
+   and that headroom erodes with each new workflow pin, whether or not anyone applies again. The dry run (step 2)
+   does not need it. Watch the GC hour with the abort budget of "Dropping orphaned
    referrers" step 3 (node1 writes, cp1 fsync p99). **Abort** = apply again with
    `-e registry_zot_retention_dry_run=true`. That reload stops all deletion from the next GC pass on; a pass already
    running finishes its repo.
