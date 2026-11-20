@@ -114,6 +114,52 @@ consulting `keepTags`. So, for every repo before it goes on the list:
 **Everything else the role converges still restarts zot**: htpasswd lines, certs, sync credentials, the unit and
 the binary. Batch those changes into one apply, in a quiet window.
 
+### Changing tag retention (dry run first)
+
+A keepTags change (the strive/** families, their knobs) deletes tags on the next GC pass, and a deleted digest cannot
+be re-pulled, only rebuilt. So every such change goes through a gate, a dry-run cycle, and then the real apply. Each
+step is a reload (`storage.retention` is on the apply helper's allowlist). Always pin the live binary
+(`-e registry_zot_version=v2.1.18`, see "Applying a config change").
+
+1. **Gate: `scripts/zot-retention-pin-scan.py`.** It simulates zot v2.1.18 retention for the policy this branch's
+   role renders (`--set KEY=YAML` tries another knob value) against the live registry, read-only. It exits 1 if
+   anything in use would be deleted. In use means:
+   - the live cluster's pods and workloads (spec, env values and status imageIDs);
+   - ailab `kubernetes/apps`;
+   - the platform's ailab overlay and pin sources (`--platform`, a checkout of cchifor/platform main);
+   - the platform's own pin list (`--refs-file`).
+
+   Comments are history, not use. Run it in Docker (python + PyYAML + jinja2), from a checkout of the branch:
+   ```bash
+   kubectl --context admin@ai get pods -A -o json > /tmp/scan/pods.json
+   kubectl --context admin@ai get deploy,sts,ds,cronjob,job -A -o json > /tmp/scan/workloads.json
+   git clone -q --depth 1 https://git.chifor.me/cchifor/platform.git /tmp/scan/platform
+   # in a python container with pyyaml (and git) installed, platform mounted at /p:
+   python3 /p/scripts/ci/list-ailab-pins.py > /tmp/scan/platform-pins.txt
+   python3 scripts/zot-retention-pin-scan.py --kube-json /tmp/scan/pods.json --kube-json /tmp/scan/workloads.json \
+       --platform /tmp/scan/platform --refs-file /tmp/scan/platform-pins.txt --json /tmp/scan/pin-scan.json
+   ```
+   Only `RESULT: PASS` (exit 0) goes on. A FAIL line names the reference, where it is used, and why it would go. Fix
+   the policy (or protect the image) and re-run; never apply around a FAIL. The report also gives the would-delete
+   totals: tags, manifests (index, platform children and referrers, ~4 MB of node1 metaDB writes each) and freed
+   layer bytes (an upper bound: base layers shared with the mirror repos stay).
+2. **Dry run, one GC cycle.** Apply with `-e registry_zot_retention_dry_run=true`. The `--check` run must show
+   `mode: reload` with `storage.retention.dryRun` (plus `storage.retention.policies` if the policy changed too).
+   `dryRun` is GLOBAL: while it is on, zot deletes nothing anywhere. deleteReferrers, deleteUntagged and the
+   strive/ci-build/** and agentforge/** pruning all pause, so finish a deleteReferrers widening first. A reload
+   restarts zot's background tasks, so the next GC pass starts within `gcInterval` (1h). Then read the decisions
+   on the registry LXC (`ssh registry`, or `pct exec 5004 -- sh -c '...'` on ai-node1):
+   ```bash
+   journalctl -u zot --since -90min -o cat | grep 'applied policy' | grep '"decision":"delete"' \
+     | grep -c '"dry-run":true'
+   ```
+   The count of `"decision":"delete"` lines (one per tag, per pass) must match the scan's `delete` total. Spot-check
+   that no line names a digest the scan listed as in use. Untagged and referrer deletions log `"dry-run":true` too.
+3. **Apply for real**: the same play without the `-e`. Watch the GC hour with the abort budget of "Dropping orphaned
+   referrers" step 3 (node1 writes, cp1 fsync p99). **Abort** = apply again with
+   `-e registry_zot_retention_dry_run=true`. That reload stops all deletion from the next GC pass on; a pass already
+   running finishes its repo.
+
 ## Enable Docker Hub upstream auth (recommended)
 
 **Now optional (failover only) — see ADR 0014 Update 2026-06-23.** The docker.io sync upstream is
@@ -246,8 +292,12 @@ only the FIRST policy whose glob matches a repo):
   delete it mid-pipeline. Never widen it to `strive/ci/**`: that namespace already holds platform
   repos (`strive/ci/platform-e2e-local`, ...) whose `latest`/`ailab*`/`sha-*` tags rely on
   `strive/**`, and a first-match policy there would strip them.
-- `strive/**` keeps `latest` + the `registry_zot_strive_keep_recent` (100) most-recently-pushed
-  `sha-<commit>` tags per repo and GC reclaims the rest.
+- `strive/**` keeps `latest`, `ailab` and `ailab-prev*`. It bounds two families, the `sha-<commit>` builds and
+  the `ailab-<digest>` protect tags: each keeps the `registry_zot_strive_keep_recent` (10) most recently pushed
+  tags OR any pushed within `registry_zot_strive_keep_within` (336h = 14 days). One keepTags entry per family,
+  which zot v2.1.18 ORs, so the 10 newest always stay. "Pushed" is zot's per-digest metaDB push time: re-tagging an
+  old digest does not refresh it. GC reclaims the rest. Until 2026-11-20 it was 100 sha- builds and every
+  ailab-<digest> tag forever. Change it only through "Changing tag retention (dry run first)".
 - `agentforge/**` keeps `latest` + the `registry_zot_agentforge_keep_recent` (40)
   most-recently-pushed tags per repo, under TWO patterns because the four repos do not all push
   the same tag shape: orchestrator, sandbox and p1-worker (agentforge's
@@ -262,9 +312,10 @@ only the FIRST policy whose glob matches a repo):
 - `**` (everything else, i.e. the mirror/cache repos) stays protected (`deleteUntagged:false`,
   keep all) so digest-pinned base images are never collected.
 
-Both count-based knobs exist for the same reason: the deployed ailab pins reference these images by
+Both families' knobs exist for the same reason: the deployed ailab pins reference these images by
 **digest**, and Zot's GC removes untagged manifests — a GC'd digest is un-rollback-able (only
-rebuildable from git), so each window must comfortably outlive how far the live pin can lag `main`.
+rebuildable from git), so what is deployed must keep a tag that survives (for strive, its `ailab` /
+`ailab-<digest>` tag; `scripts/zot-retention-pin-scan.py` checks it).
 If the store ever fills again (writes fail with `blob upload unknown` / `provided digest did not
 match` while reads still 200), grow it online — `pct resize <vmid> mp0 +NG` then bump `data_gb` +
 `tofu apply` to match — and/or lower `registry_zot_strive_keep_recent` /

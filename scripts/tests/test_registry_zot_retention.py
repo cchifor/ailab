@@ -98,8 +98,9 @@ def _render_config(overrides=None) -> str:
     context.update(_EXTRA_VARS)
     context.update(overrides or {})
     env = jinja2.Environment(undefined=jinja2.StrictUndefined)
-    # Ansible's `to_json` is json.dumps with default arguments; plain jinja2 does not ship it.
+    # Ansible's `to_json` is json.dumps with default arguments; plain jinja2 does not ship it, nor ansible's `bool`.
     env.filters["to_json"] = json.dumps
+    env.filters["bool"] = _ansible_bool
     template = env.from_string(TEMPLATE_PATH.read_text())
     return template.render(**context)
 
@@ -445,6 +446,11 @@ def _without_strive_ci_user(defaults: dict) -> dict:
     }
 
 
+# strive/**'s two bounded families (2026-11-20): the 10 most recently pushed OR pushed within 14 days, one entry each.
+_STRIVE_SHA_ENTRY = {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 10, "pushedWithin": "336h"}
+_STRIVE_AILAB_DIGEST_ENTRY = {
+    "patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"], "mostRecentlyPushedCount": 10, "pushedWithin": "336h",
+}
 _STRIVE_POLICY = {
     "repositories": ["strive/**"],
     "deleteUntagged": True,
@@ -452,8 +458,8 @@ _STRIVE_POLICY = {
         {"patterns": ["^latest$"]},
         {"patterns": ["^ailab$"]},
         {"patterns": ["^ailab-prev\\d*$"]},
-        {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 100},
-        {"patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"]},
+        _STRIVE_SHA_ENTRY,
+        _STRIVE_AILAB_DIGEST_ENTRY,
     ],
 }
 
@@ -546,8 +552,8 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
                 ("latest", {"patterns": ["^latest$"]}),
                 ("ailab", {"patterns": ["^ailab$"]}),
                 ("ailab-prev2", {"patterns": ["^ailab-prev\\d*$"]}),
-                ("sha-" + _FULL_SHA, {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 100}),
-                ("ailab-" + _FULL_SHA[:12], {"patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"]}),
+                ("sha-" + _FULL_SHA, _STRIVE_SHA_ENTRY),
+                ("ailab-" + _FULL_SHA[:12], _STRIVE_AILAB_DIGEST_ENTRY),
             ]:
                 policy, entry = _keep_entry(self.policies, repo, tag)
                 self.assertEqual(policy, _STRIVE_POLICY, f"{repo}:{tag} left strive/**")
@@ -910,6 +916,83 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
         self.assertTrue(re.search(rule["encrypted_regex"], "registry_scoped_push_passwords"))
         meta = yaml.safe_load((REPO_ROOT / secrets_path).read_text())["sops"]
         self.assertTrue(re.search(meta["encrypted_regex"], "registry_scoped_push_passwords"))
+
+
+# The keepTags strive/** had until 2026-11-20 (the live config at that date): 100 sha- builds, every ailab-<digest>.
+_STRIVE_KEEP_TAGS_BEFORE = [
+    {"patterns": ["^latest$"]},
+    {"patterns": ["^ailab$"]},
+    {"patterns": ["^ailab-prev\\d*$"]},
+    {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 100},
+    {"patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"]},
+]
+
+
+class RegistryZotStriveTagRetentionTest(unittest.TestCase):
+    """strive/** keeps latest / ailab / ailab-prev* forever, and the sha- builds and ailab-<digest> protect tags each
+    by the N most recently pushed OR pushed within a window: both rules in ONE entry, which zot v2.1.18 ORs."""
+
+    def setUp(self):
+        self.defaults = _load_defaults()
+        self.policies = json.loads(_render_config())["storage"]["retention"]["policies"]
+
+    def test_knobs(self):
+        self.assertEqual(self.defaults["registry_zot_strive_keep_recent"], 10)
+        self.assertEqual(self.defaults["registry_zot_strive_keep_within"], "336h")  # 14 days, a Go duration
+        self.assertIs(self.defaults["registry_zot_retention_dry_run"], False)
+
+    def test_strive_keep_tags(self):
+        strive = self.policies[_policy_index(self.policies, "strive/**")]
+        self.assertEqual(strive["keepTags"], _STRIVE_POLICY["keepTags"])
+        for entry in (_STRIVE_SHA_ENTRY, _STRIVE_AILAB_DIGEST_ENTRY):
+            # one entry carrying both rules: split in two, the first would claim every tag (first match) and the
+            # second would never apply
+            self.assertEqual(sum(1 for e in strive["keepTags"] if e["patterns"] == entry["patterns"]), 1)
+
+    def test_every_strive_policy_shares_the_keep_tags(self):
+        # the deleteReferrers list renders from the same macro, at any list value
+        for repos in ([], ["strive/web"], ["strive/**"]):
+            for policy in _policies(repos):
+                if any(p.startswith("strive/") and not p.startswith("strive/ci-build") for p in policy["repositories"]):
+                    self.assertEqual(policy["keepTags"], _STRIVE_POLICY["keepTags"], (repos, policy["repositories"]))
+
+    def test_knobs_reach_both_families(self):
+        pols = json.loads(_render_config({"registry_zot_strive_keep_recent": 25,
+                                          "registry_zot_strive_keep_within": "48h"}))["storage"]["retention"]["policies"]
+        strive = pols[_policy_index(pols, "strive/**")]
+        bounded = [e for e in strive["keepTags"] if len(e) > 1]
+        self.assertEqual(len(bounded), 2)
+        for e in bounded:
+            self.assertEqual((e["mostRecentlyPushedCount"], e["pushedWithin"]), (25, "48h"))
+
+    def test_other_policies_untouched(self):
+        ci_build = self.policies[_policy_index(self.policies, _CI_BUILD_REPOS)]
+        self.assertEqual(ci_build["keepTags"], [_CI_BUILD_ENTRY])
+        agentforge = self.policies[_policy_index(self.policies, "agentforge/**")]
+        self.assertNotIn("pushedWithin", json.dumps(agentforge))
+
+    def test_dry_run_renders_a_json_boolean(self):
+        # `-e registry_zot_retention_dry_run=true` arrives as the STRING "true": a bare to_json would render "true" in
+        # quotes, which zot rejects (bool field), so the template goes through ansible's bool filter first.
+        for value, want in ((None, False), (False, False), (True, True), ("true", True), ("yes", True),
+                            ("false", False), ("no", False)):
+            overrides = {} if value is None else {"registry_zot_retention_dry_run": value}
+            rendered = _render_config(overrides)
+            self.assertIs(json.loads(rendered)["storage"]["retention"]["dryRun"], want, value)
+
+    def test_retention_changes_are_reloads(self):
+        # the apply helper must hot-reload both steps of the rollout, never restart (19 min outage)
+        helper = _load_apply_helper()
+        live = json.loads(_render_config({}))
+        for policy in live["storage"]["retention"]["policies"]:  # what ran until 2026-11-20
+            if policy["repositories"] != [_CI_BUILD_REPOS] and policy["keepTags"] == _STRIVE_POLICY["keepTags"]:
+                policy["keepTags"] = _STRIVE_KEEP_TAGS_BEFORE
+        dry = json.loads(_render_config({"registry_zot_retention_dry_run": "true"}))
+        mode, paths, _ = helper.classify(live, dry)
+        self.assertEqual(mode, "reload", paths)
+        self.assertEqual(paths, ["storage.retention.dryRun", "storage.retention.policies"])
+        mode, paths, _ = helper.classify(dry, json.loads(_render_config({})))
+        self.assertEqual((mode, paths), ("reload", ["storage.retention.dryRun"]))
 
 
 if __name__ == "__main__":
