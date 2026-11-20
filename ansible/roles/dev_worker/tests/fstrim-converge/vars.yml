@@ -1,0 +1,6 @@
+# A worker's host_vars (dev-worker-1's slot). / is the container's overlay here, so only /workspace (a real
+# ext4 on a loop device) is trimmed; the / remount is exercised up to its read of the live options.
+dev_worker_fstrim_enabled: true
+dev_worker_fstrim_start: "00:30"
+dev_worker_root_nodiscard: true
+dev_worker_fstrim_mounts: [/workspace]
