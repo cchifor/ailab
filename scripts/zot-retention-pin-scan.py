@@ -210,8 +210,10 @@ def refs_from_paths(paths, base=None):
         for f in _iter_files(path):
             try:
                 text = f.read_text(encoding="utf-8")
-            except (UnicodeDecodeError, OSError):
-                continue
+            except UnicodeDecodeError:
+                continue  # a binary file holds no reference
+            except OSError as err:  # an unread source must not pass silently
+                raise ScanError(f"cannot read reference source {f} ({err.__class__.__name__})")
             label = str(f.relative_to(base)) if base and f.is_relative_to(base) else str(f)
             if REGISTRY_HOST in text or "sha256:" in text:
                 out.extend(refs_from_text(without_comments(text, f.name), label))
@@ -526,7 +528,7 @@ def evaluate(repos, refs):
             if data is None:
                 warnings.append({"ref": label, "source": ref["source"], "why": f"{repo} is not a scanned repository"})
                 continue
-            if tag is not None:
+            if tag is not None and digest is None:  # with a digest, the digest is what gets pulled, not the tag
                 if tag not in data["tags"]:
                     warnings.append({"ref": label, "source": ref["source"], "why": f"tag {tag} does not exist"})
                 else:
@@ -543,11 +545,21 @@ def evaluate(repos, refs):
                                      "why": f"{repo}@{digest[:19]} would be {state} (only its doomed tags hold it)"})
                 elif ref.get("exists") is False:
                     warnings.append({"ref": label, "source": ref["source"], "why": "digest is not in the registry"})
-                else:
-                    warnings.append({"ref": label, "source": ref["source"],
-                                     "why": "digest has no tag in the registry (untagged: retention already "
-                                            "deletes it, or a referrer)"})
+                elif deletes_untagged(data.get("policy")):
+                    # no tag and no kept index holds it: GC collects an untagged manifest in this repo (or its
+                    # existence could not be confirmed): fail closed
+                    seen = "exists untagged" if ref.get("exists") else "untagged, existence unknown"
+                    failures.append({"ref": label, "source": ref["source"],
+                                     "why": f"{repo}@{digest[:19]} {seen}, and the repo's policy deletes untagged "
+                                            "manifests (deleteUntagged)"})
     return failures, warnings, notes
+
+
+def deletes_untagged(policy):
+    """zot v2.1.18 HasDeleteUntagged: the policy's deleteUntagged, true when unset or when no policy matches."""
+    if policy is None or policy.get("deleteUntagged") is None:
+        return True
+    return bool(policy["deleteUntagged"])
 
 
 def _ref_label(ref):
@@ -619,6 +631,9 @@ def main(argv=None):
         return _run(args)
     except ScanError as err:
         print(f"FAIL-CLOSED: {err}", file=sys.stderr)
+        return 2
+    except Exception as err:  # noqa: BLE001 - exit 1 must only ever mean "an in-use image would be deleted"
+        print(f"FAIL-CLOSED: {err.__class__.__name__}: {err}", file=sys.stderr)
         return 2
 
 

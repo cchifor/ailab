@@ -10,6 +10,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 _PATH = pathlib.Path(__file__).resolve().parents[1] / "zot-retention-pin-scan.py"
 _spec = importlib.util.spec_from_file_location("zot_retention_pin_scan", _PATH)
@@ -142,10 +143,29 @@ class EvaluateTest(unittest.TestCase):
         self.tags = {"sha-kept": tag(D1, 1, children=[D3]), "sha-gone": tag(D2, 500, children=[D3, D4])}
         decisions = scan.simulate_repo({**POLICY, "keepTags": [{"patterns": ["^sha-"], "mostRecentlyPushedCount": 1}]},
                                        self.tags, NOW)
-        self.repos = {"strive/web": {"tags": self.tags, "decisions": decisions}}
+        self.repos = {"strive/web": {"tags": self.tags, "decisions": decisions, "policy": POLICY}}
 
     def run_refs(self, *refs):
         return scan.evaluate(self.repos, [dict(r, source="t") for r in refs])
+
+    def test_tag_plus_digest_follows_the_digest(self):
+        # a runtime pulls repo:tag@digest by the digest: a deleted tag does not matter while the digest stays
+        fails, warns, _ = self.run_refs({"repo": "strive/web", "tag": "sha-gone", "digest": D1})
+        self.assertEqual((fails, warns), ([], []))
+        fails, _, _ = self.run_refs({"repo": "strive/web", "tag": "sha-kept", "digest": D2})
+        self.assertEqual(len(fails), 1)
+
+    def test_untagged_in_use_digest_fails_where_untagged_is_collected(self):
+        untagged = "sha256:" + "7" * 64
+        for exists in (True, None):  # confirmed, or not determined: fail closed
+            fails, _, _ = self.run_refs({"repo": "strive/web", "tag": None, "digest": untagged, "exists": exists})
+            self.assertEqual(len(fails), 1, exists)
+            self.assertIn("deleteUntagged", fails[0]["why"])
+        self.repos["strive/web"]["policy"] = {**POLICY, "deleteUntagged": False}
+        fails, warns, _ = self.run_refs({"repo": "strive/web", "tag": None, "digest": untagged, "exists": True})
+        self.assertEqual((fails, warns), ([], []))
+        self.assertTrue(scan.deletes_untagged(None))  # no policy: zot's default deletes untagged manifests
+        self.assertTrue(scan.deletes_untagged({"repositories": ["x"]}))
 
     def test_digest_held_by_a_kept_tag_or_a_kept_index_survives(self):
         fails, warns, _ = self.run_refs({"repo": "strive/web", "tag": None, "digest": D1},
@@ -219,6 +239,35 @@ class MainTest(unittest.TestCase):
         self.assertEqual(rc, 1, out)
         self.assertIn("RESULT: FAIL", out)
         self.assertEqual(len(json.loads((self.d / "out.json").read_text())["failures"]), 1)
+
+    def test_existing_untagged_pinned_digest_fails(self):
+        untagged = "sha256:" + "7" * 64
+        snap = json.loads(self.snapshot.read_text())
+        snap["exists"] = {f"strive/web@{untagged}": True}
+        self.snapshot.write_text(json.dumps(snap))
+        (self.empty / "pins.yaml").write_text(f"image: registry.chifor.me/strive/web@{untagged}\n")
+        rc, out = self.run_main()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("exists untagged", out)
+
+    def test_unreadable_source_fails_closed(self):
+        (self.empty / "pins.yaml").write_text(f"image: registry.chifor.me/strive/web@{D2}\n")
+        real = pathlib.Path.read_text
+
+        def read_text(path, *args, **kwargs):
+            if path.name == "pins.yaml":
+                raise PermissionError(13, "Permission denied")
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(pathlib.Path, "read_text", read_text):
+            rc, out = self.run_main()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("cannot read reference source", out)
+
+    def test_unexpected_error_is_not_a_fail_verdict(self):
+        self.snapshot.write_text("{not json")
+        rc, out = self.run_main()
+        self.assertEqual(rc, 2, out)  # exit 1 is reserved for "an in-use image would be deleted"
 
     def test_fail_closed(self):
         self.config.write_text(json.dumps({"storage": {"retention": {"policies": [
