@@ -574,8 +574,8 @@ def disk_usage(x, y, w, h):
     return ts("Disk Usage by Consumer (local-lvm thin pool)", x, y, w, h,
               [f"max by (nodename) ({used})", f"max({size})", consumers], "bytes",
               legends=["{{nodename}}", "capacity", "{{nodename}} · {{consumer}}"], fill=0, minv=0,
-              # The table on the right: in this 8x10 panel it shows ~12 of its ~18 rows (on the bottom, ~4).
-              legend_calcs=["last"], legend_table=True, legend_sort=("Name", False), legend_placement="right",
+              # The table below the graph, as in the owner's approved mockup (2026-11-20).
+              legend_calcs=["last"], legend_table=True, legend_sort=("Name", False), legend_placement="bottom",
               overrides=overrides,
               links=[{"title": "Local Drives: the thin pools and their guests", "targetBlank": False,
                       "url": LOCAL_DRIVES}],
