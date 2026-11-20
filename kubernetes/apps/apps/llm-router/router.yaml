@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 5a5181b78350a6f740cc65fb7412e1c009732a32
-        chifor.me/release: router-0.1.0-20261114-adapted-codex
+        chifor.me/source-commit: 1d65206575251e3f450a3b6c41650b40d17f42b8
+        chifor.me/release: router-0.1.0-20261120-budget-runtime-get
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,10 +121,10 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source 5a5181b78350a6f740cc65fb7412e1c009732a32: the live a17f60db plus llm-router #189 (adapted Codex
-          # routes listed in /v1/routes) and #190 (Codex MCP tools on chat routes; cached counts only when reported).
-          # Relay run 132490; archive sha256:3b5ffcee4bbdf66687809d66d2134abae12aa1e7c0b75c5e3de5f75f9523afeb.
-          image: registry.chifor.me/llm-router/router@sha256:54735b64a017d46c2828d1d421acf7696e036e0259eefae827785fcb8db0eb0b
+          # Source 1d65206575251e3f450a3b6c41650b40d17f42b8: the live 5a5181b7 plus llm-router #192 (api-keys reads the
+          # worker-budget authority with ctx.get; the property read threw, so every worker-budget call returned 500).
+          # Relay run 143129; archive sha256:791e9ee726f8c1d5fb4fde704e86bfae9d9b6ace0332bd4949c0918edcc4e382.
+          image: registry.chifor.me/llm-router/router@sha256:f923c13a40de9e52948c122eb1528d77886cf0d431581ebce93da2b0a4a87647
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
