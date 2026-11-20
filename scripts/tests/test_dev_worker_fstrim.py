@@ -140,13 +140,19 @@ class DevWorkerFstrim(unittest.TestCase):
     def test_the_workers_are_found(self):
         self.assertEqual(["dev-worker-1", "dev-worker-2", "dev-worker-3", "dev-worker-4"], sorted(self.vars))
 
-    def test_off_in_the_role_on_per_worker(self):
+    def test_off_in_the_role_and_the_group(self):
+        # Per worker, on or off, is host_vars' business: the kill switch is dev_worker_fstrim_enabled: false in one
+        # worker's host_vars, so no test may require it on. problems() checks every worker that has it on.
         d = load(ROLE / "defaults/main.yml")
         self.assertIs(False, d["dev_worker_fstrim_enabled"])
         self.assertIs(False, d["dev_worker_root_nodiscard"])
         self.assertNotIn("dev_worker_fstrim_enabled", load(REPO / "ansible/group_vars/dev_workers.yml"))
-        for h, v in self.vars.items():
-            self.assertIs(True, v["dev_worker_fstrim_enabled"], h)
+        self.assertNotIn("dev_worker_root_nodiscard", load(REPO / "ansible/group_vars/dev_workers.yml"))
+
+    def test_a_worker_switched_off_is_not_a_failure(self):
+        v = copy.deepcopy(self.vars)
+        v["dev-worker-2"]["dev_worker_fstrim_enabled"] = False
+        self.assertEqual([], problems(v))
 
     def test_the_schedule_is_sound(self):
         self.assertEqual([], problems(self.vars))
@@ -161,6 +167,8 @@ class DevWorkerFstrim(unittest.TestCase):
         env = render("dev-worker-fstrim.env.j2", v)
         names = re.findall(r"^([A-Z_]+)=", env, re.M)
         self.assertIn("TEXTFILE_DIR", names)
+        self.assertIn("STATE_DIR=/var/lib/node-fstrim", env.splitlines())
+        self.assertEqual("node-fstrim", key(svc, "StateDirectory"))
         for n in names:
             self.assertRegex(script, r"(?m)^" + n + r'="\$\{' + n + r":-", f"{n} is rendered but never read")
         tasks = (ROLE / "tasks/fstrim.yml").read_text(encoding="utf-8")

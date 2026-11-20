@@ -10,10 +10,13 @@ RequiresMountsFor={{ dev_worker_fstrim_mounts | join(' ') }}
 Type=oneshot
 EnvironmentFile=/etc/default/dev-worker-fstrim
 ExecStart=/usr/local/sbin/node-fstrim {{ dev_worker_fstrim_mounts | join(' ') }}
+# /var/lib/node-fstrim (STATE_DIR in the settings file), created by systemd.
+StateDirectory=node-fstrim
 Nice=10
-# The deadline: no chunk starts after {{ dev_worker_fstrim_run_max_min | int }} min unless it can end by then; this allows
-# one chunk more ({{ inflight }} s) and a minute. A oneshot is "activating" for its whole run, so TimeoutStartSec= is
-# the limit (RuntimeMaxSec= does nothing on a oneshot).
+# The deadline: no chunk starts after {{ dev_worker_fstrim_run_max_min | int }} min unless it can end by then, and an IO-pressure
+# wait ends there too (node-fstrim.sh counts it against RUN_MAX_S); this allows one chunk more ({{ inflight }} s)
+# and a minute. A oneshot is "activating" for its whole run, so TimeoutStartSec= is the limit (RuntimeMaxSec= does
+# nothing on a oneshot).
 TimeoutStartSec={{ (dev_worker_fstrim_run_max_min | int) * 60 + inflight + 60 }}
 # On stop the trim finishes its chunk in flight; a deliberate stop is not a failure.
 TimeoutStopSec={{ inflight + 60 }}

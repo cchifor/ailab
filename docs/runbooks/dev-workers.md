@@ -1651,15 +1651,18 @@ one burst on the etcd drive. The role (`tasks/fstrim.yml`) replaces it with a da
   `dev_worker_fstrim_mounts` (`/workspace` then `/`).
   - It trims 4 GiB chunks with `-m 64K`. It waits while the VM's IO pressure is above 45 % (gives up
     after 3 min: exit 3) and rests as long as each chunk took.
-  - No chunk starts after 5 min unless it can end by then. A cut-short night is continued by the next one:
-    ext4 skips the groups it already trimmed.
+  - No chunk starts after 5 min unless it can end by then, and a pressure wait ends there too. A cut-short
+    night is continued by the next one at the cursor in `/var/lib/node-fstrim` (the unit's `StateDirectory`).
+    A cut-short night fails with exit 9 once a mount has had no complete pass for 7 days.
   - `touch /run/node-fstrim.stop` stops it before its next chunk.
 - The stock `fstrim.timer` is stopped and masked while this is on.
 - `dev_worker_root_nodiscard` drops the online `discard` option from the root fstab entry and remounts `/`
   `nodiscard`, live. The regexes are the CI runners' (`gitea_runner_root_nodiscard`), and the fstab is backed
   up. Under `discard`, ext4 frees small, scattered extents online that cannot free whole 64 KiB thin
   chunks, and it never clears a group's "trimmed" flag, so a later fstrim of `/` trims 0 bytes. A remount
-  does not clear flags already set; **the worker's next reboot does, once**.
+  does not clear flags already set; **the worker's next reboot does, once**. The regexes only know the cloud
+  image's `LABEL=cloudimg-rootfs` line, so the converge reads the root entry back and fails if it still has
+  `discard` (a `UUID=` entry, say), rather than let it come back at the next boot.
 - The beacon is `node_fstrim.prom` in node_exporter's textfile dir: the run's reason, per-mount bytes and
   completion, and the last complete success. The role writes `dev_worker_fstrim_enabled 1` next to it.
 
@@ -1692,7 +1695,9 @@ ssh c4@192.168.0.9 'journalctl -u dev-worker-fstrim --since -1d --no-pager | tai
 ```
 
 Kill switch: set `dev_worker_fstrim_enabled: false` in the worker's host_vars and converge with `--tags fstrim`.
-This removes the unit, the script and the metrics, and unmasks and starts the stock weekly timer.
+This removes the unit, the script, the state and the metrics, unmasks and starts the stock weekly timer, and only
+then removes `/etc/default/dev-worker-fstrim`. That file marks the worker as having had the daily trim, so a
+takedown interrupted part-way is finished by the next converge.
 `dev_worker_root_nodiscard: false` leaves fstab as it is; it does not put `discard` back.
 
 Tests: `scripts/tests/test_dev_worker_fstrim.py`, the script's own suites (`scripts/tests/test-node-fstrim.sh`;

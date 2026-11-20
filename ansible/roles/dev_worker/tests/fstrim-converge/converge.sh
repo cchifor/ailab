@@ -84,16 +84,36 @@ eq "beacon: done" 1 "$(metric 'node_fstrim_last_run_reason\{reason="done"\}')"
 eq "beacon: /workspace complete" 1 "$(metric 'node_fstrim_complete\{mountpoint="/workspace"\}')"
 [ -n "$(metric node_fstrim_last_success_timestamp_seconds)" ] && ok "a success time" || bad "no success time"
 eq "the beacon is readable by node_exporter" 644 "$(stat -c %a "$TF/node_fstrim.prom")"
+[ -s /var/lib/node-fstrim/_workspace.complete ] && ok "the state dir (StateDirectory) holds the complete pass" \
+  || bad "no /var/lib/node-fstrim/_workspace.complete: $(ls -la /var/lib/node-fstrim 2>&1)"
 
 # ---- refused settings ----
 run badstart -e dev_worker_fstrim_start=0:30 && bad "an unpadded start was accepted" || ok "an unpadded start is refused"
 run badmount -e '{"dev_worker_fstrim_mounts": ["workspace"]}' && bad "a relative mount was accepted" || ok "a relative mount is refused"
+run badpsi -e dev_worker_fstrim_psi_max=45% && bad "psi_max 45% was accepted" || ok "psi_max 45% is refused"
+run badpsi2 -e dev_worker_fstrim_psi_max=101 && bad "psi_max 101 was accepted" || ok "psi_max 101 is refused"
+
+# ---- a root entry the regexes do not know (UUID=) that still has discard is refused, not silently kept ----
+cp /etc/fstab /tmp/fstab.good
+sed -i '1s/.*/UUID=0b6f8d2c-1111-2222-3333-444455556666 \/ ext4 discard,errors=remount-ro 0 1/' /etc/fstab
+run uuidroot && bad "a UUID= root entry with discard was accepted" || ok "a UUID= root entry with discard is refused"
+grep -q "still has .discard." /tmp/run-uuidroot.log && ok "and the play says why" || { bad "no reason given"; show uuidroot; }
+eq "that entry is left as it was" "UUID=0b6f8d2c-1111-2222-3333-444455556666 / ext4 discard,errors=remount-ro 0 1" "$(head -1 /etc/fstab)"
+cp /tmp/fstab.good /etc/fstab
+
+# ---- a takedown interrupted after the units went (the stock timer still masked) is finished by the next one ----
+systemctl disable --now dev-worker-fstrim.timer > /dev/null 2>&1
+rm -f /etc/systemd/system/dev-worker-fstrim.timer /etc/systemd/system/dev-worker-fstrim.service /usr/local/sbin/node-fstrim
+systemctl daemon-reload
+eq "precondition: the units are gone, the stock timer masked, the settings left" "masked present" \
+  "$(systemctl is-enabled fstrim.timer) $(exists /etc/default/dev-worker-fstrim)"
 
 # ---- disable: the kill switch gives the disks back to the stock weekly timer ----
 run disable -e dev_worker_fstrim_enabled=false -e dev_worker_root_nodiscard=false || { bad "disable failed"; show disable; }
 eq "timer gone" absent "$(exists /etc/systemd/system/dev-worker-fstrim.timer)"
 eq "service gone" absent "$(exists /etc/systemd/system/dev-worker-fstrim.service)"
-eq "settings gone" absent "$(exists /etc/default/dev-worker-fstrim)"
+eq "settings gone (the ownership marker, last)" absent "$(exists /etc/default/dev-worker-fstrim)"
+eq "state gone" absent "$(exists /var/lib/node-fstrim)"
 eq "script gone" absent "$(exists /usr/local/sbin/node-fstrim)"
 eq "marker gone" absent "$(exists "$TF/dev_worker_fstrim_enabled.prom")"
 eq "beacon gone" absent "$(exists "$TF/node_fstrim.prom")"
@@ -101,10 +121,17 @@ eq "beacon gone" absent "$(exists "$TF/node_fstrim.prom")"
 # (ConditionResult=no) and goes active on a VM. Either way the role unmasked, enabled and started it.
 eq "the stock weekly timer is back (enabled; started, its container condition unmet)" "enabled no" \
   "$(systemctl is-enabled fstrim.timer) $(systemctl show -p ConditionResult --value fstrim.timer)"
-grep -q 'Unmask and start the stock weekly fstrim.timer again' /tmp/run-disable.log && ok "the role started it" || bad "the role did not start it"
+grep -A3 'Unmask and start the stock weekly fstrim.timer again' /tmp/run-disable.log | grep -q '^changed' && ok "the interrupted takedown was finished: the role restored it" || { bad "the stock timer was not restored"; show disable; }
 eq "fstab keeps nodiscard (off does not put discard back)" "LABEL=cloudimg-rootfs	/	 ext4	commit=30,errors=remount-ro	0 1" "$(head -1 /etc/fstab)"
 run disable-again -e dev_worker_fstrim_enabled=false -e dev_worker_root_nodiscard=false || { bad "second disable failed"; show disable-again; }
 eq "a second disable changes nothing" 0 "$(changed)"
+
+# ---- on again, then a clean takedown ----
+run reapply || { bad "re-apply failed"; show reapply; }
+eq "re-apply: the stock timer masked again" masked "$(systemctl is-enabled fstrim.timer)"
+run disable2 -e dev_worker_fstrim_enabled=false -e dev_worker_root_nodiscard=false || { bad "clean disable failed"; show disable2; }
+eq "clean takedown: units, settings and state gone; the stock timer enabled" "absent absent absent enabled" \
+  "$(exists /etc/systemd/system/dev-worker-fstrim.timer) $(exists /etc/default/dev-worker-fstrim) $(exists /var/lib/node-fstrim) $(systemctl is-enabled fstrim.timer)"
 
 umount /workspace; losetup -d "$LOOP"
 [ "$fail" -eq 0 ] && echo "dev_worker fstrim converge: all cases passed" || echo "dev_worker fstrim converge: FAILURES"

@@ -14,9 +14,12 @@
       - dev_worker_fstrim_chunk_gb | int >= 1
       - dev_worker_fstrim_sec_per_gb | int >= 1
       - dev_worker_fstrim_psi_wait_max_s | int >= 1
+      - dev_worker_fstrim_psi_max | string is match('^[0-9]+(\.[0-9]+)?$')
+      - dev_worker_fstrim_psi_max | float <= 100
     fail_msg: >-
-      dev_worker_fstrim_*: need a quoted HH:MM start, run_max_min >= 2, absolute mount paths and positive integers
-      (start={{ dev_worker_fstrim_start | to_json }}, mounts={{ dev_worker_fstrim_mounts | to_json }})
+      dev_worker_fstrim_*: need a quoted HH:MM start, run_max_min >= 2, absolute mount paths, positive integers and
+      psi_max a number 0-100 (start={{ dev_worker_fstrim_start | to_json }}, mounts={{ dev_worker_fstrim_mounts | to_json }},
+      psi_max={{ dev_worker_fstrim_psi_max | to_json }})
     quiet: true
   when: dev_worker_fstrim_enabled | bool
 
@@ -37,6 +40,33 @@
     - regexp: '^(LABEL=cloudimg-rootfs[ \t]+/[ \t]+ext4[ \t]+)discard(?=[ \t]|$)'
       replace: '\g<1>defaults'
   when: dev_worker_root_nodiscard | bool
+  register: dev_worker_root_fstab_edit
+  tags: [fstrim]
+
+# The regexes only know the cloud image's LABEL=cloudimg-rootfs line. A root entry written another way (UUID=, a
+# rebuilt image) would be left alone, `discard` would come back at the next boot and the trim of / would quietly do
+# nothing again: refuse that instead. Read with findmnt's own fstab parser (rc 1: no entry for /, nothing to fix).
+- name: Read the root entry's options in /etc/fstab
+  ansible.builtin.command: findmnt --fstab -no OPTIONS --mountpoint /
+  register: dev_worker_root_fstab_opts
+  changed_when: false
+  failed_when: dev_worker_root_fstab_opts.rc not in [0, 1]
+  check_mode: false
+  when: dev_worker_root_nodiscard | bool
+  tags: [fstrim]
+
+- name: Check the root fstab entry no longer has `discard`
+  ansible.builtin.assert:
+    that: "'discard' not in dev_worker_root_fstab_opts.stdout.strip().split(',')"
+    fail_msg: >-
+      The root entry in /etc/fstab still has `discard` ({{ dev_worker_root_fstab_opts.stdout | trim }}): it is not the
+      cloud image's LABEL=cloudimg-rootfs line the role edits. Drop `discard` from it by hand (keep every other option)
+      or set dev_worker_root_nodiscard false; the live remount alone would be undone at the next boot.
+    quiet: true
+  when:
+    - dev_worker_root_nodiscard | bool
+    # --check did not write the edit it would make
+    - not (ansible_check_mode and dev_worker_root_fstab_edit is changed)
   tags: [fstrim]
 
 # The live mount, read every run, so a play that stopped between the edit and the remount is finished next time.
@@ -130,13 +160,19 @@
   when: not (dev_worker_fstrim_enabled | bool)
   tags: [fstrim]
   block:
-    - name: Look for an installed daily trim timer
+    # The settings file is the ownership marker: written before the stock timer is masked, removed only after it
+    # is back. So a takedown that stopped part-way (after the units went, before the stock timer came back) is
+    # finished by the next converge, and a worker that never had the daily trim is left alone.
+    - name: Look for an installed daily trim (its timer, or its settings file)
       ansible.builtin.stat:
-        path: /etc/systemd/system/dev-worker-fstrim.timer
-      register: dev_worker_fstrim_timer_unit
+        path: "{{ item }}"
+      loop:
+        - /etc/systemd/system/dev-worker-fstrim.timer
+        - /etc/default/dev-worker-fstrim
+      register: dev_worker_fstrim_installed
 
     - name: Take down the daily trim
-      when: dev_worker_fstrim_timer_unit.stat.exists
+      when: dev_worker_fstrim_installed.results | selectattr('stat.exists') | list | length > 0
       block:
         # Stopping a run is clean: the chunk in flight finishes first.
         - name: Stop the timer and a running trim
@@ -154,7 +190,7 @@
             - dev_worker_fstrim_stop is failed
             - "'Could not find the requested service' not in (dev_worker_fstrim_stop.msg | default(''))"
 
-        - name: Remove the trim, its settings, units and metrics
+        - name: Remove the trim, its units, state and metrics (the settings file goes last, below)
           ansible.builtin.file:
             path: "{{ item }}"
             state: absent
@@ -163,8 +199,8 @@
             - "{{ dev_worker_fstrim_textfile_dir }}/node_fstrim.prom"
             - /etc/systemd/system/dev-worker-fstrim.timer
             - /etc/systemd/system/dev-worker-fstrim.service
-            - /etc/default/dev-worker-fstrim
             - /usr/local/sbin/node-fstrim
+            - /var/lib/node-fstrim
 
         - name: Unmask and start the stock weekly fstrim.timer again
           ansible.builtin.systemd:
@@ -173,3 +209,8 @@
             enabled: true
             state: started
             daemon_reload: true
+
+        - name: Remove the settings file, now that the stock timer is back
+          ansible.builtin.file:
+            path: /etc/default/dev-worker-fstrim
+            state: absent
