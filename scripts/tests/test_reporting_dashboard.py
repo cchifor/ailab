@@ -170,11 +170,18 @@ class DriveViews(unittest.TestCase):
         consumers = [o for o in overrides if o["matcher"] == {"id": "byFrameRefID", "options": "C"}]
         self.assertEqual(consumers, [{"matcher": {"id": "byFrameRefID", "options": "C"},
                                       "properties": [{"id": "custom.lineWidth", "value": 1}]}])
-        # the totals keep the colours they had (Grafana's classic palette, first three), pinned, at 4 px
+        # every host total is 4 px: by query (refId A, the per-host used bytes), so a host added later is too
+        self.assertEqual(p["targets"][0]["legendFormat"], "{{nodename}}")
+        self.assertEqual([o for o in overrides if o["matcher"] == {"id": "byFrameRefID", "options": "A"}],
+                         [{"matcher": {"id": "byFrameRefID", "options": "A"},
+                           "properties": [{"id": "custom.lineWidth", "value": 4}]}])
+        # the current hosts keep the colours they had (Grafana's classic palette, first three), pinned and distinct
+        pinned = {}
         for node, color in (("ai-node1", "green"), ("ai-node2", "semi-dark-yellow"), ("ai-node3", "blue")):
             with self.subTest(node):
-                self.assertEqual(_props(p, node), {"color": {"mode": "fixed", "fixedColor": color},
-                                                   "custom.lineWidth": 4})
+                self.assertEqual(_props(p, node), {"color": {"mode": "fixed", "fixedColor": color}})
+                pinned[node] = color
+        self.assertEqual(len(set(pinned.values())), len(pinned))
         self.assertEqual(p["fieldConfig"]["defaults"]["custom"]["fillOpacity"], 0)
         # the capacity line is as before: dashed red, 2 px
         self.assertEqual(_props(p, "capacity"), {"color": {"mode": "fixed", "fixedColor": "red"},

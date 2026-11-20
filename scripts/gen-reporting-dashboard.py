@@ -570,10 +570,12 @@ def disk_usage(x, y, w, h):
         # refId C: the consumer series, drawn as thin lines (owner, 2026-11-20).
         {"matcher": {"id": "byFrameRefID", "options": "C"}, "properties": [{"id": "custom.lineWidth", "value": 1}]},
     ]
-    # The host totals stand out by width (owner, 2026-11-20), in the colours they had before the consumers were drawn
-    # (Grafana's classic palette, first three), pinned so the consumer lines cannot shift them.
-    overrides += [_ov(node, [{"id": "color", "value": {"mode": "fixed", "fixedColor": color}},
-                             {"id": "custom.lineWidth", "value": 4}])
+    # The host totals stand out by width (owner, 2026-11-20): refId A, so every host the query returns gets it, a new
+    # one too (reviewer-claude on #1903). Each current host keeps the colour it had before the consumers were drawn
+    # (Grafana's classic palette, first three), pinned so the consumer lines cannot shift it.
+    overrides.append({"matcher": {"id": "byFrameRefID", "options": "A"},
+                      "properties": [{"id": "custom.lineWidth", "value": 4}]})
+    overrides += [_ov(node, [{"id": "color", "value": {"mode": "fixed", "fixedColor": color}}])
                   for node, color in (("ai-node1", "green"), ("ai-node2", "semi-dark-yellow"), ("ai-node3", "blue"))]
     return ts("Disk Usage by Consumer (local-lvm thin pool)", x, y, w, h,
               [f"max by (nodename) ({used})", f"max({size})", consumers], "bytes",
