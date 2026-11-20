@@ -40,7 +40,7 @@ resource "proxmox_virtual_environment_vm" "cp" {
   # Static IP on first boot via nocloud cloud-init (Talos nocloud reads this);
   # the machine-config also pins it + adds the control-plane VIP.
   initialization {
-    datastore_id = var.vm_datastore
+    datastore_id = var.cloudinit_datastore
     ip_config {
       ipv4 {
         address = "${each.value.ip}/${var.network_prefix}"
