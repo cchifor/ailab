@@ -14,7 +14,12 @@ variable's All, and run as
     volumes (not its cloud-init drive) summed into its consumer group (each dev worker by name, ci-runners,
     registry, talos-cp, talos-workers for the agent nodes and relay workers, llm, other for the rest and for a
     vmid pve-exporter does not know), each on the host its volumes are on; a cloudlab guest that reuses a vmid
-    does not rename an ailab one.
+    does not rename an ailab one;
+  * disk throughput: each host's bytes/s read (positive) and written (negative, as the network panel draws
+    transmit) summed over its whole NVMe drives, a second drive included, its partitions and device-mapper layers
+    left out; named by host;
+  * pressure stall: 100 x the 5-minute rate of each host's CPU, memory and I/O "some" stall counters, named by
+    host.
 
 Needs docker (fails closed without it, like rules-lint.sh).
 
@@ -41,6 +46,7 @@ DASH = json.loads(json.loads((ROOT / "kubernetes/apps/infrastructure/monitoring/
 
 GiB = 1073741824
 H1, H2, H3 = "192.168.0.2:9100", "192.168.0.3:9100", "192.168.0.4:9100"
+MiB = 1048576
 ALL = "(ai-node1|ai-node2|ai-node3)"    # what Grafana puts for the hidden $host variable's All
 # Each host's pool used % and size; ai-node3's pool is one GiB bigger, so the capacity line must be the max.
 USED_PCT = {"ai-node1": 20, "ai-node2": 30, "ai-node3": 40}
@@ -74,6 +80,29 @@ def estate():
     drive(H1, "nvme1n1", 10, 5, 10, 5)
     drive(H2, "nvme0n1", 0, 0, 0, 0)
     drive(H3, "nvme0n1", 600, 0.3, 0, 0)
+
+    # Bytes per minute. ai-node1: nvme0n1 reads 1 MiB/s and writes 2 MiB/s, a second drive (nvme1n1) reads 64 KiB/s;
+    # its partition and a device-mapper volume carry the same bytes again and must not count. ai-node2 writes
+    # 0.5 MiB/s and reads nothing. ai-node3 has no disk byte counters.
+    def disk_bytes(inst, dev, read_per_s, written_per_s):
+        L = {"job": "proxmox-node", "instance": inst, "device": dev}
+        s.add("node_disk_read_bytes_total", L, f"0+{read_per_s * 60}x69")
+        s.add("node_disk_written_bytes_total", L, f"0+{written_per_s * 60}x69")
+    disk_bytes(H1, "nvme0n1", MiB, 2 * MiB)
+    disk_bytes(H1, "nvme1n1", 65536, 0)
+    disk_bytes(H1, "nvme0n1p3", 10 * MiB, 10 * MiB)
+    disk_bytes(H1, "dm-3", 10 * MiB, 10 * MiB)
+    disk_bytes(H2, "nvme0n1", 0, MiB // 2)
+
+    # Pressure stall "some", seconds stalled per minute: 0.6 = 1%, 1.2 = 2%, 3 = 5%, 6 = 10%, 0.06 = 0.1%.
+    def psi(inst, cpu, memory, io):
+        L = {"job": "proxmox-node", "instance": inst}
+        s.add("node_pressure_cpu_waiting_seconds_total", L, f"0+{cpu}x69")
+        s.add("node_pressure_memory_waiting_seconds_total", L, f"0+{memory}x69")
+        s.add("node_pressure_io_waiting_seconds_total", L, f"0+{io}x69")
+    psi(H1, 0.6, 1.2, 3)
+    psi(H2, 0, 0.06, 0.6)
+    psi(H3, 6, 0, 0)
 
     guests = (("qemu/4101", "ci-runner-1", "ai-node1"), ("qemu/4104", "ci-runner-4", "ai-node1"),
               ("qemu/4201", "dev-worker-1", "ai-node1"), ("qemu/4204", "dev-worker-3", "ai-node1"),
@@ -113,6 +142,9 @@ def estate():
 def expr_tests():
     lat = "Disk Latency per Hypervisor"
     use = "Disk Usage by Consumer"
+    tput = "Disk Throughput per Hypervisor"
+    psi = "Pressure Stall per Hypervisor"
+    h1, h2, h3 = ({"instance": i, "nodename": n} for i, n in ((H1, "ai-node1"), (H2, "ai-node2"), (H3, "ai-node3")))
     n1, n2, n3 = {"nodename": "ai-node1"}, {"nodename": "ai-node2"}, {"nodename": "ai-node3"}
     return [
         ("latency, ms", f"round({expr(lat)}, 0.001)", "60m",
@@ -120,6 +152,16 @@ def expr_tests():
         ("pool used per host", expr(use, "A", ALL), "60m",
          [sample({"nodename": n}, USED_PCT[n] / 100 * (POOL_GIB[n] * GiB)) for n in USED_PCT]),
         ("one capacity line, the max over the hosts", expr(use, "B", ALL), "60m", [sample({}, 1756 * GiB)]),
+        ("disk read, bytes/s", f"round({expr(tput, 'A')})", "60m",
+         [sample(h1, MiB + 65536), sample(h2, 0)]),
+        ("disk write, bytes/s, negative", f"round({expr(tput, 'B')})", "60m",
+         [sample(h1, -2 * MiB), sample(h2, -(MiB // 2))]),
+        ("pressure CPU, percent", f"round({expr(psi, 'A')}, 0.001)", "60m",
+         [sample(h1, 1), sample(h2, 0), sample(h3, 10)]),
+        ("pressure memory, percent", f"round({expr(psi, 'B')}, 0.001)", "60m",
+         [sample(h1, 2), sample(h2, 0.1), sample(h3, 0)]),
+        ("pressure I/O, percent", f"round({expr(psi, 'C')}, 0.001)", "60m",
+         [sample(h1, 5), sample(h2, 1), sample(h3, 0)]),
         ("consumer rows", expr(use, "C", ALL), "60m",
          [sample({**n1, "consumer": "ci-runners"}, 150 * GiB), sample({**n1, "consumer": "dev-worker-1"}, 130 * GiB),
           sample({**n1, "consumer": "dev-worker-3"}, 20 * GiB), sample({**n1, "consumer": "registry"}, 5 * GiB),

@@ -82,14 +82,14 @@ def row(title, y):
 
 def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=None, maxv=None,
        thresholds=None, overrides=None, description=None, legend_calcs=None, time_from=None, minv=None,
-       links=None, legend_table=False, legend_sort=None, legend_placement="bottom"):
+       links=None, legend_table=False, legend_sort=None, legend_placement="bottom", line_width=None, soft_max=None):
     """`thresholds` (steps) draws each step as a dashed horizontal line (a limit to read the series
     against, not a colour scheme); `overrides` are Grafana field overrides (e.g. a second axis).
     `legend_calcs` puts values in the legend (e.g. ["lastNotNull"]); `time_from` pins the panel to its
     own relative window (e.g. "14d") whatever the dashboard's range, for slow-moving series.
     `links` are panel links. `legend_table` shows the legend as a table (a row per series, a column per
     calc); `legend_sort` = (column, descending) sorts it, e.g. ("Name", False); `legend_placement` is bottom or
-    right."""
+    right. `line_width` sets every series' width; `soft_max` is an axis maximum a larger value still expands."""
     legends = legends or ["{{instance}}"] * len(exprs)
     defaults = {"unit": unit, "custom": {"drawStyle": "line", "fillOpacity": fill, "showPoints": "never",
                                          "stacking": {"mode": "none"}}}
@@ -99,6 +99,10 @@ def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=N
         defaults["max"] = maxv
     if minv is not None:
         defaults["min"] = minv
+    if line_width is not None:
+        defaults["custom"]["lineWidth"] = line_width
+    if soft_max is not None:
+        defaults["custom"]["axisSoftMax"] = soft_max
     if thresholds:
         defaults["thresholds"] = {"mode": "absolute", "steps": thresholds}
         defaults["custom"]["thresholdsStyle"] = {"mode": "dashed"}
@@ -478,21 +482,12 @@ panels += [
        "percent", maxv=100),
     ts("CPU Clock per Hypervisor (avg)", 16, 5, 8, 8,
        [f'avg by (instance) (node_cpu_scaling_frequency_hertz{{{HOSTS}}})'], "hertz"),
-    ts("Root Disk Used % per Hypervisor", 0, 13, 8, 8,
-       [f'100 * (1 - node_filesystem_avail_bytes{{{HOSTS},mountpoint="/"}} / node_filesystem_size_bytes{{{HOSTS},mountpoint="/"}})'],
-       "percent", maxv=100),
+    # x=0 and x=16 of this line: Disk Throughput and Pressure Stall per Hypervisor, below with the drive panels (they
+    # need hn()). They replaced Root Disk Used % and CPU Governor per Hypervisor (owner, 2026-11-20).
     ts("Network per Hypervisor (RX+ / TX-)", 8, 13, 8, 8,
        [f'sum by (instance) (rate(node_network_receive_bytes_total{{{HOSTS},{NETDEV}}}[5m]))',
         f'0 - sum by (instance) (rate(node_network_transmit_bytes_total{{{HOSTS},{NETDEV}}}[5m]))'],
        "Bps", legends=["{{instance}} rx", "{{instance}} tx"]),
-    qtable("CPU Governor per Hypervisor", 16, 13, 8, 8,
-           # node_exporter emits a series per (cpu, governor) — 1=active, 0=inactive — so filter ==1
-           f'count by (instance, governor) (node_cpu_scaling_governor{{{HOSTS}}} == 1)',
-           rename={"instance": "Host", "governor": "Governor", "Value": "Cores"},
-           exclude=["Time", "__name__"],
-           overrides=[_ov("Governor", [{"id": "custom.cellOptions", "value": {"type": "color-text"}},
-                                       {"id": "mappings", "value": [{"type": "value", "options": {
-                                           "performance": {"color": "green", "index": 0}}}]}])]),
 ]
 
 
@@ -520,9 +515,9 @@ NVME_HWMON_CHIP = "nvme_nvme0"
 # Dashed lines: the drive's warning/critical (86/90 C, NVMe only) and the APU's ~100 C throttle point.
 TEMP_LIMITS = [{"color": "green", "value": None}, {"color": "orange", "value": 86}, {"color": "red", "value": 90},
                {"color": "purple", "value": 100}]
-# Height of this line of panels: 10, the temperature panel beside the two drive views (owner, 2026-11-20: in the
-# 16x10 block the four NVMe tiles of #1891 filled, half each).
-NVME_ROW_H = 10
+# Height of this line of panels: 8, as the lines above (owner, 2026-11-20); the temperature panel beside the two
+# drive views, which took the block #1891's four NVMe tiles filled, half each.
+NVME_ROW_H = 8
 # Both drive panels open the Local Drives dashboard (uid ailab-local-drives, scripts/gen-local-drives-dashboard.py)
 # over the same time range: throughput, latency, who writes, the thin pool, endurance, trims.
 LOCAL_DRIVES = "/d/ailab-local-drives/?${__url_time_range}"
@@ -570,13 +565,14 @@ def disk_usage(x, y, w, h):
         # refId C: the consumer series, drawn as thin lines (owner, 2026-11-20).
         {"matcher": {"id": "byFrameRefID", "options": "C"}, "properties": [{"id": "custom.lineWidth", "value": 1}]},
     ]
-    # The host totals stand out by width (owner, 2026-11-20): refId A, so every host the query returns gets it, a new
-    # one too (reviewer-claude on #1903). Each current host keeps the colour it had before the consumers were drawn
-    # (Grafana's classic palette, first three), pinned so the consumer lines cannot shift it.
+    # The host totals stand out by width (owner, 2026-11-20): 2 px against the consumers' 1. By refId A, so every host
+    # the query returns gets it, a new one too (reviewer-claude on #1903). Each current host keeps the colour it had
+    # before the consumers were drawn (Grafana's classic palette, first three), pinned so the consumer lines cannot
+    # shift it.
     overrides.append({"matcher": {"id": "byFrameRefID", "options": "A"},
-                      "properties": [{"id": "custom.lineWidth", "value": 4}]})
+                      "properties": [{"id": "custom.lineWidth", "value": 2}]})
     overrides += [_ov(node, [{"id": "color", "value": {"mode": "fixed", "fixedColor": color}}])
-                  for node, color in (("ai-node1", "green"), ("ai-node2", "semi-dark-yellow"), ("ai-node3", "blue"))]
+                  for node, color in HOST_COLORS]
     return ts("Disk Usage by Consumer (local-lvm thin pool)", x, y, w, h,
               [f"max by (nodename) ({used})", f"max({size})", consumers], "bytes",
               legends=["{{nodename}}", "capacity", "{{nodename}} · {{consumer}}"], fill=0, minv=0,
@@ -598,6 +594,59 @@ def disk_usage(x, y, w, h):
                           "VMs, or a vmid pve-exporter does not know). A host's consumers add up to its thick "
                           "line. A guest whose disks are on the QNAP is not here. The panel link opens Local "
                           "Drives.")
+
+
+# The hosts' own colours, on every line a panel draws for a host (the disk usage totals, the throughput and pressure
+# lines): Grafana's classic palette, first three, as the host lines had before any were pinned.
+HOST_COLORS = (("ai-node1", "green"), ("ai-node2", "semi-dark-yellow"), ("ai-node3", "blue"))
+
+
+# The host's own colour on every line of it; what the line is (read or write, which resource) is its line style.
+def by_host_colour():
+    return [{"matcher": {"id": "byRegexp", "options": f"{node} .*"},
+             "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": color}}]}
+            for node, color in HOST_COLORS]
+
+
+def line_style(ref, style):
+    return {"matcher": {"id": "byFrameRefID", "options": ref},
+            "properties": [{"id": "custom.lineStyle", "value": style}]}
+
+
+DASHED = {"fill": "dash", "dash": [10, 10]}
+DOTTED = {"fill": "dot", "dash": [0, 3]}  # dense: at 1 px a sparser dot pattern breaks into scattered points
+NVME_DEVICES = 'job="proxmox-node", device=~"nvme[0-9]+n[0-9]+"'
+
+
+def disk_throughput(x, y, w, h):
+    """Bytes/s each host reads from (up) and writes to (down) its NVMe drives, as Network per Hypervisor draws
+    receive and transmit. Utilisation, in the USE sense, next to the latency panel (owner, 2026-11-20)."""
+    return ts("Disk Throughput per Hypervisor (read+ / write-)", x, y, w, h,
+              [hn(f"sum by (instance) (rate(node_disk_read_bytes_total{{{NVME_DEVICES}}}[5m]))"),
+               hn(f"0 - sum by (instance) (rate(node_disk_written_bytes_total{{{NVME_DEVICES}}}[5m]))")], "binBps",
+              legends=["{{nodename}} read", "{{nodename}} write"], fill=0, line_width=1,
+              overrides=by_host_colour() + [line_style("B", DASHED)],
+              description="Bytes per second each host reads from its NVMe drives (up) and writes to them (down, "
+                          "dashed), whole drives only: no partitions and no device-mapper layers, so nothing is "
+                          "counted twice. Activity, not headroom: the drive's limit is not on this axis. Context "
+                          "for the latency panel: a latency rise with no throughput rise is the drive, not the "
+                          "load.")
+
+
+def pressure_stall(x, y, w, h):
+    """Pressure stall information ("some") of each host for CPU, memory and I/O: saturation, in the USE sense
+    (owner, 2026-11-20). Colour = host, line style = resource (CPU solid, memory dashed, I/O dotted)."""
+    return ts("Pressure Stall per Hypervisor (CPU / memory / I/O)", x, y, w, h,
+              [hn(f'100 * rate(node_pressure_{res}_waiting_seconds_total{{job="proxmox-node"}}[5m])')
+               for res in ("cpu", "memory", "io")], "percent",
+              legends=["{{nodename}} CPU", "{{nodename}} memory", "{{nodename}} I/O"], fill=0, minv=0,
+              soft_max=10, line_width=1,
+              overrides=by_host_colour() + [line_style("B", DASHED), line_style("C", DOTTED)],
+              description="The share of wall time at least one task on the host was stalled waiting for that "
+                          "resource (the kernel's pressure-stall \"some\" counters, 5-minute rate): CPU solid, "
+                          "memory dashed, I/O dotted. A share of time, so it needs no normalising by core count. "
+                          "The host's figure cannot see reclaim inside a VM with a balloon. Never add the three "
+                          "together: they overlap.")
 
 
 panels += [
@@ -625,6 +674,9 @@ panels += [
                    "is mostly the writes. The panel link opens the Local Drives dashboard, which has them apart, "
                    "with flush latency and the etcd member's fsync on the same host."),
     disk_usage(16, 21, 8, NVME_ROW_H),
+    # The line above (y=13): x=0 where Root Disk Used % per Hypervisor was, x=16 where CPU Governor per Hypervisor was.
+    disk_throughput(0, 13, 8, 8),
+    pressure_stall(16, 13, 8, 8),
 ]
 HV_EXTRA_H = NVME_ROW_H  # the thermal/NVMe line above; every later row shifts by this (as HEALTH_H does below)
 _hv_end = len(panels)
