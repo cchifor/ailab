@@ -521,11 +521,20 @@ python scripts/qnap-ssh.py --sudo 'grep tbnet-offload /var/log/messages | tail -
 python scripts/node-ssh.py 192.168.0.2 "nstat -az IpFragFails"
 ```
 
+## 11. The NAS holds the Talos control-plane disks (2026-11-20, ADR 0043)
+
+Since 2026-11-20 the three Talos control-plane disks are raw files in `/pve-nfs/images/400N/` (the `qnap-nfs`
+storage). So a NAS reboot (a firmware update included), pool work that takes the pool or the export offline, or
+work on its Thunderbolt or network stalls every etcd member at once: **plan it as control-plane maintenance**. The
+monthly scrub (§4) is not on that list: it is a latency event to watch, not an outage (ADR 0043 risk 5). The
+checklist is in `docs/runbooks/node-maintenance.md`, "QNAP maintenance is control-plane maintenance". Never move,
+rename or snapshot-roll-back `images/` by hand.
+
 ## Open items this audit did NOT close
 
 | Gap | Why it is still open |
 |---|---|
-| **No UPS** | Needs hardware. All 5 SSDs already report `unsafe_shutdowns: 2`. ZFS tolerates power loss; the exposure is the ext4 filesystems inside the iSCSI LUNs (Postgres, Gitea, Prometheus). |
+| **UPS (owner-reported 2026-11-20)** | The owner reports the NAS is on a UPS with a clean-shutdown path. Its configuration is not recorded here yet. All 5 SSDs already reported `unsafe_shutdowns: 2`. The pool's KC3000 drives have volatile write caches and no power-loss protection: the owner accepted that residual risk (#1753 comment 133410; ADR 0043). |
 | **QNAP-native notification** | Cluster side is built and verified (§7); the last mile is two UI steps in Notification Center, because QuTS hero exposes no CLI and no usable API for it. |
 | **`/mnt/ext` at 93%** | 29 MB free on the 417 MB QTS app partition (`/dev/md13`). All QNAP system files — nothing safe to prune by hand. Firmware updates and app installs write here, so it is a known wedge point. Not exposed over SNMP; check by hand. |
 | **Thin-LUN reclaim** | See §6. Needs a privileged `fstrim` DaemonSet; deliberately not built without an operator decision on the PSA/hostPath trade-off. |

@@ -17,12 +17,49 @@ which workloads must survive a node loss (Tier A) and which singletons are *acce
   off. Expect ~5 min, poll `qm status <vmid>` for `stopped`.
 - kubectl: `--context admin@ai` or `KUBECONFIG=kubernetes/infra/_out/kubeconfig` (the default context
   is a DIFFERENT cluster).
+- **The CP disks are on the QNAP** (`scsi0` on `qnap-nfs` since 2026-11-20, ADR 0043). A host reboot or loss
+  still takes ONE CP down. A QNAP outage takes all THREE: see "QNAP maintenance is control-plane maintenance".
 
 | Proxmox host | mgmt IP | Talos CP | CP IP | CP vmid | AI LXC ctid |
 |---|---|---|---|---|---|
 | ai-node1 | 192.168.0.2 | talos-cp1 | 192.168.0.41 | 4001 | 5001 |
 | ai-node2 | 192.168.0.3 | talos-cp2 | 192.168.0.42 | 4002 | 5002 |
 | ai-node3 | 192.168.0.4 | talos-cp3 | 192.168.0.43 | 4003 | 5003 |
+
+## QNAP maintenance is control-plane maintenance (since 2026-11-20)
+
+All three etcd members' disks are raw files on the QNAP (`qnap-nfs`, ADR 0043). Anything that takes the share away
+stalls the whole control plane at once, not one node:
+- a NAS reboot, including a QuTS firmware update, which reboots it;
+- pool work that takes the pool or the `/pve-nfs` export offline;
+- work on its Thunderbolt or network (the NFS service IP `10.55.0.254` lives on its `tbtbr0` bridge).
+
+Source: by construction (ADR 0043 risk 1). The disks are files on that share, so not having the share is not having
+the disks. It has not been observed since the move.
+
+For the outage list above: every database, Gitea and Prometheus were already on its iSCSI LUNs. Now the API server,
+the scheduling and every lease go with them.
+
+- **Plan it as a full-cluster outage**, with the owner, never as routine NAS upkeep.
+- **Take an etcd snapshot first:**
+  `_out/talosctl-1142.exe -n <cp-ip> -e <cp-ip> etcd snapshot _out/etcd-snapshots/<name>.db`. talos-backup's own
+  copies land on versitygw, which runs in the NAS chassis itself.
+- **What the CPs see:** the mount is `hard,timeo=600,retrans=2`, so their disk I/O blocks while the NAS is away and
+  resumes when it answers. How Talos rides out a multi-minute stall (guest SCSI timeouts, the XFS on EPHEMERAL) has
+  not been tested.
+- **Open item:** there is no rehearsed procedure yet for a planned NAS outage (stopping the CPs before, starting them
+  after the share is mounted on every host). Write and rehearse one before the first planned NAS reboot.
+- **Afterwards, on every host:** `findmnt /mnt/pve/qnap-nfs`; `qm status <vmid>` running for each CP (`qm start` any
+  that is not); etcd 3/3 in sync; then the post-maintenance checklist.
+- **After a host boot**, check that its CP is running (`qm status <vmid>`). The boot-order guard (#1899; its state
+  is under "Implementation state" in ADR 0043) holds the start until the share is ready, and logs that it did.
+
+**A scrub, a resilver or a large copy is a latency event, not an outage** (ADR 0043 risk 5). Nothing has measured one
+stalling etcd: no scrub has run since the move, and the first scrub on this pool took 3m43s (`qnap-storage-setup.md`
+§4). Run them off-hours: the monthly scrub is already a NAS cron job at 05:00 on the 1st. Watch the etcd alerts while
+they run: `etcdHighFsyncDurations` (WAL fsync p99 > 0.5 s / 1 s for 10 min), `etcdHighCommitDurations` (> 0.25 s) and
+`etcdHighNumberOfLeaderChanges` (4 or more in 15 min). If one fires, stop the scrub with
+`python scripts/qnap-ssh.py --sudo "zpool scrub -s zpool1"`. It needs no owner-planned outage.
 
 ## Planned drain / host reboot
 
@@ -284,7 +321,9 @@ converged into a systemd container, then a stand-in pve-guests booted with the s
 
 ## Thin pool fill (`pve_thin_textfile`, all three ai-nodes)
 
-Every guest disk on a host is a thin LV in `pve/data` (`local-lvm`). A full pool fails every guest's writes
+Every guest disk on a host is a thin LV in `pve/data` (`local-lvm`), except the Talos CP's boot disk, which is on
+`qnap-nfs` since 2026-11-20 (ADR 0043). The CP's cloud-init drive is still here, and PVE rewrites it on every start,
+so a full pool can also keep the CP from starting. A full pool fails every guest's writes
 on that host, and a pool with full metadata goes read-only. Space a guest frees stays allocated until it is
 trimmed. On 2026-11-20 about 1.1 TiB of the three pools was freed-but-untrimmed space, and nothing showed
 it. `pve_base` (tag `thin_textfile`, on by default) installs a read-only exporter.
