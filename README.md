@@ -54,7 +54,7 @@ See [`docs/network-plan.md`](docs/network-plan.md) for the authoritative IP plan
 
 Two layers share the same QNAP ZFS pool over the Thunderbolt fabric (service IP `10.55.0.254`; ~1.1 GB/s raw, ~660 MB/s through CSI vs ~280 on 2.5 GbE — ADR 0011):
 
-1. **Proxmox level** — the `qnap-nfs` datacenter storage (`/pve-nfs` export, mounted at `/mnt/pve/qnap-nfs` on every node, 5 TB). Deliberately holds **no VM disks** — it carries the **LLM GGUFs** (`models/`, bind-mounted into the GPU LXCs as `/models`) and doubles as the backing share for the `nfs-csi` PVs below.
+1. **Proxmox level** — the `qnap-nfs` datacenter storage (`/pve-nfs` export, mounted at `/mnt/pve/qnap-nfs` on every node, 5 TB). Since 2026-11-20 it holds the **three Talos control-plane disks** (`images/400N/`, ADR 0043) and no other VM disks. It carries the **LLM GGUFs** (`models/`, bind-mounted into the GPU LXCs as `/models`) and doubles as the backing share for the `nfs-csi` PVs below.
 2. **Kubernetes level** — three CSI StorageClasses:
 
 | Class | Driver | Shape | Reclaim | Used by |
@@ -65,10 +65,10 @@ Two layers share the same QNAP ZFS pool over the Thunderbolt fabric (service IP 
 
 **Where things actually persist:**
 
-- **Talos OS + etcd: NOT on the NAS** — each control-plane VM's 40 G disk is `local-lvm` on the node's NVMe (etcd belongs on local disk). Its DR story is `talos-backup` age-encrypted etcd snapshots, not shared storage.
+- **Talos OS + etcd: ON the NAS since 2026-11-20** — each control-plane VM's 80 G disk is a raw file on `qnap-nfs`, moved live off the worn, stalling local NVMe (ADR 0043). **QNAP maintenance is therefore control-plane maintenance**: a NAS outage stalls all three etcd members. The cloud-init drive stays on `local-lvm`. Its DR story is `talos-backup` age-encrypted etcd snapshots (local copy on the QNAP's USB-NVMe, off-site on Google Drive).
 - **Databases** live on `qnap-iscsi` **block LUNs**, which are *invisible in the NFS share* — Trident carves them from the ZFS pool via the QNAP API (see them in the QNAP iSCSI UI or `tridentctl get volume`). A LUN re-attaches wherever its pod reschedules (node-loss-migratable), but is single-attach — so anything needing fast failover uses **app-level replication** (CNPG streaming) instead of volume migration (~6-min force-detach on hard node loss; ADR 0016 + `docs/runbooks/node-maintenance.md`).
 - **RWX/file PVs** are plain `pvc-<uuid>/` directories inside `/pve-nfs`, next to `models/`.
-- ⚠️ **"qnap-nfs looks empty" gotcha:** the Proxmox UI storage panel only lists Proxmox content types (VM images, ISOs, backups) — all deliberately empty here. `ls /mnt/pve/qnap-nfs/` from any node shows the real contents (`models/` + the `pvc-*` dirs).
+- ⚠️ **"qnap-nfs looks empty" gotcha:** the Proxmox UI storage panel only lists Proxmox content: the cloud images the VM modules import, the LXC templates, and since 2026-11-20 the three Talos CP disk images (ADR 0043). `ls /mnt/pve/qnap-nfs/` from any node shows the real contents (`models/` + the `pvc-*` dirs).
 
 **Backup (3-2-1, free — ADR 0010):** Layer A = CSI VolumeSnapshots (`qnap-iscsi` class, round-trip validated). Layer B = **Velero** (CSI snapshot data-movement via Kopia) + **talos-backup** → **versitygw** S3 on a QNAP USB-NVMe (local copy, off the ZFS pool) → nightly **rclone-crypt → Google Drive** (encrypted off-site). Talos secrets bundle is SOPS-escrowed in git.
 

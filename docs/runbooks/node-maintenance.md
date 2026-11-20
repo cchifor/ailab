@@ -17,12 +17,38 @@ which workloads must survive a node loss (Tier A) and which singletons are *acce
   off. Expect ~5 min, poll `qm status <vmid>` for `stopped`.
 - kubectl: `--context admin@ai` or `KUBECONFIG=kubernetes/infra/_out/kubeconfig` (the default context
   is a DIFFERENT cluster).
+- **The CP disks are on the QNAP** (`scsi0` on `qnap-nfs` since 2026-11-20, ADR 0043). A host reboot or loss
+  still takes ONE CP down. A QNAP outage takes all THREE: see "QNAP maintenance is control-plane maintenance".
 
 | Proxmox host | mgmt IP | Talos CP | CP IP | CP vmid | AI LXC ctid |
 |---|---|---|---|---|---|
 | ai-node1 | 192.168.0.2 | talos-cp1 | 192.168.0.41 | 4001 | 5001 |
 | ai-node2 | 192.168.0.3 | talos-cp2 | 192.168.0.42 | 4002 | 5002 |
 | ai-node3 | 192.168.0.4 | talos-cp3 | 192.168.0.43 | 4003 | 5003 |
+
+## QNAP maintenance is control-plane maintenance (since 2026-11-20)
+
+All three etcd members' disks are raw files on the QNAP (`qnap-nfs`, ADR 0043). These stall the whole control plane
+at once, not one node:
+- a NAS reboot, or a QuTS firmware or app update;
+- pool work (a scrub, a resilver, a disk swap);
+- work on its Thunderbolt or network (the NFS service IP `10.55.0.254` lives on its `tbtbr0` bridge).
+
+Every database, Gitea and Prometheus were already on its iSCSI LUNs. Now the API server, the scheduling and every
+lease go with them.
+
+- **Plan it as a full-cluster outage**, with the owner, never as routine NAS upkeep.
+- **Take an etcd snapshot first:**
+  `_out/talosctl-1142.exe -n <cp-ip> -e <cp-ip> etcd snapshot _out/etcd-snapshots/<name>.db`. talos-backup's own
+  copies land on versitygw, which runs in the NAS chassis itself.
+- **What the CPs see:** the mount is `hard,timeo=600,retrans=2`, so their disk I/O blocks while the NAS is away and
+  resumes when it answers. How Talos rides out a multi-minute stall (guest SCSI timeouts, the XFS on EPHEMERAL) has
+  not been tested.
+- **Open item:** there is no rehearsed procedure yet for a planned NAS outage (stopping the CPs before, starting them
+  after the share is mounted on every host). Write and rehearse one before the first planned NAS reboot.
+- **Afterwards, on every host:** `findmnt /mnt/pve/qnap-nfs`; `qm status <vmid>` running for each CP (`qm start` any
+  that is not); etcd 3/3 in sync; then the post-maintenance checklist.
+- **After a host boot**, the boot-order guard must have said ready ("Boot-order guard", #1899).
 
 ## Planned drain / host reboot
 
@@ -203,7 +229,8 @@ kubectl --context admin@ai taint nodes <node> node.kubernetes.io/out-of-service=
 
 ## Thin pool fill (`pve_thin_textfile`, all three ai-nodes)
 
-Every guest disk on a host is a thin LV in `pve/data` (`local-lvm`). A full pool fails every guest's writes
+Every guest disk on a host is a thin LV in `pve/data` (`local-lvm`), except the Talos CP's, which is on `qnap-nfs`
+since 2026-11-20 (ADR 0043). A full pool fails every guest's writes
 on that host, and a pool with full metadata goes read-only. Space a guest frees stays allocated until it is
 trimmed. On 2026-11-20 about 1.1 TiB of the three pools was freed-but-untrimmed space, and nothing showed
 it. `pve_base` (tag `thin_textfile`, on by default) installs a read-only exporter.

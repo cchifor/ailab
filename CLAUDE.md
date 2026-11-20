@@ -50,6 +50,7 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 - Graceful CP reboot = **`talosctl shutdown -n <cp-ip>`** — **`qm shutdown`/ACPI does NOT stop Talos** (falls back to a hard stop). Then `qm set <vmid> --memory …` + `qm start`.
 - Use **`_out/talosctl-1142.exe`** (v1.14.2, matches the cluster since the 2026-10-09 upgrade; `scripts/talos-upgrade-node.sh` picks the client whose `version --client` matches each node). The system `talosctl` is v1.6.2 and **UNSAFE** (silently drops newer config keys).
 - Roll **ONE CP at a time**; verify **`talosctl … etcd status` is 3/3 in-sync** (quorum) between each reboot.
+- **The CP disks live on the QNAP** (`scsi0` on `qnap-nfs` since 2026-11-20, ADR 0043). **QNAP maintenance is control-plane maintenance**: a NAS reboot, firmware update, pool fault or storage-link outage on the NAS stalls all three etcd members at once. Plan it as a full-cluster outage with the owner. `vm_datastore` in `kubernetes/infra` records the datastore: move a disk with `qm disk move` first, never by changing the variable. After a host boot, the boot-order guard (#1899) must say ready (`journalctl -b -u pve-guests | grep pve-nfs-disk-gate`; `docs/runbooks/node-maintenance.md`).
 
 ## Inventory (mgmt LAN 192.168.0.0/24)
 
@@ -60,7 +61,7 @@ Free static space: **none** (statics end at `.52`; the router DHCP pool starts a
 | Role | IPs | vmid |
 |---|---|---|
 | Proxmox hosts | ai-node1/2/3 = .2 / .3 / .4 | — |
-| Talos CPs | .41 / .42 / .43 (API VIP .40:6443) | 4001–4003 |
+| Talos CPs (disks on `qnap-nfs`, ADR 0043) | .41 / .42 / .43 (API VIP .40:6443) | 4001–4003 |
 | GHA / Gitea CI runners | .14 / .15 / .16 / .17 / .18 | 4101–4105 |
 | CI runners | .19 / .31 / .23 | 4106, 4109, 4110 |
 | dev-workers `dev-worker-1..4` (**slot ≠ vmid**: dw3 = vmid 4204, dw4 = vmid 4205) | .8–.11 (user `c4`) | 4201, 4202, 4204, 4205 |

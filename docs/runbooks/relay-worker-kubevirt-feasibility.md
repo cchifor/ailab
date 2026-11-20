@@ -499,8 +499,8 @@ spike running), so that rule would stop every run. Instead:
      by design, so ignore it for 15 minutes after the reset.
    - An etcd leader change: `increase(etcd_server_leader_changes_seen_total[10m]) > 0`.
    - A new alert on the control-plane node that shares the dedicated node's Proxmox disk. For
-     `relay-worker-1` that is `talos-cp3`, on ai-node3's `local-lvm`, together with two CI
-     runners. Per-pod alerts don't count: they carry cp3's kubelet as `instance` only because the
+     `relay-worker-1` that was `talos-cp3`, on ai-node3's `local-lvm`, together with two CI
+     runners. Since 2026-11-20 cp3's disk is on `qnap-nfs` (ADR 0043), so it no longer shares that disk. Per-pod alerts don't count: they carry cp3's kubelet as `instance` only because the
      pod runs there.
 4. Log every other new alert in the step's evidence.
 
