@@ -3869,6 +3869,12 @@ client (both arms are API mode), the seat, the egress IP or a timing race (a 1 s
 traffic is a lead, from one pair of windows; the mechanism is not known. So `codex` and `codex-control` `code-edit` can FAIL
 on uncached tokens some of the time: read such a FAIL against this note, and do not call it noise.
 
+2026-11-20, image `f923c13a` (release `router-0.1.0-20261120-budget-runtime-get`, ailab #1910): `code-edit` uncached
+tokens read router 4,116 vs direct 10,287 (0.40x, 3 pairs, 20:10Z), then router 39,050 vs direct 20,642 (1.89x,
+6 pairs, 20:18Z) on the same image minutes apart, with Layer (a) identical (19,047 input tokens) and every other
+metric inside its margin. The FAIL was recorded and the release kept as a documented exception (#1910). A matched
+parent-versus-release comparison is still owed; concurrent router traffic during the gate remains the only lead.
+
 **Open at rev 2247:** `qwen-cloud3` `code-edit` is FAIL on uncached tokens in 2 of 2 runs (1.29x, 1.20x), with Layer (a)
 clean and the model doing more work via the router (1.30x, 1.91x output tokens). cloud2 passes on the same day. On one
 body sampled direct (n = 25) and via the router on cloud3 (n = 12), output length did not shift (median 946 vs 797, z =
