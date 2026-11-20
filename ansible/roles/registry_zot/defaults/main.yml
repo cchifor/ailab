@@ -196,11 +196,73 @@ registry_zot_strive_keep_recent: 100
 # against TOP-LEVEL index.json entries only and ignores keepTags, so the check must report nested_not_top == 0 and
 # tagged_orphans == 0 (2026-11-18: strive/web, strive/sentinel, strive/knowledge all safe; 2026-11-19 09:0xZ, B1:
 # strive/e2e-runner 1843 orphans, strive/keycloak-realm-sync 1836, strive/notification 1774, all safe, check-rc=0).
-# Widening, in batches (owner go 2026-11-19; ~4 MB of metaDB writes per deletion on node1, so ~100 GB in all):
-#   B1 e2e-runner, keycloak-realm-sync, notification (5.4k orphans) -> B2 profile, knowledge, tms, mcp (7.0k)
-#   -> B3 workflow, airlock, integration, sentinel (5.8k) -> B4 ["strive/**"] (the rest, 3.6k). One GC hour
-#   observed between batches, with the abort budget in docs/runbooks/registry-cache.md.
-registry_zot_strive_delete_referrers_repos: ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"]
+# Widened on 2026-11-20 (owner go: "cleanup the registry"; strive/web canary clean, B1 applied 10:17Z). Pre-check of
+# EVERY strive/** repo, 2026-11-20 10:14Z, 64 repos: 63 safe (nested_not_top 0, tagged_orphans 0, unreadable 0).
+# Orphans per repo: airlock 1696, app-runner 1263, deepagent 1172, digest 1269, doc-search 997, e2e-runner 1864,
+# gatekeeper 983, harness 654, integration 1286, keycloak 802, keycloak-realm-sync 1857, knowledge 1780, mcp 1773,
+# notification 1795, profile 1790, sentinel 1271, tms 1776, web 0, workflow 1755; strive/ci/* 1 each (12, their only
+# manifest); pin-manifest and strive/cache/* 0. New beyond the canary and B1: 20,279 deletions, ~4 MB of metaDB
+# writes each on node1 (~80 GB). check-rc=1 for ONE repo, strive/keycloak-sync: its index is EMPTY ("manifests":
+# null, no blobs), which the check fails closed on. zot globs have no negation, so instead of "strive/**" the list
+# names every safe repo and keycloak-sync stays on plain strive/**. strive/ci-build/* (12, all safe) is not listed:
+# the strive/ci-build/** policy above claims those repos first. A new strive repo gets deleteReferrers only when it
+# is added here after its own pre-check. ["strive/**"] (the template supports it) once keycloak-sync is gone or passes.
+registry_zot_strive_delete_referrers_repos:
+  # the 19 service repos (strive/web = the 2026-11-18 canary; e2e-runner, keycloak-realm-sync, notification = B1)
+  # and strive/pin-manifest
+  - "strive/airlock"
+  - "strive/app-runner"
+  - "strive/deepagent"
+  - "strive/digest"
+  - "strive/doc-search"
+  - "strive/e2e-runner"
+  - "strive/gatekeeper"
+  - "strive/harness"
+  - "strive/integration"
+  - "strive/keycloak"
+  - "strive/keycloak-realm-sync"
+  - "strive/knowledge"
+  - "strive/mcp"
+  - "strive/notification"
+  - "strive/profile"
+  - "strive/sentinel"
+  - "strive/tms"
+  - "strive/web"
+  - "strive/workflow"
+  - "strive/pin-manifest"
+  # buildx cache repos (one manifest each, no referrers today)
+  - "strive/cache/airlock"
+  - "strive/cache/app-runner"
+  - "strive/cache/deepagent"
+  - "strive/cache/digest"
+  - "strive/cache/doc-search"
+  - "strive/cache/e2e"
+  - "strive/cache/gatekeeper"
+  - "strive/cache/harness"
+  - "strive/cache/integration"
+  - "strive/cache/keycloak"
+  - "strive/cache/keycloak-realm-sync"
+  - "strive/cache/knowledge"
+  - "strive/cache/mcp"
+  - "strive/cache/notification"
+  - "strive/cache/profile"
+  - "strive/cache/sentinel"
+  - "strive/cache/tms"
+  - "strive/cache/web"
+  - "strive/cache/workflow"
+  # strive/ci/*: each holds one orphaned referrer and nothing else (no tag); GC then empties them
+  - "strive/ci/platform-app-runner-latest"
+  - "strive/ci/platform-digest-test"
+  - "strive/ci/platform-doc-search-latest"
+  - "strive/ci/platform-e2e-local"
+  - "strive/ci/platform-echo-http"
+  - "strive/ci/platform-hatchet-init"
+  - "strive/ci/platform-integration"
+  - "strive/ci/platform-mock-mcp"
+  - "strive/ci/platform-mock-mcp-oauth"
+  - "strive/ci/platform-mock-model"
+  - "strive/ci/platform-sentinel-latest"
+  - "strive/ci/platform-stub-oauth"
 
 # strive/ci-build/** holds cchifor/platform's per-commit e2e images (`ci-<40-hex commit>`, pushed by
 # strive-ci-push above). Its policy is listed BEFORE strive/** in config.json.j2: zot applies only
