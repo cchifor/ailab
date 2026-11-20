@@ -446,10 +446,12 @@ def _without_strive_ci_user(defaults: dict) -> dict:
     }
 
 
-# strive/**'s two bounded families (2026-11-20): the 10 most recently pushed OR pushed within 14 days, one entry each.
+# strive/**'s two bounded families (2026-11-20): the 10 most recently pushed OR pushed within 14 days, one entry each;
+# an ailab-<digest> protect tag also while its digest was pulled within 14 days (the platform re-fetches pins daily).
 _STRIVE_SHA_ENTRY = {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 10, "pushedWithin": "336h"}
 _STRIVE_AILAB_DIGEST_ENTRY = {
     "patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"], "mostRecentlyPushedCount": 10, "pushedWithin": "336h",
+    "pulledWithin": "336h",
 }
 _STRIVE_POLICY = {
     "repositories": ["strive/**"],
@@ -964,6 +966,9 @@ class RegistryZotStriveTagRetentionTest(unittest.TestCase):
         self.assertEqual(len(bounded), 2)
         for e in bounded:
             self.assertEqual((e["mostRecentlyPushedCount"], e["pushedWithin"]), (25, "48h"))
+        sha, ailab_digest = bounded
+        self.assertNotIn("pulledWithin", sha)  # a sha- build is kept by count or push age only
+        self.assertEqual(ailab_digest["pulledWithin"], "48h")  # a pinned digest is re-fetched daily
 
     def test_other_policies_untouched(self):
         ci_build = self.policies[_policy_index(self.policies, _CI_BUILD_REPOS)]

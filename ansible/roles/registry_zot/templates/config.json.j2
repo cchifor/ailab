@@ -1,13 +1,14 @@
 {#- The strive/** keepTags, shared by strive/** and the deleteReferrers canary below so the two can never drift.
     sha- builds and ailab-<digest> protect tags each keep the N most recently pushed OR those pushed within the
-    window: both rules in ONE entry, which zot ORs (defaults: registry_zot_strive_keep_recent). #}
+    window: both rules in ONE entry, which zot ORs (defaults: registry_zot_strive_keep_recent). An ailab-<digest>
+    tag also stays while its digest was PULLED within the window: the platform re-fetches every pinned digest daily. #}
 {%- macro strive_keep_tags() -%}
           "keepTags": [
             { "patterns": ["^latest$"] },
             { "patterns": ["^ailab$"] },
             { "patterns": ["^ailab-prev\\d*$"] },
             { "patterns": ["^sha-.*"], "mostRecentlyPushedCount": {{ registry_zot_strive_keep_recent }}, "pushedWithin": {{ registry_zot_strive_keep_within | to_json }} },
-            { "patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"], "mostRecentlyPushedCount": {{ registry_zot_strive_keep_recent }}, "pushedWithin": {{ registry_zot_strive_keep_within | to_json }} }
+            { "patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"], "mostRecentlyPushedCount": {{ registry_zot_strive_keep_recent }}, "pushedWithin": {{ registry_zot_strive_keep_within | to_json }}, "pulledWithin": {{ registry_zot_strive_keep_within | to_json }} }
           ]
 {%- endmacro %}
 {

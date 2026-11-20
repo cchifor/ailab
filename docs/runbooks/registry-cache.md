@@ -296,7 +296,10 @@ only the FIRST policy whose glob matches a repo):
   the `ailab-<digest>` protect tags: each keeps the `registry_zot_strive_keep_recent` (10) most recently pushed
   tags OR any pushed within `registry_zot_strive_keep_within` (336h = 14 days). One keepTags entry per family,
   which zot v2.1.18 ORs, so the 10 newest always stay. "Pushed" is zot's per-digest metaDB push time: re-tagging an
-  old digest does not refresh it. GC reclaims the rest. Until 2026-11-20 it was 100 sha- builds and every
+  old digest does not refresh it. An `ailab-<digest>` tag also stays while its digest was PULLED within the window:
+  the platform's `protect-ailab-images` job GETs every pinned digest daily, which refreshes zot's pull time, so a
+  pin stays protected however old it is. A digest that job does not fetch is not covered; the pin scan catches
+  it. GC reclaims the rest. Until 2026-11-20 it was 100 sha- builds and every
   ailab-<digest> tag forever. Change it only through "Changing tag retention (dry run first)".
 - `agentforge/**` keeps `latest` + the `registry_zot_agentforge_keep_recent` (40)
   most-recently-pushed tags per repo, under TWO patterns because the four repos do not all push

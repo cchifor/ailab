@@ -193,8 +193,17 @@ registry_zot_config_allow_restart: false
 # protect job's `imagetools create`) does NOT refresh it, so an ailab-<digest> tag ages from its
 # build, not from its tagging. BEFORE lowering either knob (or editing the macro), run
 # scripts/zot-retention-pin-scan.py: it fails if an image in use would be deleted.
+# ailab-<digest> tags ALSO stay while their digest was PULLED within the window (pulledWithin: zot's
+# DaysPull keeps a tag pulled OR pushed in it). The count alone failed that gate on 2026-11-20: the
+# platform pins historical digests (app-runner templates, airlock, workflow runtimes) far below the 10
+# newest protect tags (app-runner's oldest pinned one ranked 54th), and no count follows a pinned SET.
+# platform protect-ailab-images.yml GETs every pinned digest daily (06:17Z), and a manifest GET updates
+# the metaDB LastPullTimestamp (v2.1.18 routes.go GetManifest -> meta.OnGetManifest ->
+# UpdateStatsOnDownload; a HEAD does not). So "pulled within 14 days" tracks "still pinned", with 13
+# days of slack if that job stops. A digest the job does not fetch is NOT covered: the gate shows it.
 registry_zot_strive_keep_recent: 10
-# ...OR pushed within this window. A Go duration string (zot parses it like gcDelay): 336h = 14 days.
+# ...OR pushed within this window (and, for ailab-<digest>, pulled within it). A Go duration string
+# (zot parses it like gcDelay): 336h = 14 days.
 registry_zot_strive_keep_within: "336h"
 
 # storage.retention.dryRun. While true, zot's GC logs every retention decision ("applied policy",
