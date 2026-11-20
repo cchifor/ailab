@@ -74,9 +74,24 @@ variable "nameservers" {
 
 # ---- Storage for VM disks / images ----
 variable "vm_datastore" {
-  description = "Proxmox datastore for Talos VM disks (per-node local NVMe)"
+  description = "Proxmox datastore for the Talos CP VMs' boot disk (scsi0)"
   type        = string
-  default     = "local-lvm"
+  # qnap-nfs since 2026-11-20 (ADR 0043). The three disks were moved LIVE, off the worn local NVMe, with
+  # `qm disk move <vmid> scsi0 qnap-nfs --format raw --delete 1` (cp1 07:27-07:37Z, cp2 14:07-14:16Z,
+  # cp3 14:17-14:26Z). This default records where the disks are: the provider reads the live datastore,
+  # so `tofu plan` shows no diff. Never change it to MOVE a disk. When it differs from the live datastore,
+  # bpg 0.123.1 plans an in-place `disk.datastore_id` update on all three CPs at once: a move nobody here
+  # has tested, and bpg issue #1256 reports a VM recreated instead. Move with `qm disk move` first, one CP
+  # at a time, then set this to match. Rollback: `qm disk move <vmid> scsi0 local-lvm --delete 1`, live,
+  # then "local-lvm" here.
+  default = "qnap-nfs"
+}
+variable "cloudinit_datastore" {
+  description = "Proxmox datastore for the Talos CP VMs' cloud-init drive (ide2)"
+  type        = string
+  # Still local-lvm: the 2026-11-20 move covered scsi0 only. Talos reads the drive at first boot, and
+  # `initialization` is in the VMs' ignore_changes, so this only matters when a CP VM is created.
+  default = "local-lvm"
 }
 variable "image_datastore" {
   description = "Proxmox datastore that holds the downloaded Talos image"

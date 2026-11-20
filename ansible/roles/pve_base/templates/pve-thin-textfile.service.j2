@@ -1,0 +1,16 @@
+# Managed by ansible (role: pve_base, tag thin_textfile). Reads the LVM thin pool fill (`lvs`) into
+# node_exporter's textfile directory; run every 2 min by pve-thin-textfile.timer. Read-only on LVM.
+[Unit]
+Description=Publish the LVM thin pool and thin volume fill for node_exporter
+
+[Service]
+Type=oneshot
+Environment="PVE_THIN_POOLS={{ pve_thin_textfile_pools | join(' ') }}"
+Environment=PVE_THIN_TEXTFILE_DIR={{ pve_thin_textfile_dir }}
+ExecStart=/usr/local/sbin/pve-thin-textfile
+Nice=10
+# `full`, not `strict`: lvs takes its read lock under /run/lock/lvm.
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes

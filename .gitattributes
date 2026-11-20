@@ -26,3 +26,5 @@ justfile    text eol=lf
 # bots see the full line; they skip it through pr_reviewer_exclude_globs in the pr_reviewer role
 # (ailab#835), not through this marker. Review the generator.
 kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml -diff
+# Same for the Local Drives dashboard (scripts/gen-local-drives-dashboard.py).
+kubernetes/apps/infrastructure/monitoring/local-drives-dashboard.yaml -diff

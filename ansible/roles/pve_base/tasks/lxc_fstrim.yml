@@ -1,0 +1,148 @@
+---
+# Nightly trim of the running containers' local-lvm volumes (pve_lxc_fstrim_*; defaults/main.yml has the
+# why). `just lxc-fstrim --limit <host> --check --diff`, then without --check, one host at a time
+# (docs/runbooks/node-maintenance.md "LXC volume trim (nightly)"). Not gated in main.yml: switched off,
+# it removes what an earlier converge installed (and does nothing on a host that never had it).
+- name: Check the LXC trim settings
+  ansible.builtin.assert:
+    that:
+      - pve_lxc_fstrim_start is string
+      - pve_lxc_fstrim_start is match('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+      - pve_lxc_fstrim_run_max_min | int >= 5
+      - pve_lxc_fstrim_storages | length > 0
+      - pve_lxc_fstrim_storages | select('match', '^[A-Za-z][A-Za-z0-9._-]*$') | list | length == pve_lxc_fstrim_storages | length
+      - pve_lxc_fstrim_exclude | map('string') | select('match', '^[1-9][0-9]*$') | list | length == pve_lxc_fstrim_exclude | length
+      - pve_lxc_fstrim_chunk_gb | int >= 1
+      - pve_lxc_fstrim_pause_s | int >= 1
+      - pve_lxc_fstrim_pause_idle_s | int >= 1
+      - pve_lxc_fstrim_sec_per_gb | int >= 1
+      - pve_lxc_fstrim_psi_wait_max_s | int >= 1
+      - pve_lxc_fstrim_psi_max | string is match('^[0-9]+(\.[0-9]+)?$')
+      - pve_lxc_fstrim_psi_max | float <= 100
+    fail_msg: >-
+      pve_lxc_fstrim_*: need a quoted HH:MM start, run_max_min >= 5, storage ids, numeric container ids, positive
+      integers and psi_max a number 0-100 (start={{ pve_lxc_fstrim_start | to_json }},
+      exclude={{ pve_lxc_fstrim_exclude | to_json }}, psi_max={{ pve_lxc_fstrim_psi_max | to_json }})
+    quiet: true
+  when: pve_lxc_fstrim_enabled | bool
+  tags: [lxc_fstrim]
+
+- name: Enabled -- the chunked trim, the sweep and its timer
+  when: pve_lxc_fstrim_enabled | bool
+  tags: [lxc_fstrim]
+  block:
+    # The same path ai-node1's hand-installed registry unit runs (docs/runbooks/registry-cache.md), so this
+    # also puts that copy under the role. Its defaults are unchanged: the registry run behaves as before.
+    - name: Install the chunked LXC volume trim (lxc-fstrim-chunked.sh)
+      ansible.builtin.copy:
+        src: "{{ role_path }}/../../../scripts/lxc-fstrim-chunked.sh"
+        dest: /usr/local/sbin/lxc-fstrim-chunked.sh
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the nightly sweep
+      ansible.builtin.copy:
+        src: pve-lxc-fstrim.sh
+        dest: /usr/local/sbin/pve-lxc-fstrim
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render the sweep's settings
+      ansible.builtin.template:
+        src: pve-lxc-fstrim.env.j2
+        dest: /etc/default/pve-lxc-fstrim
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Install the sweep's unit and timer
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - pve-lxc-fstrim.service
+        - pve-lxc-fstrim.timer
+      register: pve_lxc_fstrim_units
+
+    - name: Ensure node_exporter's textfile directory exists
+      ansible.builtin.file:
+        path: "{{ pve_lxc_fstrim_textfile_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # Written by the role, not the sweep: a host whose timer never fires still reports that the trim is
+    # meant to run there (the "not running" alert keys on it). Removed when the trim is switched off.
+    - name: Mark the trim as enabled for the alerts
+      ansible.builtin.copy:
+        dest: "{{ pve_lxc_fstrim_textfile_dir }}/pve_lxc_fstrim_enabled.prom"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # HELP pve_lxc_fstrim_enabled 1 while the pve_base role has the nightly LXC volume trim on for this host.
+          # TYPE pve_lxc_fstrim_enabled gauge
+          pve_lxc_fstrim_enabled 1
+
+    # The timer only: the converge never starts a trim. A unit file that --check did not write cannot be
+    # enabled in check mode either.
+    - name: Enable and start the timer
+      ansible.builtin.systemd:
+        name: pve-lxc-fstrim.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+      when: not (ansible_check_mode and pve_lxc_fstrim_units is changed)
+
+- name: Disabled -- remove the sweep and its timer
+  when: not (pve_lxc_fstrim_enabled | bool)
+  tags: [lxc_fstrim]
+  block:
+    - name: Look for an installed sweep timer
+      ansible.builtin.stat:
+        path: /etc/systemd/system/pve-lxc-fstrim.timer
+      register: pve_lxc_fstrim_timer_unit
+
+    # The timer first, then a run it may have started (static unit: stopped, not disabled). Stopping a run
+    # is clean: the volume in flight finishes its chunk and releases its mount.
+    - name: Stop the timer and a running sweep
+      ansible.builtin.systemd:
+        name: "{{ item.name }}"
+        state: stopped
+        enabled: "{{ item.enabled | default(omit) }}"
+      loop:
+        - { name: pve-lxc-fstrim.timer, enabled: false }
+        - { name: pve-lxc-fstrim.service }
+      loop_control:
+        label: "{{ item.name }}"
+      register: pve_lxc_fstrim_stop
+      failed_when:
+        - pve_lxc_fstrim_stop is failed
+        - "'Could not find the requested service' not in (pve_lxc_fstrim_stop.msg | default(''))"
+      when: pve_lxc_fstrim_timer_unit.stat.exists
+
+    # lxc-fstrim-chunked.sh stays: the registry's weekly unit on ai-node1 runs it.
+    - name: Remove the sweep, its settings, units and metrics
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ pve_lxc_fstrim_textfile_dir }}/pve_lxc_fstrim_enabled.prom"
+        - "{{ pve_lxc_fstrim_textfile_dir }}/pve_lxc_fstrim.prom"
+        - /etc/systemd/system/pve-lxc-fstrim.timer
+        - /etc/systemd/system/pve-lxc-fstrim.service
+        - /etc/default/pve-lxc-fstrim
+        - /usr/local/sbin/pve-lxc-fstrim
+        - /var/lib/pve-lxc-fstrim
+      register: pve_lxc_fstrim_removed
+
+    - name: Reload systemd after removing the units
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: pve_lxc_fstrim_removed is changed

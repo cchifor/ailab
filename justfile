@@ -50,6 +50,12 @@ thinpool *args:
 ec-fan *args:
     cd {{ansible_dir}} && ansible-playbook site.yml --tags ec_fan {{args}}
 
+# Ansible: the nightly, chunked, IO-pressure-guarded trim of every running container's local-lvm volumes on
+# the Proxmox hosts (pve_lxc_fstrim_enabled per host). ONE host at a time, check mode first:
+# `just lxc-fstrim --limit ai-node2 --check --diff` (docs/runbooks/node-maintenance.md "LXC volume trim").
+lxc-fstrim *args:
+    cd {{ansible_dir}} && ansible-playbook site.yml --tags lxc_fstrim {{args}}
+
 # Ansible: start onboot LXCs whose NFS bind-mount source was late at boot (power-cut race with the QNAP)
 autostart:
     cd {{ansible_dir}} && ansible-playbook site.yml --tags autostart

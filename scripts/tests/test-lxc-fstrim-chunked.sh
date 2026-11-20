@@ -9,7 +9,12 @@
 # - every block of the filesystem is covered, from ext4's own geometry, not df;
 # - nothing is trimmed while host IO pressure is high OR unreadable;
 # - a stop file halts it, even during a pressure wait;
-# - a failed trim is a failed run, and bad settings or an unknown volume are errors.
+# - a failed trim is a failed run, and bad settings or an unknown volume are errors;
+# - for the nightly sweep (role pve_base): a rootfs works like an mpN, a snapshot's copy of a key is never
+#   used, a DEADLINE stops it cleanly (exit 8) before a chunk that could not end in time, also during a
+#   pressure wait, and a chunk that trimmed nothing is followed by the short PAUSE_IDLE_S;
+# - with CURSOR_FILE, a volume the deadline cuts every night still reaches its tail: the cursor is kept on
+#   every exit before the last chunk and removed when the pass completes.
 #
 # Run: bash scripts/tests/test-lxc-fstrim-chunked.sh   (Linux, WSL or Git Bash)
 set -u
@@ -37,7 +42,7 @@ STUB
 cat > "$BIN/pvesm" <<'STUB'
 #!/usr/bin/env bash
 # pvesm path <volid>
-[ "$1" = path ] && [ "$2" = "local-lvm:vm-5004-disk-1" ] && echo /dev/pve/vm-5004-disk-1
+[ "$1" = path ] && case "$2" in local-lvm:vm-5004-disk-[0-9]) echo "/dev/pve/${2#local-lvm:}" ;; esac
 STUB
 cat > "$BIN/stat" <<'STUB'
 #!/usr/bin/env bash
@@ -64,10 +69,12 @@ cat > "$BIN/fstrim" <<'STUB'
 # fstrim -v -o <bytes> -l <bytes> <dir>; fails on call number $CTL/fail_on if set
 echo "$*" >> "$CTL/fstrim_calls"
 n=$(wc -l < "$CTL/fstrim_calls")
+# fake clock (the DEADLINE cases): each trim takes $CTL/trim_s seconds of it
+[ -f "$CTL/clock" ] && echo $(( $(cat "$CTL/clock") + $(cat "$CTL/trim_s") )) > "$CTL/clock"
 # slow_trim: an FITRIM that cannot be interrupted (ignores SIGTERM) and holds the mount busy for 2 s
 if [ -f "$CTL/slow_trim" ]; then trap '' TERM; touch "$CTL/fstrim_running"; /bin/sleep 2; rm -f "$CTL/fstrim_running"; fi
 if [ -f "$CTL/fail_on" ] && [ "$n" -ge "$(cat "$CTL/fail_on")" ]; then echo "fstrim: $5: FITRIM ioctl failed: Input/output error" >&2; exit 1; fi
-echo "$5: 1 GiB (1073741824 bytes) trimmed"
+if [ -f "$CTL/zero_bytes" ]; then echo "$5: 0 B (0 bytes) trimmed"; else echo "$5: 1 GiB (1073741824 bytes) trimmed"; fi
 STUB
 cat > "$BIN/lvs" <<'STUB'
 #!/usr/bin/env bash
@@ -78,12 +85,19 @@ cat > "$BIN/sleep" <<'STUB'
 # Each sleep advances a counter. At $CTL/psi_drop_after, pressure drops to 5;
 # at $CTL/stop_after, a stop request appears.
 n=$(( $(cat "$CTL/sleeps" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$CTL/sleeps"
+echo "$1" >> "$CTL/sleep_args"
+[ -f "$CTL/clock" ] && echo $(( $(cat "$CTL/clock") + $1 )) > "$CTL/clock"
 if [ -f "$CTL/psi_drop_after" ] && [ "$n" -ge "$(cat "$CTL/psi_drop_after")" ]; then
   echo "some avg10=5.00 avg60=5.00 avg300=5.00 total=1" > "$CTL/psi"
 fi
 if [ -f "$CTL/stop_after" ] && [ "$n" -ge "$(cat "$CTL/stop_after")" ]; then touch "$CTL/stop"; fi
 # block_sleep: a REAL blocking sleep, announced via $CTL/sleeping, for the SIGTERM case
 if [ -f "$CTL/block_sleep" ]; then touch "$CTL/sleeping"; exec /bin/sleep 30; fi
+STUB
+cat > "$BIN/date" <<'STUB'
+#!/usr/bin/env bash
+# The fake clock for `date +%s` when $CTL/clock exists; everything else is the real date.
+if [ "$*" = "+%s" ] && [ -f "$CTL/clock" ]; then cat "$CTL/clock"; else exec /bin/date "$@"; fi
 STUB
 chmod +x "$BIN"/*
 
@@ -95,9 +109,9 @@ new_case() {
   echo $(( 20 * GiB / 4096 )) > "$CTL/blocks"   # 20 GiB of ext4 blocks
   echo "some avg10=3.00 avg60=3.00 avg300=3.00 total=1" > "$CTL/psi"
 }
-run() { # extra VAR=value settings may be passed as arguments
+run() { # extra VAR=value settings may be passed as arguments; KEY (default mp0) is the volume
   env PATH="$BIN:$PATH" PSI_FILE="$CTL/psi" STOP_FILE="$CTL/stop" MOUNT_BASE="$CTL/mnt" LOCK_FILE="$CTL/lock" CHUNK_GB=8 PAUSE_S=1 \
-    PSI_MAX=45 PSI_WAIT_MAX_S=5 "$@" bash "$SCRIPT" 5004 mp0 > "$CTL/out" 2>&1
+    PSI_MAX=45 PSI_WAIT_MAX_S=5 "$@" bash "$SCRIPT" 5004 "${KEY:-mp0}" > "$CTL/out" 2>&1
   echo $? > "$CTL/rc"
 }
 
@@ -211,8 +225,94 @@ eq "exit 7" 7 "$(cat "$CTL/rc")"
 eq "nothing mounted" 0 "$(calls mount_calls)"
 has "says why" "another run" "$(cat "$CTL/out")"
 
+echo "== the container's rootfs is trimmed like a mount point =="
+new_case rootfs; KEY=rootfs run
+eq "exit 0" 0 "$(cat "$CTL/rc")"
+has "mounts the rootfs volume's device" "/dev/pve/vm-5004-disk-0" "$(cat "$CTL/mount_calls")"
+eq "covers it (3 chunks)" 3 "$(calls fstrim_calls)"
+
+echo "== a snapshot's copy of a key is never used =="
+new_case snapshot
+printf 'hostname: registry\nrootfs: local-lvm:vm-5004-disk-0,size=16G\n\n[before-upgrade]\nmp0: local-lvm:vm-5004-disk-1,mp=/var/lib/registry,size=384G\n' > "$CTL/pct_config"
+run
+eq "mp0 only in a snapshot -> exit 1" 1 "$(cat "$CTL/rc")"
+eq "nothing mounted" 0 "$(calls mount_calls)"
+new_case snapshot2
+printf 'mp0: local-lvm:vm-5004-disk-1,mp=/var/lib/registry,size=384G\nrootfs: local-lvm:vm-5004-disk-0,size=16G\n[old]\nmp0: local-lvm:vm-5004-disk-7,mp=/var/lib/registry,size=256G\n' > "$CTL/pct_config"
+run
+eq "the main section's mp0 is used" 0 "$(cat "$CTL/rc")"
+eq "mounted once, the current volume" "1 /dev/pve/vm-5004-disk-1" "$(calls mount_calls) $(grep -o '/dev/pve/vm-5004-disk-[0-9]' "$CTL/mount_calls")"
+
+echo "== DEADLINE: no chunk starts that could not end by it (exit 8, mount released) =="
+# Fake clock: each trim takes 60 s, a pause 1 s; a chunk is costed at 8 GiB x 10 s = 80 s.
+new_case deadline; echo 1000 > "$CTL/clock"; echo 60 > "$CTL/trim_s"
+run DEADLINE=1200 SEC_PER_GB=10
+eq "exit 8" 8 "$(cat "$CTL/rc")"
+eq "two chunks fit (1000+80, 1061+80), the third (1122+80 > 1200) does not" 2 "$(calls fstrim_calls)"
+has "says why" "deadline reached" "$(cat "$CTL/out")"
+eq "unmounted" 1 "$(calls umount_calls)"
+eq "mount dir removed" 0 "$(ls -d "$CTL"/mnt/lxc-fstrim-* 2>/dev/null | wc -l | tr -d ' ')"
+new_case deadpast; echo 5000 > "$CTL/clock"; echo 60 > "$CTL/trim_s"
+run DEADLINE=4000
+eq "a deadline already past -> exit 8" 8 "$(cat "$CTL/rc")"
+eq "a deadline already past -> nothing trimmed" 0 "$(calls fstrim_calls)"
+new_case deadroom; echo 1000 > "$CTL/clock"; echo 60 > "$CTL/trim_s"
+run DEADLINE=99999
+eq "a deadline with room for the whole volume -> exit 0" 0 "$(cat "$CTL/rc")"
+eq "all three chunks" 3 "$(calls fstrim_calls)"
+
+echo "== DEADLINE during a pressure wait: exit 8, not the pressure give-up =="
+new_case deadpsi; echo 1000 > "$CTL/clock"; echo 60 > "$CTL/trim_s"
+echo "some avg10=80.00 avg60=70.00 avg300=60.00 total=1" > "$CTL/psi"
+run DEADLINE=1100 SEC_PER_GB=10 PAUSE_S=15 PSI_WAIT_MAX_S=1800
+eq "exit 8" 8 "$(cat "$CTL/rc")"
+eq "nothing trimmed" 0 "$(calls fstrim_calls)"
+has "says it was the deadline during the wait" "deadline reached during the pressure wait" "$(cat "$CTL/out")"
+
+echo "== PAUSE_IDLE_S after a chunk that trimmed nothing, PAUSE_S after one that did =="
+new_case idle; touch "$CTL/zero_bytes"; run PAUSE_S=7 PAUSE_IDLE_S=2
+eq "exit 0" 0 "$(cat "$CTL/rc")"
+eq "three short pauses" "2 2 2" "$(tr '\n' ' ' < "$CTL/sleep_args" | sed 's/ $//')"
+new_case busy; run PAUSE_S=7 PAUSE_IDLE_S=2
+eq "three full pauses" "7 7 7" "$(tr '\n' ' ' < "$CTL/sleep_args" | sed 's/ $//')"
+new_case idledefault; touch "$CTL/zero_bytes"; run PAUSE_S=7
+eq "PAUSE_IDLE_S defaults to PAUSE_S (the registry unit's behaviour)" "7 7 7" "$(tr '\n' ' ' < "$CTL/sleep_args" | sed 's/ $//')"
+
+echo "== CURSOR_FILE: a volume the deadline cuts every night still reaches its tail =="
+# One chunk a night: a chunk is costed at 8 GiB x 10 s = 80 s and takes 60 s; DEADLINE = now + 100.
+new_case nights; echo 1000 > "$CTL/clock"; echo 60 > "$CTL/trim_s"
+for night in 1 2 3 4; do
+  run DEADLINE=$(( $(cat "$CTL/clock") + 100 )) SEC_PER_GB=10 CURSOR_FILE="$CTL/cursor"
+  echo "$(cat "$CTL/rc"):$( [ -e "$CTL/cursor" ] && cut -d' ' -f1 "$CTL/cursor" || echo none)" >> "$CTL/nights"
+  echo $(( $(cat "$CTL/clock") + 86400 )) > "$CTL/clock"
+done
+eq "offsets night by night: 0, 8 GiB, 16 GiB (the pass is complete), then 0 again" \
+  "0 $((8 * GiB)) $((16 * GiB)) 0" "$(sed -E 's/^-v -o ([0-9]+) .*/\1/' "$CTL/fstrim_calls" | tr '\n' ' ' | sed 's/ $//')"
+eq "exit and cursor after each night" "8:next=1 8:next=2 0:none 8:next=1" "$(tr '\n' ' ' < "$CTL/nights" | sed 's/ $//')"
+eq "the cursor's geometry" "next=1 chunks=3 size=$((20 * GiB)) chunk=$((8 * GiB))" "$(cat "$CTL/cursor")"
+eq "unmounted every night" 4 "$(calls umount_calls)"
+
+echo "== CURSOR_FILE: kept at the chunk a stop or a failure left; a cursor for another geometry starts over =="
+new_case cstop; echo "next=2 chunks=3 size=$((20 * GiB)) chunk=$((8 * GiB))" > "$CTL/cursor"; touch "$CTL/stop"
+run CURSOR_FILE="$CTL/cursor"
+eq "stop file: nothing trimmed" 0 "$(calls fstrim_calls)"
+eq "stop file: the cursor still says chunk 3" "next=2" "$(cut -d' ' -f1 "$CTL/cursor")"
+new_case cfail; echo 2 > "$CTL/fail_on"; run CURSOR_FILE="$CTL/cursor"
+eq "a failed chunk 2: exit 5" 5 "$(cat "$CTL/rc")"
+eq "a failed chunk 2: the cursor says chunk 2" "next=1" "$(cut -d' ' -f1 "$CTL/cursor")"
+new_case cresume; echo "next=2 chunks=3 size=$((20 * GiB)) chunk=$((8 * GiB))" > "$CTL/cursor"; run CURSOR_FILE="$CTL/cursor"
+eq "resume: only the last chunk" "-v -o $((16 * GiB)) -l $((8 * GiB))" "$(sed -E 's| [^ ]*$||' "$CTL/fstrim_calls")"
+eq "resume: exit 0, the pass complete, the cursor gone" "0 absent" "$(cat "$CTL/rc") $([ -e "$CTL/cursor" ] && echo present || echo absent)"
+for cur in "next=1 chunks=3 size=$((24 * GiB)) chunk=$((8 * GiB))" "next=7 chunks=3 size=$((20 * GiB)) chunk=$((8 * GiB))" "junk"; do
+  new_case cbad; echo "$cur" > "$CTL/cursor"; run CURSOR_FILE="$CTL/cursor"
+  eq "cursor '${cur:0:22}...': a new pass from chunk 1" 3 "$(calls fstrim_calls)"
+done
+has "and says so" "does not fit this volume" "$(cat "$CTL/out")"
+new_case cnone; run
+eq "without CURSOR_FILE (the registry unit) no cursor is written" "" "$(ls "$CTL" | grep -i cursor)"
+
 echo "== invalid settings are rejected before anything is mounted (exit 2) =="
-for bad in "CHUNK_GB=-1" "CHUNK_GB=0" "PAUSE_S=0" "PSI_MAX=abc" "PSI_WAIT_MAX_S=x"; do
+for bad in "CHUNK_GB=-1" "CHUNK_GB=0" "PAUSE_S=0" "PSI_MAX=abc" "PSI_WAIT_MAX_S=x" "PAUSE_IDLE_S=0" "SEC_PER_GB=x" "DEADLINE=soon" "DEADLINE=-5"; do
   new_case "set${bad%%=*}"; run "$bad"
   eq "$bad -> exit 2" 2 "$(cat "$CTL/rc")"
   eq "$bad -> nothing mounted" 0 "$(calls mount_calls)"
@@ -225,6 +325,8 @@ eq "missing mp0 -> nothing mounted" 0 "$(calls mount_calls)"
 new_case notblock; echo "regular file" > "$CTL/devtype"; run
 eq "non-block device -> exit 1" 1 "$(cat "$CTL/rc")"
 eq "non-block device -> nothing mounted" 0 "$(calls mount_calls)"
+new_case badkey; KEY=unused0 run
+eq "a key that is neither rootfs nor mpN -> exit 2" 2 "$(cat "$CTL/rc")"
 
 echo
 echo "lxc-fstrim-chunked: $PASS passed, $FAIL failed"

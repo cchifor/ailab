@@ -98,8 +98,9 @@ def _render_config(overrides=None) -> str:
     context.update(_EXTRA_VARS)
     context.update(overrides or {})
     env = jinja2.Environment(undefined=jinja2.StrictUndefined)
-    # Ansible's `to_json` is json.dumps with default arguments; plain jinja2 does not ship it.
+    # Ansible's `to_json` is json.dumps with default arguments; plain jinja2 does not ship it, nor ansible's `bool`.
     env.filters["to_json"] = json.dumps
+    env.filters["bool"] = _ansible_bool
     template = env.from_string(TEMPLATE_PATH.read_text())
     return template.render(**context)
 
@@ -445,6 +446,14 @@ def _without_strive_ci_user(defaults: dict) -> dict:
     }
 
 
+# strive/**'s two bounded families (2026-11-20): the 30 most recently pushed (10 once the platform protects airlock's
+# admitted runtimes) OR pushed within 14 days, one entry each;
+# an ailab-<digest> protect tag also while its digest was pulled within 14 days (the platform re-fetches pins daily).
+_STRIVE_SHA_ENTRY = {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 30, "pushedWithin": "336h"}
+_STRIVE_AILAB_DIGEST_ENTRY = {
+    "patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"], "mostRecentlyPushedCount": 30, "pushedWithin": "336h",
+    "pulledWithin": "336h",
+}
 _STRIVE_POLICY = {
     "repositories": ["strive/**"],
     "deleteUntagged": True,
@@ -452,8 +461,8 @@ _STRIVE_POLICY = {
         {"patterns": ["^latest$"]},
         {"patterns": ["^ailab$"]},
         {"patterns": ["^ailab-prev\\d*$"]},
-        {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 100},
-        {"patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"]},
+        _STRIVE_SHA_ENTRY,
+        _STRIVE_AILAB_DIGEST_ENTRY,
     ],
 }
 
@@ -508,12 +517,15 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
             self.assertFalse(rx.match(repo), repo)
 
     def test_no_policy_targets_strive_ci(self):
+        # A policy naming strive/ci/* must keep exactly strive/**'s tags. Only the deleteReferrers list does
+        # (since 2026-11-20); any other one would shadow strive/** for the existing strive/ci/* repos.
         for policy in self.policies:
             for pattern in policy["repositories"]:
-                self.assertFalse(
-                    pattern.startswith("strive/ci/") or pattern == "strive/ci",
-                    f"{pattern!r} would shadow strive/** for the existing strive/ci/* repos",
-                )
+                if pattern.startswith("strive/ci/") or pattern == "strive/ci":
+                    self.assertIs(policy.get("deleteReferrers"), True, f"{pattern!r} would shadow strive/**")
+                    self.assertEqual(policy["keepTags"], _STRIVE_POLICY["keepTags"], pattern)
+                    self.assertIs(policy["deleteUntagged"], _STRIVE_POLICY["deleteUntagged"], pattern)
+                    self.assertNotIn("*", pattern, f"{pattern!r}: name strive/ci/* repos one by one, no glob")
 
     def test_keep_pattern_matches_only_the_full_commit_tag(self):
         policy = self.policies[_policy_index(self.policies, _CI_BUILD_REPOS)]
@@ -539,18 +551,20 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
 
     def test_existing_strive_ci_repos_keep_their_strive_rules(self):
         # Regression for the first draft (strive/ci/**): every existing strive/ci/* repo must still
-        # be governed by the UNCHANGED strive/** policy, so its latest / ailab / ailab-prev /
-        # sha- / ailab-<digest> tags keep the entries they had.
+        # be governed by strive/**'s UNCHANGED rules, so its latest / ailab / ailab-prev /
+        # sha- / ailab-<digest> tags keep the entries they had. Since 2026-11-20 they reach those
+        # rules through the deleteReferrers list, whose policy shares strive/**'s keepTags macro.
         for repo in _EXISTING_STRIVE_CI_REPOS:
             for tag, want in [
                 ("latest", {"patterns": ["^latest$"]}),
                 ("ailab", {"patterns": ["^ailab$"]}),
                 ("ailab-prev2", {"patterns": ["^ailab-prev\\d*$"]}),
-                ("sha-" + _FULL_SHA, {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 100}),
-                ("ailab-" + _FULL_SHA[:12], {"patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"]}),
+                ("sha-" + _FULL_SHA, _STRIVE_SHA_ENTRY),
+                ("ailab-" + _FULL_SHA[:12], _STRIVE_AILAB_DIGEST_ENTRY),
             ]:
                 policy, entry = _keep_entry(self.policies, repo, tag)
-                self.assertEqual(policy, _STRIVE_POLICY, f"{repo}:{tag} left strive/**")
+                self.assertEqual(policy["keepTags"], _STRIVE_POLICY["keepTags"], f"{repo}:{tag} left strive/**'s rules")
+                self.assertIs(policy["deleteUntagged"], _STRIVE_POLICY["deleteUntagged"], f"{repo}:{tag}")
                 self.assertEqual(entry, want, f"{repo}:{tag}")
 
     def test_ci_build_tag_is_governed_by_the_new_policy(self):
@@ -568,7 +582,6 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
             "strive/ci-build/nested/image": _CI_BUILD_REPOS,
             "strive/ci-build": _CI_BUILD_REPOS,
             "strive/ci-buildx/foo": "strive/**",
-            "strive/ci/platform-e2e-local": "strive/**",
             "strive/ci": "strive/**",
             "strive/platform-api": "strive/**",
             "agentforge/orchestrator": "agentforge/**",
@@ -578,6 +591,9 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
         for repo, want in expected.items():
             got = _first_retention_policy(self.policies, repo)["repositories"]
             self.assertEqual(got, [want], f"{repo} must be governed by {want}")
+        # strive/ci/* is on the deleteReferrers list since 2026-11-20 (strive/**'s keepTags, see that class).
+        got = _first_retention_policy(self.policies, "strive/ci/platform-e2e-local")["repositories"]
+        self.assertEqual(got, _DEFAULT_REFERRER_REPOS)
 
     def test_strive_policy_would_drop_a_ci_tag(self):
         # The reason for the ordering: under strive/** a ci- tag matches no keepTags entry.
@@ -629,8 +645,19 @@ def _load_apply_helper():
     return mod
 
 
-# The shipped deleteReferrers list: the strive/web canary plus batch B1 (2026-11-19). One place to update per batch.
-_DEFAULT_REFERRER_REPOS = ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"]
+# The shipped deleteReferrers list (2026-11-20): every strive repo the orphan pre-check passed, by name. One place to
+# update. strive/keycloak-sync (empty index: the check fails closed) and strive/ci-build/* (claimed first by the
+# strive/ci-build/** policy) are not on it.
+_SERVICE_REPOS = ["airlock", "app-runner", "deepagent", "digest", "doc-search", "e2e-runner", "gatekeeper", "harness",
+                  "integration", "keycloak", "keycloak-realm-sync", "knowledge", "mcp", "notification", "profile",
+                  "sentinel", "tms", "web", "workflow"]
+_CACHE_REPOS = ["airlock", "app-runner", "deepagent", "digest", "doc-search", "e2e", "gatekeeper", "harness",
+                "integration", "keycloak", "keycloak-realm-sync", "knowledge", "mcp", "notification", "profile",
+                "sentinel", "tms", "web", "workflow"]
+_DEFAULT_REFERRER_REPOS = (["strive/" + r for r in _SERVICE_REPOS] + ["strive/pin-manifest"]
+                           + ["strive/cache/" + r for r in _CACHE_REPOS] + _EXISTING_STRIVE_CI_REPOS)
+# What was live before this list (the strive/web canary plus batch B1, applied 2026-11-20 10:17Z).
+_B1_REFERRER_REPOS = ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"]
 
 
 class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
@@ -638,9 +665,24 @@ class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
     which TAGS are kept: the canary policy is strive/**'s exact rules plus deleteReferrers, between
     strive/ci-build/** and strive/**; widening to strive/** puts the flag on strive/** itself."""
 
-    def test_default_is_the_canary_plus_batch_b1(self):
-        # Widening in batches (2026-11-19): strive/web (canary) + B1. B2-B4 follow, then ["strive/**"].
-        self.assertEqual(_load_defaults()[_CANARY_KNOB], _DEFAULT_REFERRER_REPOS)
+    def test_default_is_every_prechecked_safe_repo(self):
+        listed = _load_defaults()[_CANARY_KNOB]
+        self.assertEqual(listed, _DEFAULT_REFERRER_REPOS)
+        self.assertEqual(len(listed), len(set(listed)), "duplicate entries")
+        self.assertEqual(len(listed), 51)
+        for repo in listed:
+            # exact repository names only: a glob would reach repos the pre-check never saw
+            self.assertRegex(repo, r"^strive/[a-z0-9][a-z0-9/-]*[a-z0-9]$")
+            self.assertFalse(repo.startswith("strive/ci-build"), f"{repo}: strive/ci-build/** claims it first")
+        self.assertNotIn("strive/keycloak-sync", listed)  # empty index: the pre-check fails closed on it
+        self.assertNotIn("strive/**", listed)
+        self.assertTrue(set(_B1_REFERRER_REPOS) <= set(listed), "the canary and B1 must stay on the list")
+
+    def test_widening_from_b1_is_a_reload(self):
+        helper = _load_apply_helper()
+        before = json.loads(_render_config({_CANARY_KNOB: _B1_REFERRER_REPOS}))
+        mode, paths, _ = helper.classify(before, json.loads(_render_config()))
+        self.assertEqual((mode, paths), ("reload", ["storage.retention.policies"]))
 
     def test_canary_sits_between_ci_build_and_strive(self):
         repos = [p["repositories"] for p in _policies()]
@@ -663,7 +705,10 @@ class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
     def test_first_match_routing(self):
         pols = _policies()
         expected = {"strive/web": _DEFAULT_REFERRER_REPOS, "strive/e2e-runner": _DEFAULT_REFERRER_REPOS,
-                    "strive/profile": ["strive/**"],
+                    "strive/profile": _DEFAULT_REFERRER_REPOS, "strive/cache/web": _DEFAULT_REFERRER_REPOS,
+                    "strive/ci/platform-mock-mcp": _DEFAULT_REFERRER_REPOS,
+                    "strive/keycloak-sync": ["strive/**"], "strive/new-service": ["strive/**"],
+                    "strive/ci-build/platform-e2e-local": [_CI_BUILD_REPOS],
                     "strive/webx": ["strive/**"], "strive/ci-build/a": [_CI_BUILD_REPOS],
                     "strive/platform-api": ["strive/**"], "agentforge/orchestrator": ["agentforge/**"],
                     "library/python": ["**"]}
@@ -910,6 +955,86 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
         self.assertTrue(re.search(rule["encrypted_regex"], "registry_scoped_push_passwords"))
         meta = yaml.safe_load((REPO_ROOT / secrets_path).read_text())["sops"]
         self.assertTrue(re.search(meta["encrypted_regex"], "registry_scoped_push_passwords"))
+
+
+# The keepTags strive/** had until 2026-11-20 (the live config at that date): 100 sha- builds, every ailab-<digest>.
+_STRIVE_KEEP_TAGS_BEFORE = [
+    {"patterns": ["^latest$"]},
+    {"patterns": ["^ailab$"]},
+    {"patterns": ["^ailab-prev\\d*$"]},
+    {"patterns": ["^sha-.*"], "mostRecentlyPushedCount": 100},
+    {"patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"]},
+]
+
+
+class RegistryZotStriveTagRetentionTest(unittest.TestCase):
+    """strive/** keeps latest / ailab / ailab-prev* forever, and the sha- builds and ailab-<digest> protect tags each
+    by the N most recently pushed OR pushed within a window: both rules in ONE entry, which zot v2.1.18 ORs."""
+
+    def setUp(self):
+        self.defaults = _load_defaults()
+        self.policies = json.loads(_render_config())["storage"]["retention"]["policies"]
+
+    def test_knobs(self):
+        self.assertEqual(self.defaults["registry_zot_strive_keep_recent"], 30)
+        self.assertEqual(self.defaults["registry_zot_strive_keep_within"], "336h")  # 14 days, a Go duration
+        self.assertIs(self.defaults["registry_zot_retention_dry_run"], False)
+
+    def test_strive_keep_tags(self):
+        strive = self.policies[_policy_index(self.policies, "strive/**")]
+        self.assertEqual(strive["keepTags"], _STRIVE_POLICY["keepTags"])
+        for entry in (_STRIVE_SHA_ENTRY, _STRIVE_AILAB_DIGEST_ENTRY):
+            # one entry carrying both rules: split in two, the first would claim every tag (first match) and the
+            # second would never apply
+            self.assertEqual(sum(1 for e in strive["keepTags"] if e["patterns"] == entry["patterns"]), 1)
+
+    def test_every_strive_policy_shares_the_keep_tags(self):
+        # the deleteReferrers list renders from the same macro, at any list value
+        for repos in ([], ["strive/web"], ["strive/**"]):
+            for policy in _policies(repos):
+                if any(p.startswith("strive/") and not p.startswith("strive/ci-build") for p in policy["repositories"]):
+                    self.assertEqual(policy["keepTags"], _STRIVE_POLICY["keepTags"], (repos, policy["repositories"]))
+
+    def test_knobs_reach_both_families(self):
+        pols = json.loads(_render_config({"registry_zot_strive_keep_recent": 25,
+                                          "registry_zot_strive_keep_within": "48h"}))["storage"]["retention"]["policies"]
+        strive = pols[_policy_index(pols, "strive/**")]
+        bounded = [e for e in strive["keepTags"] if len(e) > 1]
+        self.assertEqual(len(bounded), 2)
+        for e in bounded:
+            self.assertEqual((e["mostRecentlyPushedCount"], e["pushedWithin"]), (25, "48h"))
+        sha, ailab_digest = bounded
+        self.assertNotIn("pulledWithin", sha)  # a sha- build is kept by count or push age only
+        self.assertEqual(ailab_digest["pulledWithin"], "48h")  # a pinned digest is re-fetched daily
+
+    def test_other_policies_untouched(self):
+        ci_build = self.policies[_policy_index(self.policies, _CI_BUILD_REPOS)]
+        self.assertEqual(ci_build["keepTags"], [_CI_BUILD_ENTRY])
+        agentforge = self.policies[_policy_index(self.policies, "agentforge/**")]
+        self.assertNotIn("pushedWithin", json.dumps(agentforge))
+
+    def test_dry_run_renders_a_json_boolean(self):
+        # `-e registry_zot_retention_dry_run=true` arrives as the STRING "true": a bare to_json would render "true" in
+        # quotes, which zot rejects (bool field), so the template goes through ansible's bool filter first.
+        for value, want in ((None, False), (False, False), (True, True), ("true", True), ("yes", True),
+                            ("false", False), ("no", False)):
+            overrides = {} if value is None else {"registry_zot_retention_dry_run": value}
+            rendered = _render_config(overrides)
+            self.assertIs(json.loads(rendered)["storage"]["retention"]["dryRun"], want, value)
+
+    def test_retention_changes_are_reloads(self):
+        # the apply helper must hot-reload both steps of the rollout, never restart (19 min outage)
+        helper = _load_apply_helper()
+        live = json.loads(_render_config({}))
+        for policy in live["storage"]["retention"]["policies"]:  # what ran until 2026-11-20
+            if policy["repositories"] != [_CI_BUILD_REPOS] and policy["keepTags"] == _STRIVE_POLICY["keepTags"]:
+                policy["keepTags"] = _STRIVE_KEEP_TAGS_BEFORE
+        dry = json.loads(_render_config({"registry_zot_retention_dry_run": "true"}))
+        mode, paths, _ = helper.classify(live, dry)
+        self.assertEqual(mode, "reload", paths)
+        self.assertEqual(paths, ["storage.retention.dryRun", "storage.retention.policies"])
+        mode, paths, _ = helper.classify(dry, json.loads(_render_config({})))
+        self.assertEqual((mode, paths), ("reload", ["storage.retention.dryRun"]))
 
 
 if __name__ == "__main__":

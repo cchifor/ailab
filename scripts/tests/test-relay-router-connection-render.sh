@@ -8,7 +8,9 @@
 #     plus, for Relay, exactly two added objects: the generated connection ConfigMap (whose content is
 #     connections.json byte for byte, and whose hashed name the volume follows) and the additive
 #     OpenBao egress NetworkPolicy. Every other object, container and pre-existing env entry is the
-#     plain render, so ROUTER_PLUGIN_CONFIG and RELAY_AGENT_CONTROL_PLANE are untouched;
+#     plain render, so ROUTER_PLUGIN_CONFIG and RELAY_AGENT_CONTROL_PLANE are untouched (and the Relay
+#     component's own patch never names RELAY_AGENT_CONTROL_PLANE, which hub step H6 sets through
+#     ../relay-agent-control-plane, so the plain render may already carry it);
 #   * also builds together with the budget-ledger consumer component of the same app (the inclusion
 #     the runbook orders) with no volume, mount or env collision: every env entry of the plain render,
 #     of the budget component and of this component is present exactly once with its own value (env
@@ -45,6 +47,11 @@ for app in relay llm-router; do
 import sys, yaml
 path, component, budget = sys.argv[1:4]
 k = yaml.safe_load(open(path, encoding="utf-8"))
+# Only the components list is rewritten: an overlay entry that could target what a stripped component
+# supplies (patches, replacements, transformers and the like) would fail the renders for an unrelated
+# reason, so any other key fails here, naming this script.
+extra = set(k) - {"apiVersion", "kind", "resources", "components"}
+assert not extra, f"{path}: test-relay-router-connection-render.sh strips only components, but the overlay also has {sorted(extra)}"
 entries = k.get("components") or []
 name = lambda e: e.rstrip("/").split("/")[-1]
 found = {n: sum(1 for e in entries if name(e) == n) for n in (component, budget)}
@@ -133,7 +140,12 @@ for app, (deployment, container, env_names, volumes, added) in CASES.items():
         assert cm["data"]["connections.json"] == open(record, encoding="utf-8").read(), "rendered record differs"
         env = {e["name"]: e["value"] for e in added_env}
         assert env["RELAY_ROUTER_CONNECTIONS_FILE"] == "/run/relay-router/connections.json"
-        assert "RELAY_AGENT_CONTROL_PLANE" not in {e["name"] for e in c["env"]}
+        # The control plane stays exactly as the plain render has it (before == after above; since hub
+        # step H6 the plain render carries it), and the component's own patch never names it: a
+        # same-valued entry would merge away unseen.
+        [patch] = [d for d in yaml.safe_load_all(open(f"{record.rsplit('/', 1)[0]}/deployment.yaml", encoding="utf-8")) if d]
+        assert "RELAY_AGENT_CONTROL_PLANE" not in {e["name"] for x in patch["spec"]["template"]["spec"]["containers"]
+                                                   for e in x.get("env", [])}, "the component sets the control plane"
     if app == "relay":
         [np_key] = [k for k in extra if k[0] == "NetworkPolicy"]
         selector = with_[np_key]["spec"]["podSelector"]["matchLabels"]

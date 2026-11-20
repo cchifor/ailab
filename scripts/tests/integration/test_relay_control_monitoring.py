@@ -11,7 +11,7 @@ import unittest
 import uuid
 
 import yaml
-from test_relay_notifications import docker, KUSTOMIZE, KUBECONFORM, named, relay_overlay_without
+from test_relay_notifications import docker, KUSTOMIZE, KUBECONFORM, named, live_relay_components, relay_overlay_without
 
 ROOT = Path(__file__).resolve().parents[3]
 COMPONENT = ROOT / 'kubernetes/components/relay-control-monitoring'
@@ -207,13 +207,16 @@ class Monitoring(unittest.TestCase):
         (self.root / 'input/tenant-id').mkdir()
         self.run_setup(False)
 
-    def test_worker_and_candidate_rules_are_opt_in_and_do_not_invent_a_journal_target(self):
+    def test_worker_rules_ride_with_the_collector_candidate_rules_stay_opt_in_and_no_journal_target(self):
         self.assertEqual(len(named(self.docs, 'PrometheusRule', 'relay-worker-operations')['spec']['groups'][0]['rules']), 7)
         self.assertEqual(len(named(self.docs, 'PrometheusRule', 'relay-candidate-journal')['spec']['groups'][0]['rules']), 3)
         self.assertEqual([d['metadata']['name'] for d in self.docs if d['kind'] == 'ServiceMonitor'], ['relay-control-plane'])
+        # Hub upgrade step H6 includes the worker rules in the live Relay overlay, once, with the collector
+        # they read. The candidate journal rules stay opt-in, and the monitoring stack includes neither.
+        self.assertEqual(live_relay_components().count('relay-worker-monitoring'), 1)
+        self.assertNotIn('relay-candidate-monitoring', (ROOT / 'kubernetes/apps/apps/relay/kustomization.yaml').read_text())
         for component in ['relay-worker-monitoring', 'relay-candidate-monitoring']:
-            for path in ['kubernetes/apps/apps/relay/kustomization.yaml', 'kubernetes/apps/infrastructure/monitoring/kustomization.yaml']:
-                self.assertNotIn(component, (ROOT / path).read_text())
+            self.assertNotIn(component, (ROOT / 'kubernetes/apps/infrastructure/monitoring/kustomization.yaml').read_text())
 
     def test_collector_has_separate_authority_and_fixed_placement(self):
         monitor = named(self.docs, 'ServiceMonitor', 'relay-control-plane')
@@ -261,22 +264,35 @@ class Monitoring(unittest.TestCase):
         env = {e['name']: e.get('value') for e in application['env']}
         self.assertEqual(env['RELAY_CONTROL_METRICS_FILE'], '/run/relay-metrics/private/config.json')
         base_app = next(c for c in base['containers'] if c['name'] == 'relay')
-        # Monitoring preserves the opt-in boundary; this rendered overlay must
-        # not carry the managed flag or a router connection Secret.
-        self.assertNotIn('RELAY_AGENT_CONTROL_PLANE', {e['name'] for e in base_app['env']})
-        self.assertNotIn('RELAY_ROUTER_CONNECTIONS_FILE', {e['name'] for e in base_app['env']})
-        self.assertNotIn('RELAY_AGENT_CONTROL_PLANE', env)
-        self.assertNotIn('RELAY_ROUTER_CONNECTIONS_FILE', env)
-        self.assertNotIn('relay-router-connection', {v['secret']['secretName'] for v in self.spec['volumes'] if 'secret' in v})
+        # Monitoring adds no managed flag and no router connection of its own: since hub upgrade step H6
+        # the base carries both through their own components. The rendered layer keeps every base env
+        # entry and volume as they are, adds only the metrics file and the notification file, and mounts
+        # no Secret but those two layers' own (so never the Router connection's relay-router-files).
+        for entry in base_app['env']:
+            self.assertIn(entry, application['env'])
+        self.assertEqual(set(env) - {e['name'] for e in base_app['env']},
+                         {'RELAY_CONTROL_METRICS_FILE', 'RELAY_NOTIFICATION_DESTINATIONS_FILE'})
+        patch = yaml.safe_load((COMPONENT / 'deployment.yaml').read_text())
+        self.assertEqual([e['name'] for c in patch['spec']['template']['spec']['containers'] for e in c.get('env', [])],
+                         ['RELAY_CONTROL_METRICS_FILE'])
+        secrets = lambda pod: {v['secret']['secretName'] for v in pod['volumes'] if 'secret' in v}
+        self.assertEqual(secrets(self.spec) - secrets(base), {'relay-control-metrics', 'relay-notifications'})
+        for volume in base['volumes']:
+            self.assertIn(volume, self.spec['volumes'])
+        # Exactly the two layers' own volumes are added, so no second projection of a base Secret either.
+        self.assertEqual({v['name'] for v in self.spec['volumes']} - {v['name'] for v in base['volumes']},
+                         {'metrics-setup', 'metrics-input', 'metrics-files',
+                          'notification-setup', 'notification-input', 'notification-files'})
         self.assertNotIn('metrics-input', {v['name'] for v in application['volumeMounts']})
         inputs = next(v['secret'] for v in self.spec['volumes'] if v['name'] == 'metrics-input')
         self.assertEqual(inputs['secretName'], 'relay-control-metrics')
         self.assertEqual({item['key'] for item in inputs['items']}, {'tenant-id', 'token-sha256', 'expires-at'})
         memory = next(v['emptyDir'] for v in self.spec['volumes'] if v['name'] == 'metrics-files')
         self.assertEqual(memory, {'medium': 'Memory', 'sizeLimit': '1Mi'})
-        # This component does not activate itself in either live kustomization.
-        for path in ['kubernetes/apps/apps/relay/kustomization.yaml', 'kubernetes/apps/infrastructure/monitoring/kustomization.yaml']:
-            self.assertNotIn('relay-control-monitoring', (ROOT / path).read_text())
+        # Hub upgrade step H6 includes the collector in the live Relay overlay, once, as a component
+        # (docs/runbooks/relay-control-monitoring.md, activation step 3); the monitoring stack never does.
+        self.assertEqual(live_relay_components().count('relay-control-monitoring'), 1)
+        self.assertNotIn('relay-control-monitoring', (ROOT / 'kubernetes/apps/infrastructure/monitoring/kustomization.yaml').read_text())
 
 
 if __name__ == '__main__':

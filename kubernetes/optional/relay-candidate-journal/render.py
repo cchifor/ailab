@@ -36,9 +36,12 @@ CLUSTER_IP = '10.96.0.42'
 # kubernetes/apps/relay-researcher/installation/namespaces.yaml.
 CLIENT_NAMESPACES = {'control': 'relay-infra-control', 'execution': 'relay-researcher-1'}
 LABELS = {'app.kubernetes.io/part-of': NAME, 'velero.io/exclude-from-backup': 'true'}
+# Off the Relay worker pool. NotIn ['true'], not DoesNotExist: the agent nodes carry
+# ailab.io/relay-worker-pool=false (kubernetes/infra/agent-nodes/node-labels.tf, the researcher agent's
+# placement), and NotIn also matches a node without the label.
 AFFINITY = {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {
     'nodeSelectorTerms': [{'matchExpressions': [
-        {'key': 'ailab.io/relay-worker-pool', 'operator': 'DoesNotExist'},
+        {'key': 'ailab.io/relay-worker-pool', 'operator': 'NotIn', 'values': ['true']},
         {'key': 'kubernetes.io/arch', 'operator': 'In', 'values': ['amd64']},
     ]}]}}}
 SECURITY = {'privileged': False, 'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,

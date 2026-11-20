@@ -175,6 +175,13 @@ def order_violations(comps: set[str]) -> list[str]:
                    "(step H6 follows H3 and H4a)")
     if "relay-agent-control-plane" in comps and comps & {"relay-gitea-authority", "relay-notifications"}:
         out.append("control plane with Gitea authority or notifications (owner decision G2)")
+    # H6's monitoring: Relay refuses to start with a control metrics file and no control plane
+    # ("Control metrics require the agent control plane", server/main.ts), and the worker alerts read
+    # the control collector's series (docs/runbooks/relay-worker-monitoring.md).
+    if "relay-control-monitoring" in comps and "relay-agent-control-plane" not in comps:
+        out.append("control monitoring without the control plane (Relay refuses to start)")
+    if "relay-worker-monitoring" in comps and "relay-control-monitoring" not in comps:
+        out.append("worker monitoring without the control collector")
     # H7 needs H6 (the budget authority starts on the candidate profile source with the Router
     # connection) and so everything H6 needs; Relay's design removes the candidate authority before the
     # canary, and H4b's registry comes after the canary, so the two never share a rollout.
@@ -250,6 +257,9 @@ class InclusionGate(unittest.TestCase):
             {"relay-agent-control-plane", "relay-router-connection"},   # H6 with nothing before it
             *(h6 - {missing} for missing in ("relay-restore-fencing", "relay-infrastructure-installations",
                                              "relay-worker-budget-client", "relay-router-connection")),
+            h6 - {"relay-agent-control-plane"},                        # the collector without the control plane
+            h6 - {"relay-control-monitoring"},                         # worker alerts without the collector
+            h4a | {"relay-control-monitoring", "relay-worker-monitoring"},
             h4b - {"relay-worker-budget-client"},
             h4b | {"relay-gitea-authority"},
             h4b | {"relay-notifications"},

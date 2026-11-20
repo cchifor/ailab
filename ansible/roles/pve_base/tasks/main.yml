@@ -131,6 +131,11 @@
     - pve_pin_kernel | bool
     - pve_pinned_kernel | length > 0
 
+# ---- The thin pool's fill as node_exporter textfile metrics (pve_thin_textfile_*) ----
+# `ansible-playbook site.yml --limit <host> --tags thin_textfile` converges only this. Its tasks carry the tag.
+- name: Thin pool fill metrics
+  ansible.builtin.import_tasks: thin_textfile.yml
+
 # ---- LVM thin-pool zeroing (pve_thin_pool_zero; see defaults/main.yml for the trade-off) ----
 # `just thinpool --limit <host>` (tags: thinpool) converges only this, one host at a time. The full
 # `base` tag (and `just net`) also runs it. `lvs --binary` prints 1/0, not "zero"/"".
@@ -145,6 +150,11 @@
   ansible.builtin.command: "lvchange --zero {{ 'y' if (pve_thin_pool_zero | bool) else 'n' }} {{ pve_thin_pool }}"
   when: (pve_thin_pool_zero_state.stdout | trim == '1') != (pve_thin_pool_zero | bool)
   tags: [thinpool]
+
+# ---- Nightly trim of the running containers' local-lvm volumes (pve_lxc_fstrim_*) ----
+# `just lxc-fstrim --limit <host>` (tags: lxc_fstrim) converges only this. Its tasks carry the tag.
+- name: Nightly LXC volume trim
+  ansible.builtin.import_tasks: lxc_fstrim.yml
 
 # ---- Host writeback bounds (pve_base_writeback_sysctl; ADR 0042, see defaults/main.yml) ----
 # `ansible-playbook site.yml --limit <host> --tags writeback` converges only this. Live; no reboot.

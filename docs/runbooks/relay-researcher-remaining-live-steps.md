@@ -1,6 +1,6 @@
 # Relay researcher: remaining live steps before the first qualification run
 
-Status: **checklist, updated 2026-11-18. Steps 1-2 are DONE; resume at step 3 after the readbacks in steps 0-2 pass.**
+Status: **checklist, updated 2026-11-20. Steps 1-3 are DONE; resume at step 4 after the readbacks in steps 0-3 pass.**
 Merging this file changes nothing live. It puts in execution order
 the owner and operator live steps that are still open between today's state and lifting the hold on
 hub step H6 (ailab #1811). It does not replace the runbooks it cites. Each step is an operator action on
@@ -86,7 +86,7 @@ the other live values below still require that readback.
 **Tags.** Each step has a **Writes** line, naming any write to OpenBao, the budget ledger, Kubernetes
 objects or the Router admin API, and a **Restarts** line, naming every rollout. A `force-sync`
 annotation is a Kubernetes write, and ESO then re-renders the ExternalSecret's Secret.
-For DONE steps 1-2, the Writes/Restarts in the step bodies are historical; only the readbacks are current.
+For DONE steps 1-3, the Writes/Restarts in the step bodies are historical; only the readbacks are current.
 
 **Owner decisions come first.** The decisions below are recorded in
 [ailab #1820](https://git.chifor.me/cchifor/ailab/issues/1820) and repeated at the end of this file.
@@ -108,7 +108,7 @@ Each of those steps repeats the requirement as a pre-check.
 | 0 | Session, helpers, baseline | (this checklist) | none | none |
 | 1 | **DONE**: Signer keys and the Router trust document (H5, first half) | Router connection step 3 | completed; readback only now | none |
 | 2 | **DONE**: Router trust inclusion | Router connection step 6 | completed; readback only now | none |
-| 3 | Control-metrics collector Secrets | control monitoring, activation step 2 | **OpenBao**: 1 document (NEW path); **Kubernetes**: 2 Secrets | none |
+| 3 | **DONE**: Control-metrics collector Secrets | control monitoring, activation step 2 | completed; readback only now | none |
 | 4 | Budget step 8 proofs | budget step 8 | **Kubernetes**: one temporary client Pod | none |
 | 5 | Witness drills A-D | budget, "Drills before production `ready=true`" | **OpenBao**: witness versions; **ledger**: the rotation to B and the `ready` flips; **Router admin API**: plugin on and off; **Kubernetes**: ExternalSecret annotations, Deployment restarts, the client Pod's deletion | **Router**, 8 times |
 | 6 | Durability evidence (6a), then the independent review (6b) | budget step 8; budget, "Durability evidence for the first `ready=true`" | **Kubernetes**: the disposable probe namespace and its objects, created and deleted; the ledger Pod's deletion. With the owner's OK only: a `qm reset` of the probe's node (tier b), a 60 s host firewall rule (tier c) | **the ledger Pod**, once (`OnDelete`); the probe's node VM if tier (b) runs |
@@ -209,7 +209,8 @@ wsha_bao; wsha_secret relay relay-worker-budget; wsha_secret llm-router llm-rout
   `llm-router-relay-trust` is Ready. Both `*-worker-budget` ExternalSecrets are
   `SecretSynced`, and both SecretStores are Ready.
 - **OpenBao.** `af/relay-router` lists `relay/` and `router/`; step 1's signer/trust readbacks hold.
-- **Collector Secrets.** Neither Secret exists.
+- **Collector Secrets.** Both exist (step 3 DONE): `relay/relay-control-metrics` with keys
+  `expires-at`, `tenant-id`, `token-sha256`, and `monitoring/relay-control-collector` with key `token`.
 - **Provision objects.** The policy and the token role read back exactly as Router connection step 1
   says: `allowed_policies [relay-router-escrow]`, `orphan true`, `renewable false`,
   `token_no_default_policy true`, `token_explicit_max_ttl 720h`.
@@ -414,6 +415,13 @@ Relay connection exists, reverting an inclusion PR is enough (`relay-router-conn
 
 ## Step 3. Control-metrics collector Secrets
 
+**DONE.** The two Secrets were created on 2026-11-17 at 10:39:37Z (`kubectl create`, both in the same
+second, after step 1) and the token was escrowed at `af/relay-control/collector`. The full readback
+passed on 2026-11-20: token shape, `MATCH`, the escrow's sha256 equal to `token-sha256`, the tenant row
+present in Relay, the expiry and pattern, and the discovery and RBAC checks. Re-run the readback only.
+The commented-out creation block below is the historical record and must not be run again: `bao kv put` would replace the
+escrowed token, so it would no longer match the two Secrets.
+
 **Purpose.** Create the two Secrets that H6's `relay-control-monitoring` component needs
 (`relay-control-monitoring.md:10-22` and activation step 2 at `:55-56`):
 
@@ -457,15 +465,17 @@ The token is 32 random bytes in unpadded base64url: 43 characters, no newline. R
 `server/agent-sessions/metrics.ts:164-182`).
 
 ```sh
-openssl rand 32 | basenc --base64url | tr -d '=\n' | bao kv put -mount=af relay-control/collector token=-
-bao kv get -mount=af -field=token relay-control/collector \
-  | kubectl --context admin@ai -n monitoring create secret generic relay-control-collector --from-file=token=/dev/stdin
-sha="$(bao kv get -mount=af -field=token relay-control/collector | tr -d '\n' | sha256sum | cut -d' ' -f1)"
-kubectl --context admin@ai -n relay create secret generic relay-control-metrics \
-  --from-literal=tenant-id=00000000-0000-4000-8000-000000000001 \
-  --from-literal=token-sha256="$sha" \
-  --from-literal=expires-at='2027-02-15T00:00:00Z'
-unset sha
+# HISTORICAL RECORD, step 3 DONE. DO NOT RUN: it would replace the escrowed collector token, which
+# would then no longer match the two Secrets. Every line is commented out so a paste does nothing.
+# openssl rand 32 | basenc --base64url | tr -d '=\n' | bao kv put -mount=af relay-control/collector token=-
+# bao kv get -mount=af -field=token relay-control/collector \
+#   | kubectl --context admin@ai -n monitoring create secret generic relay-control-collector --from-file=token=/dev/stdin
+# sha="$(bao kv get -mount=af -field=token relay-control/collector | tr -d '\n' | sha256sum | cut -d' ' -f1)"
+# kubectl --context admin@ai -n relay create secret generic relay-control-metrics \
+#   --from-literal=tenant-id=00000000-0000-4000-8000-000000000001 \
+#   --from-literal=token-sha256="$sha" \
+#   --from-literal=expires-at='2027-02-15T00:00:00Z'
+# unset sha
 ```
 
 **Readback.** This block is NEW. It prints keys, `MATCH` or `OK` lines and the two values that are not
@@ -805,6 +815,39 @@ rlog() {
   l="$(kubectl --context admin@ai -n llm-router logs deploy/llm-router -c router --since=10m)" || return 1
   printf '%s\n' "$l" | grep 'Worker budget authority' || true
 }
+# At llm-router 5a5181b7, rlog is always empty: the plugin logs through cordis's ctx.logger, whose only
+# exporter is an in-memory buffer (llm-router #191). The two helpers below are the ledger-side
+# observation the owner accepted on 2026-11-20 (#1753). Keep capturing rlog: it shows the gap.
+# rreader: the Router plugin's reader session (it refreshes every 5 s over one pooled connection).
+rreader() {
+  lsql <<'SQL'
+SELECT pid, backend_start, application_name, usename, state, query_start, left(query, 60) AS query
+  FROM pg_stat_activity WHERE application_name = 'router-worker-budget-reader';
+SQL
+}
+# lerrors <time>: every ERROR, FATAL or PANIC line the ledger logged since <time>, with its CONTEXT and
+# STATEMENT lines. <time> is any form `date -d` reads: `date -u +%FT%TZ` output, or psql's
+# "2026-11-20 10:00:00.123+00". It is converted to the RFC 3339 form `kubectl logs --since-time` needs. PostgreSQL logs every failed
+# statement at ERROR, so a read that fails for any reason (gate, permission, connection) shows here.
+# Only relay_budget_router may execute runtime_snapshot (step 4): a runtime_snapshot context line is the
+# Router plugin's read; a current_epoch context line is an operator control (`q`).
+lerrors() {
+  t="$(date -u -d "$1" +%Y-%m-%dT%H:%M:%SZ)" || return 1
+  l="$(kubectl --context admin@ai -n relay-budget-authority logs relay-budget-postgres-0 --timestamps --since-time="$t")" || return 1
+  printf '%s\n' "$l" | grep -A3 -E ' (ERROR|FATAL|PANIC): ' || true
+}
+# rident: the two identities the Router compares a snapshot against. The authority row's instance_id
+# must equal the mounted witness's instanceId (wsha_router shows which witness is mounted; B's file is
+# $ev/witness-B.json), and the readers row's deployment_digest must equal the Router's env digest.
+rident() {
+  kubectl --context admin@ai -n llm-router get deploy llm-router -o json \
+    | jq -r '.spec.template.spec.containers[] | select(.name=="router") | .env[] | select(.name=="ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST") | "router_digest " + .value' || return 1
+  jq -r '"witness_B_instance " + .instanceId' "$ev/witness-B.json" || return 1
+  lsql <<'SQL'
+SELECT 'readers' AS row, login, deployment_digest FROM worker_budget.readers;
+SELECT 'authority' AS row, instance_id FROM worker_budget.authority;
+SQL
+}
 # Keeps the outgoing Router Pod's budget log lines, then rolls it (Recreate) and waits.
 # It refuses to roll if the log capture failed: a roll destroys that Pod's log.
 roll_router() {
@@ -843,7 +886,11 @@ later roll cannot overwrite it.
        `cap control q relay_budget_router "SELECT worker_budget.current_epoch('<B instanceId>', '<B recoveryEpoch>', '<B witnessDigest>')"`.
        It returns `<B recoveryEpoch>`.
   4. **Observe the drill's Pass column.**
-     - `cap router-log rlog`, then `sleep 20` and `cap router-log-after-20s rlog`.
+     - `cap router-log rlog`, then `sleep 20` and `cap router-log-after-20s rlog` (empty at this pin,
+       see `rreader`).
+     - `cap reader rreader`, then `cap errors lerrors "$t0"`, at least 20 s after the commit: the
+       Router-side observation (see "Observing the Router" below). `$t0` is set by
+       `t0="$(date -u +%FT%TZ)"` immediately before O1's `lwrite open-B`.
      - Where the mounted file has IDs, check the refusal:
        `cap refusal q relay_budget_router "SELECT worker_budget.current_epoch('<mounted instanceId>', '<mounted recoveryEpoch>', '<mounted witnessDigest>')"`.
        It fails with `42501: Worker budget authority unavailable`.
@@ -854,8 +901,11 @@ later roll cannot overwrite it.
   1. Run W with step 3 = `bao kv put -mount=af relay-budget/witness witness=- < "$ev/witness-B.json"`
      (the form of "Who writes it", `:366`), and B's sha256 expected.
   2. `lwrite open-B`, then `plugin true` (`HTTP 200`, `active`).
-  3. `cap router-log rlog` shows `Worker budget authority available`, and the positive control
-     succeeds.
+  3. Available, observed as in "Observing the Router" below: `cap reader rreader`, then at least
+     10 s later `cap reader-after-10s rreader`, `cap errors lerrors "$t0"` at least 20 s after the commit (`t0="$(date -u +%FT%TZ)"` set just before
+     step 2's `lwrite open-B`), and
+     `cap ident rident`. The positive control succeeds. (`cap router-log rlog` is still taken; it is
+     empty at this pin.)
   4. Withdraw.
 - **F, the failure path. It never re-opens.**
   1. Withdraw: `lwrite withdraw`, then `plugin false`.
@@ -865,6 +915,38 @@ later roll cannot overwrite it.
      (`relay-worker-budget-authority.md:615-622`).
   4. Otherwise run W with B, as in R step 1. Authority stays withdrawn and the plugin disabled.
   5. Stop. Re-opening, even for a drill, needs the owner's review of the failure first.
+
+**Observing the Router (owner decision 2026-11-20, #1753).** At llm-router `5a5181b7` the
+`Worker budget authority …` lines never reach `kubectl logs` (llm-router #191), so a log line cannot be
+a pass criterion. Each Router observation below is made on the ledger instead:
+
+- **Unavailable** (`read_failed`): `lerrors` shows `Worker budget authority unavailable` with the
+  context `runtime_snapshot(uuid,uuid,text)`, about every 5 s, over at least 20 s. Only
+  `relay_budget_router` may execute `runtime_snapshot` (step 4), so these are the Router plugin's reads.
+  Lines with the context `current_epoch` are the operator's own controls and are not counted.
+  At `runtime.ts:83-97` a failed read is reported as `read_failed`.
+- **Available**: all three of:
+  - `rreader` shows one session `router-worker-budget-reader`, user `relay_budget_router`, query
+    `runtime_snapshot`, and its `query_start` advances between the `reader` and `reader-after-10s`
+    captures, at least 10 s apart, with the same `pid` and `backend_start`: the Router keeps reading
+    over one connection;
+  - `lerrors` shows **no** ERROR, FATAL or PANIC line at all from the open-B capture to at least 20 s
+    later. R and D3 run no negative control, so any error, of any kind, fails the check. Together with
+    the advancing `query_start`, this shows the ledger served the reads without error: a read the
+    ledger refuses or fails (the gate, a permission, a statement error) is logged at ERROR, as A3
+    showed;
+  - `rident`: the `readers` row's `deployment_digest` equals `router_digest`, and the `authority`
+    row's `instance_id` equals the mounted witness's `instanceId` (the witness `wsha_router` shows).
+    These are the comparisons `runtime.ts:89-92` makes against the snapshot.
+- **Accepted residual.** Any failure on the Router's side after the ledger has served the read without
+  error is not visible from the ledger: the Router's own checks (`snapshot_invalid`,
+  `identity_mismatch`, `policy_digest_invalid`), and a client timeout or lost connection that leaves
+  the Router without the answer. The owner accepted the checks on 2026-11-20 and widened the
+  acceptance to the whole class the same day (#1895 review), until llm-router #191 is fixed;
+  afterwards, the log line is checked as well. A lasting transport failure would show as a changing
+  `pid`/`backend_start` between the two reader captures, which fails the check.
+- **Plugin start failure** (B2, C2): unchanged, it is visible in the admin API (`HTTP 500`
+  `PLUGIN_FAILED`). `rreader` then has no row.
 
 **Drill A, stale witness.**
 
@@ -907,7 +989,7 @@ later roll cannot overwrite it.
   `bao kv rollback -mount=af -version=<A> relay-budget/witness` with `<A>` = 1, since A is version 1
   (#1753 comment 123957). A's sha256 `8e5a4104…527b` is expected.
 - **A3. Run O.**
-  - Pass: the Router log shows `Worker budget authority unavailable: read_failed`, and still does
+  - Pass: the Router is unavailable (`read_failed`) as "Observing the Router" defines it, still
     after at least 20 s. The plugin is `active`.
   - `current_epoch` with A's IDs fails with SQLSTATE 42501.
   - The control with B's IDs succeeds.
@@ -935,7 +1017,8 @@ later roll cannot overwrite it.
 
   There are no mounted IDs to query. This is the accepted bootstrap pass (ailab #1820), also recorded
   in the budget runbook's drill protocol. If the live Router instead starts the plugin and logs
-  `Worker budget authority unavailable`, that is the original runbook's pass criterion.
+  `Worker budget authority unavailable`, that is the original runbook's pass criterion, observed as
+  in "Observing the Router".
 - **B3. Soft delete.** First record the Router Pod's UID with
   `cap router-pod-before kubectl --context admin@ai -n llm-router get pod -l app=llm-router -o jsonpath='{.items[*].metadata.uid}'`.
   Then run `bao kv delete -mount=af relay-budget/witness`, the runbook's `bao kv delete` with the mount
@@ -978,15 +1061,18 @@ later roll cannot overwrite it.
   The runbook gives this step as prose ("Roll back to the previous version"), so the command is NEW.
   Use `bao kv metadata get -mount=af relay-budget/witness` for the version numbers. B's sha256 is
   expected.
-- **D3.** Re-open as in O1-O3. Pass, as far as this window can show it:
-  - the Router log shows `Worker budget authority available`;
+- **D3.** Re-open as in O1-O3, with `t0="$(date -u +%FT%TZ)"` set just before O1's `lwrite open-B`.
+  Then the Available captures, as R step 3 takes them: `cap reader rreader`, at least 10 s later
+  `cap reader-after-10s rreader`, at least 20 s after the commit `cap errors lerrors "$t0"`, and
+  `cap ident rident`. Pass, as far as this window can show it:
+  - the Router is available, as "Observing the Router" defines it;
   - the Router's mounted witness equals B and the record's latest entry.
 
   Then withdraw, and run `cap row-after-D ledger_state`: equal to D1 in every column. The history
   comparison (allocations, `token_limit`, `original_deadline`, `recovery_epoch`, outbox sequences,
   receipts) runs when D is repeated with the Relay-wired drills.
 
-`Worker budget authority available` proves the gate and the witness, not qualification. The Router
+Available (observed as above) proves the gate and the witness, not qualification. The Router
 accepts a snapshot with no qualification row (`runtime.ts:20-21`, `:89-96`). File B's pre-signing
 check is `file_b_router_check`, defined in the budget runbook's
 [File B pre-signing readback](relay-worker-budget-authority.md#file-b-pre-signing-readback).
@@ -1006,7 +1092,8 @@ A ledger pass alone does not prove Router qualification.
 - **Evidence.** Post one comment per drill on ailab #1753, titled "Witness drill A", "… B", "… C" and
   "… D". Build each from that drill's files in `$ev/cap`:
   - the O3 captures from the same window as the observation;
-  - the Router log lines, including those kept before each roll;
+  - the Router log captures, including those kept before each roll (empty at this pin), and the
+    `reader`, `reader-after-10s`, `errors` and `ident` captures;
   - the mounted hashes;
   - the SQL outputs and the before and after diffs.
 
@@ -1103,7 +1190,11 @@ S4.4  Login roles, function grants and table privileges exactly as checklist ste
 S4.5  History counts all 0; the witness three-way comparison agrees, five equal hashes. Criterion:
       checklist step 4, "Expected".
 DA..DD One item per drill A, B, C, D. Each comment has captures timestamped just before the
-      observation that prove the gate open (authority row ready=t, positive control), Router log lines,
+      observation that prove the gate open (authority row ready=t, positive control), the Router
+      observation as checklist step 5 "Observing the Router" defines it (ledger-side reader, error
+      and identity captures, owner decision 2026-11-20). That substitute applies only while the
+      drill comment records an llm-router pin whose plugin log does not reach kubectl logs
+      (5a5181b7, llm-router #191 open); on a pin with #191 fixed, the Router log line is required too,
       the mounted witness SHA-256, the SQL outputs and before/after diffs, and the drill's pass:
       - A: the plugin enabled (HTTP 200, active) and the pass of the budget runbook's table,
         "Drills before production ready=true", as checklist step 5 runs it;
@@ -1113,8 +1204,8 @@ DA..DD One item per drill A, B, C, D. Each comment has captures timestamped just
         and B3, the soft delete: both ExternalSecrets not Ready, both Secrets still holding the empty-witness hash,
         the Router Pod UID unchanged;
       - C: as B2 (checklist step 5, C2);
-      - D: checklist step 5's D3, the Router-side scope of this window: Worker budget authority
-        available, the Router's mounted witness equal to B and the record's latest entry, the
+      - D: checklist step 5's D3, the Router-side scope of this window: the Router available as
+        "Observing the Router" defines it, the Router's mounted witness equal to B and the record's latest entry, the
         authority row equal before and after. Relay still mounts A until H6; verify its mounted B
         at H6. R0 covers A-C only. D's later history comparison still needs a separately scheduled
         Relay-wired repeat, not a FAIL in this pre-allocation window.
@@ -1232,9 +1323,15 @@ is `plugin true`.
 **Readback.**
 
 - Verbatim (`relay-worker-budget-authority.md`, step 9): `GET /admin/v1/plugins` shows the plugin active (run `plugins`), and the
-  Router log has `Worker budget authority available`.
-- From 124071 §4.1: the line stays, with no `snapshot_invalid` or `policy_digest_invalid`. Check
-  again after 10 s with `cap plugin-on rlog` (step 5's helper).
+  Router log has `Worker budget authority available`. At llm-router `5a5181b7` that line never reaches
+  `kubectl logs` (llm-router #191), so it is observed as step 5's "Observing the Router" defines
+  (owner decision 2026-11-20): `cap plugin-on-reader rreader`, at least 10 s later
+  `cap plugin-on-reader-after-10s rreader`, and
+  `cap plugin-on-errors lerrors "$t0"` at least 20 s later (`t0="$(date -u +%FT%TZ)"` set just before
+  `plugin true`), with no
+  ERROR, FATAL or PANIC line, and `cap plugin-on-ident rident`. Also keep `cap plugin-on rlog`.
+- From 124071 §4.1: the Router stays available, with no `snapshot_invalid` or `policy_digest_invalid`.
+  Until #191 is fixed, those two are the accepted residual of "Observing the Router".
 - This proves the gate and the witness, not qualification. The Router accepts a snapshot with no
   `qualifications` row (llm-router `runtime.ts:20-21`, `:89-96`).
 
@@ -1361,8 +1458,7 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
 **Readback.**
 
 - **Ledger:** `ready=t` with B's IDs (step 7).
-- **Router:** `worker-budget-authority` is active and logs `Worker budget authority available` (step
-  8). `relay-keys` is active (step 2).
+- **Router:** `worker-budget-authority` is active and available, observed as in step 8. `relay-keys` is active (step 2).
 - **`relay/relay-router-files`:** Ready, with the three keys (step 9).
 - **`relay/relay-router-openbao-tls`:** has `ca.crt`, and its Certificate is Ready (step 9).
 - **`relay/relay-control-metrics`:** has the three keys. **`monitoring/relay-control-collector`:**
