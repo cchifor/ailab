@@ -876,7 +876,7 @@ rollstate() {
     | {revision: ($d.metadata.annotations["deployment.kubernetes.io/revision"] | tonumber),
        restartedAt: $d.spec.template.metadata.annotations["kubectl.kubernetes.io/restartedAt"],
        restartedAtOwners: [$d.metadata.managedFields[] | select(.fieldsV1["f:spec"]["f:template"]["f:metadata"]["f:annotations"]["f:kubectl.kubernetes.io/restartedAt"] != null) | {manager, operation}],
-       pods: [$p.items[] | {pod: .metadata.name, revision: $rev[.metadata.ownerReferences[0].name], created: .metadata.creationTimestamp,
+       pods: [$p.items[] | {pod: .metadata.name, revision: $rev[.metadata.ownerReferences[0].name // ""], created: .metadata.creationTimestamp,
                             phase: .status.phase, deleting: .metadata.deletionTimestamp}]}'
 }
 # roll_deploy <namespace> <deployment> <pod selector> <label>: exactly one Recreate roll of a Flux-owned Deployment, with proof.
@@ -908,7 +908,12 @@ roll_deploy() {
     printf '%s\n' "$s0"; return 1
   fi
   kubectl --context admin@ai -n "$ns" rollout restart deploy/"$dep" --field-manager=relay-runbook || return 1
-  cap "$label-rollout" kubectl --context admin@ai -n "$ns" rollout status deploy/"$dep" --timeout=10m || return 1
+  if ! cap "$label-rollout" kubectl --context admin@ai -n "$ns" rollout status deploy/"$dep" --timeout=10m; then
+    # The restart is already applied: record where it left the Deployment, so a retry diagnoses correctly.
+    s1="$(rollstate "$ns" "$dep" "$sel")" && { cap "$label-roll-timeout" printf '%s\n' "$s1"; ROLLREV[$ns/$dep]="$(jq -r .revision <<<"$s1")"; }
+    echo "$ns/$dep: restart APPLIED (revision was $r0, now ${ROLLREV[$ns/$dep]:-unknown}) but not Ready within 10m. Do not roll again; check its Pod, then rollstate."
+    return 1
+  fi
   s1="$(rollstate "$ns" "$dep" "$sel")" || return 1
   cap "$label-roll" printf '%s\n' "$s1"
   ROLLREV[$ns/$dep]="$(jq -r .revision <<<"$s1")"
