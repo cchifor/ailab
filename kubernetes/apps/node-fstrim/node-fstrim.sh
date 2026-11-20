@@ -56,6 +56,8 @@
 #   3   IO pressure stayed above PSI_MAX for PSI_WAIT_MAX_S, or until the deadline, before a chunk
 #   4   IO pressure unreadable
 #   5   an fstrim failed
+#   6   a write to STATE_DIR failed (full, read-only, ...): the run's progress could not be recorded, so it is a
+#       failure even if the trim went well (a silent restart at chunk 1 every night is what STATE_DIR prevents)
 #   7   another run holds LOCK_FILE
 #   9   a partial run, and a mount point has had no complete pass for over COMPLETE_MAX_AGE_S (with STATE_DIR)
 #   143/130  SIGTERM/SIGINT (after the in-flight chunk finished)
@@ -108,12 +110,15 @@ declare -A TRIMMED=() COMPLETE=()
 # ---- the state (STATE_DIR) ------------------------------------------------------------------------
 key_of() { local k="${1//\//_}"; printf '%s' "${k:-_}"; }
 state_get() { [ -n "$STATE_DIR" ] && [ -r "$STATE_DIR/$1" ] && head -n 1 "$STATE_DIR/$1" 2>/dev/null | head -c 200; }
-state_put() { # <file> <line>: one rename; a failed write is logged, not fatal (the next run then starts over)
+# A failed write sets state_err: the run then ends with exit 6 rather than 0 (finish), so a STATE_DIR that cannot
+# take the cursor or the completion time never turns into a silent restart at chunk 1 every night.
+state_err=0
+state_put() { # <file> <line>: one rename; returns 1 (and sets state_err) when it could not be written
   [ -n "$STATE_DIR" ] || return 0
   local tmp
-  tmp="$(mktemp "$STATE_DIR/.$1.XXXXXX" 2>/dev/null)" || { log "warning: cannot write $STATE_DIR/$1"; return 0; }
+  tmp="$(mktemp "$STATE_DIR/.$1.XXXXXX" 2>/dev/null)" || { log "cannot write $STATE_DIR/$1"; state_err=1; return 1; }
   if printf '%s\n' "$2" > "$tmp" && mv -f "$tmp" "$STATE_DIR/$1"; then return 0; fi
-  rm -f "$tmp"; log "warning: cannot write $STATE_DIR/$1"
+  rm -f "$tmp"; log "cannot write $STATE_DIR/$1"; state_err=1; return 1
 }
 state_rm() { [ -n "$STATE_DIR" ] && rm -f "$STATE_DIR/$1"; return 0; }
 # The cursor to write if the run stops now: set before each chunk, moved on after it, cleared when the mount
@@ -166,6 +171,9 @@ finish() { # <rc> <reason> <message>
   trap - TERM INT
   local m summary=""
   [ -n "$pending_key" ] && state_put "$pending_key.cursor" "$pending_line"
+  if [ "$state_err" = 1 ] && [ "$1" -eq 0 ]; then
+    set -- 6 failed "$3; but a write to $STATE_DIR failed, so the progress was not recorded"
+  fi
   for m in "${!TRIMMED[@]}"; do summary+=" $m=${TRIMMED[$m]}${COMPLETE[$m]:+(complete)}"; done
   log "$3 - exit $1 ($2):${summary:- nothing trimmed}"
   write_beacon "$1" "$2"
@@ -257,7 +265,9 @@ for pos in "${!ORDER[@]}"; do
       pending_line="next=$(( i + 1 )) chunks=$chunks size=$size chunk=$chunk"
     else # the pass reached the last chunk: record it before anything else can stop the run
       COMPLETE[$mnt]=1; pending_key=""
-      state_put "$key.complete" "$(now_s)"; state_rm "$key.cursor"; state_rm "$key.since"
+      # The cursor goes only once the completion time is safely written; if it is not, the old cursor stays and
+      # the run fails (state_err), rather than lose both.
+      if state_put "$key.complete" "$(now_s)"; then state_rm "$key.cursor"; state_rm "$key.since"; fi
     fi
     rest=$took
     [ "$rest" -lt "$PAUSE_MIN_S" ] && rest=$PAUSE_MIN_S

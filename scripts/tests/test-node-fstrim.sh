@@ -70,6 +70,12 @@ if [ -f "$CTL/psi_drop_after" ] && [ "$n" -ge "$(cat "$CTL/psi_drop_after")" ]; 
 fi
 exit 0
 STUB
+cat > "$BIN/mktemp" <<'STUB'
+#!/usr/bin/env bash
+# state_write_fail: every temp file in a STATE_DIR (path .../state/...) fails, as on a full or read-only filesystem.
+if [ -f "$CTL/state_write_fail" ]; then for a in "$@"; do case "$a" in */state/*) exit 1 ;; esac; done; fi
+exec /usr/bin/mktemp "$@"
+STUB
 cat > "$BIN/date" <<'STUB'
 #!/usr/bin/env bash
 if [ "$*" = "+%s" ]; then cat "$CTL/clock"; else exec /bin/date "$@"; fi
@@ -247,6 +253,21 @@ eq "cursor at the failed chunk" "next=1" "$(cut -d' ' -f1 "$CTL/state/_host_var.
 new_case nodir; run STATE_DIR="$CTL/missing" -- /workspace
 eq "a missing STATE_DIR: exit 1" 1 "$(cat "$CTL/rc")"
 eq "nothing trimmed" 0 "$(calls fstrim_calls)"
+
+echo "== STATE_DIR: a state write that fails fails the run (exit 6); the cursor goes only after .complete =="
+new_case statefail; mkdir "$CTL/state"; echo 100 > "$CTL/trim_s"; touch "$CTL/state_write_fail"
+run STATE_DIR="$CTL/state" RUN_MAX_S=200 -- /host/var
+eq "a partial night whose cursor cannot be written: exit 6, not 0" 6 "$(cat "$CTL/rc")"
+eq "reason failed" 1 "$(metric 'node_fstrim_last_run_reason\{reason="failed"\}')"
+has "says why" "a write to $CTL/state failed" "$(cat "$CTL/out")"
+new_case completefail; mkdir "$CTL/state"; echo "next=2 chunks=3 size=$((10 * GiB)) chunk=$((4 * GiB))" > "$CTL/state/_host_var.cursor"
+touch "$CTL/state_write_fail"; run STATE_DIR="$CTL/state" -- /host/var
+eq "the last chunk trimmed but .complete not written: exit 6" 6 "$(cat "$CTL/rc")"
+eq "and the cursor is kept, not lost with it" "next=2" "$(cut -d' ' -f1 "$CTL/state/_host_var.cursor")"
+eq "no .complete" absent "$([ -e "$CTL/state/_host_var.complete" ] && echo present || echo absent)"
+new_case statefail5; mkdir "$CTL/state"; echo 1 > "$CTL/fail_on"; touch "$CTL/state_write_fail"
+run STATE_DIR="$CTL/state" -- /host/var
+eq "a failed fstrim keeps its own exit code (5)" 5 "$(cat "$CTL/rc")"
 
 echo "== the stop file, the lock, bad settings, usage =="
 new_case stop; touch "$CTL/stop"; run -- /workspace

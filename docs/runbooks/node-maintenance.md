@@ -431,7 +431,8 @@ That means WAL fsync p99 per member and leader changes over the slot.
 `kubernetes/apps/infrastructure/monitoring/node-fstrim-rules.yaml`) fires when a node's CronJob has not
 succeeded for 50 h (two nights), or is older than 50 h and has never succeeded. A suspended CronJob is never
 alerted on. One failed night is not alerted. The pod log says why: exit 3 means pressure stayed high, 4
-pressure unreadable, 5 fstrim failed, 9 partial nights with no complete pass for 7 days, and
+pressure unreadable, 5 fstrim failed, 6 the progress could not be written to `/var/lib/node-fstrim`
+(full or read-only), 9 partial nights with no complete pass for 7 days, and
 DeadlineExceeded means the slot ran out. `kubectl debug node/<node>` and `cat /host/var/lib/node-fstrim/*`
 shows the cursor and the last complete pass.
 

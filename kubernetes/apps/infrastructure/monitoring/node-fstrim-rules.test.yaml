@@ -28,7 +28,7 @@ tests:
               cronjob: node-fstrim-talos-cp2
             exp_annotations:
               summary: "Talos node trim node-fstrim-talos-cp2 has not succeeded for over 50 h"
-              description: "The nightly trim CronJob node-fstrim-talos-cp2 in node-fstrim has not completed a run for over 50 h (two nights), so what that node frees stays allocated in its host's thin pool. Check the last Job's pod log: `kubectl --context admin@ai -n node-fstrim logs job/<last job>` (exit 3 = IO pressure stayed high, 4 = pressure unreadable, 5 = fstrim failed, 9 = partial nights and no complete pass for 7 days, DeadlineExceeded = the slot ran out). Runbook: docs/runbooks/node-maintenance.md \"Talos node trim (nightly)\"."
+              description: "The nightly trim CronJob node-fstrim-talos-cp2 in node-fstrim has not completed a run for over 50 h (two nights), so what that node frees stays allocated in its host's thin pool. Check the last Job's pod log: `kubectl --context admin@ai -n node-fstrim logs job/<last job>` (exit 3 = IO pressure stayed high, 4 = pressure unreadable, 5 = fstrim failed, 6 = the progress could not be written to /var/lib/node-fstrim, 9 = partial nights and no complete pass for 7 days, DeadlineExceeded = the slot ran out). Runbook: docs/runbooks/node-maintenance.md \"Talos node trim (nightly)\"."
 
   - interval: 1m
     name: one failed night (last success 30 h ago) does not warn
@@ -55,7 +55,7 @@ tests:
               cronjob: relay-worker-1-new
             exp_annotations:
               summary: "Talos node trim relay-worker-1-new has not succeeded for over 50 h"
-              description: "The nightly trim CronJob relay-worker-1-new in node-fstrim has not completed a run for over 50 h (two nights), so what that node frees stays allocated in its host's thin pool. Check the last Job's pod log: `kubectl --context admin@ai -n node-fstrim logs job/<last job>` (exit 3 = IO pressure stayed high, 4 = pressure unreadable, 5 = fstrim failed, 9 = partial nights and no complete pass for 7 days, DeadlineExceeded = the slot ran out). Runbook: docs/runbooks/node-maintenance.md \"Talos node trim (nightly)\"."
+              description: "The nightly trim CronJob relay-worker-1-new in node-fstrim has not completed a run for over 50 h (two nights), so what that node frees stays allocated in its host's thin pool. Check the last Job's pod log: `kubectl --context admin@ai -n node-fstrim logs job/<last job>` (exit 3 = IO pressure stayed high, 4 = pressure unreadable, 5 = fstrim failed, 6 = the progress could not be written to /var/lib/node-fstrim, 9 = partial nights and no complete pass for 7 days, DeadlineExceeded = the slot ran out). Runbook: docs/runbooks/node-maintenance.md \"Talos node trim (nightly)\"."
 
   - interval: 1m
     name: a new CronJob that has not had its first nights yet does not warn
