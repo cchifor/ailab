@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# talos-cp1 on ai-node1: control plane; its disk is on the QNAP (qnap-nfs) now, so this trim costs the NVMe nothing. Slot 03:06-03:18 UTC
+# (the slot table: ../../kustomization.yaml).
+resources:
+  - ../../base
+nameSuffix: -talos-cp1
+labels:
+  - pairs:
+      app.kubernetes.io/instance: talos-cp1
+    includeTemplates: true
+patches:
+  - target:
+      kind: CronJob
+    patch: |-
+      - op: replace
+        path: /spec/schedule
+        value: "6 3 * * *"
+      - op: replace
+        path: /spec/jobTemplate/spec/template/spec/nodeSelector/kubernetes.io~1hostname
+        value: talos-cp1

@@ -1,0 +1,42 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# node-fstrim - the nightly trim of every Talos node's /var (Flux Kustomization clusters/ai/node-fstrim.yaml;
+# docs/runbooks/node-maintenance.md "Talos node trim (nightly)").
+#
+# WHY. Each Talos VM's disk is a thin LV on its Proxmox host's local-lvm, discard=on, on the QLC NVMe that
+# the host's etcd member shares. Talos mounts /var (XFS) without `discard` and nothing trimmed it, so what
+# the node freed (images, logs, emptyDirs, etcd compaction) stayed allocated in the thin pool: about 195 GiB
+# across the seven nodes on 2026-11-20. One fstrim of a whole /var is one discard burst on the etcd drive.
+#
+# HOW. One CronJob per node (nodes/<node>, from base/cronjob.yaml), each pinned to its node and its own
+# 12-min slot, so ONE node trims at a time and two hosts never trim at once. The pod runs node-fstrim.sh on
+# the node's /var (read-only hostPath, CAP_SYS_ADMIN only): 4 GiB chunks, waiting while the node's IO pressure
+# is above 45 %, resting as long as each chunk took, and no chunk after 6 min unless it can end by the slot.
+#
+# Slots (UTC, daily), alternating hosts, between Velero (02:00) and the off-site sync (04:00):
+#   02:30 talos-agent-node-1 (ai-node1)    03:06 talos-cp1 (ai-node1; disk on the QNAP)
+#   02:42 talos-cp2          (ai-node2)    03:18 talos-agent-node-2 (ai-node2)
+#   02:54 talos-cp3          (ai-node3)    03:30 talos-agent-node-3 (ai-node3)
+#                                          03:42 relay-worker-1 (ai-node3), ends by 03:54
+# The Proxmox hosts' own LXC trim runs 04:30-05:29 (pve_base, tag lxc_fstrim), after these.
+#
+# Kill switch: `suspend: true` on the CronJobs (git, or `kubectl patch` after `flux suspend kustomization
+# node-fstrim`); a running pod stops cleanly on delete (it finishes its chunk first).
+namespace: node-fstrim
+resources:
+  - namespace.yaml
+  - networkpolicy.yaml
+  - nodes/talos-agent-node-1
+  - nodes/talos-cp2
+  - nodes/talos-cp3
+  - nodes/talos-cp1
+  - nodes/talos-agent-node-2
+  - nodes/talos-agent-node-3
+  - nodes/relay-worker-1
+
+configMapGenerator:
+  # Generated, so the name carries a content hash: a script change renames it and every CronJob's next pod
+  # runs the new script.
+  - name: node-fstrim-script
+    files:
+      - node-fstrim.sh

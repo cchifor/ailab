@@ -370,6 +370,73 @@ installed, a new pin that does not build (the installed module stays), and the l
 level it was given. A clean shutdown or reboot stops `ec-fan-profile` first, so the fans are back on auto
 before the kernel goes down.
 
+## Talos node trim (nightly; `kubernetes/apps/node-fstrim`, all seven Talos nodes)
+
+Each Talos VM's disk is a thin LV on its host's `local-lvm`, `discard=on`, on the QLC NVMe that the host's
+etcd member shares. Talos mounts `/var` (XFS) without `discard`, and nothing trimmed it, so what a node
+freed (images, logs, emptyDirs, etcd compaction) stayed allocated in the thin pool: about 195 GiB across
+the seven nodes on 2026-11-20. The Flux Kustomization `node-fstrim` runs one CronJob per node:
+
+- The pod is pinned to its node by hostname and tolerates only the nodes' own taints (`dedicated=agent`,
+  `dedicated=relay-worker`, a control plane's). It runs `node-fstrim.sh /host/var` from a ConfigMap in a
+  digest-pinned Debian slim image. `/var` is mounted read-only, and the pod has CAP_SYS_ADMIN only (FITRIM),
+  no service-account token, a read-only root and no network. The namespace is PSA `privileged` for that
+  capability and the hostPath.
+- `node-fstrim.sh` trims 4 GiB chunks from statfs, with `-m 64K`. The last chunk has no `-l` and runs to the
+  real end, which statfs understates (XFS's log). It waits while the node's IO pressure is above 45 %
+  (gives up after 3 min: exit 3), and after each chunk it rests as long as the chunk took (2-30 s).
+  No chunk starts after 6 min unless it can end by then (a partial night, exit 0).
+- XFS keeps no record of what it trimmed, so every night discards every free extent again. The thin
+  pool drops what is already unmapped at once, so only what the node freed since the last night costs the
+  NVMe anything.
+
+**Slots (UTC, daily), one node at a time, 12 min each:** 02:30 talos-agent-node-1 (ai-node1), 02:42
+talos-cp2 (ai-node2), 02:54 talos-cp3 (ai-node3), 03:06 talos-cp1 (ai-node1; its disk is on the QNAP, so
+the NVMe sees nothing), 03:18 talos-agent-node-2 (ai-node2), 03:30 talos-agent-node-3 (ai-node3), 03:42
+relay-worker-1 (ai-node3), done by 03:54. That is after Velero (02:00) and before the off-site sync
+(04:00). Each slot is a hard bound: a start at most 60 s late (`startingDeadlineSeconds`), the Job
+killed at 480 s (`activeDeadlineSeconds`), then 150 s for the chunk in flight
+(`terminationGracePeriodSeconds`), so 690 s at worst. There are no retries (`backoffLimit: 0`).
+`scripts/tests/test_node_fstrim_manifests.py` checks that arithmetic, the node set against the tofu
+modules, the tolerations against the nodes' taints, and the pod's privileges.
+
+**Other trims on the same drives.** The CI runners trim inside their VMs every night (ci-runners.md,
+"Thin-pool trim"), and their windows cover every slot here but relay-worker-1's (ai-node1: ci-runner-4
+to 03:10; ai-node2 and ai-node3: ci-runner-5 and -6 to 03:35). A runner slice raises the node's IO pressure
+only when it slows the node's own disk, so the pressure wait is a partial guard, not an interlock. That overlap is the same class of residual risk as the runners' own (ci-runners.md
+"Residual risk"). After the one-time cleanup a node frees little per night. iocost (when on) gives the
+host's etcd VM the drive first.
+
+**Rollout.** Merging deploys the CronJobs; the first run is that night's slot. To watch the first one by
+hand without waiting, trigger a single node, a control plane last:
+
+```bash
+kubectl --context admin@ai -n node-fstrim get cronjobs
+kubectl --context admin@ai -n node-fstrim create job --from=cronjob/node-fstrim-talos-agent-node-1 fstrim-manual-1
+kubectl --context admin@ai -n node-fstrim logs -f job/fstrim-manual-1   # one line per chunk, then `complete - exit 0 (done)`
+# then the host side: the node's thin LV (vmid 4301) should have dropped
+python scripts/node-ssh.py 192.168.0.2 "lvs pve/vm-4301-disk-0"
+```
+
+Check etcd during a control plane's slot as for the registry trim (registry-cache.md, "Verify a run").
+That means WAL fsync p99 per member and leader changes over the slot.
+
+**Alert.** `TalosNodeFstrimNotSucceeding` (warning,
+`kubernetes/apps/infrastructure/monitoring/node-fstrim-rules.yaml`) fires when a node's CronJob has not
+succeeded for 50 h (two nights), or is older than 50 h and has never succeeded. A suspended CronJob is never
+alerted on. One failed night is not alerted. The pod log says why: exit 3 means pressure stayed high, 4
+pressure unreadable, 5 fstrim failed, and DeadlineExceeded means the slot ran out.
+
+**Kill switch.** Set `suspend: true` on the CronJobs. In git, set it in `base/cronjob.yaml`. Live, run
+`flux suspend kustomization node-fstrim` first, then `kubectl -n node-fstrim patch cronjob <name> -p
+'{"spec":{"suspend":true}}'`. Deleting a running pod is clean: it finishes its chunk first.
+
+Tests: `bash scripts/tests/test-node-fstrim.sh` (stubs, CI: manifests.yaml),
+`scripts/tests/test_node_fstrim_manifests.py` (script-tests), and the manual
+`bash scripts/tests/test-node-fstrim-kernel-docker.sh`. The manual test runs the script in the CronJob's
+image, with CAP_SYS_ADMIN only, against read-only binds of a real XFS and ext4 on loop devices, and checks
+that the freed space comes back out of the sparse backing files.
+
 ## Post-maintenance checklist (gates before touching the next node)
 
 ```bash

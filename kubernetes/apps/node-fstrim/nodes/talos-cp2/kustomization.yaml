@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# talos-cp2 on ai-node2: control plane: etcd member on this host's NVMe. Slot 02:42-02:54 UTC
+# (the slot table: ../../kustomization.yaml).
+resources:
+  - ../../base
+nameSuffix: -talos-cp2
+labels:
+  - pairs:
+      app.kubernetes.io/instance: talos-cp2
+    includeTemplates: true
+patches:
+  - target:
+      kind: CronJob
+    patch: |-
+      - op: replace
+        path: /spec/schedule
+        value: "42 2 * * *"
+      - op: replace
+        path: /spec/jobTemplate/spec/template/spec/nodeSelector/kubernetes.io~1hostname
+        value: talos-cp2

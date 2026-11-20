@@ -1,0 +1,102 @@
+# `promtool test rules` fixtures for node-fstrim-rules.yaml. Run by scripts/rules-lint.sh on every PR.
+# `rule_files` is the extracted spec name (rules-lint.sh hands promtool each PrometheusRule's `spec:`
+# body under the manifest's basename). promtool's clock starts at 0, so a timestamp series of 0 means
+# "at the start of the fixture" and time() is the eval time.
+rule_files:
+  - node-fstrim-rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - interval: 1m
+    name: a node whose trim last succeeded over 50 h ago warns after 1 h
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="node-fstrim", cronjob="node-fstrim-talos-cp2"}'
+        values: "0x3700"
+      - series: 'kube_cronjob_spec_suspend{namespace="node-fstrim", cronjob="node-fstrim-talos-cp2"}'
+        values: "0x3700"
+    alert_rule_test:
+      - eval_time: 50h30m
+        alertname: TalosNodeFstrimNotSucceeding
+        exp_alerts: []
+      - eval_time: 51h10m
+        alertname: TalosNodeFstrimNotSucceeding
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: node-fstrim
+              cronjob: node-fstrim-talos-cp2
+            exp_annotations:
+              summary: "Talos node trim node-fstrim-talos-cp2 has not succeeded for over 50 h"
+              description: "The nightly trim CronJob node-fstrim-talos-cp2 in node-fstrim has not completed a run for over 50 h (two nights), so what that node frees stays allocated in its host's thin pool. Check the last Job's pod log: `kubectl --context admin@ai -n node-fstrim logs job/<last job>` (exit 3 = IO pressure stayed high, 4 = pressure unreadable, 5 = fstrim failed, DeadlineExceeded = the slot ran out). Runbook: docs/runbooks/node-maintenance.md \"Talos node trim (nightly)\"."
+
+  - interval: 1m
+    name: one failed night (last success 30 h ago) does not warn
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="node-fstrim", cronjob="node-fstrim-talos-cp3"}'
+        values: "108000x3700"
+    alert_rule_test:
+      - eval_time: 60h
+        alertname: TalosNodeFstrimNotSucceeding
+        exp_alerts: []
+
+  - interval: 1m
+    name: a CronJob older than 50 h that never succeeded warns
+    input_series:
+      - series: 'kube_cronjob_created{namespace="node-fstrim", cronjob="relay-worker-1-new"}'
+        values: "0x3700"
+    alert_rule_test:
+      - eval_time: 52h
+        alertname: TalosNodeFstrimNotSucceeding
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              namespace: node-fstrim
+              cronjob: relay-worker-1-new
+            exp_annotations:
+              summary: "Talos node trim relay-worker-1-new has not succeeded for over 50 h"
+              description: "The nightly trim CronJob relay-worker-1-new in node-fstrim has not completed a run for over 50 h (two nights), so what that node frees stays allocated in its host's thin pool. Check the last Job's pod log: `kubectl --context admin@ai -n node-fstrim logs job/<last job>` (exit 3 = IO pressure stayed high, 4 = pressure unreadable, 5 = fstrim failed, DeadlineExceeded = the slot ran out). Runbook: docs/runbooks/node-maintenance.md \"Talos node trim (nightly)\"."
+
+  - interval: 1m
+    name: a new CronJob that has not had its first nights yet does not warn
+    input_series:
+      - series: 'kube_cronjob_created{namespace="node-fstrim", cronjob="node-fstrim-talos-cp1"}'
+        values: "144000x3700"
+    alert_rule_test:
+      - eval_time: 60h
+        alertname: TalosNodeFstrimNotSucceeding
+        exp_alerts: []
+
+  - interval: 1m
+    name: a CronJob that also has a success is judged by the success, not by its age
+    input_series:
+      - series: 'kube_cronjob_created{namespace="node-fstrim", cronjob="node-fstrim-talos-cp1"}'
+        values: "0x3700"
+      - series: 'kube_cronjob_status_last_successful_time{namespace="node-fstrim", cronjob="node-fstrim-talos-cp1"}'
+        values: "180000x3700"
+    alert_rule_test:
+      - eval_time: 60h
+        alertname: TalosNodeFstrimNotSucceeding
+        exp_alerts: []
+
+  - interval: 1m
+    name: a suspended CronJob (the kill switch) never warns
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="node-fstrim", cronjob="node-fstrim-talos-agent-node-1"}'
+        values: "0x3700"
+      - series: 'kube_cronjob_spec_suspend{namespace="node-fstrim", cronjob="node-fstrim-talos-agent-node-1"}'
+        values: "1x3700"
+    alert_rule_test:
+      - eval_time: 60h
+        alertname: TalosNodeFstrimNotSucceeding
+        exp_alerts: []
+
+  - interval: 1m
+    name: another namespace's CronJob is not this rule's business
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="backup", cronjob="something"}'
+        values: "0x3700"
+    alert_rule_test:
+      - eval_time: 60h
+        alertname: TalosNodeFstrimNotSucceeding
+        exp_alerts: []
