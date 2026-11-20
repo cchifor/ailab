@@ -825,11 +825,28 @@ SELECT application_name, usename, state, query_start, left(query, 60) AS query
   FROM pg_stat_activity WHERE application_name = 'router-worker-budget-reader';
 SQL
 }
-# lrefusals <RFC 3339 time>: the ledger's gate refusals since that time. Only relay_budget_router may
-# execute runtime_snapshot, so a "runtime_snapshot" context line is the Router plugin's read.
-lrefusals() {
-  l="$(kubectl --context admin@ai -n relay-budget-authority logs relay-budget-postgres-0 --timestamps --since-time="$1")" || return 1
-  printf '%s\n' "$l" | grep -E 'Worker budget authority unavailable|runtime_snapshot|current_epoch' || true
+# lerrors <time>: every ERROR, FATAL or PANIC line the ledger logged since <time>, with its CONTEXT and
+# STATEMENT lines. <time> is any form `date -d` reads: `date -u +%FT%TZ` output, or psql's
+# "2026-11-20 10:00:00.123+00". It is converted to the RFC 3339 form `kubectl logs --since-time` needs. PostgreSQL logs every failed
+# statement at ERROR, so a read that fails for any reason (gate, permission, connection) shows here.
+# Only relay_budget_router may execute runtime_snapshot (step 4): a runtime_snapshot context line is the
+# Router plugin's read; a current_epoch context line is an operator control (`q`).
+lerrors() {
+  t="$(date -u -d "$1" +%Y-%m-%dT%H:%M:%SZ)" || return 1
+  l="$(kubectl --context admin@ai -n relay-budget-authority logs relay-budget-postgres-0 --timestamps --since-time="$t")" || return 1
+  printf '%s\n' "$l" | grep -A3 -E ' (ERROR|FATAL|PANIC): ' || true
+}
+# rident: the two identities the Router compares a snapshot against. The authority row's instance_id
+# must equal the mounted witness's instanceId (wsha_router shows which witness is mounted; B's file is
+# $ev/witness-B.json), and the readers row's deployment_digest must equal the Router's env digest.
+rident() {
+  kubectl --context admin@ai -n llm-router get deploy llm-router -o json \
+    | jq -r '.spec.template.spec.containers[] | select(.name=="router") | .env[] | select(.name=="ROUTER_WORKER_BUDGET_DEPLOYMENT_DIGEST") | "router_digest " + .value' || return 1
+  jq -r '"witness_B_instance " + .instanceId' "$ev/witness-B.json" || return 1
+  lsql <<'SQL'
+SELECT 'readers' AS row, login, deployment_digest FROM worker_budget.readers;
+SELECT 'authority' AS row, instance_id FROM worker_budget.authority;
+SQL
 }
 # Keeps the outgoing Router Pod's budget log lines, then rolls it (Recreate) and waits.
 # It refuses to roll if the log capture failed: a roll destroys that Pod's log.
@@ -871,8 +888,9 @@ later roll cannot overwrite it.
   4. **Observe the drill's Pass column.**
      - `cap router-log rlog`, then `sleep 20` and `cap router-log-after-20s rlog` (empty at this pin,
        see `rreader`).
-     - `cap reader rreader`, then `cap refusals lrefusals <the open-B commit time>`, at least 20 s
-       after the commit: the Router-side observation (see "Observing the Router" below).
+     - `cap reader rreader`, then `cap errors lerrors "$t0"`, at least 20 s after the commit: the
+       Router-side observation (see "Observing the Router" below). `$t0` is set by
+       `t0="$(date -u +%FT%TZ)"` immediately before O1's `lwrite open-B`.
      - Where the mounted file has IDs, check the refusal:
        `cap refusal q relay_budget_router "SELECT worker_budget.current_epoch('<mounted instanceId>', '<mounted recoveryEpoch>', '<mounted witnessDigest>')"`.
        It fails with `42501: Worker budget authority unavailable`.
@@ -884,8 +902,10 @@ later roll cannot overwrite it.
      (the form of "Who writes it", `:366`), and B's sha256 expected.
   2. `lwrite open-B`, then `plugin true` (`HTTP 200`, `active`).
   3. Available, observed as in "Observing the Router" below: `cap reader rreader` twice, at least
-     10 s apart, and `cap refusals lrefusals <the open-B commit time>` at least 20 s after the commit.
-     The positive control succeeds. (`cap router-log rlog` is still taken; it is empty at this pin.)
+     10 s apart, `cap errors lerrors "$t0"` at least 20 s after the commit (`t0="$(date -u +%FT%TZ)"` set just before
+     step 2's `lwrite open-B`), and
+     `cap ident rident`. The positive control succeeds. (`cap router-log rlog` is still taken; it is
+     empty at this pin.)
   4. Withdraw.
 - **F, the failure path. It never re-opens.**
   1. Withdraw: `lwrite withdraw`, then `plugin false`.
@@ -900,15 +920,22 @@ later roll cannot overwrite it.
 `Worker budget authority …` lines never reach `kubectl logs` (llm-router #191), so a log line cannot be
 a pass criterion. Each Router observation below is made on the ledger instead:
 
-- **Unavailable** (`read_failed`): `lrefusals` shows `Worker budget authority unavailable` with the
+- **Unavailable** (`read_failed`): `lerrors` shows `Worker budget authority unavailable` with the
   context `runtime_snapshot(uuid,uuid,text)`, about every 5 s, over at least 20 s. Only
   `relay_budget_router` may execute `runtime_snapshot` (step 4), so these are the Router plugin's reads.
+  Lines with the context `current_epoch` are the operator's own controls and are not counted.
   At `runtime.ts:83-97` a failed read is reported as `read_failed`.
-- **Available**: `rreader` shows one session `router-worker-budget-reader`, user
-  `relay_budget_router`, query `runtime_snapshot`, and its `query_start` advances between two reads
-  at least 10 s apart; `lrefusals` shows no `unavailable` line from the open-B commit to 20 s later;
-  and the snapshot's identity matches the Router's (the same `instanceId` in the witness and the row,
-  the same deployment digest in the `readers` row and the Router).
+- **Available**: all three of:
+  - `rreader` shows one session `router-worker-budget-reader`, user `relay_budget_router`, query
+    `runtime_snapshot`, and its `query_start` advances between two reads at least 10 s apart: the
+    Router keeps reading;
+  - `lerrors` shows **no** ERROR, FATAL or PANIC line at all from the open-B capture to at least 20 s
+    later. R and D3 run no negative control, so any error, of any kind, fails the check. Together with
+    the advancing `query_start`, this shows the reads succeed: a failed read (the gate, a permission,
+    a connection) is always logged at ERROR, as A3 showed;
+  - `rident`: the `readers` row's `deployment_digest` equals `router_digest`, and the `authority`
+    row's `instance_id` equals the mounted witness's `instanceId` (the witness `wsha_router` shows).
+    These are the comparisons `runtime.ts:89-92` makes against the snapshot.
 - **Accepted residual.** A read that succeeds but fails the Router's own checks (`snapshot_invalid`,
   `identity_mismatch`, `policy_digest_invalid`) is not visible from the ledger. The owner accepted
   this until llm-router #191 is fixed; afterwards, the log line is checked as well.
@@ -1057,7 +1084,7 @@ A ledger pass alone does not prove Router qualification.
   "… D". Build each from that drill's files in `$ev/cap`:
   - the O3 captures from the same window as the observation;
   - the Router log captures, including those kept before each roll (empty at this pin), and the
-    `reader` and `refusals` captures;
+    `reader`, `errors` and `ident` captures;
   - the mounted hashes;
   - the SQL outputs and the before and after diffs.
 
@@ -1155,8 +1182,10 @@ S4.5  History counts all 0; the witness three-way comparison agrees, five equal 
       checklist step 4, "Expected".
 DA..DD One item per drill A, B, C, D. Each comment has captures timestamped just before the
       observation that prove the gate open (authority row ready=t, positive control), the Router
-      observation as checklist step 5 "Observing the Router" defines it (ledger-side reader and
-      refusal captures; the Router log is empty at llm-router 5a5181b7, owner decision 2026-11-20),
+      observation as checklist step 5 "Observing the Router" defines it (ledger-side reader, error
+      and identity captures, owner decision 2026-11-20). That substitute applies only while the
+      drill comment records an llm-router pin whose plugin log does not reach kubectl logs
+      (5a5181b7, llm-router #191 open); on a pin with #191 fixed, the Router log line is required too,
       the mounted witness SHA-256, the SQL outputs and before/after diffs, and the drill's pass:
       - A: the plugin enabled (HTTP 200, active) and the pass of the budget runbook's table,
         "Drills before production ready=true", as checklist step 5 runs it;
@@ -1288,8 +1317,9 @@ is `plugin true`.
   Router log has `Worker budget authority available`. At llm-router `5a5181b7` that line never reaches
   `kubectl logs` (llm-router #191), so it is observed as step 5's "Observing the Router" defines
   (owner decision 2026-11-20): `cap plugin-on-reader rreader` twice, at least 10 s apart, and
-  `cap plugin-on-refusals lrefusals <the plugin true time>` at least 20 s later, with no
-  `unavailable` line. Also keep `cap plugin-on rlog`.
+  `cap plugin-on-errors lerrors "$t0"` at least 20 s later (`t0="$(date -u +%FT%TZ)"` set just before
+  `plugin true`), with no
+  ERROR, FATAL or PANIC line, and `cap plugin-on-ident rident`. Also keep `cap plugin-on rlog`.
 - From 124071 §4.1: the Router stays available, with no `snapshot_invalid` or `policy_digest_invalid`.
   Until #191 is fixed, those two are the accepted residual of "Observing the Router".
 - This proves the gate and the witness, not qualification. The Router accepts a snapshot with no
