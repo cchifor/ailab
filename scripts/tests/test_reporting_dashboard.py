@@ -177,6 +177,7 @@ class DriveViews(unittest.TestCase):
         self.assertEqual(legend["displayMode"], "table")
         self.assertEqual(legend["calcs"], ["last"])
         self.assertEqual((legend["sortBy"], legend["sortDesc"]), ("Name", False))
+        self.assertEqual(legend["placement"], "bottom")               # below the graph, the owner's mockup
 
     def test_usage_names_guests_with_the_local_drives_query(self):
         ld = _local_drives()
