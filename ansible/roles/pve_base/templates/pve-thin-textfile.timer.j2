@@ -1,0 +1,12 @@
+# Managed by ansible (role: pve_base, tag thin_textfile). The ProxmoxThinTextfileStale alert fires when the file
+# is 15 min old.
+[Unit]
+Description=Publish the LVM thin pool fill every 2 min
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=2min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target

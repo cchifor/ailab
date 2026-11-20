@@ -1,0 +1,122 @@
+# The Proxmox hosts' LVM thin pools (local-lvm, pve/data) and the trims that keep them honest. On 2026-11-20
+# about 1.1 TiB of the three pools was freed-but-untrimmed space and nothing showed it.
+#
+# Pool fill, from pve-thin-textfile (role pve_base, tag thin_textfile; node_exporter textfile, job proxmox-node):
+# - ProxmoxThinPoolDataHigh / Critical: data space over 85 % for 15m (warning) / over 95 % for 5m (critical).
+#   A full pool fails every guest's writes on the host (they pause or see I/O errors).
+# - ProxmoxThinPoolMetadataHigh / Critical: metadata over 80 % for 15m / over 90 % for 5m. Full metadata
+#   switches the pool read-only, which is worse than full data.
+# - ProxmoxThinTextfileStale: the file is over 15 min old (the 2-min timer stopped); the fill alerts above
+#   would be judging old numbers.
+# - ProxmoxThinTextfileReadErrors: lvs failed or a row did not parse for 15m. The affected series are left
+#   out of the file, so the fill alerts above cannot fire for them.
+# - pve:lxc_volume_untrimmed_bytes (recording): for a container volume whose guest runs node_exporter (the LLM
+#   containers), the pool allocation minus the guest filesystem's use, i.e. what a trim would give back. The
+#   join is on the device-mapper name, /dev/mapper/pve-vm--<id>--disk--<n>, which the guest sees too.
+#
+# The trims (each writes a last-success time into its own textfile; the role writes an `enabled` marker, so a
+# host whose timer never fires still alerts; the marker's mtime gives a new install 50 h before it can):
+# - ProxmoxLxcTrimNotSucceeding: the nightly LXC volume sweep (pve_base, tag lxc_fstrim) has not completed a
+#   pass for 50 h. A pass cut by its deadline or a lock is partial, so this also says the slot is too short.
+# - DevWorkerTrimNotSucceeding: the dev worker's daily trim (dev_worker, tag fstrim) likewise.
+# The Talos node trim alerts from kube-state-metrics (node-fstrim-rules.yaml).
+# Fixtures: thin-pool-rules.test.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: thin-pool
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: proxmox-thin-pool
+      rules:
+        - alert: ProxmoxThinPoolDataHigh
+          expr: pve_thin_pool_data_percent{job="proxmox-node"} > 85
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: thin pool {{ $labels.pool }} data at {{ $value }}%"
+            description: "The LVM thin pool {{ $labels.pool }} on {{ $labels.instance }} has had more than 85% of its data space allocated for 15m. When it fills, every guest's writes on the host fail. Check what holds it: `lvs -o lv_name,lv_size,data_percent --sort -data_percent pve` on the host, and the freed-but-untrimmed space (pve:lxc_volume_untrimmed_bytes, and the trims' journals: pve-lxc-fstrim, the node-fstrim CronJobs, dev-worker-fstrim, gitea-runner-fstrim). Runbook: docs/runbooks/node-maintenance.md \"Thin pool fill\"."
+        - alert: ProxmoxThinPoolDataCritical
+          expr: pve_thin_pool_data_percent{job="proxmox-node"} > 95
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: thin pool {{ $labels.pool }} data at {{ $value }}%, about to fill"
+            description: "The LVM thin pool {{ $labels.pool }} on {{ $labels.instance }} is over 95% allocated. A full pool fails every guest's writes on the host. Free space now: trim (the trims' units, or `pct fstrim`/`fstrim` by hand off-hours), delete unused volumes or snapshots, or move a guest. Runbook: docs/runbooks/node-maintenance.md \"Thin pool fill\"."
+        - alert: ProxmoxThinPoolMetadataHigh
+          expr: pve_thin_pool_metadata_percent{job="proxmox-node"} > 80
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: thin pool {{ $labels.pool }} metadata at {{ $value }}%"
+            description: "The LVM thin pool {{ $labels.pool }} on {{ $labels.instance }} has used more than 80% of its metadata space for 15m. Full metadata switches the pool read-only. Grow it (`lvextend --poolmetadatasize +1G pve/data`, online) before it fills. Runbook: docs/runbooks/node-maintenance.md \"Thin pool fill\"."
+        - alert: ProxmoxThinPoolMetadataCritical
+          expr: pve_thin_pool_metadata_percent{job="proxmox-node"} > 90
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: thin pool {{ $labels.pool }} metadata at {{ $value }}%, about to fill"
+            description: "The LVM thin pool {{ $labels.pool }} on {{ $labels.instance }} has used more than 90% of its metadata space. Full metadata switches the pool read-only. Grow it now: `lvextend --poolmetadatasize +1G pve/data` (online). Runbook: docs/runbooks/node-maintenance.md \"Thin pool fill\"."
+        - alert: ProxmoxThinTextfileStale
+          expr: time() - pve_thin_textfile_timestamp_seconds{job="proxmox-node"} > 900
+          labels:
+            severity: warning
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: thin pool metrics not updated for {{ $value | humanizeDuration }}"
+            description: "pve-thin-textfile has not rewritten pve_thin.prom on {{ $labels.instance }} for over 15m, so the thin pool fill alerts are judging old numbers. Check `systemctl status pve-thin-textfile.timer pve-thin-textfile.service` and `journalctl -u pve-thin-textfile`, or converge `ansible-playbook site.yml --limit <host> --tags thin_textfile`."
+        - alert: ProxmoxThinTextfileReadErrors
+          expr: pve_thin_textfile_read_errors{job="proxmox-node"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: thin pool metrics incomplete ({{ $value }} read errors)"
+            description: "pve-thin-textfile on {{ $labels.instance }} could not read the thin pool (lvs failed, the pool is not in the listing, or a row did not parse) for 15m, and leaves those series out, so the fill alerts cannot fire for them. Run `lvs --noheadings --units b --nosuffix --separator '|' -o lv_name,pool_lv,segtype,lv_size,data_percent,metadata_percent,lv_metadata_size pve` on the host and `journalctl -u pve-thin-textfile`."
+        - record: pve:lxc_volume_untrimmed_bytes
+          expr: |
+            label_replace(
+              pve_thin_lv_allocated_bytes{job="proxmox-node", lv=~"vm-[0-9]+-disk-[0-9]+"},
+              "device", "/dev/mapper/pve-vm--$1--disk--$2", "lv", "vm-([0-9]+)-disk-([0-9]+)"
+            )
+            - on (device) group_left ()
+            max by (device) (
+              node_filesystem_size_bytes{device=~"/dev/mapper/pve-vm--[0-9]+--disk--[0-9]+"}
+              - node_filesystem_free_bytes{device=~"/dev/mapper/pve-vm--[0-9]+--disk--[0-9]+"}
+            )
+    - name: thin-pool-trims
+      rules:
+        - alert: ProxmoxLxcTrimNotSucceeding
+          expr: |
+            (
+              (time() - node_textfile_mtime_seconds{job="proxmox-node", file=~".*/pve_lxc_fstrim_enabled\\.prom"}) > 180000
+              and on (job, instance) (pve_lxc_fstrim_enabled{job="proxmox-node"} == 1)
+            )
+            unless on (job, instance)
+              ((time() - pve_lxc_fstrim_last_success_timestamp_seconds{job="proxmox-node"}) < 180000)
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: the nightly LXC volume trim has not completed a pass for over 50 h"
+            description: "pve-lxc-fstrim on {{ $labels.instance }} has not covered every running container's local-lvm volumes for over 50 h (two nights), so what the containers free stays allocated in the thin pool. The beacon says why: `cat /var/lib/prometheus/node-exporter/pve_lxc_fstrim.prom` (reason partial = the slot ran out or the registry trim held the lock; failed = a volume's exit code), and `journalctl -u pve-lxc-fstrim`. Runbook: docs/runbooks/node-maintenance.md \"LXC volume trim (nightly)\"."
+        - alert: DevWorkerTrimNotSucceeding
+          expr: |
+            (
+              (time() - node_textfile_mtime_seconds{job="dev-worker-node", file=~".*/dev_worker_fstrim_enabled\\.prom"}) > 180000
+              and on (job, instance) (dev_worker_fstrim_enabled{job="dev-worker-node"} == 1)
+            )
+            unless on (job, instance)
+              ((time() - node_fstrim_last_success_timestamp_seconds{job="dev-worker-node"}) < 180000)
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Dev worker {{ $labels.instance }}: the daily trim has not completed for over 50 h"
+            description: "dev-worker-fstrim on {{ $labels.instance }} has not trimmed all of its mounts for over 50 h (two nights), so what the worker frees stays allocated in its host's thin pool. The beacon says why: `cat /var/lib/prometheus/node-exporter/node_fstrim.prom` (partial = the slot ran out; failed with exit 3 = IO pressure stayed high), and `journalctl -u dev-worker-fstrim`. Runbook: docs/runbooks/dev-workers.md \"Daily trim\"."
