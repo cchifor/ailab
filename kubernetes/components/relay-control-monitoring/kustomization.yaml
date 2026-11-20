@@ -1,6 +1,16 @@
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
-# Opt-in after the reviewed Relay metrics release and credential provisioning.
+# The control-plane collector (docs/runbooks/relay-control-monitoring.md): a ServiceMonitor in
+# `monitoring` with its own token Secret there (monitoring/relay-control-collector), the Prometheus-only
+# ingress to Relay's 8788, the rules, and the verifier initializer that turns Secret
+# relay/relay-control-metrics into the private file named by RELAY_CONTROL_METRICS_FILE (read by the
+# live hub, Relay v0.10.4 e77bd09a, server/config.ts).
+#
+# INCLUDED by kubernetes/apps/apps/relay since hub upgrade step H6
+# (docs/runbooks/relay-researcher-hub-upgrade.md), together with ../relay-agent-control-plane: Relay
+# refuses to start with a metrics file and no control plane ("Control metrics require the agent control
+# plane"). Both Secrets must exist first: without relay/relay-control-metrics the Pod cannot mount its
+# volumes. Including or removing it is a Recreate rollout of Relay (with its pre-migration backup).
 resources:
 - collector.yaml
 - network-policy.yaml

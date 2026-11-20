@@ -32,7 +32,7 @@ The per-run ceremony for H7's signed candidate runs is [relay-researcher-qualifi
 
 ## Staged here
 
-| Component (H3 and H4a included by `kubernetes/apps/apps/relay`) | Sets | Step |
+| Component (`kubernetes/apps/apps/relay` includes each from its step: H3, H4a and H6 so far) | Sets | Step |
 | --- | --- | --- |
 | `relay-restore-fencing` (existing) | `RELAY_RECOVERY_GENERATION_FILE` from the operator's `relay-recovery-generation` ConfigMap | H3 |
 | `relay-infrastructure-installations` (new) | `RELAY_INFRASTRUCTURE_INSTALLATIONS=1` | H3 |
@@ -43,14 +43,16 @@ The per-run ceremony for H7's signed candidate runs is [relay-researcher-qualifi
 | `relay-control-monitoring`, `relay-worker-monitoring` (existing) | control metrics and worker alerts | H6 |
 | `relay-worker-candidate` (new) | `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`; the run's document ConfigMap and the key-copy init container; `run/` is generated per signed run ([relay-candidate-run-generator.md](relay-candidate-run-generator.md)) | H7 |
 
-`scripts/tests/test_relay_v060_activation_gate.py` refuses H6's Router connection and agent control plane,
-H7's candidate files and H4b's profile registry in the live overlay (not H6's monitoring components); each step's PR removes exactly its own
-entries from that list. `relay-restore-fencing` stays includable on its own, because
-a restore of the hub needs it with or without installations. `test_relay_researcher_hub_upgrade.py`
+`scripts/tests/test_relay_v060_activation_gate.py` refuses H7's candidate files and H4b's profile registry in
+the live overlay; each step's PR removes exactly its own entries from that list (H3's installation pair and
+H6's Router connection and agent control plane are gone; H6's monitoring components were never on it).
+`relay-restore-fencing` stays includable on its own, because a restore of the hub needs it with or without
+installations. `test_relay_researcher_hub_upgrade.py`
 pins each patch, and refuses installations without the recovery generation (one way only), the profile
 registry without the installations and budget client or with a placeholder or wrong SHA, the control
 plane without the Router connection or next to `RELAY_ENVIRONMENTS`, `relay-gitea-authority` or
-`relay-notifications`, the candidate files without H6 or next to the profile registry, and an H3 that
+`relay-notifications`, the control-plane collector without the control plane (Relay refuses to start)
+and the worker alerts without the collector, the candidate files without H6 or next to the profile registry, and an H3 that
 runs the fence script; `test_relay_candidate_run.py` refuses a placeholder `run/` in the overlay and any
 committed `run/` or agent candidate value that is not `scripts/relay-candidate-run.py`'s output for the
 committed run. It does not require the registry for the

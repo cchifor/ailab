@@ -13,6 +13,7 @@ resources:
 - postgres-bootstrap.yaml
 - backup.yaml
 components:
+# Default agent communication; it contains no router/OpenBao Secret or trust bridge.
 - ../../../components/relay-default-communication
 # Researcher hub upgrade H3 (docs/runbooks/relay-researcher-hub-upgrade.md): the recovery generation
 # (initialized once by recovery:initialize) and worker installations, enabled together.
@@ -21,5 +22,11 @@ components:
 # H4a: the worker budget ledger's client files only (RELAY_WORKER_BUDGET_{DSN,CA,WITNESS}_FILE). The
 # budget authority stays unstarted until H7's candidate file gives it a profile source.
 - ../../../components/relay-worker-budget-client
-# The separate managed router component remains opt-in. This
-# communication component contains no router/OpenBao Secret or trust bridge.
+# H6: the Router connection (its record, signer keys, escrow token and OpenBao egress), the agent
+# control plane with its full scope (owner decision G2), and the control-plane collector with the
+# worker alerts. Environments, Gitea issuers and notifications stay off (G2). Budget startup reads
+# start_failed until H7: the authority has no profile source before then.
+- ../../../components/relay-router-connection
+- ../../../components/relay-agent-control-plane
+- ../../../components/relay-control-monitoring
+- ../../../components/relay-worker-monitoring
