@@ -507,15 +507,22 @@ installed, a new pin that does not build (the installed module stays), and the l
 level it was given. A clean shutdown or reboot stops `ec-fan-profile` first, so the fans are back on auto
 before the kernel goes down.
 
-## Talos node trim (nightly; `kubernetes/apps/node-fstrim`, all seven Talos nodes)
+## Talos node trim (nightly; `kubernetes/apps/node-fstrim`, the agent nodes and relay-worker-1)
 
-Each Talos VM's disk is a thin LV on its host's `local-lvm`, `discard=on`, on the QLC NVMe that the host's
-etcd member shares. Talos mounts `/var` (XFS) without `discard`, and nothing trimmed it, so what a node
-freed (images, logs, emptyDirs, etcd compaction) stayed allocated in the thin pool: about 195 GiB across
-the seven nodes on 2026-11-20. The Flux Kustomization `node-fstrim` runs one CronJob per node:
+Each trimmed Talos VM's disk is a thin LV on its host's `local-lvm`, `discard=on`, on the host's QLC NVMe.
+Talos mounts `/var` (XFS) without `discard`, and nothing trimmed it, so what a node freed (images, logs,
+emptyDirs) stayed allocated in the thin pool: about 195 GiB across the seven Talos nodes on 2026-11-20. The
+Flux Kustomization `node-fstrim` runs one CronJob per node whose disk is on `local-lvm`.
 
-- The pod is pinned to its node by hostname and tolerates only the nodes' own taints (`dedicated=agent`,
-  `dedicated=relay-worker`, a control plane's). It runs `node-fstrim.sh /host/var` from a ConfigMap in a
+**Not the control planes.** Since 2026-11-20 the disks of talos-cp1/2/3 are raw files on `qnap-nfs` (ADR 0043).
+There is no `local-lvm` thin space left to reclaim for them, and a guest discard there becomes hole-punching over
+NFS on the share that etcd's WAL fsync depends on. So they have no CronJob.
+`scripts/tests/test_node_fstrim_manifests.py` takes the trimmed set from the tofu modules' `vm_datastore`
+(`local-lvm` only) and fails on a CronJob for any control plane. If the CP disks ever move back (ADR 0043,
+"Rollback"), restore their overlays from git history, with slots of their own.
+
+- The pod is pinned to its node by hostname and tolerates only the trimmed nodes' own taints
+  (`dedicated=agent`, `dedicated=relay-worker`). It runs `node-fstrim.sh /host/var` from a ConfigMap in a
   digest-pinned Debian slim image. `/var` is mounted read-only, and the pod has CAP_SYS_ADMIN only (FITRIM),
   no service-account token, a read-only root and no network. The namespace is PSA `privileged` for that
   capability and the hostPath.
@@ -533,25 +540,25 @@ the seven nodes on 2026-11-20. The Flux Kustomization `node-fstrim` runs one Cro
   pool drops what is already unmapped at once, so only what the node freed since the last night costs the
   NVMe anything.
 
-**Slots (UTC, daily), one node at a time, 12 min each:** 02:30 talos-agent-node-1 (ai-node1), 02:42
-talos-cp2 (ai-node2), 02:54 talos-cp3 (ai-node3), 03:06 talos-cp1 (ai-node1; its disk is on the QNAP, so
-the NVMe sees nothing), 03:18 talos-agent-node-2 (ai-node2), 03:30 talos-agent-node-3 (ai-node3), 03:42
-relay-worker-1 (ai-node3), done by 03:54. That is after Velero (02:00) and before the off-site sync
+**Slots (UTC, daily), one node at a time, 12 min each:** 02:30 talos-agent-node-1 (ai-node1), 03:18
+talos-agent-node-2 (ai-node2), 03:30 talos-agent-node-3 (ai-node3), 03:42 relay-worker-1 (ai-node3), done
+by 03:54. 02:42-03:18 held the control planes' slots until they were taken out. That is after Velero (02:00) and before the off-site sync
 (04:00). Each slot is a hard bound: a start at most 60 s late (`startingDeadlineSeconds`), the Job
 killed at 480 s (`activeDeadlineSeconds`), then 150 s for the chunk in flight
 (`terminationGracePeriodSeconds`), so 690 s at worst. There are no retries (`backoffLimit: 0`).
 `scripts/tests/test_node_fstrim_manifests.py` checks that arithmetic, the node set against the tofu
-modules, the tolerations against the nodes' taints, and the pod's privileges.
+modules (the nodes on `local-lvm`, never a control plane), the tolerations against the nodes' taints, and the
+pod's privileges.
 
 **Other trims on the same drives.** The CI runners trim inside their VMs every night (ci-runners.md,
 "Thin-pool trim"), and their windows cover every slot here but relay-worker-1's (ai-node1: ci-runner-4
 to 03:10; ai-node2 and ai-node3: ci-runner-5 and -6 to 03:35). A runner slice raises the node's IO pressure
 only when it slows the node's own disk, so the pressure wait is a partial guard, not an interlock. That overlap is the same class of residual risk as the runners' own (ci-runners.md
-"Residual risk"). After the one-time cleanup a node frees little per night. iocost (when on) gives the
-host's etcd VM the drive first.
+"Residual risk"). After the one-time cleanup a node frees little per night. No etcd member is on these drives
+any more (ADR 0043).
 
-**Rollout.** Merging deploys the CronJobs; the first run is that night's slot. To watch the first one by
-hand without waiting, trigger a single node, a control plane last:
+**Rollout.** Merging deploys the four CronJobs; the first run is that night's slot. To watch the first one
+by hand without waiting, trigger a single node:
 
 ```bash
 kubectl --context admin@ai -n node-fstrim get cronjobs
@@ -561,8 +568,7 @@ kubectl --context admin@ai -n node-fstrim logs -f job/fstrim-manual-1   # one li
 python scripts/node-ssh.py 192.168.0.2 "lvs pve/vm-4301-disk-0"
 ```
 
-Check etcd during a control plane's slot as for the registry trim (registry-cache.md, "Verify a run").
-That means WAL fsync p99 per member and leader changes over the slot.
+No slot touches a control plane's disk, so a run needs no etcd watch beyond the usual alerts.
 
 **Alert.** `TalosNodeFstrimNotSucceeding` (warning,
 `kubernetes/apps/infrastructure/monitoring/node-fstrim-rules.yaml`) fires when a node's CronJob has not

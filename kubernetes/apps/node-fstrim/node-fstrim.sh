@@ -3,11 +3,12 @@
 # filesystems, in place (no mount of its own). The nightly Talos node trim runs it in a CronJob pod per node
 # on the host's /var (kubernetes/apps/node-fstrim); any Linux guest on a thin volume can run it the same way.
 #
-# WHY. The guests' disks are thin LVs on each Proxmox host's local-lvm, with discard passed down to a QLC
-# NVMe that a Talos control plane's etcd shares. A filesystem that frees blocks without discarding them
-# leaves them allocated in the thin pool: Talos mounts /var (XFS) without `discard` and nothing trimmed it,
-# so on 2026-11-20 about 195 GiB were freed but still allocated across the seven Talos nodes. One fstrim of
-# a whole filesystem is a single discard burst on the etcd drive; this trims CHUNK_GB at a time.
+# WHY. The guests' disks are thin LVs on each Proxmox host's local-lvm, with discard passed down to the host's
+# QLC NVMe. A filesystem that frees blocks without discarding them leaves them allocated in the thin pool:
+# Talos mounts /var (XFS) without `discard` and nothing trimmed it, so on 2026-11-20 about 195 GiB were freed
+# but still allocated across the seven Talos nodes. One fstrim of a whole filesystem is a single discard burst
+# on that drive; this trims CHUNK_GB at a time. (The control planes' disks moved to qnap-nfs that day, ADR
+# 0043, and are not trimmed: kubernetes/apps/node-fstrim/kustomization.yaml.)
 #
 # HOW. Per mount point: the filesystem's size from statfs, then chunks of CHUNK_GB:
 #   fstrim -v -m <MINLEN> -o <offset> -l <CHUNK> <mnt>
