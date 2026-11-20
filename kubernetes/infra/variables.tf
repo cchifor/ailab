@@ -89,8 +89,9 @@ variable "vm_datastore" {
 variable "cloudinit_datastore" {
   description = "Proxmox datastore for the Talos CP VMs' cloud-init drive (ide2)"
   type        = string
-  # Still local-lvm: the 2026-11-20 move covered scsi0 only. Talos reads the drive at first boot, and
-  # `initialization` is in the VMs' ignore_changes, so this only matters when a CP VM is created.
+  # Still local-lvm: the 2026-11-20 move covered scsi0 only. PVE regenerates this drive's image on every
+  # start that is not a migration, so a CP start needs this datastore writable (ADR 0043). `initialization`
+  # is in the VMs' ignore_changes, so changing the value here only matters when a CP VM is created.
   default = "local-lvm"
 }
 variable "image_datastore" {
