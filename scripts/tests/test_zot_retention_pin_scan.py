@@ -7,6 +7,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 import pathlib
 import tempfile
 import unittest
@@ -180,9 +181,20 @@ class EvaluateTest(unittest.TestCase):
 
     def test_bare_digest_is_matched_across_repos(self):
         fails, _, notes = self.run_refs({"repo": None, "tag": None, "digest": D2},
-                                        {"repo": None, "tag": None, "digest": "sha256:" + "9" * 64})
+                                        {"repo": None, "tag": None, "digest": "sha256:" + "9" * 64, "found_in": []})
         self.assertEqual(len(fails), 1)
         self.assertEqual(len(notes), 1)
+
+    def test_bare_digest_no_tag_holds(self):
+        untagged = "sha256:" + "7" * 64
+        # probed: an untagged manifest in a repo that deletes untagged ones -> FAIL
+        fails, _, notes = self.run_refs({"repo": None, "tag": None, "digest": untagged, "found_in": ["strive/web"]})
+        self.assertEqual((len(fails), notes), (1, []))
+        self.assertIn("exists untagged", fails[0]["why"])
+        # never probed (a snapshot without the probe): unknown -> FAIL closed
+        fails, _, _ = self.run_refs({"repo": None, "tag": None, "digest": untagged})
+        self.assertEqual(len(fails), 1)
+        self.assertIn("unknown", fails[0]["why"])
 
     def test_unknown_references_warn(self):
         _, warns, _ = self.run_refs({"repo": "strive/web", "tag": "sha-nope", "digest": None},
@@ -249,6 +261,32 @@ class MainTest(unittest.TestCase):
         rc, out = self.run_main()
         self.assertEqual(rc, 1, out)
         self.assertIn("exists untagged", out)
+
+    def test_helm_bare_digest_of_an_untagged_manifest(self):
+        untagged = "sha256:" + "7" * 64
+        (self.empty / "values.yaml").write_text(f"web:\n  image:\n    digest: {untagged}\n")
+        snap = json.loads(self.snapshot.read_text())
+        for found_in, want in ((["strive/web"], 1), ([], 0), (None, 1)):  # untagged there / nowhere / not probed
+            snap["exists"] = {} if found_in is None else {f"bare:{untagged}": found_in}
+            self.snapshot.write_text(json.dumps(snap))
+            rc, out = self.run_main()
+            self.assertEqual(rc, want, (found_in, out))
+
+    def test_unreadable_directory_fails_closed(self):
+        sub = self.empty / "locked"
+        sub.mkdir()
+        (sub / "pins.yaml").write_text(f"image: registry.chifor.me/strive/web@{D2}\n")
+        real = os.scandir
+
+        def scandir(path="."):
+            if os.fspath(path).endswith("locked"):
+                raise PermissionError(13, "Permission denied", os.fspath(path))
+            return real(path)
+
+        with mock.patch("os.scandir", scandir):
+            rc, out = self.run_main()
+        self.assertEqual(rc, 2, out)
+        self.assertIn("cannot list reference source directory", out)
 
     def test_unreadable_source_fails_closed(self):
         (self.empty / "pins.yaml").write_text(f"image: registry.chifor.me/strive/web@{D2}\n")

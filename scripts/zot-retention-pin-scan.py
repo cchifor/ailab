@@ -12,7 +12,9 @@ In-use references come from:
   - a platform checkout passed with --platform: its ailab Flux overlay and pin sources (PLATFORM_PIN_SOURCES below);
   - --refs-file: one reference per line, e.g. the platform's own `scripts/ci/list-ailab-pins.py` output.
 A reference is `registry.chifor.me/strive/<repo>[:tag][@sha256:...]`. A bare `sha256:<64 hex>` in a scanned file (a
-Helm `image.digest` pin) is matched against every strive repo.
+Helm `image.digest` pin) is matched against every strive repo: through their tags, else by a HEAD probe of each repo
+(an untagged manifest). A bare digest never probed (a snapshot without the probe) fails closed.
+Unreadable sources (a file or a directory) fail closed too.
 
 Tags and their push times come from the registry API, read-only: /v2/_catalog, /v2/<repo>/tags/list, and the search
 extension's GraphQL ImageList, whose PushTimestamp is the metaDB statistic retention sorts by. The policy is the role's
@@ -162,9 +164,14 @@ def _iter_files(path):
         return
     if not path.is_dir():
         raise ScanError(f"scan path does not exist: {path}")
-    for p in sorted(path.rglob("*")):
-        if p.is_file() and ".git" not in p.parts:
-            yield p
+
+    def unreadable(err):  # rglob would skip an unreadable subtree silently; a missing source must not PASS
+        raise ScanError(f"cannot list reference source directory {err.filename} ({err.__class__.__name__})")
+
+    for root, dirs, files in os.walk(path, onerror=unreadable):
+        dirs[:] = sorted(d for d in dirs if d != ".git")
+        for name in sorted(files):
+            yield pathlib.Path(root) / name
 
 
 def without_comments(text, name):
@@ -517,13 +524,21 @@ def evaluate(repos, refs):
         label = _ref_label(ref)
         if ref["repo"] is None:
             hits = sorted(digest_repos.get(ref["digest"], ()))
-            if not hits:
-                notes.append({"ref": label, "source": ref["source"], "why": "bare digest matches no strive tag"})
+            if hits:
+                targets = [(r, None, ref["digest"], ref.get("exists")) for r in hits]
+            elif ref.get("found_in") is None:  # a bare pin no tag holds, never probed: it could be first-party
+                failures.append({"ref": label, "source": ref["source"],
+                                 "why": "bare digest no strive tag holds; its presence in the strive repos is unknown"})
                 continue
-            targets = [(r, None, ref["digest"]) for r in hits]
+            elif not ref["found_in"]:
+                notes.append({"ref": label, "source": ref["source"],
+                              "why": "bare digest is in no strive repo (a third-party pin, or not in the registry)"})
+                continue
+            else:  # an untagged strive manifest pinned by a bare digest (a Helm image.digest)
+                targets = [(r, None, ref["digest"], True) for r in ref["found_in"]]
         else:
-            targets = [(ref["repo"], ref["tag"], ref["digest"])]
-        for repo, tag, digest in targets:
+            targets = [(ref["repo"], ref["tag"], ref["digest"], ref.get("exists"))]
+        for repo, tag, digest, exists in targets:
             data = repos.get(repo)
             if data is None:
                 warnings.append({"ref": label, "source": ref["source"], "why": f"{repo} is not a scanned repository"})
@@ -543,12 +558,12 @@ def evaluate(repos, refs):
                     state = "deleted" if digest in doomed[repo] else "ambiguous"
                     failures.append({"ref": label, "source": ref["source"],
                                      "why": f"{repo}@{digest[:19]} would be {state} (only its doomed tags hold it)"})
-                elif ref.get("exists") is False:
+                elif exists is False:
                     warnings.append({"ref": label, "source": ref["source"], "why": "digest is not in the registry"})
                 elif deletes_untagged(data.get("policy")):
                     # no tag and no kept index holds it: GC collects an untagged manifest in this repo (or its
                     # existence could not be confirmed): fail closed
-                    seen = "exists untagged" if ref.get("exists") else "untagged, existence unknown"
+                    seen = "exists untagged" if exists else "untagged, existence unknown"
                     failures.append({"ref": label, "source": ref["source"],
                                      "why": f"{repo}@{digest[:19]} {seen}, and the repo's policy deletes untagged "
                                             "manifests (deleteUntagged)"})
@@ -690,6 +705,16 @@ def _run(args):
                 exists[key] = registry.manifest_exists(ref["repo"], ref["digest"])
             if not held and key in exists:
                 ref["exists"] = exists[key]
+    # A bare digest (a Helm image.digest) that no strive tag holds may still be an untagged strive manifest: probe
+    # every strive repo for it (HEAD: read-only, and zot updates no statistics on HEAD).
+    held_anywhere = {dg for tags in tables.values() for i in tags.values()
+                     for dg in ([i["digest"]] if i["digest"] else []) + i["children"]}
+    for ref in refs:
+        if ref["repo"] is None and ref["digest"] not in held_anywhere:
+            key = f"bare:{ref['digest']}"
+            if key not in exists and registry is not None:
+                exists[key] = [name for name in tables if registry.manifest_exists(name, ref["digest"])]
+            ref["found_in"] = exists.get(key)  # None (a snapshot without the probe): unknown, fails closed
 
     failures, warnings, notes = evaluate(repos, refs)
     per, freed = totals(repos)
@@ -737,7 +762,7 @@ def _report(repos, refs, per, freed, failures, warnings, notes, when, top):
         for row in rows:
             print(f"{title}: {row['ref']}  [{row['source']}]  {row['why']}")
     if notes:
-        print(f"note: {len(notes)} bare digest(s) match no strive tag (third-party pins, or already gone):")
+        print(f"note: {len(notes)} bare digest(s) are in no strive repo (third-party pins, or not in the registry):")
         for row in notes:
             print(f"  {row['ref'][:19]}  [{row['source']}]")
     print("RESULT: " + ("FAIL - an in-use image would be deleted" if failures else "PASS - nothing in use is deleted"))
