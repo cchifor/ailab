@@ -12,7 +12,12 @@
 # - nothing is trimmed while IO pressure is high (waits, then gives up: exit 3, also at the deadline) or
 #   unreadable (exit 4); a failed fstrim is exit 5; every argument must be a mount point (exit 1, nothing
 #   trimmed); the lock (exit 7), the stop file and bad settings (exit 2);
-# - SIGTERM waits for the in-flight fstrim and exits 143.
+# - SIGTERM waits for the in-flight fstrim and exits 143;
+# - with STATE_DIR: a run the deadline cuts every night still reaches the tail (the cursor, also kept on a
+#   failure; a pass spans runs and completes at the last chunk), a cursor for another geometry starts over,
+#   the least recently completed
+#   mount point goes first, and a partial run exits 9 once a mount point has had no complete pass for
+#   COMPLETE_MAX_AGE_S; no rest after the run's last chunk.
 #
 # Run: bash scripts/tests/test-node-fstrim.sh   (Linux, WSL or Git Bash with flock)
 set -u
@@ -98,7 +103,7 @@ eq "the last chunk runs to the real end (no -l)" "-v -m 64K -o $((8 * GiB)) /hos
 eq "reason done" 1 "$(metric 'node_fstrim_last_run_reason\{reason="done"\}')"
 eq "complete" 1 "$(metric 'node_fstrim_complete\{mountpoint="/host/var"\}')"
 eq "trimmed bytes as fstrim reported them" $((3 * GiB)) "$(metric 'node_fstrim_trimmed_bytes\{mountpoint="/host/var"\}')"
-eq "a success time" 1006 "$(metric node_fstrim_last_success_timestamp_seconds)"
+eq "a success time (two 2 s rests, none after the last chunk)" 1004 "$(metric node_fstrim_last_success_timestamp_seconds)"
 
 echo "== an exact multiple of the chunk: the second and last chunk has no -l =="
 new_case exact; run -- /workspace
@@ -119,11 +124,13 @@ eq "both complete" "1 1" "$(metric 'node_fstrim_complete\{mountpoint="/workspace
 
 echo "== the rest after a chunk is as long as the chunk took, within PAUSE_MIN_S..PAUSE_MAX_S =="
 new_case restfast; echo 0 > "$CTL/trim_s"; run -- /workspace
-eq "a chunk that returned at once rests PAUSE_MIN_S (2)" "2 2" "$(tr '\n' ' ' < "$CTL/sleep_args" | sed 's/ $//')"
+eq "a chunk that returned at once rests PAUSE_MIN_S (2); none after the run's last chunk" "2" "$(tr '\n' ' ' < "$CTL/sleep_args" | sed 's/ $//')"
 new_case restmid; echo 11 > "$CTL/trim_s"; run -- /workspace
-eq "an 11 s chunk rests 11 s" "11 11" "$(tr '\n' ' ' < "$CTL/sleep_args" | sed 's/ $//')"
+eq "an 11 s chunk rests 11 s" "11" "$(tr '\n' ' ' < "$CTL/sleep_args" | sed 's/ $//')"
 new_case restcap; echo 100 > "$CTL/trim_s"; run RUN_MAX_S=9999 -- /workspace
-eq "a 100 s chunk rests PAUSE_MAX_S (30)" "30 30" "$(tr '\n' ' ' < "$CTL/sleep_args" | sed 's/ $//')"
+eq "a 100 s chunk rests PAUSE_MAX_S (30)" "30" "$(tr '\n' ' ' < "$CTL/sleep_args" | sed 's/ $//')"
+new_case resttwo; echo 0 > "$CTL/trim_s"; run -- /workspace /host/var
+eq "two mount points: a rest after every chunk but the run's last (2 + 3 chunks, 4 rests)" 4 "$(calls sleep_args)"
 
 echo "== the deadline: no chunk starts that could not end by it; partial, exit 0 =="
 # RUN_MAX_S 300; a chunk is costed at 4 GiB x 30 s = 120 s; each takes 100 s and rests 30 s:
@@ -137,7 +144,7 @@ eq "the second mount point is not reached" 0 "$(grep -c /workspace "$CTL/fstrim_
 eq "reason partial" 1 "$(metric 'node_fstrim_last_run_reason\{reason="partial"\}')"
 eq "not complete" 0 "$(metric 'node_fstrim_complete\{mountpoint="/host/var"\}')"
 eq "the last success time is kept" 555 "$(metric node_fstrim_last_success_timestamp_seconds)"
-has "says why" "the next run covers the rest" "$(cat "$CTL/out")"
+has "says why" "the next run starts there" "$(cat "$CTL/out")"
 
 echo "== IO pressure: waits it out, gives up (3), counts the deadline as giving up, refuses blind (4) =="
 new_case wait; echo "some avg10=80.00 avg60=70.00 avg300=60.00 total=1" > "$CTL/psi"; echo 2 > "$CTL/psi_drop_after"
@@ -170,6 +177,77 @@ eq "not even the first one is trimmed" 0 "$(calls fstrim_calls)"
 new_case nosize; rm "$CTL/blocks._workspace"; run -- /workspace
 eq "unreadable size: exit 1" 1 "$(cat "$CTL/rc")"
 
+echo "== STATE_DIR: a run the deadline cuts every night still reaches the tail (the cursor) =="
+# One chunk fits a night: RUN_MAX_S 200, a chunk is costed at 120 s, each takes 100 s and rests 30 s.
+new_case nights; mkdir "$CTL/state"; echo 100 > "$CTL/trim_s"
+for night in 1 2 3 4; do
+  run STATE_DIR="$CTL/state" RUN_MAX_S=200 -- /host/var
+  echo "$(cat "$CTL/rc"):$(sed -nE 's/^node_fstrim_last_run_reason\{reason="([a-z]+)"\} 1$/\1/p' "$CTL/textfile/node_fstrim.prom")" >> "$CTL/nights"
+  [ "$night" = 1 ] && cp "$CTL/state/_host_var.cursor" "$CTL/cursor-after-1"
+  echo $(( $(cat "$CTL/clock") + 86400 )) > "$CTL/clock"
+done
+eq "one chunk a night, in order, the third to the real end, then round again" \
+  "-o 0 -l $((4 * GiB))|-o $((4 * GiB)) -l $((4 * GiB))|-o $((8 * GiB))|-o 0 -l $((4 * GiB))" \
+  "$(sed -E 's/^-v -m 64K //; s| /host/var$||' "$CTL/fstrim_calls" | tr '\n' '|' | sed 's/|$//')"
+eq "exit and reason per night" "0:partial 0:partial 0:done 0:partial" "$(tr '\n' ' ' < "$CTL/nights" | sed 's/ $//')"
+eq "the cursor after night 1" "next=1 chunks=3 size=$((10 * GiB)) chunk=$((4 * GiB))" "$(cat "$CTL/cursor-after-1")"
+[ -s "$CTL/state/_host_var.complete" ] && ok "the complete pass is recorded" || bad "no .complete after night 3"
+eq "the beacon carries it" "$(cat "$CTL/state/_host_var.complete")" "$(metric 'node_fstrim_last_complete_timestamp_seconds\{mountpoint="/host/var"\}')"
+
+echo "== STATE_DIR: a run continues the pass at the cursor; one for another geometry, or garbage, starts over =="
+new_case resume; mkdir "$CTL/state"
+echo "next=2 chunks=3 size=$((10 * GiB)) chunk=$((4 * GiB))" > "$CTL/state/_host_var.cursor"
+run STATE_DIR="$CTL/state" -- /host/var
+eq "only chunk 3, to the end: the pass begun in earlier runs is complete" "-v -m 64K -o $((8 * GiB)) /host/var" "$(cat "$CTL/fstrim_calls")"
+eq "reason done" 1 "$(metric 'node_fstrim_last_run_reason\{reason="done"\}')"
+eq "the cursor is gone" absent "$([ -e "$CTL/state/_host_var.cursor" ] && echo present || echo absent)"
+run STATE_DIR="$CTL/state" -- /host/var
+has "the next run starts a new pass at chunk 1" "-o 0 -l" "$(sed -n 2p "$CTL/fstrim_calls")"
+for cur in "next=2 chunks=3 size=$((12 * GiB)) chunk=$((4 * GiB))" "next=9 chunks=3 size=$((10 * GiB)) chunk=$((4 * GiB))" "garbage"; do
+  new_case badcursor; mkdir "$CTL/state"; echo "$cur" > "$CTL/state/_host_var.cursor"
+  run STATE_DIR="$CTL/state" -- /host/var
+  eq "cursor '${cur:0:20}...' -> starts at chunk 1" "-v -m 64K -o 0 -l $((4 * GiB)) /host/var" "$(sed -n 1p "$CTL/fstrim_calls")"
+done
+has "and says so" "does not fit this filesystem" "$(cat "$CTL/out")"
+
+echo "== STATE_DIR: the least recently completed mount point goes first =="
+new_case order; mkdir "$CTL/state"; echo 900 > "$CTL/state/_workspace.complete"
+run STATE_DIR="$CTL/state" -- /workspace /host/var
+has "/host/var (never completed) before /workspace" "/host/var" "$(sed -n 1p "$CTL/fstrim_calls")"
+new_case order2; mkdir "$CTL/state"; echo 900 > "$CTL/state/_workspace.complete"; echo 950 > "$CTL/state/_host_var.complete"
+run STATE_DIR="$CTL/state" -- /host/var /workspace
+has "/workspace (completed longer ago) first" "/workspace" "$(sed -n 1p "$CTL/fstrim_calls")"
+
+echo "== STATE_DIR: a partial run exits 9 once a mount point has had no complete pass for COMPLETE_MAX_AGE_S =="
+new_case stale; mkdir "$CTL/state"; echo 100 > "$CTL/trim_s"; echo 1795000000 > "$CTL/clock"
+echo $(( 1795000000 - 8 * 86400 )) > "$CTL/state/_host_var.since"
+run STATE_DIR="$CTL/state" RUN_MAX_S=200 -- /host/var
+eq "first seen 8 days ago, never complete: exit 9" 9 "$(cat "$CTL/rc")"
+eq "reason stale" 1 "$(metric 'node_fstrim_last_run_reason\{reason="stale"\}')"
+eq "it still made progress (the cursor moved)" "next=1" "$(cut -d' ' -f1 "$CTL/state/_host_var.cursor")"
+new_case stale2; mkdir "$CTL/state"; echo 100 > "$CTL/trim_s"; echo 1795000000 > "$CTL/clock"
+echo $(( 1795000000 - 8 * 86400 )) > "$CTL/state/_host_var.complete"
+run STATE_DIR="$CTL/state" RUN_MAX_S=200 -- /host/var
+eq "last complete 8 days ago: exit 9" 9 "$(cat "$CTL/rc")"
+new_case fresh; mkdir "$CTL/state"; echo 100 > "$CTL/trim_s"
+run STATE_DIR="$CTL/state" RUN_MAX_S=200 -- /host/var
+eq "a first partial run: exit 0" 0 "$(cat "$CTL/rc")"
+[ -s "$CTL/state/_host_var.since" ] && ok "and it records when the mount point was first seen" || bad "no .since"
+new_case stale3; mkdir "$CTL/state"; echo 1795000000 > "$CTL/clock"; echo $(( 1795000000 - 8 * 86400 )) > "$CTL/state/_host_var.since"
+run STATE_DIR="$CTL/state" -- /host/var
+eq "a complete run is never stale: exit 0" 0 "$(cat "$CTL/rc")"
+eq "and the .since is gone" absent "$([ -e "$CTL/state/_host_var.since" ] && echo present || echo absent)"
+new_case nostate; echo 100 > "$CTL/trim_s"; run RUN_MAX_S=200 -- /host/var
+eq "without STATE_DIR a partial run exits 0 (stateless)" 0 "$(cat "$CTL/rc")"
+
+echo "== STATE_DIR: a failed chunk keeps the cursor at it; an unusable STATE_DIR refuses (1) =="
+new_case cursorfail; mkdir "$CTL/state"; echo 2 > "$CTL/fail_on"; run STATE_DIR="$CTL/state" -- /host/var
+eq "exit 5" 5 "$(cat "$CTL/rc")"
+eq "cursor at the failed chunk" "next=1" "$(cut -d' ' -f1 "$CTL/state/_host_var.cursor")"
+new_case nodir; run STATE_DIR="$CTL/missing" -- /workspace
+eq "a missing STATE_DIR: exit 1" 1 "$(cat "$CTL/rc")"
+eq "nothing trimmed" 0 "$(calls fstrim_calls)"
+
 echo "== the stop file, the lock, bad settings, usage =="
 new_case stop; touch "$CTL/stop"; run -- /workspace
 eq "stop file: exit 0" 0 "$(cat "$CTL/rc")"
@@ -183,7 +261,7 @@ run -- /workspace
 kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
 eq "lock held: exit 7" 7 "$(cat "$CTL/rc")"
 eq "lock held: nothing trimmed" 0 "$(calls fstrim_calls)"
-for setting in CHUNK_GB=0 CHUNK_GB=x MINLEN=64X PAUSE_MIN_S=0 PAUSE_MAX_S=1 PSI_MAX=101 PSI_WAIT_MAX_S=-1 RUN_MAX_S=x SEC_PER_GB=0; do
+for setting in CHUNK_GB=0 CHUNK_GB=x MINLEN=64X PAUSE_MIN_S=0 PAUSE_MAX_S=1 PSI_MAX=101 PSI_WAIT_MAX_S=-1 RUN_MAX_S=x SEC_PER_GB=0 COMPLETE_MAX_AGE_S=0; do
   new_case "set${setting%%=*}"; run "$setting" -- /workspace
   eq "$setting -> exit 2" 2 "$(cat "$CTL/rc")"
   eq "$setting -> nothing trimmed" 0 "$(calls fstrim_calls)"

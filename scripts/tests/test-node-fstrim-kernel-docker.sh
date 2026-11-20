@@ -57,6 +57,19 @@ rc2=$?
 # XFS keeps no record of what it trimmed: a second run walks the free space again and still succeeds.
 setpriv --bounding-set -all,+sys_admin --inh-caps -all,+sys_admin env CHUNK_GB=1 LOCK_FILE=/tmp/l3 bash /repo/kubernetes/apps/node-fstrim/node-fstrim.sh /pod/var > /tmp/out3 2>&1
 [ $? -eq 0 ] && ok "a second XFS run: exit 0" || bad "a second XFS run failed"
+# STATE_DIR on the real XFS: a budget that fits one 1 GiB chunk per run (31 s against a 30 s chunk cost), so the
+# pass spans three runs, each starting at the cursor the last one left, the third to the real end.
+mkdir -p /tmp/state
+for n in 1 2 3; do
+  setpriv --bounding-set -all,+sys_admin --inh-caps -all,+sys_admin env CHUNK_GB=1 RUN_MAX_S=31 STATE_DIR=/tmp/state \
+    LOCK_FILE=/tmp/l4 bash /repo/kubernetes/apps/node-fstrim/node-fstrim.sh /pod/var > /tmp/run$n 2>&1
+  echo "rc=$? $(grep -o "chunk=[0-9]/3" /tmp/run$n | tr "\n" " ")" >> /tmp/runs
+done
+sed "s/^/    /" /tmp/runs
+[ "$(cat /tmp/runs | tr "\n" "|")" = "rc=0 chunk=1/3 |rc=0 chunk=2/3 |rc=0 chunk=3/3 |" ] \
+  && ok "STATE_DIR: one chunk per run, continued at the cursor, the pass completes in the third" || bad "STATE_DIR runs: $(cat /tmp/runs)"
+[ -s /tmp/state/_pod_var.complete ] && [ ! -e /tmp/state/_pod_var.cursor ] && ok "STATE_DIR: the complete pass is recorded, the cursor removed" \
+  || bad "STATE_DIR: $(ls /tmp/state)"
 umount /pod/var /pod/ws /host/var /host/ws; losetup -d "$LV" "$LW"
 [ "$fail" -eq 0 ] && echo "node-fstrim kernel test: all cases passed" || echo "node-fstrim kernel test: FAILURES"
 exit "$fail"

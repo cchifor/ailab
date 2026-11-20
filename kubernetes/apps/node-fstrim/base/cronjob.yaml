@@ -57,6 +57,10 @@ spec:
                 - { name: PAUSE_MIN_S, value: "2" }
                 - { name: PAUSE_MAX_S, value: "30" }
                 - { name: LOCK_FILE, value: /tmp/node-fstrim.lock }
+                # The cursor and the last complete pass, on the node (the state volume below): a night the
+                # deadline cuts is continued by the next one, and a pass that never completes within 7 days
+                # makes the Job fail (exit 9), so the alert sees it.
+                - { name: STATE_DIR, value: /state }
                 - { name: STOP_FILE, value: /tmp/node-fstrim.stop }
               securityContext:
                 # FITRIM needs CAP_SYS_ADMIN and nothing else (verified against a read-only bind of XFS and
@@ -79,6 +83,7 @@ spec:
                 - { name: host-var, mountPath: /host/var, readOnly: true }
                 - { name: script, mountPath: /opt/node-fstrim, readOnly: true }
                 - { name: tmp, mountPath: /tmp }
+                - { name: state, mountPath: /state }
           volumes:
             - name: host-var
               hostPath: { path: /var, type: Directory }
@@ -86,3 +91,7 @@ spec:
               configMap: { name: node-fstrim-script, defaultMode: 0555 }
             - name: tmp
               emptyDir: { medium: Memory, sizeLimit: 16Mi }
+            # The pod's only writable host path: a few lines of trim progress per node. Losing it (a node reset)
+            # only means the next pass starts at the first chunk.
+            - name: state
+              hostPath: { path: /var/lib/node-fstrim, type: DirectoryOrCreate }

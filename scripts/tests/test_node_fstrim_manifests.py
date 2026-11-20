@@ -53,8 +53,15 @@ def tofu_nodes():
     tpl = yaml.safe_load((INFRA / "agent-nodes/machine-config/relay-worker.yaml.tftpl").read_text(encoding="utf-8"))
     [(k, v)] = tpl["machine"]["nodeTaints"].items()
     rw_taint = (k, v.split(":")[0], v.split(":")[1])
+    # The real relay-worker inventory is the gitignored relay-workers.auto.tfvars. What is committed is the
+    # module's validation, which refuses any relay worker but the listed ones (relay-workers.tf), and the
+    # example file; the two must agree, and the CronJobs follow them.
+    allowed = dict(re.findall(r'k == "(relay-worker-\d+)" && v\.node_name == "(ai-node\d+)"',
+                              (INFRA / "agent-nodes/relay-workers.tf").read_text(encoding="utf-8")))
     example = (INFRA / "agent-nodes/relay-workers.tfvars.example").read_text(encoding="utf-8")
-    for name, host in re.findall(r'^\s*(relay-worker-\d+)\s*=\s*\{\s*\n\s*node_name\s*=\s*"([^"]+)"', example, re.M):
+    listed = dict(re.findall(r'^\s*(relay-worker-\d+)\s*=\s*\{\s*\n\s*node_name\s*=\s*"([^"]+)"', example, re.M))
+    assert allowed and allowed == listed, f"relay-workers.tf allows {allowed}, the example lists {listed}"
+    for name, host in allowed.items():
         out[name] = (host, {rw_taint})
     return out
 
@@ -147,6 +154,12 @@ class NodeFstrimManifests(unittest.TestCase):
         self.assertTrue(mounts["host-var"]["readOnly"])
         vols = {v["name"]: v for v in self.pod["volumes"]}
         self.assertEqual({"path": "/var", "type": "Directory"}, vols["host-var"]["hostPath"])
+        # The only writable host path: the trim's own state directory, which STATE_DIR points at.
+        writable = sorted(v["hostPath"]["path"] for v in self.pod["volumes"]
+                          if "hostPath" in v and not mounts[v["name"]].get("readOnly"))
+        self.assertEqual(["/var/lib/node-fstrim"], writable)
+        self.assertEqual({"path": "/var/lib/node-fstrim", "type": "DirectoryOrCreate"}, vols["state"]["hostPath"])
+        self.assertEqual(mounts["state"]["mountPath"], self.env["STATE_DIR"])
         self.assertEqual(["/bin/bash", "/opt/node-fstrim/node-fstrim.sh", "/host/var"], self.ctr["command"])
         self.assertRegex(self.ctr["image"], r"^[^@\s]+:[^@\s]+@sha256:[0-9a-f]{64}$")
 
