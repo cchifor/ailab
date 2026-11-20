@@ -385,7 +385,13 @@ the seven nodes on 2026-11-20. The Flux Kustomization `node-fstrim` runs one Cro
 - `node-fstrim.sh` trims 4 GiB chunks from statfs, with `-m 64K`. The last chunk has no `-l` and runs to the
   real end, which statfs understates (XFS's log). It waits while the node's IO pressure is above 45 %
   (gives up after 3 min: exit 3), and after each chunk it rests as long as the chunk took (2-30 s).
-  No chunk starts after 6 min unless it can end by then (a partial night, exit 0).
+  No chunk starts after 6 min unless it can end by then (a partial night, exit 0). The pressure wait
+  counts against those 6 min.
+- Progress is kept on the node in `/var/lib/node-fstrim` (the pod's only writable host path, `STATE_DIR`): a
+  cursor, so a night the deadline cuts is continued by the next one and a pass always reaches the end of
+  `/var`, and the time of the last complete pass. A partial night fails with **exit 9** once `/var` has
+  had no complete pass for 7 days, so chronic partial nights reach the alert. Losing the directory only
+  restarts the pass at the first chunk.
 - XFS keeps no record of what it trimmed, so every night discards every free extent again. The thin
   pool drops what is already unmapped at once, so only what the node freed since the last night costs the
   NVMe anything.
@@ -425,7 +431,9 @@ That means WAL fsync p99 per member and leader changes over the slot.
 `kubernetes/apps/infrastructure/monitoring/node-fstrim-rules.yaml`) fires when a node's CronJob has not
 succeeded for 50 h (two nights), or is older than 50 h and has never succeeded. A suspended CronJob is never
 alerted on. One failed night is not alerted. The pod log says why: exit 3 means pressure stayed high, 4
-pressure unreadable, 5 fstrim failed, and DeadlineExceeded means the slot ran out.
+pressure unreadable, 5 fstrim failed, 9 partial nights with no complete pass for 7 days, and
+DeadlineExceeded means the slot ran out. `kubectl debug node/<node>` and `cat /host/var/lib/node-fstrim/*`
+shows the cursor and the last complete pass.
 
 **Kill switch.** Set `suspend: true` on the CronJobs. In git, set it in `base/cronjob.yaml`. Live, run
 `flux suspend kustomization node-fstrim` first, then `kubectl -n node-fstrim patch cronjob <name> -p

@@ -3,7 +3,9 @@
 #
 # TalosNodeFstrimNotSucceeding: a node's trim has not succeeded for 50 h, i.e. two nights in a row failed or
 # never ran, or a CronJob older than 50 h has never succeeded. One failed night is not alerted: a night of
-# sustained IO pressure on the node (exit 3) is the trim doing its job, and the next night retries. A
+# sustained IO pressure on the node (exit 3) is the trim doing its job, and the next night retries. A night
+# the deadline cuts is a success while the trim keeps making progress (it resumes at its cursor), and fails
+# with exit 9 once the node's /var has had no complete pass for 7 days, so chronic partial nights alert too. A
 # suspended CronJob (the kill switch) is never alerted on. While it fires, freed space accumulates in that
 # node's thin LV again.
 # Fixtures: node-fstrim-rules.test.yaml.
@@ -34,4 +36,4 @@ spec:
             severity: warning
           annotations:
             summary: "Talos node trim {{ $labels.cronjob }} has not succeeded for over 50 h"
-            description: "The nightly trim CronJob {{ $labels.cronjob }} in node-fstrim has not completed a run for over 50 h (two nights), so what that node frees stays allocated in its host's thin pool. Check the last Job's pod log: `kubectl --context admin@ai -n node-fstrim logs job/<last job>` (exit 3 = IO pressure stayed high, 4 = pressure unreadable, 5 = fstrim failed, DeadlineExceeded = the slot ran out). Runbook: docs/runbooks/node-maintenance.md \"Talos node trim (nightly)\"."
+            description: "The nightly trim CronJob {{ $labels.cronjob }} in node-fstrim has not completed a run for over 50 h (two nights), so what that node frees stays allocated in its host's thin pool. Check the last Job's pod log: `kubectl --context admin@ai -n node-fstrim logs job/<last job>` (exit 3 = IO pressure stayed high, 4 = pressure unreadable, 5 = fstrim failed, 9 = partial nights and no complete pass for 7 days, DeadlineExceeded = the slot ran out). Runbook: docs/runbooks/node-maintenance.md \"Talos node trim (nightly)\"."
