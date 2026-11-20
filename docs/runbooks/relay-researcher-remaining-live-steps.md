@@ -821,7 +821,7 @@ rlog() {
 # rreader: the Router plugin's reader session (it refreshes every 5 s over one pooled connection).
 rreader() {
   lsql <<'SQL'
-SELECT application_name, usename, state, query_start, left(query, 60) AS query
+SELECT pid, backend_start, application_name, usename, state, query_start, left(query, 60) AS query
   FROM pg_stat_activity WHERE application_name = 'router-worker-budget-reader';
 SQL
 }
@@ -901,8 +901,8 @@ later roll cannot overwrite it.
   1. Run W with step 3 = `bao kv put -mount=af relay-budget/witness witness=- < "$ev/witness-B.json"`
      (the form of "Who writes it", `:366`), and B's sha256 expected.
   2. `lwrite open-B`, then `plugin true` (`HTTP 200`, `active`).
-  3. Available, observed as in "Observing the Router" below: `cap reader rreader` twice, at least
-     10 s apart, `cap errors lerrors "$t0"` at least 20 s after the commit (`t0="$(date -u +%FT%TZ)"` set just before
+  3. Available, observed as in "Observing the Router" below: `cap reader rreader`, then at least
+     10 s later `cap reader-after-10s rreader`, `cap errors lerrors "$t0"` at least 20 s after the commit (`t0="$(date -u +%FT%TZ)"` set just before
      step 2's `lwrite open-B`), and
      `cap ident rident`. The positive control succeeds. (`cap router-log rlog` is still taken; it is
      empty at this pin.)
@@ -927,18 +927,24 @@ a pass criterion. Each Router observation below is made on the ledger instead:
   At `runtime.ts:83-97` a failed read is reported as `read_failed`.
 - **Available**: all three of:
   - `rreader` shows one session `router-worker-budget-reader`, user `relay_budget_router`, query
-    `runtime_snapshot`, and its `query_start` advances between two reads at least 10 s apart: the
-    Router keeps reading;
+    `runtime_snapshot`, and its `query_start` advances between the `reader` and `reader-after-10s`
+    captures, at least 10 s apart, with the same `pid` and `backend_start`: the Router keeps reading
+    over one connection;
   - `lerrors` shows **no** ERROR, FATAL or PANIC line at all from the open-B capture to at least 20 s
     later. R and D3 run no negative control, so any error, of any kind, fails the check. Together with
-    the advancing `query_start`, this shows the reads succeed: a failed read (the gate, a permission,
-    a connection) is always logged at ERROR, as A3 showed;
+    the advancing `query_start`, this shows the ledger served the reads without error: a read the
+    ledger refuses or fails (the gate, a permission, a statement error) is logged at ERROR, as A3
+    showed;
   - `rident`: the `readers` row's `deployment_digest` equals `router_digest`, and the `authority`
     row's `instance_id` equals the mounted witness's `instanceId` (the witness `wsha_router` shows).
     These are the comparisons `runtime.ts:89-92` makes against the snapshot.
-- **Accepted residual.** A read that succeeds but fails the Router's own checks (`snapshot_invalid`,
-  `identity_mismatch`, `policy_digest_invalid`) is not visible from the ledger. The owner accepted
-  this until llm-router #191 is fixed; afterwards, the log line is checked as well.
+- **Accepted residual.** Any failure on the Router's side after the ledger has served the read without
+  error is not visible from the ledger: the Router's own checks (`snapshot_invalid`,
+  `identity_mismatch`, `policy_digest_invalid`), and a client timeout or lost connection that leaves
+  the Router without the answer. The owner accepted the checks on 2026-11-20 and widened the
+  acceptance to the whole class the same day (#1895 review), until llm-router #191 is fixed;
+  afterwards, the log line is checked as well. A lasting transport failure would show as a changing
+  `pid`/`backend_start` between the two reader captures, which fails the check.
 - **Plugin start failure** (B2, C2): unchanged, it is visible in the admin API (`HTTP 500`
   `PLUGIN_FAILED`). `rreader` then has no row.
 
@@ -1055,7 +1061,10 @@ a pass criterion. Each Router observation below is made on the ledger instead:
   The runbook gives this step as prose ("Roll back to the previous version"), so the command is NEW.
   Use `bao kv metadata get -mount=af relay-budget/witness` for the version numbers. B's sha256 is
   expected.
-- **D3.** Re-open as in O1-O3. Pass, as far as this window can show it:
+- **D3.** Re-open as in O1-O3, with `t0="$(date -u +%FT%TZ)"` set just before O1's `lwrite open-B`.
+  Then the Available captures, as R step 3 takes them: `cap reader rreader`, at least 10 s later
+  `cap reader-after-10s rreader`, at least 20 s after the commit `cap errors lerrors "$t0"`, and
+  `cap ident rident`. Pass, as far as this window can show it:
   - the Router is available, as "Observing the Router" defines it;
   - the Router's mounted witness equals B and the record's latest entry.
 
@@ -1084,7 +1093,7 @@ A ledger pass alone does not prove Router qualification.
   "… D". Build each from that drill's files in `$ev/cap`:
   - the O3 captures from the same window as the observation;
   - the Router log captures, including those kept before each roll (empty at this pin), and the
-    `reader`, `errors` and `ident` captures;
+    `reader`, `reader-after-10s`, `errors` and `ident` captures;
   - the mounted hashes;
   - the SQL outputs and the before and after diffs.
 
@@ -1316,7 +1325,8 @@ is `plugin true`.
 - Verbatim (`relay-worker-budget-authority.md`, step 9): `GET /admin/v1/plugins` shows the plugin active (run `plugins`), and the
   Router log has `Worker budget authority available`. At llm-router `5a5181b7` that line never reaches
   `kubectl logs` (llm-router #191), so it is observed as step 5's "Observing the Router" defines
-  (owner decision 2026-11-20): `cap plugin-on-reader rreader` twice, at least 10 s apart, and
+  (owner decision 2026-11-20): `cap plugin-on-reader rreader`, at least 10 s later
+  `cap plugin-on-reader-after-10s rreader`, and
   `cap plugin-on-errors lerrors "$t0"` at least 20 s later (`t0="$(date -u +%FT%TZ)"` set just before
   `plugin true`), with no
   ERROR, FATAL or PANIC line, and `cap plugin-on-ident rident`. Also keep `cap plugin-on rlog`.
