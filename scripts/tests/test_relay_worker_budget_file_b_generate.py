@@ -775,6 +775,47 @@ VALUES ('relay_budget_allocator', 'relay.chifor.me', 'babbf5ca-38ab-42b2-b7c7-f7
         self.assert_supersede_refused(supersede(old=old, now_ms=None)[2],
                                       "old policy digest is referenced by worker_budget.scope_runs")
 
+    def test_supersede_waits_for_a_reader_of_the_old_row_then_refuses(self):
+        # A concurrent runtime transaction that READ qualifications (as prepare() does first)
+        # and only later writes a row naming the old digest. With ACCESS EXCLUSIVE the supersede
+        # must wait for it, then see the reference and refuse; a weaker lock would let it delete
+        # the row first and the late write would reference a deleted digest.
+        _, old = self.commit_old()
+        late = (
+            "BEGIN;\n"
+            "SELECT count(*) FROM worker_budget.qualifications;\n"
+            "SELECT pg_sleep(4);\n"
+            "INSERT INTO worker_budget.scope_runs (run_digest, run_document, client_login, tenant_id, worker_ids,"
+            " token_cap, request_cap, expires_at, recovery_epoch) SELECT repeat('9', 64),"
+            f" jsonb_build_object('tokenPolicyDigests', jsonb_build_array('{GOLDEN_DIGEST}')),"
+            " 'relay_budget_allocator', '00000000-0000-4000-8000-000000000001', ARRAY[gen_random_uuid()],"
+            " 1000, 10, 9000000000000, recovery_epoch FROM worker_budget.authority;\n"
+            "COMMIT;\n")
+        reader = subprocess.Popen(["docker", "exec", "-i", "-e", "PSQL_HISTORY=/dev/null", self.name, "psql", "-X",
+                                   "-v", "ON_ERROR_STOP=1", "-h", "/var/run/postgresql", "-U", "postgres",
+                                   "-d", "relay_budget", "-f", "-"],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        reader.stdin.write(late); reader.stdin.close()
+        # Wait until the reader holds its lock on qualifications (it is inside pg_sleep).
+        for _ in range(100):
+            held = self.psql_raw("SELECT count(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation"
+                                 " WHERE c.relname = 'qualifications' AND l.mode = 'AccessShareLock' AND l.granted"
+                                 " AND l.pid <> pg_backend_pid()", flags=["-qAt"], check=True).stdout.strip()
+            if held != "0":
+                break
+            time.sleep(0.05)
+        else:
+            reader.kill()
+            self.fail("the concurrent reader never took its lock")
+        started = time.monotonic()
+        result = self.run_file_b(supersede(old=old, now_ms=None)[2])
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("old policy digest is referenced by worker_budget.scope_runs", result.stderr)
+        self.assertNotIn("COMMIT", result.stdout.splitlines())
+        self.assertGreater(time.monotonic() - started, 1.0, "the supersede did not wait for the reader")
+        self.assertEqual(reader.wait(timeout=30), 0, reader.stderr.read())
+        self.assertEqual(self.qualification_count(), 1)
+
     def test_supersede_refuses_when_file_a_differs_or_expired(self):
         _, old = self.commit_old()
         _, _, expired = supersede(inputs=dict(NEW_INPUTS, qualificationExpiresAt="2001-01-01T00:00:00Z"), old=old, now_ms=1)

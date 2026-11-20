@@ -427,12 +427,15 @@ BEGIN;
 SET LOCAL standard_conforming_strings = on;
 SET LOCAL ROLE relay_budget_owner;
 -- Held until COMMIT, taken BEFORE the preconditions: blocks a concurrent ready flip or
--- witness rotation and serializes a concurrent File B run; runtime reads are not blocked.
+-- witness rotation and serializes a concurrent File B run.
 LOCK TABLE worker_budget.authority IN SHARE ROW EXCLUSIVE MODE;
-LOCK TABLE worker_budget.qualifications IN SHARE ROW EXCLUSIVE MODE;
--- Supersede only: blocks runtime writes (prepare/scope installation) until COMMIT, so no
--- allocation can start to reference the old digest after the reference check below.
-LOCK TABLE {', '.join('worker_budget.' + t for t in REFERENCE_TABLES)} IN SHARE ROW EXCLUSIVE MODE;
+-- Supersede only, ACCESS EXCLUSIVE and in this order: qualifications first waits for any
+-- transaction that already read it (an in-flight prepare() that saw the old digest) to commit,
+-- so its allocation is visible to the reference check below; every later reader waits for this
+-- COMMIT and sees the new table. The reference tables second, so such a prepare() can still take
+-- its outbox/allocation locks and finish (no deadlock). Runtime reads pause only for the reissue.
+LOCK TABLE worker_budget.qualifications IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE {', '.join('worker_budget.' + t for t in REFERENCE_TABLES)} IN ACCESS EXCLUSIVE MODE;
 
 DO \x01pre-open\x01
 BEGIN
