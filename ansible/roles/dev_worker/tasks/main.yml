@@ -92,12 +92,6 @@
   ansible.builtin.import_tasks: disk_report.yml
   tags: [disk_report]
 
-# Daily chunked trim of /workspace and / (needs workspace.yml's mount), and / without online discard. Both
-# opt-in per worker (host_vars). Own tag: --tags fstrim.
-- name: Daily trim of /workspace and / (thin LVs on the etcd NVMe)
-  ansible.builtin.import_tasks: fstrim.yml
-  tags: [fstrim]
-
 # Agent TMPDIR + ~/.cache + ~/.npm onto /workspace (needs workspace.yml and users.yml). Own tag:
 # --tags agent_dirs.
 - name: Agent temp files and caches off the root disk

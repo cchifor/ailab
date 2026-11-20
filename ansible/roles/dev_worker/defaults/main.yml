@@ -490,35 +490,6 @@ dev_worker_disk_guard_critical: 5
 dev_worker_disk_guard_image_days: 3
 dev_worker_disk_guard_deps_days: 3
 
-# Daily trim of /workspace and / (tasks/fstrim.yml, tag fstrim). Both disks are thin LVs on the host's
-# local-lvm, discard=on, on the QLC NVMe a Talos control plane's etcd shares. Ubuntu's weekly fstrim.timer
-# left a gap that rebuilt within days: ~194 GiB freed but still allocated across the four workers on
-# 2026-11-20, and a week's worth was then trimmed in one burst on the etcd drive. On: every night in this
-# worker's slot, kubernetes/apps/node-fstrim/node-fstrim.sh (the Talos node trim's script, installed as
-# /usr/local/sbin/node-fstrim) trims the mounts in 4 GiB chunks, waiting while the VM's IO pressure is
-# high, with a deadline; the stock fstrim.timer is stopped and masked while this is on. Off again = the
-# kill switch: the unit goes and the stock weekly timer comes back.
-# OFF in the role (the daily fleet converge applies the role from main to every worker): host_vars turns it
-# on per worker with its slot. docs/runbooks/dev-workers.md "Daily trim".
-dev_worker_fstrim_enabled: false
-dev_worker_fstrim_mounts: ["{{ dev_worker_workspace_mount }}", "/"]
-# The slot, HH:MM UTC (quoted). The workers take turns, 12 min each (unit worst case included), around
-# talos-backup at 01:00 and before Velero at 02:00: scripts/tests/test_dev_worker_fstrim.py checks them.
-dev_worker_fstrim_start: "00:30"
-dev_worker_fstrim_run_max_min: 5
-dev_worker_fstrim_chunk_gb: 4
-dev_worker_fstrim_sec_per_gb: 30
-dev_worker_fstrim_psi_max: 45
-dev_worker_fstrim_psi_wait_max_s: 180
-dev_worker_fstrim_textfile_dir: /var/lib/prometheus/node-exporter
-# Drop the online `discard` option from the root fstab entry (the Ubuntu cloud image's LABEL=cloudimg-rootfs
-# line; every other option kept) and remount / nodiscard live, as the CI runners do (gitea_runner_root_nodiscard).
-# Under `discard`, ext4 frees small scattered extents online that cannot free whole 64 KiB thin chunks, and it
-# never clears a block group's "trimmed" flag on a free, so a later fstrim of / trims 0 bytes: without this the
-# daily trim reaches /workspace (mounted without discard) but hardly /. A remount does not clear flags already
-# set; the next reboot does, once. Off does not put `discard` back.
-dev_worker_root_nodiscard: false
-
 # The agents' archive dir (tasks/disk_guard.yml): where the agent guide tells them to keep evidence
 # they want after a task, instead of tarballs in $HOME on the 40 GB root disk (dev-worker-3,
 # 2026-10-09: ~50 GB of "qualification archives" across / and /workspace filled both). disk-guard
