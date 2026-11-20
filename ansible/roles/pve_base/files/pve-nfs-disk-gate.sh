@@ -35,7 +35,7 @@ PVESM="${PVESM:-pvesm}"
 GATE_STORAGES="${GATE_STORAGES:-qnap-nfs}"
 GATE_FSTYPES="${GATE_FSTYPES:-nfs nfs4 cifs smb3}"
 PROBE_DIR="${PROBE_DIR:-.pve-nfs-disk-gate}"
-WAIT_S="${WAIT_S:-600}"     # elapsed, across storages
+WAIT_S="${WAIT_S:-600}"     # elapsed, across storages: at least this, at most 1 s more
 STEP_S="${STEP_S:-5}"       # between checks
 PROBE_S="${PROBE_S:-10}"    # one read or write probe
 ACTIVATE_S="${ACTIVATE_S:-30}"  # one `pvesm status`: PVE's rpcinfo check alone may take 10 s, then the mount
@@ -182,7 +182,8 @@ if [ "${#vms[@]}" -eq 0 ]; then
 fi
 
 start=$SECONDS
-deadline=$((start + WAIT_S))
+# SECONDS counts whole seconds, so +1 makes the budget at least WAIT_S (and at most WAIT_S + 1).
+deadline=$((start + WAIT_S + 1))
 rc=0
 for sid in $GATE_STORAGES; do
   [ -n "${vms[$sid]:-}" ] || continue
@@ -201,7 +202,8 @@ for sid in $GATE_STORAGES; do
       ;;
   esac
   spath=${spath:-/mnt/pve/$sid}
-  log "waiting up to $((deadline - SECONDS))s for $sid at $spath (VM ${vms[$sid]})"
+  left=$((deadline - SECONDS))
+  log "waiting up to $((left < WAIT_S ? left : WAIT_S))s for $sid at $spath (VM ${vms[$sid]})"
   # A check starts only with budget left, so WHY is always the outcome of a check that ran.
   while ! check_storage "$sid" "$spath"; do
     left=$((deadline - SECONDS))

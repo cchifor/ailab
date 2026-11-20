@@ -215,7 +215,7 @@ class Gate(unittest.TestCase):
     def test_an_empty_export_is_not_ready(self):
         self.vm(4001, *CP)
         self.mount()
-        self.assertEqual(1, self.run_gate(wait_s=1), self.out)
+        self.assertEqual(1, self.run_gate(wait_s=2), self.out)
         self.assertIn(f"reading {self.qnap.as_posix()}/images/4001/vm-4001-disk-0.raw failed", self.out)
 
     def test_a_failed_write_is_not_ready(self):
@@ -223,7 +223,7 @@ class Gate(unittest.TestCase):
         self.image("4001/vm-4001-disk-0.raw")
         self.mount()
         (self.qnap / ".pve-nfs-disk-gate").write_text("a file, so mkdir -p fails (root-proof)", encoding="utf-8")
-        self.assertEqual(1, self.run_gate(wait_s=1), self.out)
+        self.assertEqual(1, self.run_gate(wait_s=2), self.out)
         self.assertIn(f"the write probe under {self.qnap.as_posix()}/.pve-nfs-disk-gate failed", self.out)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a FIFO")
@@ -265,10 +265,10 @@ class Gate(unittest.TestCase):
         self.mount()
         for rel in ("4001/vm-4001-disk-0.raw", "4001/vm-4001-disk-1.qcow2", "4001/vm-4001-disk-2.raw"):
             self.image(rel)
-        self.assertEqual(1, self.run_gate(wait_s=1), self.out)
+        self.assertEqual(1, self.run_gate(wait_s=2), self.out)
         self.assertIn("images/4001/vm-4001-disk-3.raw failed", self.out, "a linked clone's own image is read")
         self.image("4001/vm-4001-disk-3.raw")
-        self.assertEqual(0, self.run_gate(wait_s=1), self.out)
+        self.assertEqual(0, self.run_gate(wait_s=2), self.out)
         self.assertIn("serving the disks of VM 4001", self.out)  # unused0's image is not needed
 
     def test_several_vms_on_one_storage(self):

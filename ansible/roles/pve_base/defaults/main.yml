@@ -96,7 +96,7 @@ pve_base_writeback_sysctl:
 # most pve_nfs_disk_gate_timeout_s, and then pve-guests starts every guest as before. It never fails pve-guests.
 # - The wait holds back every guest on the host, but only while the share is not ready: a reboot with the NAS up
 #   passes in seconds. A host with no onboot VM on these storages passes at once. 600 s covers the ~6 min the NAS
-#   took after the 2026-10-30 power cut; it is also the longest a local-only guest waits.
+#   took after the 2026-10-30 power cut; it is also (to the second) the longest a local-only guest waits.
 # - After a timeout the CPs are STARTED ANYWAY (left to pve-guests), not skipped:
 #   * PVE's own `qm start` checks the storage first (rpcinfo, 10 s, then a TCP ping to 2049) and fails the start
 #     with "storage 'qnap-nfs' is not online". So it never boots a CP against a missing disk, and with the NAS down

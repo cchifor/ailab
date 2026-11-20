@@ -167,7 +167,7 @@ eq "C: pve-guests active after the budget" active "$(systemctl is-active pve-gue
 eq "C: startall ran" present "$(exists $MARK)"
 [ "$took" -ge "$BUDGET" ] && [ "$took" -le $((BUDGET + 10)) ] && ok "C: held for the budget only (${took}s)" \
   || bad "C: held ${took}s for a ${BUDGET}s budget"
-since -p warning | grep -q "WARNING: qnap-nfs not ready after ${BUDGET}s: not mounted at $SHARE. Handing over to pve-guests anyway" \
+since -p warning | grep -qE "WARNING: qnap-nfs not ready after ($BUDGET|$((BUDGET + 1)))s: not mounted at $SHARE. Handing over to pve-guests anyway" \
   && ok "C: the WARNING is in the journal at priority warning" || { bad "C: no WARNING at priority warning"; since; }
 pre | grep -E "pve-nfs-disk-gate ; ignore_errors=yes ; .* code=exited ; status=1 }" > /dev/null \
   && ok "C: the gate's exit 1 is recorded and ignored" || { bad "C: the gate's status is not 1, ignored"; pre; }
