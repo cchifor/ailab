@@ -9,7 +9,8 @@ home dashboard via grafana.ini default_home_dashboard_path). Sections (collapsib
                  table. Added after the 2026-09-20 env-node outage, which this dashboard could
                  only show as "Envs Ready = 0" in the (since retired, ADR 0037) test-pool row.
   Hypervisors  — host-level node_exporter on the 3 Proxmox hosts (job="proxmox-node"), incl. APU/NVMe
-                 temperatures, NVMe writes/busy and NVMe wear (SMART, the hosts' nvme textfile)
+                 temperatures and four NVMe summary tiles that open the Local Drives dashboard
+                 (scripts/gen-local-drives-dashboard.py) for the drives' detail
   Instances    — pve-exporter per-guest (VMs + LXCs), label `id` = qemu/<vmid> | lxc/<vmid>
   AI           — amdgpu_* (iGPU) + llamacpp:* + AI-node CPU (node_exporter on the LXCs)
   Storage      — pve_storage pools + k8s PVC usage + host disk I/O + QNAP fabric probes
@@ -98,10 +99,11 @@ def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=N
 
 
 def stat(title, x, y, w, h, expr, unit="none", decimals=0, steps=None, color="value", graph="area",
-         mappings=None, value_size=None, avg=False, description=None):
+         mappings=None, value_size=None, avg=False, description=None, legend=None, links=None):
     """`avg=True` is for a utilisation tile: a RANGE query reduced to its mean, so the number is
     the average over the selected time range and the sparkline draws the range. Every other
-    tile is an instant query, read at the END of the range (a state: up, queue depth, age)."""
+    tile is an instant query, read at the END of the range (a state: up, queue depth, age).
+    `legend` names each value (one per series, e.g. "{{nodename}}"); `links` are panel links."""
     defaults = {"unit": unit, "decimals": decimals,
                 "thresholds": {"mode": "absolute", "steps": steps or [{"color": "blue", "value": None}]}}
     if mappings:
@@ -117,6 +119,11 @@ def stat(title, x, y, w, h, expr, unit="none", decimals=0, steps=None, color="va
         "options": options,
         "targets": [{"refId": "A", "datasource": _ds(), "expr": expr, "instant": not avg, "range": avg}],
     }
+    if legend:
+        panel["targets"][0]["legendFormat"] = legend
+        options["textMode"] = "value_and_name"
+    if links:
+        panel["links"] = links
     if description or avg:
         panel["description"] = description or "Mean over the selected time range; the sparkline draws it."
     return panel
@@ -485,14 +492,14 @@ def hwmon(chip_name, sensor="temp1", chip=None):
 # write life, written at ~4 TB/day (CI runners ~1 TB/day each), the APUs sat at their ~100 °C limit
 # and node1's system fan read 0 rpm (ailab memory ai-node-nvme-wear-and-thermals). Nothing on the
 # dashboard showed any of it.
-# ONE drive in all three panels: nvme0 (each host has one NVMe; local-lvm lives on it). Pinned, so a
+# ONE drive in every NVMe panel and tile: nvme0 (each host has one NVMe; local-lvm lives on it). Pinned, so a
 # second drive or a re-enumeration after a replacement can't mix devices (reviewer-claude on #1825).
 NVME_DISK = 'device="nvme0n1"'
 NVME_HWMON_CHIP = "nvme_nvme0"
 # Dashed lines: the drive's warning/critical (86/90 C, NVMe only) and the APU's ~100 C throttle point.
 TEMP_LIMITS = [{"color": "green", "value": None}, {"color": "orange", "value": 86}, {"color": "red", "value": 90},
                {"color": "purple", "value": 100}]
-# Height of this line of panels: 10, so the wear trend's six-entry legend (with latest values) fits.
+# Height of this line of panels: 10, the temperature panel beside two lines of 5-high NVMe tiles.
 NVME_ROW_H = 10
 WEAR_STEPS = [{"color": "green", "value": None}, {"color": "orange", "value": 70}, {"color": "red", "value": 85}]
 panels += [
@@ -505,64 +512,54 @@ panels += [
                    "which apply to the NVMe series only, and the APU's ~100 °C throttle point. "
                    "Fan speeds are not exported: the fans hang off the board's EC, which Linux does not "
                    "expose under Secure Boot."),
-    ts("NVMe Writes per Day + Busy % per Hypervisor", 8, 21, 8, NVME_ROW_H,
-       [hn(f'rate(node_disk_written_bytes_total{{{HOSTS},{NVME_DISK}}}[1h])') + " * 86400",
-        hn(f'rate(node_disk_io_time_seconds_total{{{HOSTS},{NVME_DISK}}}[5m])') + " * 100"], "decbytes",
-       legends=["{{nodename}} written/day", "{{nodename}} busy %"], fill=0, decimals=1,
-       overrides=[{"matcher": {"id": "byRegexp", "options": ".* busy %"},
-                   "properties": [{"id": "unit", "value": "percent"}, {"id": "min", "value": 0},
-                                  {"id": "max", "value": 100}, {"id": "decimals", "value": 0},
-                                  {"id": "custom.axisPlacement", "value": "right"},
-                                  {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}],
-       description="Left axis: bytes written to the host's NVMe, as a daily rate over the last hour "
-                   "(what wears the drive). Right axis, dashed: share of time the drive had I/O in "
-                   "flight; near 100% it is saturated and fsync latency (etcd on the Talos control "
-                   "planes) climbs. A CI runner VM writes about 1 TB/day."),
-    # A trend, not a table (owner, 2026-11-17: "show graphical traces to see the variation in time"):
-    # wear moves ~1%/day, so the panel is pinned to 14 d (under a relative dashboard range; Grafana may not
-    # apply a panel's relative time to an absolute or zoomed range, reviewer-codex on #1834).
-    ts("NVMe Wear (life used % · days to 100%)", 16, 21, 8, NVME_ROW_H,
-       [hn(f'nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}}') + " * 100",
-        # Guarded (reviewer-claude on #1825): used clamped to >= 1% (a fresh drive reads 0) and the daily
-        # rate to >= 1 data unit, so neither divides by zero; a drive past 100% shows 0, not negative.
-        "clamp_min(" + hn(f'((1 - nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}})'
-                          f' / clamp_min(nvme_percentage_used_ratio{{{HOSTS},{NVME_DISK}}}, 0.01))'
-                          f' * nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}'
-                          # 1d, not 7d: Prometheus keeps ~15 d, so a 7-day window is partial (and reads
-                          # far too optimistic) over the first half of a 14-day trend; 1d also shows the
-                          # day-to-day swings in CI load.
-                          f' / clamp_min(rate(nvme_data_units_written_total{{{HOSTS},{NVME_DISK}}}[1d]) * 86400, 1)')
-        + ", 0)"], "percent",
-       legends=["{{nodename}} used", "{{nodename}} days left"], fill=0, decimals=0,
-       thresholds=WEAR_STEPS, legend_calcs=["lastNotNull"], time_from="14d",
-       overrides=[{"matcher": {"id": "byRegexp", "options": ".* days left"},
-                   "properties": [{"id": "unit", "value": "suffix: d"}, {"id": "decimals", "value": 0},
-                                  # symlog, not log (reviewer-codex on #1834): node1/2 sit at 10-60 d while
-                                  # node3 reaches ~250 d, and an exhausted drive reads 0, which a log axis
-                                  # cannot draw; symlog is linear below 1 d, so 0 stays visible.
-                                  {"id": "custom.scaleDistribution",
-                                   "value": {"type": "symlog", "log": 10, "linearThreshold": 1}},
-                                  {"id": "custom.axisPlacement", "value": "right"},
-                                  {"id": "custom.thresholdsStyle", "value": {"mode": "off"}},
-                                  {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]}],
-       description="The last 14 days whenever the dashboard's range is relative (the default, e.g. "
-                   "'Last 6 hours'); after an absolute or zoomed range, the panel link opens it alone over the "
-                   "last 14 days. Left axis, solid: life used, the drive's own estimate of "
-                   "its rated write endurance consumed (SMART percentage_used; it can pass 100%, and "
-                   "failure risk rises after it); dashed lines at 70% and 85%. Right axis (symmetric log, so 0 days still shows), dashed: days "
-                   "to 100% at the last 24 h's write rate, assuming the same TB per 1% as the drive's life so "
-                   "far. The legend shows the latest values. Spare blocks and media errors are in the "
-                   "same source (nvme_available_spare_ratio, nvme_media_errors_total). Source: the "
-                   "hosts' nvme textfile collector, refreshed every few minutes."),
+    # The two NVMe panels that stood here (writes per day with busy % on a second axis; life used with a
+    # days-left forecast on a symlog axis) mixed units and read as noise (owner, 2026-11-20). The drives now
+    # have their own dashboard, Local Drives (uid ailab-local-drives, scripts/gen-local-drives-dashboard.py):
+    # throughput, latency, who uses each drive, the thin pool, endurance, trims. Four tiles keep the
+    # numbers that matter at a glance here, one unit each, and every tile opens that dashboard.
 ]
-# An enforced 14-day view (reviewer-codex on #1834): Grafana applies a panel's relative time only under a
-# relative dashboard range, so the wear panel also links to itself, alone, over the last 14 days.
-for _p in panels:
-    if _p.get("title", "").startswith("NVMe Wear ("):
-        _p["links"] = [{"title": "Open the last 14 days (this panel alone)", "targetBlank": False,
-                        # viewPanel=panel-<id>: the scenes form (Grafana 11+; the cluster runs 13.0.2, dashboard-preview.py
-                        # pins the same). ids come from _nid() when ts() builds the panel, before this loop.
-                        "url": f"/d/{DASH_UID}/?from=now-14d&to=now&viewPanel=panel-{_p['id']}"}]
+
+
+def nvme_tiles(y):
+    """Four 8x5 tiles in the 16x10 space right of the temperature panel: life used, written in the last
+    24 h, days to 100% at the 7-day rate, thin pool used. One value per host, named by host."""
+    nvme = f'{{{HOSTS},{NVME_DISK}}}'
+    duw, used = f"nvme_data_units_written_total{nvme}", f"nvme_percentage_used_ratio{nvme}"
+    pool = ('max by (nodename) (label_replace({m}{{job="pve-exporter",id=~"storage/.+/local-lvm"}}, '
+            '"nodename", "$1", "id", "storage/([^/]+)/local-lvm"))')
+    link = lambda section: [{"title": f"Local Drives: {section}", "targetBlank": False,  # noqa: E731
+                             "url": "/d/ailab-local-drives/?${__url_time_range}"}]
+    return [
+        stat("NVMe Life Used", 8, y, 8, 5, hn(f"{used} * 100"), unit="percent", steps=WEAR_STEPS, graph="none",
+             legend="{{nodename}}", links=link("endurance"),
+             description="SMART percentage_used: the drive's estimate of its rated write endurance used (100% is "
+                         "the rating, not failure). AiNodeNvmeWearHigh fires at 95%. The panel link opens the "
+                         "Local Drives dashboard."),
+        stat("NVMe Written · last 24 h", 16, y, 8, 5,
+             hn(f"clamp_min({duw} - {duw} offset 1d, 0) * 512000"), unit="decbytes", decimals=1, graph="none",
+             legend="{{nodename}}", links=link("throughput and who writes"),
+             description="Bytes written to the drive in the last 24 h: the raw difference of its data-units-written "
+                         "counter (x 512,000 B). The Local Drives dashboard says which guest wrote them."),
+        stat("NVMe Days to 100% (7-day rate)", 8, y + 5, 8, 5,
+             hn(f"clamp_min((1 - {used}) * ({duw} / clamp_min({used}, 0.01)) "
+                f"/ clamp_min(({duw} - {duw} offset 7d) / 7, 1), 0)"),
+             unit="suffix: d", graph="none", legend="{{nodename}}", links=link("endurance"),
+             steps=[{"color": "red", "value": None}, {"color": "orange", "value": 30},
+                    {"color": "green", "value": 90}],
+             description="Days until life used reaches 100% at the last 7 days' write rate, with the bytes per 1% "
+                         "the drive has shown over its life. A projection, not a failure date."),
+        stat("Thin Pool Used (local-lvm)", 16, y + 5, 8, 5,
+             f"100 * {pool.format(m='pve_disk_usage_bytes')} / {pool.format(m='pve_disk_size_bytes')}",
+             unit="percent", decimals=1, graph="none", legend="{{nodename}}", links=link("capacity"),
+             steps=[{"color": "green", "value": None}, {"color": "orange", "value": 75},
+                    {"color": "red", "value": 85}],
+             description="Share of each host's local-lvm thin pool allocated to guest volumes (pve-exporter). A "
+                         "full pool fails every guest's writes on the host. The Local Drives dashboard has the "
+                         "GiB, the metadata and each guest's share."),
+    ]
+
+
+panels += nvme_tiles(21)
 HV_EXTRA_H = NVME_ROW_H  # the thermal/NVMe line above; every later row shifts by this (as HEALTH_H does below)
 _hv_end = len(panels)
 
@@ -981,6 +978,9 @@ dashboard = {
     "schemaVersion": 39,
     "refresh": "30s",
     "time": {"from": "now-6h", "to": "now"},
+    # The drives' detail lives on its own dashboard (the NVMe tiles in the Hypervisors row link there too).
+    "links": [{"title": "Local Drives", "type": "link", "icon": "dashboard", "targetBlank": False,
+               "keepTime": True, "url": "/d/ailab-local-drives/"}],
     "templating": {"list": [
         {"name": "DS_PROMETHEUS", "type": "datasource", "query": "prometheus",
          "current": {}, "hide": 0, "label": "Datasource", "refresh": 1},
