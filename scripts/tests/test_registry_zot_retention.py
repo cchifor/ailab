@@ -508,12 +508,15 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
             self.assertFalse(rx.match(repo), repo)
 
     def test_no_policy_targets_strive_ci(self):
+        # A policy naming strive/ci/* must keep exactly strive/**'s tags. Only the deleteReferrers list does
+        # (since 2026-11-20); any other one would shadow strive/** for the existing strive/ci/* repos.
         for policy in self.policies:
             for pattern in policy["repositories"]:
-                self.assertFalse(
-                    pattern.startswith("strive/ci/") or pattern == "strive/ci",
-                    f"{pattern!r} would shadow strive/** for the existing strive/ci/* repos",
-                )
+                if pattern.startswith("strive/ci/") or pattern == "strive/ci":
+                    self.assertIs(policy.get("deleteReferrers"), True, f"{pattern!r} would shadow strive/**")
+                    self.assertEqual(policy["keepTags"], _STRIVE_POLICY["keepTags"], pattern)
+                    self.assertIs(policy["deleteUntagged"], _STRIVE_POLICY["deleteUntagged"], pattern)
+                    self.assertNotIn("*", pattern, f"{pattern!r}: name strive/ci/* repos one by one, no glob")
 
     def test_keep_pattern_matches_only_the_full_commit_tag(self):
         policy = self.policies[_policy_index(self.policies, _CI_BUILD_REPOS)]
@@ -539,8 +542,9 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
 
     def test_existing_strive_ci_repos_keep_their_strive_rules(self):
         # Regression for the first draft (strive/ci/**): every existing strive/ci/* repo must still
-        # be governed by the UNCHANGED strive/** policy, so its latest / ailab / ailab-prev /
-        # sha- / ailab-<digest> tags keep the entries they had.
+        # be governed by strive/**'s UNCHANGED rules, so its latest / ailab / ailab-prev /
+        # sha- / ailab-<digest> tags keep the entries they had. Since 2026-11-20 they reach those
+        # rules through the deleteReferrers list, whose policy shares strive/**'s keepTags macro.
         for repo in _EXISTING_STRIVE_CI_REPOS:
             for tag, want in [
                 ("latest", {"patterns": ["^latest$"]}),
@@ -550,7 +554,8 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
                 ("ailab-" + _FULL_SHA[:12], {"patterns": ["^ailab-[0-9a-f]{12}([0-9a-f]{52})?$"]}),
             ]:
                 policy, entry = _keep_entry(self.policies, repo, tag)
-                self.assertEqual(policy, _STRIVE_POLICY, f"{repo}:{tag} left strive/**")
+                self.assertEqual(policy["keepTags"], _STRIVE_POLICY["keepTags"], f"{repo}:{tag} left strive/**'s rules")
+                self.assertIs(policy["deleteUntagged"], _STRIVE_POLICY["deleteUntagged"], f"{repo}:{tag}")
                 self.assertEqual(entry, want, f"{repo}:{tag}")
 
     def test_ci_build_tag_is_governed_by_the_new_policy(self):
@@ -568,7 +573,6 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
             "strive/ci-build/nested/image": _CI_BUILD_REPOS,
             "strive/ci-build": _CI_BUILD_REPOS,
             "strive/ci-buildx/foo": "strive/**",
-            "strive/ci/platform-e2e-local": "strive/**",
             "strive/ci": "strive/**",
             "strive/platform-api": "strive/**",
             "agentforge/orchestrator": "agentforge/**",
@@ -578,6 +582,9 @@ class RegistryZotStriveCiBuildRetentionTest(unittest.TestCase):
         for repo, want in expected.items():
             got = _first_retention_policy(self.policies, repo)["repositories"]
             self.assertEqual(got, [want], f"{repo} must be governed by {want}")
+        # strive/ci/* is on the deleteReferrers list since 2026-11-20 (strive/**'s keepTags, see that class).
+        got = _first_retention_policy(self.policies, "strive/ci/platform-e2e-local")["repositories"]
+        self.assertEqual(got, _DEFAULT_REFERRER_REPOS)
 
     def test_strive_policy_would_drop_a_ci_tag(self):
         # The reason for the ordering: under strive/** a ci- tag matches no keepTags entry.
@@ -629,8 +636,19 @@ def _load_apply_helper():
     return mod
 
 
-# The shipped deleteReferrers list: the strive/web canary plus batch B1 (2026-11-19). One place to update per batch.
-_DEFAULT_REFERRER_REPOS = ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"]
+# The shipped deleteReferrers list (2026-11-20): every strive repo the orphan pre-check passed, by name. One place to
+# update. strive/keycloak-sync (empty index: the check fails closed) and strive/ci-build/* (claimed first by the
+# strive/ci-build/** policy) are not on it.
+_SERVICE_REPOS = ["airlock", "app-runner", "deepagent", "digest", "doc-search", "e2e-runner", "gatekeeper", "harness",
+                  "integration", "keycloak", "keycloak-realm-sync", "knowledge", "mcp", "notification", "profile",
+                  "sentinel", "tms", "web", "workflow"]
+_CACHE_REPOS = ["airlock", "app-runner", "deepagent", "digest", "doc-search", "e2e", "gatekeeper", "harness",
+                "integration", "keycloak", "keycloak-realm-sync", "knowledge", "mcp", "notification", "profile",
+                "sentinel", "tms", "web", "workflow"]
+_DEFAULT_REFERRER_REPOS = (["strive/" + r for r in _SERVICE_REPOS] + ["strive/pin-manifest"]
+                           + ["strive/cache/" + r for r in _CACHE_REPOS] + _EXISTING_STRIVE_CI_REPOS)
+# What was live before this list (the strive/web canary plus batch B1, applied 2026-11-20 10:17Z).
+_B1_REFERRER_REPOS = ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"]
 
 
 class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
@@ -638,9 +656,24 @@ class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
     which TAGS are kept: the canary policy is strive/**'s exact rules plus deleteReferrers, between
     strive/ci-build/** and strive/**; widening to strive/** puts the flag on strive/** itself."""
 
-    def test_default_is_the_canary_plus_batch_b1(self):
-        # Widening in batches (2026-11-19): strive/web (canary) + B1. B2-B4 follow, then ["strive/**"].
-        self.assertEqual(_load_defaults()[_CANARY_KNOB], _DEFAULT_REFERRER_REPOS)
+    def test_default_is_every_prechecked_safe_repo(self):
+        listed = _load_defaults()[_CANARY_KNOB]
+        self.assertEqual(listed, _DEFAULT_REFERRER_REPOS)
+        self.assertEqual(len(listed), len(set(listed)), "duplicate entries")
+        self.assertEqual(len(listed), 51)
+        for repo in listed:
+            # exact repository names only: a glob would reach repos the pre-check never saw
+            self.assertRegex(repo, r"^strive/[a-z0-9][a-z0-9/-]*[a-z0-9]$")
+            self.assertFalse(repo.startswith("strive/ci-build"), f"{repo}: strive/ci-build/** claims it first")
+        self.assertNotIn("strive/keycloak-sync", listed)  # empty index: the pre-check fails closed on it
+        self.assertNotIn("strive/**", listed)
+        self.assertTrue(set(_B1_REFERRER_REPOS) <= set(listed), "the canary and B1 must stay on the list")
+
+    def test_widening_from_b1_is_a_reload(self):
+        helper = _load_apply_helper()
+        before = json.loads(_render_config({_CANARY_KNOB: _B1_REFERRER_REPOS}))
+        mode, paths, _ = helper.classify(before, json.loads(_render_config()))
+        self.assertEqual((mode, paths), ("reload", ["storage.retention.policies"]))
 
     def test_canary_sits_between_ci_build_and_strive(self):
         repos = [p["repositories"] for p in _policies()]
@@ -663,7 +696,10 @@ class RegistryZotStriveDeleteReferrersTest(unittest.TestCase):
     def test_first_match_routing(self):
         pols = _policies()
         expected = {"strive/web": _DEFAULT_REFERRER_REPOS, "strive/e2e-runner": _DEFAULT_REFERRER_REPOS,
-                    "strive/profile": ["strive/**"],
+                    "strive/profile": _DEFAULT_REFERRER_REPOS, "strive/cache/web": _DEFAULT_REFERRER_REPOS,
+                    "strive/ci/platform-mock-mcp": _DEFAULT_REFERRER_REPOS,
+                    "strive/keycloak-sync": ["strive/**"], "strive/new-service": ["strive/**"],
+                    "strive/ci-build/platform-e2e-local": [_CI_BUILD_REPOS],
                     "strive/webx": ["strive/**"], "strive/ci-build/a": [_CI_BUILD_REPOS],
                     "strive/platform-api": ["strive/**"], "agentforge/orchestrator": ["agentforge/**"],
                     "library/python": ["**"]}

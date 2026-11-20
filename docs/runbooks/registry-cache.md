@@ -109,7 +109,18 @@ consulting `keepTags`. So, for every repo before it goes on the list:
    helper then restores the previous bytes, i.e. the canary stays ENABLED), **escalate**: `systemctl stop zot` on
    the LXC. That is an outage, but it ends GC at once. Then apply with `-e registry_zot_config_allow_restart=true`
    in a quiet window. Deletions already done are orphans and cannot be restored.
-4. Widen to `["strive/**"]` only after a clean canary.
+4. Widen to `["strive/**"]` only after a clean canary, and only when EVERY strive repo passes step 1. On
+   2026-11-20 63 of 64 passed; `strive/keycloak-sync` fails closed because its index is empty. So the list names
+   all 51 safe repos (strive/ci-build/* excepted: its own policy claims them first) instead of `strive/**`. A new
+   strive repo joins the list only after its own step 1. To pace a large widening (~4 MB of node1 metaDB writes
+   per deletion), apply a subset first with
+   `-e '{"registry_zot_strive_delete_referrers_repos": ["strive/web", ...]}'` (keep the repos already live in it),
+   watch one GC hour per step 3, then apply the full list. **Every apply, the full list included, needs a fresh
+   step 1 on the repos it adds, run right before it.** A pre-check is a snapshot: CI keeps pushing, and a tagged or
+   nested referrer that appears after it would be deleted irrecoverably once the policy is live.
+   Once GC has emptied and removed the `strive/ci/*` repos (each held one orphaned referrer and nothing else; check
+   `/v2/_catalog`), drop them from the list and from the tests' `_EXISTING_STRIVE_CI_REPOS`, so the list only names
+   repos that exist and were pre-checked.
 
 **Everything else the role converges still restarts zot**: htpasswd lines, certs, sync credentials, the unit and
 the binary. Batch those changes into one apply, in a quiet window.
