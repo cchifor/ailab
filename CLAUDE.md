@@ -39,7 +39,9 @@ gotchas; the source of truth is `docs/decisions/` (ADRs) and `docs/runbooks/`.
 
 ## Reaching hosts/guests (no Ansible in WSL → paramiko scripts)
 - Proxmox hosts (root): `python scripts/node-ssh.py <192.168.0.2|.3|.4> "<cmd>"`
-- LXCs: `python scripts/lxc-exec.py <host> <ctid>`
+- LXCs: `python scripts/node-ssh.py <host> "pct exec <ctid> -- <cmd>"`. **`scripts/lxc-exec.py` is NOT a command
+  runner:** it is the AI-LXC provisioner, and ANY call to it pushes and runs `kubernetes/infra/ai-lxc/provision.sh`
+  in the container (apt installs, a `llama` user, `llama-server.service`). Use it only to provision an LLM LXC.
 - Runner VMs: `ssh ubuntu@<ip>` · dev-workers: `ssh c4@<ip>` (key `~/.ssh/id_ed25519`)
 - **Strive platform, from a dev-worker:** `platform kubectl|psql|pf` — read-only observe + SELECT
   (ADR 0028, `docs/runbooks/dev-worker-platform-access.md`). No secrets, no exec, no writes.
