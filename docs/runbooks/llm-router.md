@@ -4781,9 +4781,10 @@ No other Router change may follow before the canary.
 source `5a5181b78350a6f740cc65fb7412e1c009732a32`, release `router-0.1.0-20261114-adapted-codex`. That brings the 500
 back, and a rolled-back release digest needs File B reissued again.
 
-**At the roll.** Roll once with `roll_deploy` (relay-researcher-remaining-live-steps.md, step 5 helpers): one replica,
-`Recreate`, one outage, and streams in flight are cut. A merge rolls through Flux as well; do one or the other, not
-both.
+**At the roll.** The merge is the roll: Flux applies the new image, and `Recreate` replaces the one replica, so there
+is one outage and streams in flight are cut. Do not also run `roll_deploy`, which would be a second outage. Read back
+with `rollstate llm-router llm-router app=llm-router` (relay-researcher-remaining-live-steps.md, step 5 helpers): the
+revision rises by exactly 1, and one Pod of the new image runs.
 
 **After the roll.**
 1. `validate-live`: 6/9, the known baseline.
