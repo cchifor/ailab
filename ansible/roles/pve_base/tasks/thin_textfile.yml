@@ -32,6 +32,19 @@
         group: root
         mode: "0755"
 
+    # Written by the role, not the script: a host whose file never appears, or whose file node_exporter cannot
+    # parse, still says the metrics should be there (ProxmoxThinTextfileMissing keys on it). Removed when off.
+    - name: Mark the thin pool metrics as enabled for the alerts
+      ansible.builtin.copy:
+        dest: "{{ pve_thin_textfile_dir }}/pve_thin_textfile_enabled.prom"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # HELP pve_thin_textfile_enabled 1 while the pve_base role has the thin pool metrics on for this host.
+          # TYPE pve_thin_textfile_enabled gauge
+          pve_thin_textfile_enabled 1
+
     - name: Install the thin pool textfile unit and timer
       ansible.builtin.template:
         src: "{{ item }}.j2"
@@ -84,6 +97,7 @@
         state: absent
       loop:
         - "{{ pve_thin_textfile_dir }}/pve_thin.prom"
+        - "{{ pve_thin_textfile_dir }}/pve_thin_textfile_enabled.prom"
         - /usr/local/sbin/pve-thin-textfile
         - /etc/systemd/system/pve-thin-textfile.timer
         - /etc/systemd/system/pve-thin-textfile.service

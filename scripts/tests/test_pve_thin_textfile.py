@@ -52,7 +52,8 @@ class TextfileScript(unittest.TestCase):
         self.out.mkdir()
         self.listing = self.tmp / "listing"
         (self.bin / "lvs").write_text(
-            '#!/bin/bash\necho "$*" >> "$LVS_CALLS"\n[ -f "$LVS_FAIL" ] && exit 5\ncat "$LVS_LISTING"\n',
+            '#!/bin/bash\necho "$*" >> "$LVS_CALLS"\n'
+            '[ -f "$LVS_FAIL" ] && { echo "  Volume group \\"pve\\" not found" >&2; exit 5; }\ncat "$LVS_LISTING"\n',
             encoding="utf-8", newline="\n")
         os.chmod(self.bin / "lvs", 0o755)
 
@@ -69,6 +70,7 @@ class TextfileScript(unittest.TestCase):
             (self.tmp / "fail").write_text("", encoding="utf-8")
         r = subprocess.run([BASH, str(SCRIPT)], env=env, capture_output=True, text=True)
         self.assertEqual(0, r.returncode, r.stderr)
+        self.stderr = r.stderr
         text = (self.out / "pve_thin.prom").read_text(encoding="utf-8")
         samples = dict(re.findall(r"^([a-z_]+(?:\{[^}]*\})?) (\S+)$", text, re.M))
         return text, samples
@@ -88,6 +90,7 @@ class TextfileScript(unittest.TestCase):
                          s['pve_thin_lv_allocated_bytes{pool="pve/data",lv="vm-4001-disk-0",vmid="4001"}'])
         self.assertIn('pve_thin_lv_data_percent{pool="pve/data",lv="snap_vm-5002-disk-0_pre",vmid=""}', s)
         self.assertEqual("0", s["pve_thin_textfile_read_errors"])
+        self.assertEqual("", self.stderr, "a clean read says nothing on stderr")
         self.assertEqual("1795160000", s["pve_thin_textfile_timestamp_seconds"])
         for absent in ("root", "swap", "base-9000-disk-0", "vm-7000-disk-0"):
             self.assertNotIn(f'lv="{absent}"', text)
@@ -105,6 +108,7 @@ class TextfileScript(unittest.TestCase):
     def test_a_failing_lvs_is_counted_and_the_file_still_written(self):
         text, s = self.run_script(fail=True)
         self.assertEqual("1", s["pve_thin_textfile_read_errors"])
+        self.assertIn('lvs pve failed:   Volume group "pve" not found', self.stderr, "lvs's own message reaches the journal")
         self.assertEqual("1795160000", s["pve_thin_textfile_timestamp_seconds"])
         self.assertNotIn("pve_thin_pool_data_percent", text)
 
@@ -116,8 +120,10 @@ class TextfileScript(unittest.TestCase):
         self.assertNotIn('pve_thin_pool_data_percent{pool="pve/data"}', s)
         _, s = self.run_script(listing=LISTING.replace("|45.10|", "|4x.10|"))
         self.assertEqual("1", s["pve_thin_textfile_read_errors"])
+        self.assertIn("cannot parse a volume's row:   vm-4001-disk-0|data|thin|85899345920|4x.10||", self.stderr)
         _, s = self.run_script(pools="not-a-pool")
         self.assertEqual("1", s["pve_thin_textfile_read_errors"])
+        self.assertIn("'not-a-pool' is not a VG/LV name", self.stderr)
 
     def test_one_rename_and_readable(self):
         self.run_script()
@@ -138,6 +144,11 @@ class RoleWiring(unittest.TestCase):
         self.assertIs(True, self.defaults["pve_thin_textfile_enabled"])
         self.assertEqual(["{{ pve_thin_pool }}"], self.defaults["pve_thin_textfile_pools"])
         self.assertEqual("pve/data", self.defaults["pve_thin_pool"])
+
+    def test_the_role_writes_and_removes_the_enabled_marker(self):
+        tasks = (ROLE / "tasks/thin_textfile.yml").read_text(encoding="utf-8")
+        self.assertEqual(2, tasks.count("pve_thin_textfile_enabled.prom"), "written when on, removed when off")
+        self.assertIn("pve_thin_textfile_enabled 1", tasks)
 
     def test_the_units(self):
         svc = self.render("pve-thin-textfile.service.j2", pve_thin_textfile_pools=["pve/data"],

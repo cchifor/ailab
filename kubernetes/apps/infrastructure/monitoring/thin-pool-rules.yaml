@@ -8,6 +8,10 @@
 #   switches the pool read-only, which is worse than full data.
 # - ProxmoxThinTextfileStale: the file is over 15 min old (the 2-min timer stopped); the fill alerts above
 #   would be judging old numbers.
+# - ProxmoxThinTextfileMissing: the role says the metrics are on here (its pve_thin_textfile_enabled marker,
+#   installed over 15 min ago) but there is no timestamp series at all: the file was never written, was
+#   deleted, or node_exporter could not parse it. Every series of the file is gone then, so neither the stale
+#   alert nor the fill alerts could fire.
 # - ProxmoxThinTextfileReadErrors: lvs failed or a row did not parse for 15m. The affected series are left
 #   out of the file, so the fill alerts above cannot fire for them.
 # - pve:lxc_volume_untrimmed_bytes (recording): for a container volume whose guest runs node_exporter (the LLM
@@ -71,6 +75,20 @@ spec:
           annotations:
             summary: "Proxmox host {{ $labels.instance }}: thin pool metrics not updated for {{ $value | humanizeDuration }}"
             description: "pve-thin-textfile has not rewritten pve_thin.prom on {{ $labels.instance }} for over 15m, so the thin pool fill alerts are judging old numbers. Check `systemctl status pve-thin-textfile.timer pve-thin-textfile.service` and `journalctl -u pve-thin-textfile`, or converge `ansible-playbook site.yml --limit <host> --tags thin_textfile`."
+        - alert: ProxmoxThinTextfileMissing
+          expr: |
+            (
+              (pve_thin_textfile_enabled{job="proxmox-node"} == 1)
+              and on (job, instance)
+                ((time() - node_textfile_mtime_seconds{job="proxmox-node", file=~".*/pve_thin_textfile_enabled\\.prom"}) > 900)
+            )
+            unless on (job, instance) pve_thin_textfile_timestamp_seconds{job="proxmox-node"}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: no thin pool metrics"
+            description: "The pve_base role has the thin pool metrics on for {{ $labels.instance }}, but node_exporter serves none of them: pve_thin.prom was never written, was removed, or could not be parsed (node_textfile_scrape_error). The thin pool fill alerts cannot fire for this host. Check `systemctl status pve-thin-textfile.timer pve-thin-textfile.service`, `journalctl -u pve-thin-textfile` and `ls -l /var/lib/prometheus/node-exporter/pve_thin.prom`, or converge `ansible-playbook site.yml --limit <host> --tags thin_textfile`."
         - alert: ProxmoxThinTextfileReadErrors
           expr: pve_thin_textfile_read_errors{job="proxmox-node"} > 0
           for: 15m

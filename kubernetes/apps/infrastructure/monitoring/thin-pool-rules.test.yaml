@@ -91,6 +91,43 @@ tests:
               description: "pve-thin-textfile has not rewritten pve_thin.prom on 192.168.0.2:9100 for over 15m, so the thin pool fill alerts are judging old numbers. Check `systemctl status pve-thin-textfile.timer pve-thin-textfile.service` and `journalctl -u pve-thin-textfile`, or converge `ansible-playbook site.yml --limit <host> --tags thin_textfile`."
 
   - interval: 1m
+    name: metrics enabled but the file missing warns after the install grace and 10m
+    input_series:
+      - series: 'pve_thin_textfile_enabled{job="proxmox-node", instance="192.168.0.4:9100"}'
+        values: "1x60"
+      - series: 'node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.4:9100", file="/var/lib/prometheus/node-exporter/pve_thin_textfile_enabled.prom"}'
+        values: "0x60"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ProxmoxThinTextfileMissing
+        exp_alerts: []
+      - eval_time: 27m
+        alertname: ProxmoxThinTextfileMissing
+        exp_alerts:
+          - exp_labels: {severity: warning, job: proxmox-node, instance: "192.168.0.4:9100"}
+            exp_annotations:
+              summary: "Proxmox host 192.168.0.4:9100: no thin pool metrics"
+              description: "The pve_base role has the thin pool metrics on for 192.168.0.4:9100, but node_exporter serves none of them: pve_thin.prom was never written, was removed, or could not be parsed (node_textfile_scrape_error). The thin pool fill alerts cannot fire for this host. Check `systemctl status pve-thin-textfile.timer pve-thin-textfile.service`, `journalctl -u pve-thin-textfile` and `ls -l /var/lib/prometheus/node-exporter/pve_thin.prom`, or converge `ansible-playbook site.yml --limit <host> --tags thin_textfile`."
+
+  - interval: 1m
+    name: metrics enabled and the file there, a fresh install, or metrics off never warn as missing
+    input_series:
+      - series: 'pve_thin_textfile_enabled{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "1x60"
+      - series: 'node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.2:9100", file="/var/lib/prometheus/node-exporter/pve_thin_textfile_enabled.prom"}'
+        values: "0x60"
+      - series: 'pve_thin_textfile_timestamp_seconds{job="proxmox-node", instance="192.168.0.2:9100"}'
+        values: "1800+60x60"
+      - series: 'pve_thin_textfile_enabled{job="proxmox-node", instance="192.168.0.3:9100"}'
+        values: "1x60"
+      - series: 'node_textfile_mtime_seconds{job="proxmox-node", instance="192.168.0.3:9100", file="/var/lib/prometheus/node-exporter/pve_thin_textfile_enabled.prom"}'
+        values: "1500x60"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ProxmoxThinTextfileMissing
+        exp_alerts: []
+
+  - interval: 1m
     name: read errors for 15m warn (the fill series they hide cannot alert)
     input_series:
       - series: 'pve_thin_textfile_read_errors{job="proxmox-node", instance="192.168.0.3:9100"}'

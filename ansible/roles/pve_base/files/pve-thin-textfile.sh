@@ -15,7 +15,9 @@
 #   pve_thin_lv_size_bytes{pool,lv,vmid}        a thin volume's virtual size (vmid "" when the name has none)
 #   pve_thin_lv_data_percent{pool,lv,vmid}      how much of it is allocated in the pool, %
 #   pve_thin_lv_allocated_bytes{pool,lv,vmid}   size x data% / 100: what the volume holds in the pool
-#   pve_thin_textfile_read_errors               lvs failed, or a line or value did not parse (left out above)
+#   pve_thin_textfile_read_errors               lvs failed, or a line or value did not parse (left out above);
+#                                               each one is also said on stderr (the unit's journal), with lvs's
+#                                               own message or the rejected line
 #   pve_thin_textfile_timestamp_seconds         when this file was written (the staleness alert reads it)
 #
 # Environment: PVE_THIN_POOLS (default pve/data; space-separated VG/LV), PVE_THIN_TEXTFILE_DIR (default
@@ -28,6 +30,9 @@ NOW="${PVE_THIN_NOW:-$(date +%s)}"
 OUT="$DIR/pve_thin.prom"
 
 errors=0
+# Count a read error and say why on stderr, which the unit's journal keeps.
+read_error() { errors=$((errors + 1)); echo "pve-thin-textfile: $*" >&2; }
+errf="$(mktemp 2> /dev/null)" || errf=/dev/null
 declare -A HELP=(
   [pve_thin_pool_data_percent]="LVM thin pool data space used, percent."
   [pve_thin_pool_metadata_percent]="LVM thin pool metadata space used, percent."
@@ -52,16 +57,17 @@ NAME='^[A-Za-z0-9+_.-]+$'
 for pool in $POOLS; do
   vg="${pool%%/*}"; plv="${pool#*/}"
   if ! [[ "$pool" == */* && "$vg" =~ $NAME && "$plv" =~ $NAME ]]; then
-    errors=$((errors + 1)); continue
+    read_error "'$pool' is not a VG/LV name"; continue
   fi
   # One call per pool: the pool itself and every volume in it. --units b --nosuffix: plain byte counts.
   if ! out="$(lvs --noheadings --units b --nosuffix --separator '|' \
-    -o lv_name,pool_lv,segtype,lv_size,data_percent,metadata_percent,lv_metadata_size "$vg" 2> /dev/null)"; then
-    errors=$((errors + 1)); continue
+    -o lv_name,pool_lv,segtype,lv_size,data_percent,metadata_percent,lv_metadata_size "$vg" 2> "$errf")"; then
+    read_error "lvs $vg failed: $(tr '\n' ' ' < "$errf" 2> /dev/null)"; continue
   fi
   pl="{pool=\"$pool\"}"
   seen_pool=0
-  while IFS='|' read -r name lvpool segtype size data meta msize; do
+  while IFS= read -r line; do
+    IFS='|' read -r name lvpool segtype size data meta msize <<< "$line"
     name="${name//[[:space:]]/}"; lvpool="${lvpool//[[:space:]]/}"; segtype="${segtype//[[:space:]]/}"
     size="${size//[[:space:]]/}"; data="${data//[[:space:]]/}"; meta="${meta//[[:space:]]/}"; msize="${msize//[[:space:]]/}"
     [ -n "$name" ] || continue
@@ -73,7 +79,7 @@ for pool in $POOLS; do
         sample pve_thin_pool_size_bytes "$pl" "$size"
         sample pve_thin_pool_metadata_size_bytes "$pl" "$msize"
       else
-        errors=$((errors + 1))
+        read_error "cannot parse the pool's row: $line"
       fi
     elif [ "$lvpool" = "$plv" ] && [ "$segtype" = thin ]; then
       # An inactive volume (a template's base-* volumes skip activation) has no readable allocation.
@@ -86,12 +92,13 @@ for pool in $POOLS; do
         sample pve_thin_lv_data_percent "$l" "$data"
         sample pve_thin_lv_allocated_bytes "$l" "$(awk -v s="$size" -v p="$data" 'BEGIN { printf "%.0f", s * p / 100 }')"
       else
-        errors=$((errors + 1))
+        read_error "cannot parse a volume's row: $line"
       fi
     fi
   done <<< "$out"
-  [ "$seen_pool" -eq 1 ] || errors=$((errors + 1)) # the pool itself was not in the listing
+  [ "$seen_pool" -eq 1 ] || read_error "the pool $pool is not in the listing of VG $vg"
 done
+[ "$errf" = /dev/null ] || rm -f "$errf"
 sample pve_thin_textfile_read_errors "" "$errors"
 sample pve_thin_textfile_timestamp_seconds "" "$NOW"
 

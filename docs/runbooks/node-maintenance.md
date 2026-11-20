@@ -224,8 +224,11 @@ Alerts (`kubernetes/apps/infrastructure/monitoring/thin-pool-rules.yaml`):
 
 - `ProxmoxThinPoolDataHigh` (data over 85 % for 15m, warning) and `...DataCritical` (over 95 % for 5m).
 - `ProxmoxThinPoolMetadataHigh` (metadata over 80 % for 15m) and `...MetadataCritical` (over 90 % for 5m).
-- `ProxmoxThinTextfileStale` (no update for 15 min) and `ProxmoxThinTextfileReadErrors`. A read error
-  leaves the affected series out, so the fill alerts could not fire for them.
+- `ProxmoxThinTextfileStale` (no update for 15 min), `ProxmoxThinTextfileMissing` (the role's
+  `pve_thin_textfile_enabled` marker is there but the file's series are not: never written, removed or
+  unparsable) and `ProxmoxThinTextfileReadErrors`. A read error leaves the affected series out, so the fill
+  alerts could not fire for them; the exporter says why on stderr (`journalctl -u pve-thin-textfile`), with
+  lvs's message or the rejected row.
 - `ProxmoxLxcTrimNotSucceeding` and `DevWorkerTrimNotSucceeding`: the nightly LXC volume trim, or a dev
   worker's daily trim, has not completed a pass for 50 h. Each keys on its `enabled` marker, whose mtime
   gives a new install 50 h first. The Talos node trim alerts from kube-state-metrics
@@ -248,8 +251,10 @@ Rollout: `ansible-playbook site.yml --limit <host> --tags thin_textfile --check 
 Then `cat /var/lib/prometheus/node-exporter/pve_thin.prom` on the host. Off: `pve_thin_textfile_enabled: false`
 removes the timer, the script and the file. Tests: `scripts/tests/test_pve_thin_textfile.py` (script-tests),
 promtool fixtures in `thin-pool-rules.test.yaml`, and the manual Docker converge
-`bash ansible/roles/pve_base/tests/test-thin-textfile-converge-docker.sh` (a real LVM thin pool on a loop
-device).
+`bash ansible/roles/pve_base/tests/test-thin-textfile-converge-docker.sh`. Docker Desktop's kernel has no
+dm-thin-pool, so the converge runs the real `lvs` against a real VG with a linear LV (its output format, and
+the unit's hardening under real LVM locking) and takes the thin numbers from a stub thin listing in that
+format: it is not thin-pool coverage.
 
 ## Thin-pool zeroing (`pve_thin_pool_zero`, OFF on ai-node1/2 since 2026-11-17)
 
