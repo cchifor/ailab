@@ -244,6 +244,14 @@ class DashboardPromQL(unittest.TestCase):
     def setUpClass(cls):
         if not shutil.which("docker"):
             raise AssertionError("no docker: these tests run promtool in the image rules-lint.sh pins")
+        # As rules-lint.sh: only the PULL is retried (a registry hiccup is not a verdict); the test is not.
+        image = _image()
+        if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode != 0:
+            for _ in range(3):
+                if subprocess.run(["docker", "pull", "-q", image], capture_output=True, timeout=600).returncode == 0:
+                    break
+            else:
+                raise AssertionError(f"could not pull {image} after 3 attempts")
 
     def test_queries_answer_as_expected(self):
         tests = []
