@@ -1639,6 +1639,68 @@ again (build cache only; nothing running depends on it), then `docker volume pru
 label=com.docker.volume.anonymous` (unreferenced anonymous volumes; check
 `docker system df` → Local Volumes RECLAIMABLE first).
 
+## Daily trim (`dev_worker_fstrim`, tag `fstrim`)
+
+Both disks of a worker (`/` and `/workspace`) are thin LVs on its host's `local-lvm`, `discard=on`, on the QLC
+NVMe that a Talos control plane's etcd shares. Ubuntu's weekly `fstrim.timer` left the freed space allocated
+for up to a week, about 194 GiB across the four workers on 2026-11-20, and then trimmed a week's worth in
+one burst on the etcd drive. The role (`tasks/fstrim.yml`) replaces it with a daily, chunked trim:
+
+- `/usr/local/sbin/node-fstrim` is `kubernetes/apps/node-fstrim/node-fstrim.sh`, the Talos node trim's
+  script (one file for both). `dev-worker-fstrim.timer` runs it in the worker's slot on
+  `dev_worker_fstrim_mounts` (`/workspace` then `/`).
+  - It trims 4 GiB chunks with `-m 64K`. It waits while the VM's IO pressure is above 45 % (gives up
+    after 3 min: exit 3) and rests as long as each chunk took.
+  - No chunk starts after 5 min unless it can end by then. A cut-short night is continued by the next one:
+    ext4 skips the groups it already trimmed.
+  - `touch /run/node-fstrim.stop` stops it before its next chunk.
+- The stock `fstrim.timer` is stopped and masked while this is on.
+- `dev_worker_root_nodiscard` drops the online `discard` option from the root fstab entry and remounts `/`
+  `nodiscard`, live. The regexes are the CI runners' (`gitea_runner_root_nodiscard`), and the fstab is backed
+  up. Under `discard`, ext4 frees small, scattered extents online that cannot free whole 64 KiB thin
+  chunks, and it never clears a group's "trimmed" flag, so a later fstrim of `/` trims 0 bytes. A remount
+  does not clear flags already set; **the worker's next reboot does, once**.
+- The beacon is `node_fstrim.prom` in node_exporter's textfile dir: the run's reason, per-mount bytes and
+  completion, and the last complete success. The role writes `dev_worker_fstrim_enabled 1` next to it.
+
+**Slots (UTC, daily), one worker at a time, 12 min each (unit worst case 11 min):**
+
+| Worker | Host | Slot |
+|---|---|---|
+| dev-worker-1 | ai-node1 | 00:30 |
+| dev-worker-2 | ai-node2 | 00:42 |
+| dev-worker-3 | ai-node1 | 01:15 |
+| dev-worker-4 | ai-node2 | 01:27 |
+
+The slots keep clear of the 00:00 runner-trim start and infra-pg dump, talos-backup at 01:00, and Velero at
+02:00. `scripts/tests/test_dev_worker_fstrim.py` (script-tests) checks the slots, the timeouts, the settings,
+and the fstab regexes, which must equal gitea_runner's.
+The CI runners' in-guest trims (ci-runners.md, "Thin-pool trim") run on the same hosts at these times. The
+pressure wait is a partial guard, not an interlock: the same residual risk as the runners' own.
+
+**Opt-in per worker.** The role default is off. The daily fleet converge applies the role from main to
+every worker at 06:35, so each worker's host_vars turns both switches on with its slot. Rollout, one
+worker at a time:
+
+```bash
+cd ansible && export ANSIBLE_CONFIG="$(pwd)/ansible.cfg"
+ansible-playbook dev-workers.yml -l dev-worker-2 -t fstrim --check --diff   # fstab diff, units, the stock timer masked
+ansible-playbook dev-workers.yml -l dev-worker-2 -t fstrim                  # then again: changed=0
+ssh c4@192.168.0.9 'systemctl list-timers dev-worker-fstrim.timer fstrim.timer; findmnt -no OPTIONS /'
+# after its first night:
+ssh c4@192.168.0.9 'journalctl -u dev-worker-fstrim --since -1d --no-pager | tail; cat /var/lib/prometheus/node-exporter/node_fstrim.prom'
+```
+
+Kill switch: set `dev_worker_fstrim_enabled: false` in the worker's host_vars and converge with `--tags fstrim`.
+This removes the unit, the script and the metrics, and unmasks and starts the stock weekly timer.
+`dev_worker_root_nodiscard: false` leaves fstab as it is; it does not put `discard` back.
+
+Tests: `scripts/tests/test_dev_worker_fstrim.py`, the script's own suites (`scripts/tests/test-node-fstrim.sh`;
+the real-kernel `scripts/tests/test-node-fstrim-kernel-docker.sh`), and the manual Docker converge
+`bash ansible/roles/dev_worker/tests/test-fstrim-converge-docker.sh`. The converge runs on Ubuntu 24.04 with
+systemd. It covers `--check`, the fstab edit, idempotence, a real trim of a loop-backed ext4 `/workspace`,
+refused settings and disable.
+
 ## Verify
 
 - `/workspace` mounted: `mountpoint -q /workspace && echo ok`

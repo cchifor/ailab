@@ -1,0 +1,20 @@
+# Managed by ansible (role: dev_worker, tag fstrim). The daily chunked trim of {{ dev_worker_fstrim_mounts | join(' and ') }};
+# started by dev-worker-fstrim.timer. docs/runbooks/dev-workers.md "Daily trim". `touch /run/node-fstrim.stop`
+# stops it before its next chunk.
+{% set inflight = (dev_worker_fstrim_chunk_gb | int) * (dev_worker_fstrim_sec_per_gb | int) %}
+[Unit]
+Description=Daily chunked, IO-pressure-guarded trim of {{ dev_worker_fstrim_mounts | join(' and ') }}
+RequiresMountsFor={{ dev_worker_fstrim_mounts | join(' ') }}
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/default/dev-worker-fstrim
+ExecStart=/usr/local/sbin/node-fstrim {{ dev_worker_fstrim_mounts | join(' ') }}
+Nice=10
+# The deadline: no chunk starts after {{ dev_worker_fstrim_run_max_min | int }} min unless it can end by then; this allows
+# one chunk more ({{ inflight }} s) and a minute. A oneshot is "activating" for its whole run, so TimeoutStartSec= is
+# the limit (RuntimeMaxSec= does nothing on a oneshot).
+TimeoutStartSec={{ (dev_worker_fstrim_run_max_min | int) * 60 + inflight + 60 }}
+# On stop the trim finishes its chunk in flight; a deliberate stop is not a failure.
+TimeoutStopSec={{ inflight + 60 }}
+SuccessExitStatus=143 130
