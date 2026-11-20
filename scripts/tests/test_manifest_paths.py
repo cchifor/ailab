@@ -114,6 +114,9 @@ EXPECTED_LOCAL_PATHS = frozenset(
         "./kubernetes/apps/infrastructure/metallb",
         "./kubernetes/apps/infrastructure/metallb-config",
         "./kubernetes/apps/apps/edge/proxy",
+        # 2026-11-20 - the nightly Talos node trim: one CronJob per node, one node at a time
+        # (docs/runbooks/node-maintenance.md "Talos node trim (nightly)"). Added deliberately.
+        "./kubernetes/apps/node-fstrim",
     }
 )
 

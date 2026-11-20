@@ -1,0 +1,44 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# node-fstrim - the nightly trim of every Talos node's /var (Flux Kustomization clusters/ai/node-fstrim.yaml;
+# docs/runbooks/node-maintenance.md "Talos node trim (nightly)").
+#
+# WHY. Each trimmed Talos VM's disk is a thin LV on its Proxmox host's local-lvm, discard=on, on the host's QLC
+# NVMe (shared with its CI runners, dev workers and LXCs). Talos mounts /var (XFS) without `discard` and nothing
+# trimmed it, so what the node freed (images, logs, emptyDirs) stayed allocated in the thin pool: about 195 GiB
+# across the seven Talos nodes on 2026-11-20, the control planes included. One fstrim of a whole /var is one
+# discard burst on that drive.
+#
+# NOT THE CONTROL PLANES. Since 2026-11-20 talos-cp1/2/3's disks are raw files on qnap-nfs (ADR 0043). There is
+# no local-lvm thin space left to reclaim for them, and a guest discard there becomes hole-punching over NFS on
+# the share that etcd's WAL fsync depends on. scripts/tests/test_node_fstrim_manifests.py takes the trimmed set
+# from the tofu modules' vm_datastore (local-lvm only) and fails on a CronJob for any control plane.
+#
+# HOW. One CronJob per trimmed node (nodes/<node>, from base/cronjob.yaml), each pinned to its node and its own
+# 12-min slot, so ONE node trims at a time and two hosts never trim at once. The pod runs node-fstrim.sh on
+# the node's /var (read-only hostPath, CAP_SYS_ADMIN only): 4 GiB chunks, waiting while the node's IO pressure
+# is above 45 %, resting as long as each chunk took, and no chunk after 6 min unless it can end by the slot.
+#
+# Slots (UTC, daily), between Velero (02:00) and the off-site sync (04:00):
+#   02:30 talos-agent-node-1 (ai-node1)    03:30 talos-agent-node-3 (ai-node3)
+#   03:18 talos-agent-node-2 (ai-node2)    03:42 relay-worker-1     (ai-node3), ends by 03:54
+# 02:42-03:18 held the control planes' slots until they were taken out (ADR 0043, above).
+# The Proxmox hosts' own LXC trim runs 04:30-05:29 (pve_base, tag lxc_fstrim), after these.
+#
+# Kill switch: `suspend: true` on the CronJobs (git, or `kubectl patch` after `flux suspend kustomization
+# node-fstrim`); a running pod stops cleanly on delete (it finishes its chunk first).
+namespace: node-fstrim
+resources:
+  - namespace.yaml
+  - networkpolicy.yaml
+  - nodes/talos-agent-node-1
+  - nodes/talos-agent-node-2
+  - nodes/talos-agent-node-3
+  - nodes/relay-worker-1
+
+configMapGenerator:
+  # Generated, so the name carries a content hash: a script change renames it and every CronJob's next pod
+  # runs the new script.
+  - name: node-fstrim-script
+    files:
+      - node-fstrim.sh

@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# talos-agent-node-1 on ai-node1: agent node (dedicated=agent). Slot 02:30-02:42 UTC
+# (the slot table: ../../kustomization.yaml).
+resources:
+  - ../../base
+nameSuffix: -talos-agent-node-1
+labels:
+  - pairs:
+      app.kubernetes.io/instance: talos-agent-node-1
+    includeTemplates: true
+patches:
+  - target:
+      kind: CronJob
+    patch: |-
+      - op: replace
+        path: /spec/schedule
+        value: "30 2 * * *"
+      - op: replace
+        path: /spec/jobTemplate/spec/template/spec/nodeSelector/kubernetes.io~1hostname
+        value: talos-agent-node-1

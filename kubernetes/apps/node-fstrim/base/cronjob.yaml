@@ -1,0 +1,96 @@
+# One node's nightly trim of its /var (../node-fstrim.sh). Each ../nodes/<node> overlay sets the name
+# suffix, the schedule (the node's 12-min slot) and the node.
+#
+# The slot is a hard bound: the Job starts at most startingDeadlineSeconds late (60), the script starts no
+# chunk after RUN_MAX_S (360) unless it can end by then, the Job is killed at activeDeadlineSeconds (480)
+# from its start, and the kill waits terminationGracePeriodSeconds (150) for the chunk in flight (4 GiB at
+# 30 s per GiB is 120 s). 60 + 480 + 150 = 690 s, inside the 720 s slot, so two nodes never trim at once.
+# scripts/tests/test_node_fstrim_manifests.py checks that arithmetic and the schedule.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: node-fstrim
+  labels:
+    app.kubernetes.io/name: node-fstrim
+spec:
+  schedule: "30 2 * * *" # replaced per node
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  # A missed start (controller down, cluster restart) is skipped, never run late into the next node's slot.
+  startingDeadlineSeconds: 60
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 480
+      backoffLimit: 0 # a failed night waits for the next one; a retry would run into the next node's slot
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: node-fstrim
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          terminationGracePeriodSeconds: 150
+          nodeSelector:
+            kubernetes.io/hostname: REPLACED-PER-NODE
+          # Exactly the taints the trimmed nodes carry, so the pod lands on the one node it selects: the agent
+          # pool (dedicated=agent) and the relay-worker pool (dedicated=relay-worker). No control plane is
+          # trimmed (ADR 0043; ../kustomization.yaml), so none is tolerated.
+          tolerations:
+            - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
+            - { key: dedicated, operator: Equal, value: relay-worker, effect: NoSchedule }
+          containers:
+            - name: fstrim
+              # Debian keeps util-linux (fstrim, flock, mountpoint) in every image, slim included.
+              image: mirror.gcr.io/library/debian:trixie-20261104-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/bash", "/opt/node-fstrim/node-fstrim.sh", "/host/var"]
+              env:
+                - { name: CHUNK_GB, value: "4" }
+                - { name: RUN_MAX_S, value: "360" }
+                - { name: SEC_PER_GB, value: "30" }
+                - { name: PSI_MAX, value: "45" }
+                - { name: PSI_WAIT_MAX_S, value: "180" }
+                - { name: PAUSE_MIN_S, value: "2" }
+                - { name: PAUSE_MAX_S, value: "30" }
+                - { name: LOCK_FILE, value: /tmp/node-fstrim.lock }
+                # The cursor and the last complete pass, on the node (the state volume below): a night the
+                # deadline cuts is continued by the next one, and a pass that never completes within 7 days
+                # makes the Job fail (exit 9), so the alert sees it.
+                - { name: STATE_DIR, value: /state }
+                - { name: STOP_FILE, value: /tmp/node-fstrim.stop }
+              securityContext:
+                # FITRIM needs CAP_SYS_ADMIN and nothing else (verified against a read-only bind of XFS and
+                # ext4 on kernel 6.18: scripts/tests/test-node-fstrim-kernel-docker.sh). Root, because a
+                # non-root user does not get an added capability in its effective set. Kubernetes refuses
+                # allowPrivilegeEscalation: false together with SYS_ADMIN, so it stays at its default.
+                privileged: false
+                runAsUser: 0
+                runAsGroup: 0
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+                  add: ["SYS_ADMIN"]
+                seccompProfile: { type: RuntimeDefault }
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits: { memory: 64Mi }
+              volumeMounts:
+                # Read-only: FITRIM does not need a writable mount (same verification as above).
+                - { name: host-var, mountPath: /host/var, readOnly: true }
+                - { name: script, mountPath: /opt/node-fstrim, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+                - { name: state, mountPath: /state }
+          volumes:
+            - name: host-var
+              hostPath: { path: /var, type: Directory }
+            - name: script
+              configMap: { name: node-fstrim-script, defaultMode: 0555 }
+            - name: tmp
+              emptyDir: { medium: Memory, sizeLimit: 16Mi }
+            # The pod's only writable host path: a few lines of trim progress per node. Losing it (a node reset)
+            # only means the next pass starts at the first chunk.
+            - name: state
+              hostPath: { path: /var/lib/node-fstrim, type: DirectoryOrCreate }
