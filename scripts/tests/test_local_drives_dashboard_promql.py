@@ -13,7 +13,8 @@ Prometheus image scripts/rules-lint.sh uses (Docker, no network). Pinned here:
     (closed on the host) gets no figure, nor one whose only local volume is an unused disk beside a remote
     one, nor one with one local and one remote disk; a Talos node's iSCSI PVC filesystem is left out; a
     container is matched per volume by device-mapper name, and its unused volume is left out of the gap; a
-    bind mount counts once;
+    bind mount counts once; a guest rebuilt under a new vmid within the hour (two vmids, one name) neither
+    fails the query nor moves the figure to the old vmid;
   * allocation, virtual size, allocated %, share of the pool and the pool's metadata %, per guest, named,
     only on the selected hosts, with a cloud-pve guest reusing a vmid kept out;
   * bytes written per day is the raw counter difference, and stays positive across a drive replacement,
@@ -121,6 +122,10 @@ def estate():
                             ("qemu/4203", "moved-vm", "ai-node1"), ("qemu/4206", "mixed-vm", "ai-node2")):
         s.add("pve_guest_info", {"job": "pve-exporter", "id": gid, "name": name, "node": node,
                                  "type": gid.split("/")[0]}, "1x70")
+    # ci-runner-1 was rebuilt: its old vmid 4199 left pve-exporter at 40m, so for the last hour two vmids share its
+    # name. The name -> vmid joins must not fail on it, and the current vmid must win (reviewer-claude on #1890).
+    s.add("pve_guest_info", {"job": "pve-exporter", "id": "qemu/4199", "name": "ci-runner-1", "node": "ai-node1",
+                             "type": "qemu"}, "1x40")
     # cloudlab's exporter reuses vmid 4101
     s.add("pve_guest_info", {"job": "cloud-pve", "id": "qemu/4101", "name": "cloud-ci-1", "node": "cloud1",
                              "type": "qemu"}, "1x70")

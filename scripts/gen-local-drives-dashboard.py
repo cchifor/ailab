@@ -72,6 +72,14 @@ DM_HOST = 'node_disk_device_mapper_info{job="proxmox-node",lv_name=~"root|swap|d
 GUEST_INFO = 'last_over_time(pve_guest_info{job="pve-exporter"}[1h])'
 GUEST_NAMES = (f'topk by (vmid) (1, max by (vmid, name, type) (label_replace({GUEST_INFO}, '
                f'"vmid", "$2", "id", "(qemu|lxc)/([0-9]+)")))')
+# guest name -> vmid, ONE per name: a guest rebuilt under a new vmid keeps its name, and for an hour both vmids
+# are in GUEST_INFO; a join keyed by name would then fail the whole query ("duplicate series for the match
+# group", reviewer-claude on #1890). A vmid pve-exporter reports now (weight 2) beats one only in the last hour
+# (1); clamp_max puts the value back to 1, since the map is multiplied into the figures.
+_VMID = '"vmid", "$2", "id", "(qemu|lxc)/([0-9]+)"'
+NAME_TO_VMID = (f'clamp_max(topk by (name) (1, (2 * max by (vmid, name, type) (label_replace('
+                f'pve_guest_info{{job="pve-exporter"}}, {_VMID}))) or on(vmid) max by (vmid, name, type) '
+                f'(label_replace({GUEST_INFO}, {_VMID}))), 1)')
 # guest name -> the host it runs on (pve_guest_info's `node`), filtered to the selected hosts; one host per
 # guest even in the hour after a migration.
 GUEST_HOST = (f'topk by (name) (1, max by (name, nodename) (label_replace({GUEST_INFO}, '
@@ -213,9 +221,9 @@ def _vm_with_local_disks_only():
     vm_fs = (f'max by (job, instance, device) (label_replace({fs_used}, "disk", "$1", "device", '
              f'"/dev/((?:sd|vd)[a-z]+)[0-9]*") * on(job, instance, disk) group_left() {qemu})')
     vm_used = (f"sum by (name) ({vm_fs} * on(job, instance) group_left(name) {uname}) "
-               f"* on(name) group_left(vmid) {GUEST_NAMES}")
+               f"* on(name) group_left(vmid) {NAME_TO_VMID}")
     vm_disks = (f"count by (name) ({QEMU_DISK} * on(job, instance) group_left(name) {uname}) "
-                f"* on(name) group_left(vmid) {GUEST_NAMES}")
+                f"* on(name) group_left(vmid) {NAME_TO_VMID}")
     open_vols = f"count by (vmid) (pve_thin_lv_open{{{HOSTS},{DISK_LV}}} == 1)"
     return f"max by (vmid) ({vm_used}) and on(vmid) (max by (vmid) ({vm_disks}) == on(vmid) {open_vols})"
 
