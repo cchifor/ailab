@@ -524,9 +524,11 @@ python scripts/node-ssh.py 192.168.0.2 "nstat -az IpFragFails"
 ## 11. The NAS holds the Talos control-plane disks (2026-11-20, ADR 0043)
 
 Since 2026-11-20 the three Talos control-plane disks are raw files in `/pve-nfs/images/400N/` (the `qnap-nfs`
-storage). So a NAS reboot, a firmware update, pool work, or work on its Thunderbolt or network stalls every etcd
-member at once: **plan it as control-plane maintenance**. The checklist is in `docs/runbooks/node-maintenance.md`,
-"QNAP maintenance is control-plane maintenance". Never move, rename or snapshot-roll-back `images/` by hand.
+storage). So a NAS reboot (a firmware update included), pool work that takes the pool or the export offline, or
+work on its Thunderbolt or network stalls every etcd member at once: **plan it as control-plane maintenance**. The
+monthly scrub (§4) is not on that list: it is a latency event to watch, not an outage (ADR 0043 risk 5). The
+checklist is in `docs/runbooks/node-maintenance.md`, "QNAP maintenance is control-plane maintenance". Never move,
+rename or snapshot-roll-back `images/` by hand.
 
 ## Open items this audit did NOT close
 
