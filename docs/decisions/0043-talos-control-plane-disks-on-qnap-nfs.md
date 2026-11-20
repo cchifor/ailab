@@ -8,8 +8,9 @@
 
 **Implementation state** (the one place to update as it changes):
 - tofu records the datastore: **merged** (#1898, `d93e3046`, 2026-11-20).
-- The boot-order guard: **PENDING, PR #1899, not merged.** Until it is merged and rolled out on a host, nothing holds
-  that host's CP start for the NAS: after any host boot, check that the CP is running (`qm status <vmid>`).
+- The boot-order guard: **merged (#1899, `2552796b`, 2026-11-20), NOT rolled out on any host yet.** Until it is rolled
+  out on a host, nothing holds that host's CP start for the NAS: after any host boot, check that the CP is running
+  (`qm status <vmid>`).
 
 **Supersedes:** the README's "Talos OS + etcd: NOT on the NAS ... (etcd belongs on local disk)".
 
