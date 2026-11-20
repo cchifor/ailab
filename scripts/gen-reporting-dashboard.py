@@ -525,6 +525,12 @@ def nvme_tiles(y):
     24 h, days to 100% at the 7-day rate, thin pool used. One value per host, named by host."""
     nvme = f'{{{HOSTS},{NVME_DISK}}}'
     duw, used = f"nvme_data_units_written_total{nvme}", f"nvme_percentage_used_ratio{nvme}"
+
+    def written(window):
+        # Data units taken in `window`: the raw counter difference (exact), or increase() when the counter went
+        # back inside it, i.e. the drive was replaced; a raw difference would go negative there and make the
+        # projection read years (reviewer-codex on #1891). Same as the Local Drives dashboard.
+        return f"(({duw} - {duw} offset {window}) unless resets({duw}[{window}]) > 0) or increase({duw}[{window}])"
     pool = ('max by (nodename) (label_replace({m}{{job="pve-exporter",id=~"storage/.+/local-lvm"}}, '
             '"nodename", "$1", "id", "storage/([^/]+)/local-lvm"))')
     link = lambda section: [{"title": f"Local Drives: {section}", "targetBlank": False,  # noqa: E731
@@ -536,18 +542,21 @@ def nvme_tiles(y):
                          "the rating, not failure). AiNodeNvmeWearHigh fires at 95%. The panel link opens the "
                          "Local Drives dashboard."),
         stat("NVMe Written · last 24 h", 16, y, 8, 5,
-             hn(f"clamp_min({duw} - {duw} offset 1d, 0) * 512000"), unit="decbytes", decimals=1, graph="none",
+             hn(f"({written('1d')}) * 512000"), unit="decbytes", decimals=1, graph="none",
              legend="{{nodename}}", links=link("throughput and who writes"),
              description="Bytes written to the drive in the last 24 h: the raw difference of its data-units-written "
-                         "counter (x 512,000 B). The Local Drives dashboard says which guest wrote them."),
+                         "counter (x 512,000 B; increase() only across a drive replacement). The Local Drives "
+                         "dashboard says which guest wrote them."),
         stat("NVMe Days to 100% (7-day rate)", 8, y + 5, 8, 5,
-             hn(f"clamp_min((1 - {used}) * ({duw} / clamp_min({used}, 0.01)) "
-                f"/ clamp_min(({duw} - {duw} offset 7d) / 7, 1), 0)"),
+             # No figure before the drive reports 1% used (a new or just-replaced drive reads 0).
+             hn(f"clamp_min((1 - {used}) * ({duw} / {used}) / clamp_min(({written('7d')}) / 7, 1), 0) "
+                f"and {used} >= 0.01"),
              unit="suffix: d", graph="none", legend="{{nodename}}", links=link("endurance"),
              steps=[{"color": "red", "value": None}, {"color": "orange", "value": 30},
                     {"color": "green", "value": 90}],
              description="Days until life used reaches 100% at the last 7 days' write rate, with the bytes per 1% "
-                         "the drive has shown over its life. A projection, not a failure date."),
+                         "the drive has shown over its life (none until it reports 1% used). A projection, not a "
+                         "failure date."),
         stat("Thin Pool Used (local-lvm)", 16, y + 5, 8, 5,
              f"100 * {pool.format(m='pve_disk_usage_bytes')} / {pool.format(m='pve_disk_size_bytes')}",
              unit="percent", decimals=1, graph="none", legend="{{nodename}}", links=link("capacity"),
