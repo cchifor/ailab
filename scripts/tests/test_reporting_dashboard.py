@@ -8,13 +8,15 @@ nothing checked that the committed file is what the generator writes (reviewer-c
     generator beside it), and a run writes nothing else (loading the Local Drives generator does not write
     that dashboard's ConfigMap);
   * the Hypervisors row's two drive views (owner, 2026-11-20), which replaced #1891's four NVMe tiles, which
-    had replaced two mixed-unit NVMe panels: all of those are gone; the latency view is one ms line per host
-    (reads and writes together), no fill, legend `nvme0n1 @ <host>`; the usage view is repeated per host over a
-    hidden, always-All `host` variable and stacks the thin pool's allocation by consumer under two unstacked
-    lines, the pool's used figure and its size; its guests are named by the Local Drives generator's own
-    query, not a copy;
-  * both views link to the Local Drives dashboard (uid ailab-local-drives) with the time range, the usage view
-    on its host; the dashboard header links there too.
+    had replaced two mixed-unit NVMe panels: all of those are gone; the two views sit side by side in the
+    16x10 block the tiles filled, half each, and nothing repeats; the latency view is one ms line per host
+    (reads and writes together), no fill, legend `nvme0n1 @ <host>`; the usage view is ONE panel drawing each
+    host's pool used bytes and one dashed red capacity line (the max over the hosts), with the consumers as
+    `<host> · <consumer>` rows of a Name-sorted legend table of last values, hidden from the graph; its guests
+    are named by the Local Drives generator's own query, not a copy (which reads $host: a hidden, always-All
+    `host` variable);
+  * both views link to the Local Drives dashboard (uid ailab-local-drives) with the time range; the dashboard
+    header links there too.
 
 What the queries RETURN is checked with promtool in test_reporting_dashboard_promql.py.
 
@@ -49,7 +51,7 @@ def _local_drives():
 
 DASH = _dashboard(COMMITTED.read_text(encoding="utf-8"))
 LATENCY = "Disk Latency per Hypervisor (NVMe, average per I/O)"
-USAGE = "Disk Usage by Consumer · $host (local-lvm thin pool)"
+USAGE = "Disk Usage by Consumer (local-lvm thin pool)"
 GONE = ("NVMe Writes per Day", "NVMe Wear (", "NVMe Life Used", "NVMe Written · last 24 h",
         "NVMe Days to 100% (7-day rate)", "Thin Pool Used (local-lvm)")
 LOCAL_DRIVES = "/d/ailab-local-drives/?${__url_time_range}"
@@ -100,21 +102,20 @@ class DriveViews(unittest.TestCase):
         titles = [p["title"] for p in DASH["panels"]]
         self.assertFalse([t for t in titles if t.startswith(GONE)])
 
-    def test_latency_beside_temperature_then_one_usage_panel_per_host(self):
+    def test_two_views_side_by_side_where_the_tiles_were(self):
+        # #1891's four 8x5 tiles filled the 16x10 block right of the temperature panel; the two views take a half
+        # each, at the temperature panel's height, and the next row starts right below (owner, 2026-11-20).
         temp = _panel("Temperature per Hypervisor (APU / NVMe)")["gridPos"]
-        self.assertEqual(_panel(LATENCY)["gridPos"], {"x": 8, "y": temp["y"], "w": 16, "h": temp["h"]})
-        use = _panel(USAGE)
-        g = use["gridPos"]
-        self.assertEqual((g["x"], g["y"], g["w"]), (0, temp["y"] + temp["h"], 8))
-        self.assertEqual((use["repeat"], use["repeatDirection"], use["maxPerRow"]), ("host", "h", 3))
-        # Grafana lays the clones side by side across the full width: nothing else may share the line, and the
-        # next row starts right below it.
-        others = [p["title"] for p in DASH["panels"] if p is not use
-                  and p["gridPos"]["y"] < g["y"] + g["h"] and g["y"] < p["gridPos"]["y"] + p["gridPos"]["h"]]
-        self.assertEqual(others, [])
-        below = min(p["gridPos"]["y"] for p in DASH["panels"] if p["gridPos"]["y"] > g["y"])
-        self.assertEqual(below, g["y"] + g["h"])
+        self.assertEqual((temp["x"], temp["w"], temp["h"]), (0, 8, 10))
+        self.assertEqual(_panel(LATENCY)["gridPos"], {"x": 8, "y": temp["y"], "w": 8, "h": temp["h"]})
+        self.assertEqual(_panel(USAGE)["gridPos"], {"x": 16, "y": temp["y"], "w": 8, "h": temp["h"]})
+        below = min(p["gridPos"]["y"] for p in DASH["panels"] if p["gridPos"]["y"] > temp["y"])
+        self.assertEqual(below, temp["y"] + temp["h"])
         self.assertEqual(next(p for p in DASH["panels"] if p["gridPos"]["y"] == below)["type"], "row")
+
+    def test_one_usage_panel_and_nothing_repeats(self):
+        self.assertEqual(len([p for p in DASH["panels"] if p["title"].startswith("Disk Usage")]), 1)
+        self.assertEqual([p["title"] for p in DASH["panels"] if "repeat" in p], [])
 
     def test_no_two_panels_overlap(self):
         boxes = [(p["title"], p["gridPos"]) for p in DASH["panels"]]
@@ -132,7 +133,7 @@ class DriveViews(unittest.TestCase):
         self.assertEqual(d["custom"]["fillOpacity"], 0)
         self.assertEqual(d["custom"]["stacking"], {"mode": "none"})
         self.assertNotIn("max", d)                                   # auto range
-        self.assertEqual(p["options"]["legend"]["placement"], "bottom")
+        self.assertEqual(p["options"]["legend"], {"displayMode": "list", "placement": "bottom"})
         self.assertEqual(p["fieldConfig"]["overrides"], [])
         self.assertEqual(len(p["targets"]), 1)
         t = p["targets"][0]
@@ -143,45 +144,60 @@ class DriveViews(unittest.TestCase):
         self.assertIn(") > 0)", t["expr"])                            # no 0/0 while the drive is idle
         self.assertTrue(t["expr"].startswith("max by (instance, nodename) ((1000 * ("))
 
-    def test_usage_stacks_consumers_under_the_used_and_capacity_lines(self):
+    def test_usage_draws_three_host_lines_and_one_capacity_line(self):
         p = _panel(USAGE)
         d = p["fieldConfig"]["defaults"]
         self.assertEqual(p["type"], "timeseries")
-        self.assertEqual((d["unit"], d["min"]), ("bytes", 0))
-        self.assertEqual(d["custom"]["stacking"]["mode"], "normal")
-        self.assertEqual([t["legendFormat"] for t in p["targets"]], ["{{consumer}}", "pool used", "capacity"])
-        self.assertTrue(p["targets"][0]["expr"].startswith("sum by (nodename, consumer) ("))
-        self.assertIn('pve_thin_pool_size_bytes{job="proxmox-node",pool="pve/data"}', p["targets"][2]["expr"])
-        for line in ("pool used", "capacity"):
-            with self.subTest(line):
-                props = _props(p, line)
-                self.assertEqual(props["custom.stacking"]["mode"], "none")
-                self.assertEqual(props["custom.fillOpacity"], 0)
-                self.assertNotIn("unit", props)
-        self.assertEqual(_props(p, "capacity")["custom.lineStyle"]["fill"], "dash")
+        self.assertEqual(d["unit"], "bytes")                          # IEC
+        self.assertEqual(d["custom"]["stacking"], {"mode": "none"})
+        self.assertEqual(d["custom"]["fillOpacity"], 0)
+        self.assertEqual([t["legendFormat"] for t in p["targets"]],
+                         ["{{nodename}}", "capacity", "{{nodename}} · {{consumer}}"])
+        used, cap, _ = (t["expr"] for t in p["targets"])
+        self.assertTrue(used.startswith("max by (nodename) ("))
+        self.assertIn("pve_thin_pool_data_percent{", used)
+        self.assertTrue(cap.startswith("max(("))                      # one line, the max over the hosts
+        self.assertIn('pve_thin_pool_size_bytes{job="proxmox-node",pool="pve/data"}', cap)
+        capacity = _props(p, "capacity")
+        self.assertEqual(capacity["color"], {"mode": "fixed", "fixedColor": "red"})
+        self.assertEqual(capacity["custom.lineStyle"]["fill"], "dash")
+
+    def test_consumers_are_legend_and_tooltip_rows_only(self):
+        p = _panel(USAGE)
+        hidden = [o for o in p["fieldConfig"]["overrides"] if o["matcher"] == {"id": "byFrameRefID", "options": "C"}]
+        self.assertEqual(len(hidden), 1)
+        self.assertEqual(hidden[0]["properties"],
+                         [{"id": "custom.hideFrom", "value": {"viz": True, "legend": False, "tooltip": False}}])
+        # nothing else is hidden: the host lines and capacity are drawn
+        self.assertEqual([o for o in p["fieldConfig"]["overrides"]
+                          if "custom.hideFrom" in [x["id"] for x in o["properties"]]], hidden)
+
+    def test_legend_is_a_name_sorted_table_of_last_values(self):
+        legend = _panel(USAGE)["options"]["legend"]
+        self.assertEqual(legend["displayMode"], "table")
+        self.assertEqual(legend["calcs"], ["last"])
+        self.assertEqual((legend["sortBy"], legend["sortDesc"]), ("Name", False))
 
     def test_usage_names_guests_with_the_local_drives_query(self):
         ld = _local_drives()
-        e = _panel(USAGE)["targets"][0]["expr"]
+        e = _panel(USAGE)["targets"][2]["expr"]
         self.assertIn(ld.thin_by_guest("pve_thin_lv_allocated_bytes"), e)
         self.assertIn(ld.GUEST_NAMES, e)
-        for t in _panel(USAGE)["targets"]:
-            with self.subTest(t["refId"]):
-                self.assertIn(ld.HOST_SEL, t["expr"])                 # one host per repeated panel
+        self.assertTrue(e.startswith("sum by (nodename, consumer) ("))
 
     def test_the_host_variable_is_hidden_and_all(self):
+        # Kept for the Local Drives queries the consumer rows reuse, which read $host; nothing repeats over it.
         v = next(v for v in DASH["templating"]["list"] if v["name"] == "host")
         self.assertEqual(v["hide"], 2)
         self.assertTrue(v["includeAll"] and v["multi"])
         self.assertEqual(v["current"]["value"], ["$__all"])
         self.assertEqual(v["definition"], 'label_values(node_uname_info{job="proxmox-node"}, nodename)')
-        # no other panel reads it: it would filter only what repeats over it
-        self.assertEqual([p["title"] for p in DASH["panels"]
-                          if "$host" in json.dumps(p.get("targets", [])) and p["title"] != USAGE], [])
+        self.assertEqual([p["title"] for p in DASH["panels"] if "$host" in json.dumps(p)], [USAGE])
 
     def test_both_views_link_to_local_drives_with_the_time_range(self):
-        self.assertEqual([lk["url"] for lk in _panel(LATENCY)["links"]], [LOCAL_DRIVES])
-        self.assertEqual([lk["url"] for lk in _panel(USAGE)["links"]], [LOCAL_DRIVES + "&var-host=${host}"])
+        for title in (LATENCY, USAGE):
+            with self.subTest(title):
+                self.assertEqual([lk["url"] for lk in _panel(title)["links"]], [LOCAL_DRIVES])
 
     def test_the_header_links_to_local_drives(self):
         self.assertIn("/d/ailab-local-drives/", [lk["url"] for lk in DASH.get("links", [])])

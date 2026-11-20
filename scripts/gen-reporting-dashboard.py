@@ -82,16 +82,17 @@ def row(title, y):
 
 def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=None, maxv=None,
        thresholds=None, overrides=None, description=None, legend_calcs=None, time_from=None, minv=None,
-       stack=False, links=None, repeat=None):
+       links=None, legend_table=False, legend_sort=None, legend_placement="bottom"):
     """`thresholds` (steps) draws each step as a dashed horizontal line (a limit to read the series
     against, not a colour scheme); `overrides` are Grafana field overrides (e.g. a second axis).
     `legend_calcs` puts values in the legend (e.g. ["lastNotNull"]); `time_from` pins the panel to its
     own relative window (e.g. "14d") whatever the dashboard's range, for slow-moving series.
-    `stack` stacks the series (an override can take one out); `links` are panel links; `repeat` names a
-    variable to repeat the panel over, side by side, three to a line."""
+    `links` are panel links. `legend_table` shows the legend as a table (a row per series, a column per
+    calc); `legend_sort` = (column, descending) sorts it, e.g. ("Name", False); `legend_placement` is bottom or
+    right."""
     legends = legends or ["{{instance}}"] * len(exprs)
     defaults = {"unit": unit, "custom": {"drawStyle": "line", "fillOpacity": fill, "showPoints": "never",
-                                         "stacking": {"mode": "normal", "group": "A"} if stack else {"mode": "none"}}}
+                                         "stacking": {"mode": "none"}}}
     if decimals is not None:
         defaults["decimals"] = decimals
     if maxv is not None:
@@ -105,20 +106,22 @@ def ts(title, x, y, w, h, exprs, unit="short", legends=None, fill=10, decimals=N
         "id": _nid(), "type": "timeseries", "title": title, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
         "fieldConfig": {"defaults": defaults, "overrides": overrides or []},
-        "options": {"legend": {"displayMode": "list", "placement": "bottom"}, "tooltip": {"mode": "multi"}},
+        "options": {"legend": {"displayMode": "list", "placement": legend_placement}, "tooltip": {"mode": "multi"}},
         "targets": [{"refId": chr(65 + i), "datasource": _ds(), "expr": e, "legendFormat": legends[i]}
                     for i, e in enumerate(exprs)],
     }
     if legend_calcs:
         panel["options"]["legend"]["calcs"] = legend_calcs
+    if legend_table:
+        panel["options"]["legend"]["displayMode"] = "table"
+    if legend_sort:
+        panel["options"]["legend"]["sortBy"], panel["options"]["legend"]["sortDesc"] = legend_sort
     if time_from:
         panel["timeFrom"] = time_from
     if description:
         panel["description"] = description
     if links:
         panel["links"] = links
-    if repeat:
-        panel.update({"repeat": repeat, "repeatDirection": "h", "maxPerRow": 3})
     return panel
 
 
@@ -517,9 +520,9 @@ NVME_HWMON_CHIP = "nvme_nvme0"
 # Dashed lines: the drive's warning/critical (86/90 C, NVMe only) and the APU's ~100 C throttle point.
 TEMP_LIMITS = [{"color": "green", "value": None}, {"color": "orange", "value": 86}, {"color": "red", "value": 90},
                {"color": "purple", "value": 100}]
-# Two lines of panels: the temperature panel beside the drive latency panel, then one disk usage panel per host.
+# Height of this line of panels: 10, the temperature panel beside the two drive views (owner, 2026-11-20: in the
+# 16x10 block the four NVMe tiles of #1891 filled, half each).
 NVME_ROW_H = 10
-USAGE_H = 12  # the legend (up to 8 series with their latest values) takes four lines
 # Both drive panels open the Local Drives dashboard (uid ailab-local-drives, scripts/gen-local-drives-dashboard.py)
 # over the same time range: throughput, latency, who writes, the thin pool, endurance, trims.
 LOCAL_DRIVES = "/d/ailab-local-drives/?${__url_time_range}"
@@ -539,9 +542,6 @@ def drive_latency_ms():
 CONSUMERS = [("$1", "(dev-worker-[0-9]+)"), ("ci-runners", "ci-runner-[0-9]+"), ("registry", "registry"),
              ("talos-workers", "talos-.+|relay-worker-[0-9]+"), ("talos-cp", "talos-cp[0-9]+"),
              ("llm", "ai-llm-[0-9]+")]
-# One colour per consumer, the same in every host's panel; the dev workers in shades of one colour.
-CONSUMER_COLORS = {"ci-runners": "orange", "registry": "yellow", "talos-cp": "dark-blue", "talos-workers": "light-blue",
-                   "llm": "green", "other": "#8e8e8e"}
 THIN_POOL = 'job="proxmox-node",pool="pve/data"'
 
 
@@ -553,40 +553,42 @@ def by_consumer(per_guest):
     return f"sum by (nodename, consumer) ({e})"
 
 
-def disk_usage(y):
-    """One panel per host ($host, repeated): the thin pool's allocation stacked by consumer, the pool's own used
-    figure and its size. The per-guest figures and their names are the Local Drives dashboard's (thin_by_guest:
-    pve_thin_lv_allocated_bytes summed per vmid, named from pve-exporter, on $host)."""
-    alloc = by_consumer(LD.thin_by_guest("pve_thin_lv_allocated_bytes"))
+def disk_usage(x, y, w, h):
+    """ONE panel for the three hosts (owner, 2026-11-20). Drawn: each host's thin pool used bytes (the pool's own
+    figure), and its size as one dashed red capacity line (the same on every host: the max over them). Who uses it:
+    the consumers of each host, as rows of the legend table only (hidden from the graph, kept in the legend and the
+    tooltip), named "<host> · <consumer>"; sorted by name, each host's total is followed by its consumers. The
+    per-guest figures and their names are the Local Drives dashboard's (thin_by_guest: pve_thin_lv_allocated_bytes
+    summed per vmid, named from pve-exporter), grouped by by_consumer()."""
     used = LD.on_host(f"pve_thin_pool_data_percent{{{THIN_POOL}}} / 100 * pve_thin_pool_size_bytes{{{THIN_POOL}}}")
     size = LD.on_host(f"pve_thin_pool_size_bytes{{{THIN_POOL}}}")
-
-    def line(color, dash):
-        props = [{"id": "custom.stacking", "value": {"mode": "none", "group": "A"}},
-                 {"id": "custom.fillOpacity", "value": 0}, {"id": "custom.lineWidth", "value": 2},
-                 {"id": "color", "value": {"mode": "fixed", "fixedColor": color}}]
-        return props + ([{"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}] if dash else [])
-    overrides = ([_ov(n, [{"id": "color", "value": {"mode": "fixed", "fixedColor": c}}])
-                  for n, c in CONSUMER_COLORS.items()]
-                 + [{"matcher": {"id": "byRegexp", "options": "dev-worker-.*"},
-                     "properties": [{"id": "color", "value": {"mode": "shades", "fixedColor": "purple"}}]},
-                    _ov("pool used", line("text", False)), _ov("capacity", line("red", True))])
-    return ts("Disk Usage by Consumer · $host (local-lvm thin pool)", 0, y, 8, USAGE_H,
-              [alloc, f"max by (nodename) ({used})", f"max by (nodename) ({size})"], "bytes",
-              legends=["{{consumer}}", "pool used", "capacity"], fill=40, stack=True, minv=0,
-              legend_calcs=["lastNotNull"], overrides=overrides, repeat="host",
-              links=[{"title": "Local Drives: this host's pool and guests", "targetBlank": False,
-                      "url": LOCAL_DRIVES + "&var-host=${host}"}],
-              description="The host's local-lvm thin pool (on its NVMe), which holds every local VM and LXC disk. "
-                          "Stacked: what each consumer's thin volumes hold in the pool (pve_thin_lv_allocated_bytes "
-                          "from the host's thin textfile; cloud-init drives left out), each guest named as on the "
-                          "Local Drives dashboard. Each dev worker by name; ci-runners: the runner VMs; registry: "
-                          "the zot container; talos-cp: the control-plane VM; talos-workers: the agent nodes and "
-                          "relay workers; llm: the LLM containers; other: anything else (the reviewer VMs, or a "
-                          "vmid pve-exporter does not know). A guest whose disks are on the QNAP is not here. The "
-                          "stack's top is the pool's used space; the pool used line, the pool's own figure, lies "
-                          "on it. Dashed red: the pool's size, the ceiling; a full pool fails every guest's writes "
-                          "on the host. The panel link opens Local Drives on this host.")
+    consumers = by_consumer(LD.thin_by_guest("pve_thin_lv_allocated_bytes"))
+    overrides = [
+        _ov("capacity", [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}},
+                         {"id": "custom.lineWidth", "value": 2},
+                         {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]),
+        # refId C: the consumer series. Rows in the legend and the tooltip, never a line.
+        {"matcher": {"id": "byFrameRefID", "options": "C"},
+         "properties": [{"id": "custom.hideFrom", "value": {"viz": True, "legend": False, "tooltip": False}}]},
+    ]
+    return ts("Disk Usage by Consumer (local-lvm thin pool)", x, y, w, h,
+              [f"max by (nodename) ({used})", f"max({size})", consumers], "bytes",
+              legends=["{{nodename}}", "capacity", "{{nodename}} · {{consumer}}"], fill=0, minv=0,
+              # The table on the right: in this 8x10 panel it shows ~12 of its ~18 rows (on the bottom, ~4).
+              legend_calcs=["last"], legend_table=True, legend_sort=("Name", False), legend_placement="right",
+              overrides=overrides,
+              links=[{"title": "Local Drives: the thin pools and their guests", "targetBlank": False,
+                      "url": LOCAL_DRIVES}],
+              description="Each host's local-lvm thin pool (on its NVMe), which holds every local VM and LXC disk. "
+                          "Lines: the pool's used bytes per host, and dashed red its size, the ceiling (the same "
+                          "on every host); a full pool fails every guest's writes on the host. Who uses it: the "
+                          "legend's \"<host> · <consumer>\" rows, what each consumer's thin volumes hold in that "
+                          "host's pool (pve_thin_lv_allocated_bytes; cloud-init drives left out), each guest named "
+                          "as on the Local Drives dashboard: each dev worker by name; ci-runners: the runner VMs; "
+                          "registry: the zot container; talos-cp: the control-plane VMs; talos-workers: the agent "
+                          "nodes and relay workers; llm: the LLM containers; other: anything else (the reviewer "
+                          "VMs, or a vmid pve-exporter does not know). A host's consumers add up to its line. A "
+                          "guest whose disks are on the QNAP is not here. The panel link opens Local Drives.")
 
 
 panels += [
@@ -599,12 +601,12 @@ panels += [
                    "which apply to the NVMe series only, and the APU's ~100 °C throttle point. "
                    "Fan speeds are not exported: the fans hang off the board's EC, which Linux does not "
                    "expose under Secure Boot."),
-    # Two views of the drive in place of what stood here (owner, 2026-11-20): first two mixed-unit NVMe panels,
-    # then four stat tiles (#1891: life used, written in 24 h, days to 100%, pool used %). Neither showed how the
-    # drive behaves or what fills it over time.
+    # Two views of the drive, side by side in the 16x10 block that #1891's four stat tiles filled (owner,
+    # 2026-11-20). Before them: two mixed-unit NVMe panels, then those tiles (life used, written in 24 h, days to
+    # 100%, pool used %). Neither showed how the drive behaves or what fills it over time.
     # One line per host, not read and write apart: over 6 h reads ran at ~0.3-3 ms and writes up to ~190 ms (node1
     # under CI bursts, 2026-11-20), so on one auto-ranged axis the three read lines lie flat on the floor.
-    ts("Disk Latency per Hypervisor (NVMe, average per I/O)", 8, 21, 16, NVME_ROW_H, [drive_latency_ms()], "ms",
+    ts("Disk Latency per Hypervisor (NVMe, average per I/O)", 8, 21, 8, NVME_ROW_H, [drive_latency_ms()], "ms",
        legends=["nvme0n1 @ {{nodename}}"], fill=0,
        links=[{"title": "Local Drives: latency, read and write apart", "targetBlank": False, "url": LOCAL_DRIVES}],
        description="Average time per completed request on each host's NVMe (nvme0n1, which holds local-lvm and "
@@ -613,9 +615,9 @@ panels += [
                    "mostly stay under a few ms while writes reach a few hundred under CI write bursts, so a spike "
                    "is mostly the writes. The panel link opens the Local Drives dashboard, which has them apart, "
                    "with flush latency and the etcd member's fsync on the same host."),
-    disk_usage(21 + NVME_ROW_H),
+    disk_usage(16, 21, 8, NVME_ROW_H),
 ]
-HV_EXTRA_H = NVME_ROW_H + USAGE_H  # the two lines above; every later row shifts by this (as HEALTH_H does below)
+HV_EXTRA_H = NVME_ROW_H  # the thermal/NVMe line above; every later row shifts by this (as HEALTH_H does below)
 _hv_end = len(panels)
 
 # ───────────────────────── Instances (VMs + Containers) ─────────────────────────
@@ -1042,9 +1044,9 @@ dashboard = {
         # The Reviewer Errors logs panel needs Loki. Same shape loki-logs-dashboard.yaml uses.
         {"name": "DS_LOKI", "type": "datasource", "query": "loki",
          "current": {}, "hide": 0, "label": "Logs", "refresh": 1},
-        # The Proxmox hosts, for the disk usage panel to repeat over (one per host) and for the Local Drives
-        # queries it reuses, which read $host. The same variable as on Local Drives, but hidden and always All:
-        # it would filter that one panel only.
+        # The Proxmox hosts, for the Local Drives queries the disk usage panel reuses (its consumer rows), which
+        # read $host. The same variable as on Local Drives, but hidden and always All: it would filter that one
+        # panel only.
         {"name": "host", "type": "query", "label": "Host", "datasource": _ds(),
          "query": {"query": f"label_values(node_uname_info{{{HOSTS}}}, nodename)", "refId": "host"},
          "definition": f"label_values(node_uname_info{{{HOSTS}}}, nodename)",
