@@ -172,6 +172,24 @@ since -p warning | grep -qE "WARNING: qnap-nfs not ready after ($BUDGET|$((BUDGE
 pre | grep -E "pve-nfs-disk-gate ; ignore_errors=yes ; .* code=exited ; status=1 }" > /dev/null \
   && ok "C: the gate's exit 1 is recorded and ignored" || { bad "C: the gate's status is not 1, ignored"; pre; }
 
+# ---- boot D: the share is mounted but reading the disk hangs (a FIFO: dd blocks in open, killable) ----
+systemctl stop pve-guests.service
+share_up
+rm -f "$SHARE/images/4001/vm-4001-disk-0.raw" && mkfifo "$SHARE/images/4001/vm-4001-disk-0.raw"
+mark_boot
+t0=$(date +%s)
+systemctl start pve-guests.service
+took=$(($(date +%s) - t0))
+eq "D: pve-guests active after the budget" active "$(systemctl is-active pve-guests.service)"
+[ "$took" -ge "$BUDGET" ] && [ "$took" -le $((BUDGET + 10)) ] && ok "D: held for the budget only (${took}s)" \
+  || bad "D: held ${took}s for a ${BUDGET}s budget"
+since -p warning | grep -q "vm-4001-disk-0.raw timed out" && ok "D: the WARNING names the hung read" \
+  || { bad "D: no 'timed out' WARNING"; since; }
+sleep 1
+eq "D: no dd from a timed-out probe survives" 0 "$(pgrep -c -f 'vm-4001-disk-0.raw' || true)"
+eq "D: no shell job notice or job-control complaint in the journal" 0 "$(since | grep -ciE 'killed|job control')"
+share_down
+
 # ---- disable ----
 systemctl stop pve-guests.service
 run disable -e pve_nfs_disk_gate_enabled=false || { bad "disable failed"; show disable; }

@@ -12,7 +12,8 @@ fake /etc/pve (qemu-server confs and storage.cfg), a fake /proc/self/mountinfo a
     it is not, the gate asks PVE to activate the storage (`pvesm status --storage`), and stops asking once that hung;
   * "ready" also needs a write of this node's probe file and a read of every such disk image (a linked clone's
     included); an empty export or a failed write is not ready;
-  * the budget bounds the whole run, across storages; a hung probe is abandoned, not waited for;
+  * the budget bounds the whole run, across storages; a hung probe is abandoned, not waited for, and killed with
+    its whole process group: no descendant (a read's dd, pvesm's child) outlives the gate, and no job notice;
   * on a timeout it exits 1 with a WARNING (priority warning under systemd) and hands over; ready = exit 0;
   * the drop-in runs the gate as a "-" ExecStartPre with the role's settings, and the role wiring.
 
@@ -37,10 +38,12 @@ SCRIPT = ROLE / "files/pve-nfs-disk-gate.sh"
 BASH = shutil.which("bash")
 
 # `pvesm status --storage <id>`: log the call; if $NAS_UP exists, "mount" the storage (append its mountinfo line,
-# as PVE's activate_storage would mount it); if $PVESM_HANG exists, hang like a mount on a dead server.
+# as PVE's activate_storage would mount it); if $PVESM_HANG exists, hang like a mount on a dead server. The hang is
+# a CHILD of the stub named $HANG_MARK (as pvesm's mount.nfs is a child of pvesm), so a test can see whether it
+# outlives the gate.
 PVESM_STUB = """#!/usr/bin/env bash
 echo "$*" >> "$PVESM_CALLS"
-[ -f "$PVESM_HANG" ] && sleep 30
+[ -f "$PVESM_HANG" ] && (exec -a "$HANG_MARK" sleep 30)
 [ -f "$NAS_UP" ] && cat "$NAS_UP" >> "$MOUNTINFO_FILE"
 exit 0
 """
@@ -94,7 +97,42 @@ class Gate(unittest.TestCase):
         self.pvesm = self.tmp / "pvesm"
         self.pvesm.write_text(PVESM_STUB, encoding="utf-8", newline="\n")
         self.pvesm.chmod(0o755)
+        self.hang_mark = f"gate-test-hang-{self.tmp.name}"
         self.env = {}
+        self.addCleanup(self.kill_leftovers)
+
+    # ---- processes a probe left behind (Linux /proc) ----
+    def procs_with(self, marker):
+        found = []
+        for d in Path("/proc").iterdir():
+            if not d.name.isdigit() or int(d.name) == os.getpid():
+                continue
+            try:
+                cmd = (d / "cmdline").read_bytes()  # empty for a zombie: dead, only not yet reaped
+            except OSError:
+                continue
+            if marker.encode() in cmd:
+                found.append(int(d.name))
+        return found
+
+    def survivors(self, marker, settle=2.0):
+        """Live processes whose command line holds `marker`, after `settle` s for a SIGKILL to land."""
+        if not Path("/proc/self/cmdline").exists():
+            self.skipTest("needs /proc")
+        deadline = time.monotonic() + settle
+        while True:
+            found = self.procs_with(marker)
+            if not found or time.monotonic() > deadline:
+                return found
+            time.sleep(0.1)
+
+    def kill_leftovers(self):
+        if Path("/proc/self/cmdline").exists():
+            for pid in self.procs_with(self.tmp.name):
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
 
     # ---- fixtures ----
     def vm(self, vmid, *lines):
@@ -122,7 +160,7 @@ class Gate(unittest.TestCase):
                    MOUNTINFO=self.mountinfo.as_posix(), MOUNTINFO_FILE=self.mountinfo.as_posix(),
                    PVESM=self.pvesm.as_posix(), PVESM_CALLS=(self.tmp / "pvesm-calls").as_posix(),
                    PVESM_HANG=(self.tmp / "pvesm-hang").as_posix(), NAS_UP=(self.tmp / "nas-up").as_posix(),
-                   WAIT_S=str(wait_s), STEP_S="1", PROBE_S="2", ACTIVATE_S="2")
+                   HANG_MARK=self.hang_mark, WAIT_S=str(wait_s), STEP_S="1", PROBE_S="2", ACTIVATE_S="2")
         env.pop("JOURNAL_STREAM", None)
         env.update(self.env)
         env.update({k: str(v) for k, v in extra.items()})
@@ -227,15 +265,19 @@ class Gate(unittest.TestCase):
         self.assertIn(f"the write probe under {self.qnap.as_posix()}/.pve-nfs-disk-gate failed", self.out)
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a FIFO")
-    def test_a_hung_read_is_abandoned_and_the_budget_holds(self):
-        # Opening a FIFO with no writer blocks, like I/O on a hard NFS mount whose server stopped answering.
+    def test_a_hung_read_is_abandoned_with_its_dd_and_the_budget_holds(self):
+        # Opening a FIFO with no writer blocks (interruptibly), like I/O on a hard NFS mount whose server stopped
+        # answering. Each retry starts a dd; every one must die with its probe's process group, not be orphaned.
         self.vm(4001, *CP)
         (self.qnap / "images" / "4001").mkdir(parents=True)
-        os.mkfifo(self.qnap / "images" / "4001" / "vm-4001-disk-0.raw")
+        fifo = self.qnap / "images" / "4001" / "vm-4001-disk-0.raw"
+        os.mkfifo(fifo)
         self.mount()
         self.assertEqual(1, self.run_gate(wait_s=3, PROBE_S=1), self.out)
         self.assertLess(self.elapsed, 10)
         self.assertIn("vm-4001-disk-0.raw timed out", self.out)
+        self.assertEqual([], self.survivors(fifo.as_posix()), "a timed-out probe's dd outlived the gate")
+        self.assertNotIn("Killed", self.out, "no job notice from the shell")
 
     def test_a_hung_activation_is_tried_once_then_left_to_pvestatd(self):
         self.vm(4001, *CP)
@@ -243,6 +285,7 @@ class Gate(unittest.TestCase):
         self.assertEqual(1, self.run_gate(wait_s=5, ACTIVATE_S=1), self.out)
         self.assertLess(self.elapsed, 12)
         self.assertEqual(["status --storage qnap-nfs"], self.calls())
+        self.assertEqual([], self.survivors(self.hang_mark), "pvesm's hung child outlived the gate")
 
     def test_the_budget_bounds_the_whole_run_across_storages(self):
         self.vm(4001, *CP, "scsi1: other-nfs:4001/vm-4001-disk-1.raw,size=1G")

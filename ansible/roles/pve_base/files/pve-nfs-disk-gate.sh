@@ -17,8 +17,9 @@
 #   2. writable: a file of this node under <path>/.pve-nfs-disk-gate/ is written, fsync'ed (an NFS COMMIT)
 #      and read back;
 #   3. serving the disks: the first 4 KiB of every such disk image is read, so an empty export fails.
-# Every probe runs in the background and is ABANDONED, never waited for, when it overruns: I/O on a hard NFS
-# mount can block in D state past SIGKILL.
+# Every probe runs in the background, in a process group of its own. When it overruns, the whole group is
+# SIGKILLed and ABANDONED, never waited for: I/O on a hard NFS mount can block in D state past SIGKILL, and such a
+# process only goes once its I/O returns. Everything else the probe started dies with it.
 #
 # It never fails pve-guests. Exit 0 = ready, or nothing on this node to wait for. Exit 1 = the budget ran out,
 # or the settings name a storage it cannot gate; the drop-in's "-" prefix ignores the status, and the WARNING
@@ -114,9 +115,13 @@ probe() {
   TIMED_OUT=""
   [ "$((deadline - SECONDS))" -ge "$limit" ] || limit=$((deadline - SECONDS))
   if [ "$limit" -le 0 ]; then TIMED_OUT=1; return 1; fi
+  # Job control on for the fork only: the probe gets a process group of its own (PGID = its PID), so an overrun
+  # can kill everything it started (dd; mkdir/sync/cat; pvesm's rpcinfo and mount.nfs), not only the subshell.
   # stdio detached, so an abandoned probe cannot hold the unit's journal stream either.
+  set -m
   ("$@") < /dev/null > /dev/null 2>&1 &
   pid=$!
+  set +m
   for ((i = 0; i < limit * 10; i++)); do
     if ! kill -0 "$pid" 2> /dev/null; then
       wait "$pid"
@@ -124,9 +129,12 @@ probe() {
     fi
     sleep 0.1
   done
-  kill -9 "$pid" 2> /dev/null
+  # Abandoned: disown it (no "Killed" job notice in the journal; never `wait` on it), then SIGKILL the whole group.
+  # A member blocked in uninterruptible NFS I/O (D state) cannot die until that I/O returns; nothing waits for it.
+  disown "$pid" 2> /dev/null
+  kill -9 -- "-$pid" 2> /dev/null
   TIMED_OUT=1
-  return 1  # abandoned: never `wait` on a child that may be unkillable
+  return 1
 }
 
 # check_storage ID PATH: WHY="" when the storage is ready, else what is missing.

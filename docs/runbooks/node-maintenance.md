@@ -224,8 +224,9 @@ waits until the storage is:
 2. **writable:** `<path>/.pve-nfs-disk-gate/<node>` is written, fsync'ed and read back.
 3. **serving the disk:** the first 4 KiB of each such disk image is read, so an empty export does not pass.
 
-The wait is bounded by `pve_nfs_disk_gate_timeout_s` (600 s) across all storages, and a hung probe is abandoned. With
-the share up it passes in seconds. A host with nothing on these storages passes at once.
+The wait is bounded by `pve_nfs_disk_gate_timeout_s` (600 s) across all storages. Each probe runs in a process group of
+its own: a hung one is SIGKILLed with everything it started (a `dd`, pvesm's `mount.nfs`) and never waited for, so
+only a process stuck in uninterruptible NFS I/O can outlive it. With the share up it passes in seconds. A host with nothing on these storages passes at once.
 
 **After a timeout the CPs are started anyway, not skipped.** The gate logs a WARNING and pve-guests starts every
 guest as before. PVE's own storage check then fails a CP's start while the share is offline, so a CP never boots
