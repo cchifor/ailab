@@ -157,17 +157,28 @@ class Queries(unittest.TestCase):
                 self.assertTrue(pick.endswith("[1m:1m] @ end())"))
 
     def test_top_n_panels_draw_what_they_pick(self):
-        # The pick is the drawn expression with the $__range window, so the legend is the top N of THAT metric.
+        # The pick ranks the same metric the panel draws, so the legend is the top N of THAT metric.
         marker = " and on(nodename, name) last_over_time((topk($topn, "
+        metrics = lambda e: set(re.findall(r"\b((?:node_disk|pve_thin_lv)_\w+?)\{", e)) - {  # noqa: E731
+            "node_disk_device_mapper_info", "node_disk_info"}
         for p, t in TARGETS:
             if marker in t["expr"]:
                 drawn, _, pick = t["expr"].partition(marker)
                 with self.subTest(p["title"]):
-                    self.assertIn(drawn.replace("[$__rate_interval]", "[$__range]"), pick)
+                    self.assertTrue(metrics(drawn))
+                    self.assertEqual(metrics(drawn), metrics(pick))
+
+    def test_range_totals_attribute_each_step_with_its_own_mapping(self):
+        # A dm-N number changes owner when a guest stops or the host reboots: a counter's increase over the
+        # whole range, joined to the mapping at the range's end, would hand the old owner's I/O to the new
+        # one (reviewer-codex on #1890). Range-wide figures integrate per-step increases instead.
+        for p, t in TARGETS:
+            with self.subTest(f"{p['title']} {t['refId']}"):
+                self.assertNotRegex(t["expr"], r'device=~"dm-\[0-9\]\+"\}\[\$__range\]')
 
     def test_variables_used_are_defined(self):
         defined = {v["name"] for v in DASH["templating"]["list"]}
-        builtin = {"__rate_interval", "__range", "__interval"}
+        builtin = {"__rate_interval", "__range", "__range_s", "__interval"}
         for p, t in TARGETS:
             for v in re.findall(r"\$(__\w+|[a-z]\w*)", t["expr"]):
                 with self.subTest(f"{p['title']} {t['refId']} ${v}"):
@@ -186,9 +197,10 @@ class Queries(unittest.TestCase):
     def test_the_drive_is_pinned(self):
         # One drive per host; a second NVMe or a re-enumeration must not mix into the drive panels.
         for p, t in TARGETS:
-            if re.search(r"node_disk_\w+\{[^}]*\}", t["expr"]) and "dm-[0-9]+" not in t["expr"]:
-                with self.subTest(f"{p['title']} {t['refId']}"):
-                    self.assertIn('device="nvme0n1"', t["expr"])
+            for name, sel in re.findall(r"(node_disk_\w+)\{([^}]*)\}", t["expr"]):
+                if 'job="proxmox-node"' in sel and name != "node_disk_device_mapper_info" and "dm-" not in sel:
+                    with self.subTest(f"{p['title']} {t['refId']} {name}"):
+                        self.assertIn('device="nvme0n1"', sel)
 
     def test_per_guest_queries_never_count_the_pool_layers(self):
         # data_tdata / data-tpool are the SUM of the guest volumes: counting them as consumers doubles the total.

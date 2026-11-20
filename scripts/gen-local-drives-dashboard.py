@@ -38,6 +38,9 @@ node_exporters (filesystem use). Two families are not live yet and their panels 
 they are: pve_thin_* (#1886, pve_base tag thin_textfile: pool metadata %, per-volume allocation) and the
 trim beacons of #1883/#1884/#1885 (pve_lxc_fstrim_*, the node-fstrim CronJobs, node_fstrim_*).
 
+Tests: scripts/tests/test_local_drives_dashboard.py (structure, no services) and
+scripts/tests/test_local_drives_dashboard_promql.py (what the joins return, promtool in Docker).
+
     python scripts/gen-local-drives-dashboard.py
     python scripts/dashboard-preview.py serve --dashboard kubernetes/apps/infrastructure/monitoring/local-drives-dashboard.yaml
 """
@@ -61,15 +64,25 @@ DATA_UNIT = 512000                            # bytes per NVMe "data unit" (1000
 DM_GUEST = 'node_disk_device_mapper_info{job="proxmox-node",lv_name=~"(vm|base)-[0-9]+-disk-[0-9]+"}'
 DM_HOST = 'node_disk_device_mapper_info{job="proxmox-node",lv_name=~"root|swap|data_tmeta"}'
 # vmid -> guest name and type (qemu | lxc). job="pve-exporter" only: the cloudlab exporter (cloud-pve)
-# reuses vmids. max by: two exporter pods overlap for a minute on a rollout.
-GUEST_NAMES = ('max by (vmid, name, type) (label_replace(pve_guest_info{job="pve-exporter"}, '
-               '"vmid", "$2", "id", "(qemu|lxc)/([0-9]+)"))')
-# guest name -> the host it runs on (pve_guest_info's `node`), filtered to the selected hosts.
-GUEST_HOST = ('max by (name, nodename) (label_replace(pve_guest_info{job="pve-exporter",node=~"$host"}, '
-              '"nodename", "$1", "node", "(.+)"))')
+# reuses vmids. last_over_time [1h]: pve-exporter's scrapes have gaps (up to ~30 min in a day), and a
+# per-step join would turn a guest into "vmid <n>" for them. topk by (vmid) (1, ...): one name per vmid
+# even in the hour after a rename, and the old and new exporter pods of a rollout count once.
+GUEST_INFO = 'last_over_time(pve_guest_info{job="pve-exporter"}[1h])'
+GUEST_NAMES = (f'topk by (vmid) (1, max by (vmid, name, type) (label_replace({GUEST_INFO}, '
+               f'"vmid", "$2", "id", "(qemu|lxc)/([0-9]+)")))')
+# guest name -> the host it runs on (pve_guest_info's `node`), filtered to the selected hosts; one host per
+# guest even in the hour after a migration.
+GUEST_HOST = (f'topk by (name) (1, max by (name, nodename) (label_replace({GUEST_INFO}, '
+              f'"nodename", "$1", "node", "(.+)"))) * on(nodename) group_left() max by (nodename) ({HOST_SEL})')
 # Guest filesystems on block devices, from the guests' own node_exporters (their nodename is the
 # Proxmox guest name). One device mounted twice counts once.
 GUEST_FS = 'fstype=~"ext4|xfs|btrfs|vfat",job!="proxmox-node"'
+# A VM's own virtual disks as the guest sees them. A Talos node also sees the QNAP's iSCSI LUNs
+# (model iSCSI_Storage, its PVCs), which are not on this drive.
+QEMU_DISK = 'node_disk_info{job!="proxmox-node",model="QEMU_HARDDISK"}'
+# Range totals add up one STEP-long increase per step (see range_total), each attributed with the device
+# mapping of its own step. 5m: the increases tile the range exactly, 288 steps for a day.
+STEP = "5m"
 
 TYPE_MAP = [{"type": "value", "options": {
     "qemu": {"text": "VM", "index": 0}, "lxc": {"text": "LXC", "index": 1},
@@ -118,16 +131,23 @@ def pool(metric):
             f'"nodename", "$1", "id", "storage/([^/]+)/local-lvm"))')
 
 
-def top(expr, only_active=False):
-    """The top $topn series of `expr` by their average over the WHOLE selected range, drawn over the range.
-    topk() alone re-picks at every step, so a legend gathers every series that was ever briefly on top and
-    its mean covers only those moments. Here the set is chosen once, at the range's end (@ end()), from
-    the same expression with a $__range window; `expr` must carry nodename and name. only_active: never
-    pick a series whose range average is 0 (a quiet range draws nothing rather than flat zeros)."""
-    pick = expr.replace(f"[{RI}]", "[$__range]")
+def top(expr, pick, only_active=False):
+    """Draw `expr` over the range for the $topn series with the highest `pick`, chosen ONCE, at the range's
+    end (@ end()). topk() alone re-picks at every step, so a legend gathers every series that was ever briefly
+    on top and its mean covers only those moments. `pick` is evaluated at the end only and must carry
+    nodename and name: a range_total() for a counter, the value itself for a gauge. only_active: never pick a
+    series whose total is 0 (a quiet range draws nothing rather than flat zeros)."""
     if only_active:
         pick = f"({pick}) > 0"
     return f"{expr} and on(nodename, name) last_over_time((topk($topn, {pick}))[1m:1m] @ end())"
+
+
+def range_total(metric, scale=""):
+    """A consumer's total over the selected range: the sum of its {STEP} increases, each joined to the
+    device-mapper mapping at its OWN step. A dm-N number is reused when a guest stops or the host reboots;
+    an increase over the whole range joined to the mapping at its end would hand the old owner's I/O to
+    the new one and drop a volume that is gone at the end (reviewer-codex on #1890)."""
+    return f"sum_over_time(({consumers(metric, fn='increase', window=STEP, scale=scale)})[$__range:{STEP}])"
 
 
 def consumers(metric, fn="rate", window=RI, scale=""):
@@ -155,21 +175,42 @@ def thin_by_guest(metric):
 
 
 def guest_fs_used():
-    """Bytes the guest's own filesystems use (size - free, which includes the filesystem's metadata), per
-    guest. Only guests that run node_exporter (Talos nodes, runners, dev workers, reviewers, the LLM
-    containers); the registry container does not. Labels: name, type, vmid, nodename (the selected hosts)."""
-    used = (f'max by (job, instance, device, name) ((node_filesystem_size_bytes{{{GUEST_FS}}} - '
-            f'node_filesystem_free_bytes{{{GUEST_FS}}}) * on(job, instance) group_left(name) '
-            f'label_replace(node_uname_info{{job!="proxmox-node"}}, "name", "$1", "nodename", "(.+)"))')
-    return (f"sum by (name) ({used}) * on(name) group_left(vmid, type) {GUEST_NAMES} "
-            f"* on(name) group_left(nodename) {GUEST_HOST}")
+    """Bytes a guest's own filesystems use ON ITS LOCAL VOLUMES (size - free, the filesystem's metadata
+    included), per vmid, from the guests' own node_exporters. Only filesystems that can be tied to the
+    guest's local-lvm volumes count, so storage elsewhere (the QNAP) can't make the gap look smaller
+    (reviewer-codex on #1890):
+      - a container's volumes are mounted under their device-mapper name, /dev/mapper/pve-vm--<id>--disk--<n>:
+        exact, per volume;
+      - a VM's filesystems on its QEMU hard disks count only when the guest has as many QEMU hard disks as
+        the host has local thin volumes for it (#1886's pve_thin_lv_size_bytes). A VM with a disk elsewhere
+        gets no figure rather than a wrong one. iSCSI LUNs (a Talos node's PVCs) are never QEMU disks.
+    Guests without node_exporter (the registry container) have no figure. Labels: name, type, vmid, nodename."""
+    fs_used = f"(node_filesystem_size_bytes{{{GUEST_FS}}} - node_filesystem_free_bytes{{{GUEST_FS}}})"
+    lxc_dev = 'device=~"/dev/mapper/pve-vm--[0-9]+--disk--[0-9]+"'
+    lxc_used = (f"(node_filesystem_size_bytes{{{GUEST_FS},{lxc_dev}}} - "
+                f"node_filesystem_free_bytes{{{GUEST_FS},{lxc_dev}}})")
+    lxc = (f'sum by (vmid) (max by (vmid, device) (label_replace({lxc_used}, "vmid", "$1", "device", '
+           f'"/dev/mapper/pve-vm--([0-9]+)--disk--[0-9]+")))')
+    uname = 'label_replace(node_uname_info{job!="proxmox-node"}, "name", "$1", "nodename", "(.+)")'
+    qemu = f'label_replace({QEMU_DISK}, "disk", "$1", "device", "(.+)")'
+    vm_fs = (f'max by (job, instance, device) (label_replace({fs_used}, "disk", "$1", "device", '
+             f'"/dev/((?:sd|vd)[a-z]+)[0-9]*") * on(job, instance, disk) group_left() {qemu})')
+    vm_used = (f"sum by (name) ({vm_fs} * on(job, instance) group_left(name) {uname}) "
+               f"* on(name) group_left(vmid) {GUEST_NAMES}")
+    vm_disks = (f"count by (name) ({QEMU_DISK} * on(job, instance) group_left(name) {uname}) "
+                f"* on(name) group_left(vmid) {GUEST_NAMES}")
+    local_vols = f'count by (vmid) (pve_thin_lv_size_bytes{{{HOSTS},lv=~"(vm|base)-[0-9]+-disk-[0-9]+"}})'
+    vm = (f"max by (vmid) ({vm_used}) and on(vmid) "
+          f"(max by (vmid) ({vm_disks}) == on(vmid) {local_vols})")
+    return (f"max by (nodename, name, type, vmid) ((({lxc}) or on(vmid) ({vm})) "
+            f"* on(vmid) group_left(name, type) {GUEST_NAMES} * on(name) group_left(nodename) {GUEST_HOST})")
 
 
 def untrimmed_gap():
     """Thin allocation minus the guest's filesystem use: blocks the guest freed but never discarded, plus
     filesystem overhead and anything outside its filesystems (Talos's boot partitions, a guest's swap)."""
-    return (f"{thin_by_guest('pve_thin_lv_allocated_bytes')} - on(vmid) group_left() "
-            f"max by (vmid) ({guest_fs_used()})")
+    return (f"{thin_by_guest('pve_thin_lv_allocated_bytes')} - on(nodename, name, type, vmid) "
+            f"{guest_fs_used()}")
 
 
 def etcd_p99(hist):
@@ -204,6 +245,31 @@ def trim_ages():
     ]
     stamps = " or ".join(f"({p})" for p in parts)
     return f"max by (name, trim, nodename) ((time() - ({stamps})) * on(name) group_left(nodename) {GUEST_HOST})"
+
+
+DUW = f"nvme_data_units_written_total{{{HOSTS},{NVME}}}"
+USED = f"nvme_percentage_used_ratio{{{HOSTS},{NVME}}}"
+
+
+def written_units(window):
+    """Data units the drive took in `window`: the RAW difference of its own counter now and `window` ago
+    (exact; increase() extrapolates), unless the counter went back inside the window, i.e. the drive was
+    replaced: then increase(), which counts across the reset. A raw difference would go negative there,
+    and the projection below would read a falsely reassuring rate for days (reviewer-codex on #1891)."""
+    return (f"(({DUW} - {DUW} offset {window}) unless resets({DUW}[{window}]) > 0) "
+            f"or increase({DUW}[{window}])")
+
+
+def written_bytes(window, per_day=1):
+    return f"({written_units(window)}) * {DATA_UNIT}" + (f" / {per_day}" if per_day != 1 else "")
+
+
+# Days to 100% at the last 7 days' write rate, with the data units per 1% the drive has shown over its life
+# (percentage_used moves in whole percent, so its own 7-day slope is too coarse to project from). No figure
+# until the drive reports 1% used (a new or just-replaced drive reads 0, and dividing by it would project
+# years); >= 1 data unit/day; a drive past 100% reads 0 days.
+DAYS_LEFT = (f"clamp_min((1 - {USED}) * ({DUW} / {USED}) / clamp_min(({written_units('7d')}) / 7, 1), 0) "
+             f"and {USED} >= 0.01")
 
 
 # ───────────────────────── panel builders ─────────────────────────
@@ -242,6 +308,8 @@ def ts(title, x, y, w, h, exprs, unit, legends, description, fill=0, stack=False
     legend = {"displayMode": "table" if calcs else "list", "placement": "bottom", "showLegend": True}
     if calcs:
         legend["calcs"] = calcs
+        # largest first: the legend table lists what matters at the top
+        legend["sortBy"], legend["sortDesc"] = {"mean": "Mean", "max": "Max", "lastNotNull": "Last *"}[calcs[0]], True
     panel = {
         "id": _nid(), "type": "timeseries", "title": title, "description": description, "datasource": _ds(),
         "gridPos": {"x": x, "y": y, "w": w, "h": h},
@@ -344,28 +412,24 @@ def build():
     # ── Overview ──
     p.append(row("Overview (per host; values at the end of the range)", y))
     y += 1
-    duw = f"nvme_data_units_written_total{{{HOSTS},{NVME}}}"
-    used = f"nvme_percentage_used_ratio{{{HOSTS},{NVME}}}"
-    # Days to 100% at the last 7 days' write rate, with the TB per 1% the drive has shown over its life
-    # (percentage_used moves in whole percent, so its own 7-day slope is too coarse to project from).
-    # Guards: used >= 1% (a new drive reads 0) and >= 1 data unit/day; a drive past 100% reads 0 days.
-    days_left = (f"clamp_min((1 - {used}) * ({duw} / clamp_min({used}, 0.01)) "
-                 f"/ clamp_min(({duw} - {duw} offset 7d) / 7, 1), 0)")
+    used, days_left = USED, DAYS_LEFT
     p += [
         stat("Life used (rated endurance)", 0, y, 4, 5, on_host(f"{used} * 100"), "percent",
              "SMART percentage_used: the drive's own estimate of its rated write endurance consumed. 100% is "
              "the rating, not a failure; the risk of the drive going read-only rises past it. AiNodeNvmeWearHigh "
              "fires at 95% (ADR 0042: pause that node's CI runners).", steps=WEAR_STEPS, decimals=0),
-        stat("Written · last 24 h", 4, y, 4, 5, on_host(f"clamp_min({duw} - {duw} offset 1d, 0) * {DATA_UNIT}"),
+        stat("Written · last 24 h", 4, y, 4, 5, on_host(written_bytes("1d")),
              "decbytes", "Bytes the host wrote to the drive in the last 24 h: the raw difference of the drive's "
-             "own counter (data units written x 512,000 B) now and 24 h ago, not an extrapolated increase(). "
-             "This is what wears it. TB here are decimal, as in the drive's endurance rating.", decimals=1),
+             "own counter (data units written x 512,000 B) now and 24 h ago, not an extrapolated increase() "
+             "(that only across a drive replacement). This is what wears it. TB here are decimal, as in the "
+             "drive's endurance rating.", decimals=1),
         stat("Written per day · 7-day average", 8, y, 4, 5,
-             on_host(f"clamp_min({duw} - {duw} offset 7d, 0) * {DATA_UNIT} / 7"), "decbytes",
+             on_host(written_bytes("7d", per_day=7)), "decbytes",
              "The same counter's raw difference over 7 days, divided by 7.", decimals=1),
         stat("Days to 100% at the 7-day rate", 12, y, 4, 5, on_host(days_left), "suffix: d",
              "Days until life used reaches 100% if the drive keeps being written at its 7-day average: "
-             "remaining % x (bytes written per 1% so far) / bytes per day. The health table has the date. A "
+             "remaining % x (bytes written per 1% so far) / bytes per day. No figure until the drive reports 1% "
+             "used (a new drive). The health table has the date. A "
              "projection, not a failure date.",
              steps=[{"color": "red", "value": None}, {"color": "orange", "value": 30},
                     {"color": "green", "value": 90}], decimals=0),
@@ -460,34 +524,34 @@ def build():
            "with the highest average over the selected range; pick a host to read one drive.")
     p += [
         ts("Top writers (bytes/s)", 0, y, 12, 9,
-           [top(consumers('node_disk_written_bytes_total'))], "binBps", ["{{name}} ({{nodename}})"],
+           [top(consumers('node_disk_written_bytes_total'), range_total('node_disk_written_bytes_total'))], "binBps", ["{{name}} ({{nodename}})"],
            who, calcs=["mean", "max"]),
         ts("Top readers (bytes/s)", 12, y, 12, 9,
-           [top(consumers('node_disk_read_bytes_total'))], "binBps", ["{{name}} ({{nodename}})"],
+           [top(consumers('node_disk_read_bytes_total'), range_total('node_disk_read_bytes_total'))], "binBps", ["{{name}} ({{nodename}})"],
            who, calcs=["mean", "max"]),
     ]
     y += 9
     p += [
         ts("Top writers (IOPS)", 0, y, 12, 8,
-           [top(consumers('node_disk_writes_completed_total'))], "iops",
+           [top(consumers('node_disk_writes_completed_total'), range_total('node_disk_writes_completed_total'))], "iops",
            ["{{name}} ({{nodename}})"], who, calcs=["mean", "max"]),
         ts("Top readers (IOPS)", 12, y, 12, 8,
-           [top(consumers('node_disk_reads_completed_total'))], "iops",
+           [top(consumers('node_disk_reads_completed_total'), range_total('node_disk_reads_completed_total'))], "iops",
            ["{{name}} ({{nodename}})"], who, calcs=["mean", "max"]),
     ]
     y += 8
-    rng = "$__range"
-    lat = (f"{consumers('node_disk_write_time_seconds_total', window=rng)} / "
-           f"({consumers('node_disk_writes_completed_total', window=rng)} > 0)")
+    per_s = " / $__range_s"
+    lat = (f"{range_total('node_disk_write_time_seconds_total')} / "
+           f"({range_total('node_disk_writes_completed_total')} > 0)")
     p.append(table(
         "Per guest over the selected range (averages; sorted by bytes written)", 0, y, 24, 11,
-        [consumers("node_disk_written_bytes_total", fn="increase", window=rng),
-         consumers("node_disk_written_bytes_total", window=rng),
-         consumers("node_disk_read_bytes_total", window=rng),
-         consumers("node_disk_writes_completed_total", window=rng),
-         consumers("node_disk_reads_completed_total", window=rng),
+        [range_total("node_disk_written_bytes_total"),
+         range_total("node_disk_written_bytes_total") + per_s,
+         range_total("node_disk_read_bytes_total") + per_s,
+         range_total("node_disk_writes_completed_total") + per_s,
+         range_total("node_disk_reads_completed_total") + per_s,
          lat,
-         consumers("node_disk_discarded_sectors_total", fn="increase", window=rng, scale=" * 512")],
+         range_total("node_disk_discarded_sectors_total", scale=" * 512")],
         rename={"name": "Consumer", "type": "Type", "nodename": "Host", "vmid": "VMID",
                 "Value #A": "Written", "Value #B": "Write B/s", "Value #C": "Read B/s",
                 "Value #D": "Write IOPS", "Value #E": "Read IOPS", "Value #F": "Write latency",
@@ -534,7 +598,7 @@ def build():
            maxv=100, minv=0, thresholds=[{"color": "green", "value": None}, {"color": "orange", "value": 80},
                                           {"color": "red", "value": 85}], calcs=["lastNotNull"]),
         ts("Allocated per guest (top $topn, GiB)", 12, y, 12, 8,
-           [top(thin_by_guest('pve_thin_lv_allocated_bytes'))], "bytes", ["{{name}} ({{nodename}})"],
+           [top(thin_by_guest('pve_thin_lv_allocated_bytes'), thin_by_guest('pve_thin_lv_allocated_bytes'))], "bytes", ["{{name}} ({{nodename}})"],
            "Bytes each guest's thin volumes hold in the pool, over time: which guest fills it. Source: #1886's "
            "pve_thin_lv_allocated_bytes (No data until its collector runs).", calcs=["lastNotNull"]),
     ]
@@ -592,11 +656,11 @@ def build():
            "relative). It moves in whole percent. Dashed: 70 / 85 / 95 (AiNodeNvmeWearHigh).",
            thresholds=WEAR_STEPS, time_from="14d", decimals=0, calcs=["lastNotNull"]),
         ts("Written per day: last 24 h and 7-day average", 8, y, 8, 9,
-           [on_host(f"clamp_min({duw} - {duw} offset 1d, 0) * {DATA_UNIT}"),
-            on_host(f"clamp_min({duw} - {duw} offset 7d, 0) * {DATA_UNIT} / 7")], "decbytes",
+           [on_host(written_bytes("1d")), on_host(written_bytes("7d", per_day=7))], "decbytes",
            ["{{nodename}} last 24 h", "{{nodename}} 7-day avg"],
            "At each point, bytes written in the 24 h (solid) and the 7 days / 7 (dashed) before it: raw "
-           "differences of the drive's data-units-written counter (x 512,000 B), not increase(). The counter "
+           "differences of the drive's data-units-written counter (x 512,000 B), not increase() (that only "
+           "across a drive replacement). The counter "
            "is refreshed every 15 min. Decimal TB, as in the endurance rating.", time_from="14d",
            calcs=["lastNotNull"],
            overrides=[{"matcher": {"id": "byRegexp", "options": ".* 7-day avg"},
@@ -663,7 +727,8 @@ def build():
     y += 1
     p += [
         ts("Discards per consumer (bytes/s)", 0, y, 12, 9,
-           [top(consumers('node_disk_discarded_sectors_total', scale=' * 512'), only_active=True)], "binBps",
+           [top(consumers('node_disk_discarded_sectors_total', scale=' * 512'),
+                range_total('node_disk_discarded_sectors_total', scale=' * 512'), only_active=True)], "binBps",
            ["{{name}} ({{nodename}})"],
            "Bytes discarded (trimmed) per second at each guest's thin volumes: what a guest trim actually "
            "handed back to the pool, whoever ran it (the nightly jobs, an online-discard mount, a hand-run "
