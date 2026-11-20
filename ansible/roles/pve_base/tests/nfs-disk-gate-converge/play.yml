@@ -1,0 +1,11 @@
+# Only the role's nfs_disk_gate tasks (tasks_from), with the role's defaults, against the container.
+- name: Converge the boot-order guard
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  tasks:
+    - name: The nfs_disk_gate tasks of pve_base
+      ansible.builtin.import_role:
+        name: pve_base
+        tasks_from: nfs_disk_gate

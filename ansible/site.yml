@@ -9,6 +9,7 @@
 #   just thinpool      # LVM thin-pool zeroing, OFF on node1/2 only (tags: thinpool)
 #   just lxc-fstrim    # nightly trim of the running containers' local-lvm volumes (tags: lxc_fstrim)
 #   just autostart     # start onboot LXCs whose NFS bind source was late at boot (tags: autostart)
+#   just nfs-disk-gate # pve-guests waits (bounded) for the NFS storage of an onboot VM's disk (tags: nfs_disk_gate)
 #   just mounts        # NFS test mount (tags: mounts)  -- after QNAP export exists
 #   just validate      # link/throughput checks (tags: validate)
 
