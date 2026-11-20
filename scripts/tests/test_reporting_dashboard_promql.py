@@ -22,13 +22,16 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 import yaml
 
-from test_local_drives_dashboard_promql import Series, _image, sample
+# The harness lives beside this file; on the path also when run as scripts.tests.<module> from the repo root.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_local_drives_dashboard_promql import Series, _image, sample  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 DASH = json.loads(json.loads((ROOT / "kubernetes/apps/infrastructure/monitoring/reporting-dashboard.yaml")
