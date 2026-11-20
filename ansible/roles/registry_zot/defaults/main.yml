@@ -250,7 +250,8 @@ registry_zot_strive_delete_referrers_repos:
   - "strive/cache/tms"
   - "strive/cache/web"
   - "strive/cache/workflow"
-  # strive/ci/*: each holds one orphaned referrer and nothing else (no tag); GC then empties them
+  # strive/ci/*: each holds one orphaned referrer and nothing else (no tag). GC then empties and removes
+  # them; once /v2/_catalog no longer lists them, drop these 12 entries (and the tests' fixture for them).
   - "strive/ci/platform-app-runner-latest"
   - "strive/ci/platform-digest-test"
   - "strive/ci/platform-doc-search-latest"
