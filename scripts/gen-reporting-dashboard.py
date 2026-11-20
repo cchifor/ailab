@@ -554,12 +554,12 @@ def by_consumer(per_guest):
 
 
 def disk_usage(x, y, w, h):
-    """ONE panel for the three hosts (owner, 2026-11-20). Drawn: each host's thin pool used bytes (the pool's own
-    figure), and its size as one dashed red capacity line (the same on every host: the max over them). Who uses it:
-    the consumers of each host, as rows of the legend table only (hidden from the graph, kept in the legend and the
-    tooltip), named "<host> · <consumer>"; sorted by name, each host's total is followed by its consumers. The
-    per-guest figures and their names are the Local Drives dashboard's (thin_by_guest: pve_thin_lv_allocated_bytes
-    summed per vmid, named from pve-exporter), grouped by by_consumer()."""
+    """ONE panel for the three hosts (owner, 2026-11-20). Each host's thin pool used bytes (the pool's own figure),
+    highlighted as a 4 px line in a pinned colour; its size as one dashed red capacity line (the same on every host:
+    the max over them); and who uses it, each host's consumers as 1 px lines named "<host> · <consumer>", in the
+    legend table and the tooltip too; sorted by name, each host's total is followed by its consumers. The per-guest
+    figures and their names are the Local Drives dashboard's (thin_by_guest: pve_thin_lv_allocated_bytes summed per
+    vmid, named from pve-exporter), grouped by by_consumer()."""
     used = LD.on_host(f"pve_thin_pool_data_percent{{{THIN_POOL}}} / 100 * pve_thin_pool_size_bytes{{{THIN_POOL}}}")
     size = LD.on_host(f"pve_thin_pool_size_bytes{{{THIN_POOL}}}")
     consumers = by_consumer(LD.thin_by_guest("pve_thin_lv_allocated_bytes"))
@@ -567,10 +567,14 @@ def disk_usage(x, y, w, h):
         _ov("capacity", [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}},
                          {"id": "custom.lineWidth", "value": 2},
                          {"id": "custom.lineStyle", "value": {"fill": "dash", "dash": [10, 10]}}]),
-        # refId C: the consumer series. Rows in the legend and the tooltip, never a line.
-        {"matcher": {"id": "byFrameRefID", "options": "C"},
-         "properties": [{"id": "custom.hideFrom", "value": {"viz": True, "legend": False, "tooltip": False}}]},
+        # refId C: the consumer series, drawn as thin lines (owner, 2026-11-20).
+        {"matcher": {"id": "byFrameRefID", "options": "C"}, "properties": [{"id": "custom.lineWidth", "value": 1}]},
     ]
+    # The host totals stand out by width (owner, 2026-11-20), in the colours they had before the consumers were drawn
+    # (Grafana's classic palette, first three), pinned so the consumer lines cannot shift them.
+    overrides += [_ov(node, [{"id": "color", "value": {"mode": "fixed", "fixedColor": color}},
+                             {"id": "custom.lineWidth", "value": 4}])
+                  for node, color in (("ai-node1", "green"), ("ai-node2", "semi-dark-yellow"), ("ai-node3", "blue"))]
     return ts("Disk Usage by Consumer (local-lvm thin pool)", x, y, w, h,
               [f"max by (nodename) ({used})", f"max({size})", consumers], "bytes",
               legends=["{{nodename}}", "capacity", "{{nodename}} · {{consumer}}"], fill=0, minv=0,
@@ -582,15 +586,16 @@ def disk_usage(x, y, w, h):
               links=[{"title": "Local Drives: the thin pools and their guests", "targetBlank": False,
                       "url": LOCAL_DRIVES}],
               description="Each host's local-lvm thin pool (on its NVMe), which holds every local VM and LXC disk. "
-                          "Lines: the pool's used bytes per host, and dashed red its size, the ceiling (the same "
-                          "on every host); a full pool fails every guest's writes on the host. Who uses it: the "
-                          "legend's \"<host> · <consumer>\" rows, what each consumer's thin volumes hold in that "
+                          "Thick lines: the pool's used bytes per host. Dashed red: its size, the ceiling (the same "
+                          "on every host); a full pool fails every guest's writes on the host. Thin lines, "
+                          "\"<host> · <consumer>\": who uses it, what each consumer's thin volumes hold in that "
                           "host's pool (pve_thin_lv_allocated_bytes; cloud-init drives left out), each guest named "
                           "as on the Local Drives dashboard: each dev worker by name; ci-runners: the runner VMs; "
                           "registry: the zot container; talos-cp: the control-plane VMs; talos-workers: the agent "
                           "nodes and relay workers; llm: the LLM containers; other: anything else (the reviewer "
-                          "VMs, or a vmid pve-exporter does not know). A host's consumers add up to its line. A "
-                          "guest whose disks are on the QNAP is not here. The panel link opens Local Drives.")
+                          "VMs, or a vmid pve-exporter does not know). A host's consumers add up to its thick "
+                          "line. A guest whose disks are on the QNAP is not here. The panel link opens Local "
+                          "Drives.")
 
 
 panels += [
