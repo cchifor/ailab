@@ -196,13 +196,46 @@ class ActiveRegistryAfterCutover(unittest.TestCase):
     TF = REPO / "kubernetes" / "infra" / "registry-lxc"
 
     def _block(self, text, header):
+        """The HCL block that starts at `header`. Braces inside `#`/`//` comments and "..." strings (including
+        `${...}` interpolations, which only occur inside strings) are not counted."""
         start = text.index(header)
-        depth, i = 0, text.index("{", start)
-        for j in range(i, len(text)):
-            depth += {"{": 1, "}": -1}.get(text[j], 0)
-            if depth == 0:
-                return text[start:j + 1]
+        i = text.index("{", start)
+        depth, j, in_str, in_comment = 0, i, False, False
+        while j < len(text):
+            ch = text[j]
+            if in_comment:
+                in_comment = ch != "\n"
+            elif in_str:
+                if ch == "\\":
+                    j += 1
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "#" or text.startswith("//", j):
+                in_comment = True
+            elif ch in "{}":
+                depth += 1 if ch == "{" else -1
+                if depth == 0:
+                    return text[start:j + 1]
+            j += 1
         self.fail(f"unterminated block {header}")
+
+    def test_block_ignores_braces_in_comments_and_strings(self):
+        hcl = ('output "a" {\n  # a { brace in a comment\n  value = "${var.x} }"  // and } here\n}\n'
+               'output "b" {\n  value = 1\n}\n')
+        self.assertEqual(self._block(hcl, 'output "a"').count("\n"), 3)
+        self.assertTrue(self._block(hcl, 'output "a"').endswith("// and } here\n}"))
+
+    def test_the_n3_variable_declares_every_attribute_the_outputs_use(self):
+        # the outputs read var.registry_lxc_n3.{ip,vm_id,hostname,node_name}: each must be in the object type
+        # and in the default (a missing attribute is a tofu validate error, which fmt and grep would not catch)
+        var = self._block((self.TF / "variables.tf").read_text(), 'variable "registry_lxc_n3"')
+        type_block = var[var.index("object({"):var.index("})")]
+        default = self._block(var, "default =")
+        for attr in ("ip", "vm_id", "hostname", "node_name"):
+            self.assertRegex(type_block, rf"\b{attr}\s*=", f"type lacks {attr}")
+            self.assertRegex(default, rf"\b{attr}\s*=", f"default lacks {attr}")
 
     def test_active_outputs_point_at_the_new_ct(self):
         out = (self.TF / "outputs.tf").read_text()
