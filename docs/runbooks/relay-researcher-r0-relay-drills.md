@@ -196,10 +196,16 @@ R0 therefore never changes the Router's Secret:
 - Every W_R and R_R syncs Relay's ExternalSecret only (`force_sync_relay`, `wait_hashes_relay`). The
   Router's Secret, and so its bound files, stay B.
 - The Router's ExternalSecret refreshes on its own every hour (`refreshInterval: 1h`), and a refresh while
-  OpenBao holds a drill witness would rewrite it. So before each drill's W_R, while OpenBao still holds B,
-  `force_sync_router` restarts that interval without changing data.
-- `router_es_next` must then show the next refresh after the drill's planned R_R end. A drill (W_R to R_R)
-  takes about 20 minutes, inside the hour.
+  OpenBao holds a drill witness would rewrite it. So before each drill's W_R withdraws, while OpenBao still
+  holds B, `router_presync <latest R_R end>` (checklist step 5 helpers) requests a refresh and waits until ESO
+  has done it (a newer `refreshTime`, Ready). The refresh changes no data. Its next scheduled refresh must
+  fall after the drill's planned R_R end; a drill (W_R to R_R) takes about 20 minutes, inside the hour.
+- ESO also reconciles outside its schedule: on an ESO controller restart or leader change, a SecretStore or
+  ClusterSecretStore change, or an edit of the ExternalSecret or its target Secret. Any of these during a
+  drill would pull the drill witness into the Router's Secret. The change freeze rules out the edits. The
+  proof that none happened is the Router ExternalSecret's `refreshTime`: `router_es_refresh` at the end of
+  `router_presync` and again at the end of R_R must be equal. A later time is F_R step 3 (a Router-side
+  difference): stop and check `rlinks_ok`.
 - With llm-router #193 deployed, a zero-link file is accepted (the start-time bytes are the subPath
   contract). R0 still syncs only Relay's Secret: a Router container restart re-binds the subPaths to
   whatever the Secret holds, and that must stay B.
@@ -464,15 +470,16 @@ are NEW.
 
 - **W_R, install a witness state in Relay; authority stays withdrawn.**
   1. Check the clock: it is no later than `t_s + 85 min` for a drill's install, and no later than
-     `t_s + 105 min` for any roll. Otherwise §9.
+     `t_s + 105 min` for any roll. Otherwise §9. Then, **while OpenBao still holds B and before anything
+     else** (NEW, 2026-11-21): `router_presync <the drill's planned R_R end, epoch seconds>` must return 0,
+     then `cap router-es-before-X router_es_refresh`. In R_R's own W_R (restoring B) this step is skipped: the
+     drill's refresh window is still open.
   2. Withdraw: `lwrite withdraw`, then `plugin false` (`HTTP 200`, `disabled`). Relay has no worker
      allocation to stop: `hub_counts` is unchanged.
   3. `sleep 20`.
   4. Write the drill's state to OpenBao, as each drill says.
   5. `force_sync_relay`, then `wait_hashes_relay <expected sha256> <B sha256>`: it must return 0. Relay's
-     Secret carries the drill's state; the Router's stays B. Before step 2 of each drill's W_R, while OpenBao
-     still holds B: `force_sync_router`, `wait_hashes <B sha256>`, then `cap router-es-X router_es_next`,
-     whose next refresh must fall after the drill's planned R_R end (NEW, 2026-11-21).
+     Secret carries the drill's state; the Router's stays B. Never `force_sync` or `force_sync_router` here.
   6. `roll_relay`.
   7. `cap hub-after-roll hpod` (Running, every init exit 0, R0's pin unchanged);
      `cap relay-log-after-roll hlog` (no `worker_candidate_unavailable`, no
@@ -508,6 +515,9 @@ are NEW.
   3. `relay_check 1 "$since"` returns 0: Relay's positive control on B after the drill.
      `cap router-log rlog` shows `available`, and `cap control-allocator …` returns `<B recoveryEpoch>`.
   4. Withdraw: `lwrite withdraw`, then `plugin false`.
+  5. `cap router-es-after-X router_es_refresh` equals `router-es-before-X` (no ESO reconcile of the Router's
+     ExternalSecret ran during the drill), and `cap router-links-after-X rlinks_ok` passes. Otherwise F_R
+     step 3 (NEW, 2026-11-21).
 - **F_R, the failure path. It never re-opens.**
   1. Withdraw: `lwrite withdraw`, then `plugin false`.
   2. `cap ledger-state ledger_state` and `cap hub-counts hub_counts`.

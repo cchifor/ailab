@@ -806,8 +806,8 @@ plugin() {
   local -; set -o pipefail
   local want="${2:-200}" code state
   capfile "plugin-$1"; pf="$CAPF.json"
-  code="$(cap "plugin-$1-status" radmin -o "$pf" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
-    -d "{\"enabled\":$1}" https://router.chifor.me/admin/v1/plugins/worker-budget-authority | tail -c 3)" \
+  code="$(cap "plugin-$1-status" radmin -o "$pf" -w '\n%{http_code}\n' -X POST -H 'Content-Type: application/json' \
+    -d "{\"enabled\":$1}" https://router.chifor.me/admin/v1/plugins/worker-budget-authority | tail -n1 | tr -cd 0-9)" \
     || { echo "plugin call or its capture failed; response kept in $pf"; return 1; }
   jq -c 'if type == "array" then (.[] | select(.id == "worker-budget-authority") | {id, state, error}) else . end' "$pf"
   [ "$code" = "$want" ] || { echo "plugin $1: HTTP $code, expected $want (response in $pf)"; return 1; }
@@ -822,21 +822,61 @@ force_sync() {
 }
 # force_sync_relay / force_sync_router: one ExternalSecret each. R0 (Relay's half) syncs only Relay's, so the
 # Router's Secret, and the files its Pod bound at start, stay B (relay-researcher-r0-relay-drills.md, "The Router's
-# mounted files"). force_sync_router is used only while OpenBao holds B: it changes no data and restarts the
-# ExternalSecret's refresh interval (1h), so no scheduled refresh lands inside the next drill.
+# mounted files"). force_sync_router is used only through router_presync, while OpenBao holds B.
 force_sync_relay() { kubectl --context admin@ai -n relay annotate externalsecret relay-worker-budget force-sync="$(date +%s)" --overwrite; }
 force_sync_router() { kubectl --context admin@ai -n llm-router annotate externalsecret llm-router-worker-budget force-sync="$(date +%s)" --overwrite; }
-# router_es_next: the Router ExternalSecret's last refresh and its next scheduled one (last + refreshInterval).
-router_es_next() {
-  kubectl --context admin@ai -n llm-router get externalsecret llm-router-worker-budget \
-    -o jsonpath='{.status.refreshTime} {.spec.refreshInterval}{"\n"}'
+# router_es_refresh: the Router ExternalSecret's last refresh as epoch seconds and its Ready status ("<epoch> <True|False>").
+router_es_refresh() {
+  local t r
+  t="$(kubectl --context admin@ai -n llm-router get externalsecret llm-router-worker-budget -o jsonpath='{.status.refreshTime}')" || return 1
+  r="$(kubectl --context admin@ai -n llm-router get externalsecret llm-router-worker-budget -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" || return 1
+  printf '%s %s\n' "$(date -u -d "$t" +%s)" "$r"
 }
-# rlinks: the link count of the Router's three bound files. A subPath bind keeps the inode bound at container
-# start; when the Secret's data changes, kubelet unlinks it (count 0). On a Router before llm-router #193 the
-# worker-budget plugin then cannot start or re-enable, and an active one goes read_failed. All three must be 1.
+# router_es_next: the Router ExternalSecret's last refresh, its interval and the NEXT scheduled refresh, computed
+# (refreshTime + refreshInterval; the interval is in h, m or s units as ESO writes them, e.g. 1h).
+router_es_next() {
+  local t i s
+  t="$(kubectl --context admin@ai -n llm-router get externalsecret llm-router-worker-budget -o jsonpath='{.status.refreshTime}')" || return 1
+  i="$(kubectl --context admin@ai -n llm-router get externalsecret llm-router-worker-budget -o jsonpath='{.spec.refreshInterval}')" || return 1
+  s="$(printf '%s' "$i" | awk '{n=0; while (match($0,/[0-9]+[hms]/)) {v=substr($0,RSTART,RLENGTH-1); u=substr($0,RSTART+RLENGTH-1,1);
+        n+=v*(u=="h"?3600:(u=="m"?60:1)); $0=substr($0,RSTART+RLENGTH)} print n}')"
+  [ "${s:-0}" -gt 0 ] || { echo "cannot read refreshInterval '$i'"; return 1; }
+  echo "last=$t interval=$i next=$(date -u -d "@$(( $(date -u -d "$t" +%s) + s ))" +%FT%TZ) next_epoch=$(( $(date -u -d "$t" +%s) + s ))"
+}
+# router_presync <latest R_R end, epoch seconds>: run BEFORE a drill's W_R withdraws, while OpenBao still holds B.
+# It requests a Router ExternalSecret refresh and waits (bounded, 2 minutes) until ESO has actually done it: a
+# refreshTime newer than before and Ready=True. Only then are the hashes checked (all B: the refresh changed no
+# data) and the next scheduled refresh compared with the drill's planned end. An annotation alone proves nothing:
+# a reconcile that ran later, with the drill witness in OpenBao, would rewrite the Router's Secret.
+router_presync() {
+  local -; set -o pipefail
+  [ $# -eq 1 ] || { echo "usage: router_presync <latest R_R end, epoch seconds>"; return 2; }
+  local before now i next
+  before="$(router_es_refresh | cut -d' ' -f1)" || return 1
+  force_sync_router || return 1
+  for i in $(seq 1 24); do
+    now="$(router_es_refresh)" || return 1
+    if [ "${now%% *}" -gt "$before" ] && [ "${now##* }" = True ]; then break; fi
+    sleep 5
+  done
+  [ "${now%% *}" -gt "$before" ] && [ "${now##* }" = True ] || { cap router-presync-timeout echo "refresh before=$before now=$now"; return 1; }
+  wait_hashes "$B_SHA" || return 1
+  next="$(router_es_next)" || return 1
+  cap router-es-presync echo "$next drill-end=$1"
+  [ "${next##*next_epoch=}" -gt "$1" ] || { echo "the Router ExternalSecret refreshes before the drill ends"; return 1; }
+}
+# rlinks: the link count of the Router's three bound files, in EVERY Router Pod (selector app=llm-router, container
+# router). A subPath bind keeps the inode bound at container start; when the Secret's data changes, kubelet unlinks
+# it (count 0). On a Router before llm-router #193 the worker-budget plugin then cannot start or re-enable, and an
+# active one goes read_failed. All must be 1.
 rlinks() {
-  kubectl --context admin@ai -n llm-router exec deploy/llm-router -c router -- \
-    stat -c '%h %n' /run/llm-router-worker-budget/dsn /run/llm-router-worker-budget/ca.crt /run/llm-router-worker-budget/witness.json
+  local p pods
+  pods="$(kubectl --context admin@ai -n llm-router get pods -l app=llm-router -o name)" || return 1
+  [ -n "$pods" ] || { echo "no Router Pod"; return 1; }
+  for p in $pods; do
+    kubectl --context admin@ai -n llm-router exec "$p" -c router -- \
+      stat -c "%h $p %n" /run/llm-router-worker-budget/dsn /run/llm-router-worker-budget/ca.crt /run/llm-router-worker-budget/witness.json || return 1
+  done
 }
 rlinks_ok() { local out; out="$(rlinks)" || return 1; printf '%s\n' "$out"; [ "$(printf '%s\n' "$out" | awk '$1!=1' | wc -l)" -eq 0 ]; }
 # rreader: the Router's ledger reader session and its last statement time. Two captures at least 10 s apart with a
@@ -846,10 +886,12 @@ rreader() {
 SELECT clock_timestamp(), pid, state, query_start FROM pg_stat_activity WHERE application_name = 'router-worker-budget-reader';
 SQL
 }
-# wait_hashes_relay <sha256>: bounded wait (2 minutes) until OpenBao and Relay's Secret carry it, and the Router's
-# Secret still carries B (its second argument, B's sha256).
+# wait_hashes_relay <drill sha256> <B sha256>: bounded wait (2 minutes) until OpenBao and Relay's Secret carry the
+# drill's sha256, while the Router's Secret still carries B. It fails at once if the Router's Secret changes.
 wait_hashes_relay() {
   local -; set -o pipefail
+  [ $# -eq 2 ] || { echo "usage: wait_hashes_relay <drill sha256> <B sha256>"; return 2; }
+  local a b c i
   for i in $(seq 1 24); do
     a=; b=; c=
     if a="$(wsha_bao | cut -d' ' -f1)" && b="$(wsha_secret relay relay-worker-budget | cut -d' ' -f1)" &&
