@@ -4838,6 +4838,16 @@ cordis logger on this release buffers in memory only (llm-router #191), so the w
   from `SOURCE_COMMIT` and pnpm's bookkeeping timestamps (`deploy/backup-router.mjs` is added by the publisher).
 - No schema, migration, KV, plugin-settings or configuration change.
 
+**After an intentional worker-budget Secret change.** This release turns a loud failure into a quiet one: after a change
+to the Router's worker-budget Secret (witness, DSN or CA), the running Router keeps serving its start-time bytes, and the
+only in-process signal is the hourly warning, which this release does not write to stdout (llm-router #191). So:
+- **Roll the Router in the same step** as any change under `af/relay-budget/*` or to that Secret (the interim rule),
+  with the one-outage roll in "Worker-budget authority release" step 1, never `roll_deploy` on top of a Flux apply.
+- **Prove the new value is live** (helpers in relay-researcher-remaining-live-steps.md): `rlinks_ok` shows links 1 on
+  every file of the fresh Pod, and `wsha_router` shows the new witness hash. Links 0 on a running Pod means it still
+  serves the old value.
+- A Secret change that is not followed by a roll is an incident: roll, then re-check as above.
+
 **Verified on the release tree.**
 - `tests/worker-budget-runtime-io.test.ts` and `tests/worker-budget-runtime-wiring.test.ts`: 10 passed, 1 skipped
   (the opt-in bind-mount test). `tsc --noEmit` clean.
@@ -4863,7 +4873,7 @@ release digest needs File B reissued again.
 "Worker-budget authority release" above, with these values:
 1. **Merge = the roll** (no `roll_deploy`). One Pod of image `9687bdc673a62046b5b13b89c8962be0b5d31e1b6973d051b578ba219e63c9e7`; the revision rises by exactly 1 and is
    unchanged after Flux's next reconcile of `apps`.
-2. **Router readback** as above; `rlinks_ok` (relay-researcher-r0-relay-drills.md) shows links 1 on the fresh Pod.
+2. **Router readback** as above; `rlinks_ok` (relay-researcher-remaining-live-steps.md) shows links 1 on the fresh Pod.
 3. **Release gate (router-ab)** on the live router.
 4. **Readings R1-R5** and a new File B evidence file: expected `routerReleaseDigest`
    `28c8bd496299bf2680b8df2467119cc094ed995489f63026dabe06c2f9ddaea3`, the same openai adapter digest, and
