@@ -30,7 +30,3 @@ components:
 - ../../../components/relay-agent-control-plane
 - ../../../components/relay-control-monitoring
 - ../../../components/relay-worker-monitoring
-# H7: the candidate hub files of the current signed run (run/ is generated per run by
-# scripts/relay-candidate-run.py; docs/runbooks/relay-candidate-run-generator.md). First included by
-# drill run R0, which is never granted; R0's reset removes this line and R1 includes it again.
-- ../../../components/relay-worker-candidate
