@@ -100,8 +100,15 @@ resource "proxmox_virtual_environment_container" "registry" {
 #   - started/start_on_boot false: tofu must never start it while 5004 owns .36. `started` is honoured at create
 #     only (ignore_changes below): the cutover starts the CT by hand, and a later apply must not stop it again.
 #     The move's follow-up PR sets start_on_boot true only AFTER the cutover; until then no registry-lxc apply.
-#   - net0 gets link_down=1 and the CT a 'mounted' lock right after creation (b-newct-n3.sh): bpg cannot express
-#     link_down (its `enabled = false` DELETES the interface) and ignores the key, so neither shows as drift.
+#   - net0 gets link_down=1 and the CT a 'backup' lock right after creation (b-newct-n3.sh): bpg cannot express
+#     link_down (its `enabled = false` DELETES the interface) and ignores both keys, so neither shows as drift.
+#     NOT a 'mounted' lock: PVE skips the lock check for 'mounted' when it starts a CT (API2/LXC/Status.pm and
+#     lxc-pve-prestart-hook), while any other lock makes `pct start` fail ("CT is locked").
+#   - The template: debian_tmpl lives on the SHARED qnap-nfs datastore (var.template_datastore; storage.cfg
+#     `nfs: qnap-nfs`, content vztmpl, nodes ai-node1,ai-node2,ai-node3), so its id
+#     (qnap-nfs:vztmpl/registry-debian-13-standard_13.1-2_amd64.tar.zst) resolves on ai-node3 too, although
+#     template_download_node downloaded it on another node. The rootfs and mp0 datastores (local-lvm) exist on
+#     every node. The move's pre-create step checks `pveam list qnap-nfs` on ai-node3 for that file.
 #   - prevent_destroy: this volume becomes the only live copy of the registry at the cutover.
 resource "proxmox_virtual_environment_container" "registry_n3" {
   node_name     = var.registry_lxc_n3.node_name
