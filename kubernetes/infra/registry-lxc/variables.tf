@@ -127,3 +127,21 @@ variable "ssh_public_key" {
   description = "Public key injected into the CT root account for Ansible access."
   type        = string
 }
+
+# The NEW registry CT on ai-node3 (the zot move, 2026-11-21). vmid 5005 is free cluster-wide (5001-5003 belong to
+# the ai-lxc module's range, 5004 is the current registry). Same IP: only one of the two CTs ever owns .36 (5005 is
+# created stopped with its NIC link-down; the cutover stops 5004 first).
+variable "registry_lxc_n3" {
+  type = object({
+    node_name = string
+    vm_id     = number
+    ip        = string
+    hostname  = string
+  })
+  default = {
+    node_name = "ai-node3"
+    vm_id     = 5005
+    ip        = "192.168.0.36"
+    hostname  = "registry"
+  }
+}
