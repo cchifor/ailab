@@ -188,6 +188,10 @@ registry_zot_config_allow_restart: false
 # the scoped push users, the admin group and adminPolicy) as read-only: pushes and deletes are denied, pulls work.
 # http.accessControl is reload-safe (files/zot-config-apply.py RELOADABLE), so turning it on or off is a reload, not a
 # restart. Used during the zot move (2026-11-21): on before the cutover stop, off after the post-start acceptance.
+# On cutover night the fence-off play runs against the NEW CT while group_vars still pins v2.1.18, so it is exactly:
+#   ansible-playbook registry.yml -e registry_zot_version=v2.1.23 -e registry_zot_read_only=false
+# The binary guard stays honest: the installed bytes match the v2.1.23 entry, so nothing is downloaded and no
+# restart happens. Any other registry play waits for the move's follow-up PR (which drops the v2.1.18 pin).
 registry_zot_read_only: false
 
 # ---- Retention (storage.retention in config.json.j2) ----

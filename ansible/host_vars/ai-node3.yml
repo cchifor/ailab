@@ -19,6 +19,9 @@ pve_lxc_fstrim_enabled: true
 pve_lxc_fstrim_start: "04:50"
 # 5005 is the registry's NEW CT (the zot move, 2026-11-21). Kept out of this sweep: its trim is decided with the
 # move's follow-up (docs/runbooks/registry-cache.md "Thin-volume trim"), not inherited by accident on night one.
+# Consumed by roles/pve_base: defaults/main.yml (pve_lxc_fstrim_exclude: []), tasks/lxc_fstrim.yml (validated),
+# templates/pve-lxc-fstrim.env.j2 (PVE_LXC_FSTRIM_EXCLUDE) and files/pve-lxc-fstrim.sh (skips listed ids; it also
+# skips stopped or locked containers). Test: scripts/tests/test_registry_zot_move_codify.py.
 pve_lxc_fstrim_exclude: [5005]
 
 # Thunderbolt/USB4 PCIe-tunnel boot params for the TB->10GbE storage adapter (Ubiquiti UACC,
