@@ -13,9 +13,3 @@ registry_zot_strive_keep_within: "87600h"
 # Retention dryRun across the v2.1.18 -> v2.1.23 binary change: v2.1.23's GC semantics differ from what the safety
 # scanners model, so nothing may be pruned until the owner has reviewed v2.1.23's dry-run decisions.
 registry_zot_retention_dry_run: true
-# TEMPORARY: the binary that runs today (v2.1.18) on CT 5004. The move installs v2.1.23 into the new CT offline,
-# and the move's follow-up PR deletes this line (the role default is v2.1.23). There is deliberately no renovate
-# annotation here: the regex manager must not bump this override. Both CTs are the same inventory host (.36), so
-# after the cutover NO registry play may run until that follow-up PR has merged: the guard would refuse the new
-# CT's v2.1.23, and opting in would downgrade it (PLAN-B).
-registry_zot_version: "v2.1.18"

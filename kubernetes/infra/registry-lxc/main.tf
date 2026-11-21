@@ -17,11 +17,16 @@ resource "proxmox_virtual_environment_download_file" "debian_tmpl" {
 }
 
 resource "proxmox_virtual_environment_container" "registry" {
-  node_name     = var.registry_lxc.node_name
-  vm_id         = var.registry_lxc.vm_id
-  tags          = ["lxc", "registry", "zot", "platform"]
-  unprivileged  = true # no host devices / bind mounts needed -> run unprivileged for safety
-  start_on_boot = true
+  node_name    = var.registry_lxc.node_name
+  vm_id        = var.registry_lxc.vm_id
+  tags         = ["lxc", "registry", "zot", "platform"]
+  unprivileged = true # no host devices / bind mounts needed -> run unprivileged for safety
+  # RETIRED from service by the zot move (2026-11-21): stopped, onboot 0, net0 link_down=1 and a 'backup' lock, all
+  # set by hand (pct); its volumes stay as the pre-cutover copy until the owner approves decommissioning (a separate
+  # PR). started/start_on_boot below document that state only: lifecycle.ignore_changes covers both, so tofu never
+  # acts on them.
+  started       = false
+  start_on_boot = false
 
   features {
     nesting = true # systemd + the zot service inside the CT
@@ -87,9 +92,14 @@ resource "proxmox_virtual_environment_container" "registry" {
   # `start_on_boot` from its onboot flag. After the cutover CT 5004 is stopped with onboot 0 on purpose (it is the
   # rollback copy, kept off 192.168.0.36), and an apply must never start it or re-arm it at boot. Run state and
   # onboot of this CT are set by hand (pct) from here on.
+  # network_interface (review #1927): its net0 carries link_down=1, set by hand, so this copy can never answer
+  # on .36 next to CT 5005. bpg 0.123.1 does not model link_down for containers (it reads `enabled` back as true),
+  # so any apply that rewrote net0 would drop link_down=1 and put a second .36 on the wire. Do NOT express it as
+  # `enabled = false` either: for a container that DELETES net0 (container.go: !ni.Enabled -> Delete). So tofu
+  # never touches this CT's NIC.
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [started, start_on_boot]
+    ignore_changes  = [started, start_on_boot, network_interface]
   }
 }
 
@@ -115,8 +125,8 @@ resource "proxmox_virtual_environment_container" "registry_n3" {
   vm_id         = var.registry_lxc_n3.vm_id
   tags          = ["lxc", "registry", "zot", "platform"]
   unprivileged  = true # the default idmap: guest uid 999 (zot) = host 100999, as on CT 5004
-  started       = false
-  start_on_boot = false
+  started       = true # the live registry since the 2026-11-21 cutover; documentation only (ignore_changes)
+  start_on_boot = true # tofu applies this one
 
   features {
     nesting = true
