@@ -1,0 +1,11 @@
+# Only the role's fstrim tasks (tasks_from), with the role's defaults, against the container.
+- name: Converge the dev workers' daily trim
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  tasks:
+    - name: The fstrim tasks of dev_worker
+      ansible.builtin.import_role:
+        name: dev_worker
+        tasks_from: fstrim

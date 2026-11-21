@@ -38,3 +38,11 @@ relay_agent_skill_enabled: true
 # delegation policy for one weekly-limit window (from 2026-11-13). Rollback = delete these two lines, converge.
 dev_worker_claude_subagents: [scout, bulk-worker]
 dev_worker_delegation_policy_enabled: true
+
+# Daily chunked trim of /workspace and / (role dev_worker, tag fstrim; docs/runbooks/dev-workers.md "Daily trim";
+# owner, 2026-11-20: "provide a durable solution to avoid garbage data accumulating in the future"). The workers
+# take turns, 12 min each: dev-worker-1 00:30, dev-worker-2 00:42, dev-worker-3 01:15, dev-worker-4 01:27 (UTC).
+# This one is on ai-node2. / goes nodiscard too, or its trim would find nothing to do.
+dev_worker_fstrim_enabled: true
+dev_worker_fstrim_start: "00:42"
+dev_worker_root_nodiscard: true
