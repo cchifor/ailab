@@ -797,18 +797,70 @@ SELECT worker_budget.gate('<B instanceId>', '<B recoveryEpoch>', '<B witnessDige
 SELECT clock_timestamp(), ready, instance_id, recovery_epoch, witness_digest FROM worker_budget.authority;
 COMMIT;
 SQL
-# plugin true|false: the endpoint and body of budget step 9. The HTTP status and the body are both kept.
+# plugin true|false [<expected HTTP code>]: the endpoint and body of budget step 9. The HTTP status and the
+# body are both kept. It FAILS (returns 1) unless the answer is the expected one: by default HTTP 200 with the
+# plugin `active` (true) or `disabled` (false). radmin has no -f, so curl alone succeeds on any HTTP answer; a
+# drill that expects a refusal passes its code (checklist B2: `plugin true 500`). (2026-11-21: R0 drill A's
+# `plugin true` answered 500 and the old helper still returned 0.)
 plugin() {
+  local -; set -o pipefail
+  local want="${2:-200}" code state
   capfile "plugin-$1"; pf="$CAPF.json"
-  cap "plugin-$1-status" radmin -o "$pf" -w 'HTTP %{http_code}\n' -X POST -H 'Content-Type: application/json' \
-    -d "{\"enabled\":$1}" https://router.chifor.me/admin/v1/plugins/worker-budget-authority \
+  code="$(cap "plugin-$1-status" radmin -o "$pf" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    -d "{\"enabled\":$1}" https://router.chifor.me/admin/v1/plugins/worker-budget-authority | tail -c 3)" \
     || { echo "plugin call or its capture failed; response kept in $pf"; return 1; }
   jq -c 'if type == "array" then (.[] | select(.id == "worker-budget-authority") | {id, state, error}) else . end' "$pf"
+  [ "$code" = "$want" ] || { echo "plugin $1: HTTP $code, expected $want (response in $pf)"; return 1; }
+  [ "$want" = 200 ] || return 0
+  state="$(jq -r 'if type == "array" then (.[] | select(.id == "worker-budget-authority") | .state) else .state end' "$pf")"
+  case "$1:$state" in true:active|false:disabled) ;; *) echo "plugin $1: state $state"; return 1;; esac
 }
 # The form of "Changing the witness" step 4, in relay and in llm-router.
 force_sync() {
   kubectl --context admin@ai -n relay annotate externalsecret relay-worker-budget force-sync="$(date +%s)" --overwrite &&
   kubectl --context admin@ai -n llm-router annotate externalsecret llm-router-worker-budget force-sync="$(date +%s)" --overwrite
+}
+# force_sync_relay / force_sync_router: one ExternalSecret each. R0 (Relay's half) syncs only Relay's, so the
+# Router's Secret, and the files its Pod bound at start, stay B (relay-researcher-r0-relay-drills.md, "The Router's
+# mounted files"). force_sync_router is used only while OpenBao holds B: it changes no data and restarts the
+# ExternalSecret's refresh interval (1h), so no scheduled refresh lands inside the next drill.
+force_sync_relay() { kubectl --context admin@ai -n relay annotate externalsecret relay-worker-budget force-sync="$(date +%s)" --overwrite; }
+force_sync_router() { kubectl --context admin@ai -n llm-router annotate externalsecret llm-router-worker-budget force-sync="$(date +%s)" --overwrite; }
+# router_es_next: the Router ExternalSecret's last refresh and its next scheduled one (last + refreshInterval).
+router_es_next() {
+  kubectl --context admin@ai -n llm-router get externalsecret llm-router-worker-budget \
+    -o jsonpath='{.status.refreshTime} {.spec.refreshInterval}{"\n"}'
+}
+# rlinks: the link count of the Router's three bound files. A subPath bind keeps the inode bound at container
+# start; when the Secret's data changes, kubelet unlinks it (count 0). On a Router before llm-router #193 the
+# worker-budget plugin then cannot start or re-enable, and an active one goes read_failed. All three must be 1.
+rlinks() {
+  kubectl --context admin@ai -n llm-router exec deploy/llm-router -c router -- \
+    stat -c '%h %n' /run/llm-router-worker-budget/dsn /run/llm-router-worker-budget/ca.crt /run/llm-router-worker-budget/witness.json
+}
+rlinks_ok() { local out; out="$(rlinks)" || return 1; printf '%s\n' "$out"; [ "$(printf '%s\n' "$out" | awk '$1!=1' | wc -l)" -eq 0 ]; }
+# rreader: the Router's ledger reader session and its last statement time. Two captures at least 10 s apart with a
+# later query_start show the Router reading the ledger now (it polls every 5 s); an old `available` log line does not.
+rreader() {
+  lsql <<'SQL'
+SELECT clock_timestamp(), pid, state, query_start FROM pg_stat_activity WHERE application_name = 'router-worker-budget-reader';
+SQL
+}
+# wait_hashes_relay <sha256>: bounded wait (2 minutes) until OpenBao and Relay's Secret carry it, and the Router's
+# Secret still carries B (its second argument, B's sha256).
+wait_hashes_relay() {
+  local -; set -o pipefail
+  for i in $(seq 1 24); do
+    a=; b=; c=
+    if a="$(wsha_bao | cut -d' ' -f1)" && b="$(wsha_secret relay relay-worker-budget | cut -d' ' -f1)" &&
+       c="$(wsha_secret llm-router llm-router-worker-budget | cut -d' ' -f1)" &&
+       [ "$a" = "$1" ] && [ "$b" = "$1" ] && [ "$c" = "$2" ]; then
+      cap hashes echo "openbao=$a relay=$b llm-router=$c (B)"; return
+    fi
+    [ -n "$c" ] && [ "$c" != "$2" ] && { cap hashes-router-changed echo "llm-router=$c, expected B=$2"; return 1; }
+    sleep 5
+  done
+  cap hashes-not-converged echo "openbao=$a relay=$b llm-router=$c want=$1 router-want=$2"; return 1
 }
 # wait_hashes <sha256>: bounded wait (2 minutes) until OpenBao and both rendered Secrets carry it.
 # A failed read is never a match: each read must succeed before its hash is compared.
@@ -957,7 +1009,8 @@ later roll cannot overwrite it.
 - **O, re-open, observe, withdraw.** This is the drill protocol, steps 2-5.
   1. `lwrite open-B` (COMMITTED). Its output holds the gate check and the row with `ready = t`.
   2. `plugin true`. In drills A and D this gives `HTTP 200` with state `active`. Drills B and C have
-     their own expectation (B2).
+     their own expectation (B2): `plugin true 500`, since the helper fails on any answer it was not told to
+     expect.
   3. **Prove that the gate is open**, immediately before the observation:
      - `cap plugins plugins`;
      - the positive control:

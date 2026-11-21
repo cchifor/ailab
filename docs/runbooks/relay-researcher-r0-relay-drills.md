@@ -173,12 +173,36 @@ follows the drill protocol (`relay-worker-budget-authority.md:423-459`):
 
 After drill C, the owner re-opens the production gate (§8). Its end state is exactly the state before
 R0. The Router is not rolled in R0: its mounted witness stays B throughout and serves as an in-window
-control. That holds because both consumers mount `witness.json` as a `subPath` file
+control. Both consumers mount `witness.json` as a `subPath` file
 (`kubernetes/components/llm-router-worker-budget-reader/deployment.yaml:39-41`,
-`kubernetes/components/relay-worker-budget-client/deployment.yaml:32-34`), which never updates in a
-running Pod (`relay-worker-budget-authority.md:376-378`; checklist, "Starting state"). A force-sync
-changes the Secret, not a running Pod's file: only a roll does. Every W_R and O_R captures
-`wsha_router` and `wsha_relay` to show it.
+`kubernetes/components/relay-worker-budget-client/deployment.yaml:32-34`), whose **bytes** never update
+in a running Pod (`relay-worker-budget-authority.md:376-378`). Every W_R and O_R captures `wsha_router`
+and `wsha_relay` to show it.
+
+**The Router's mounted files (2026-11-21, R0's first attempt; #1753 comment 135072).** Their bytes stay,
+but their **link count** does not.
+- When a Secret's data changes, kubelet's atomic writer unlinks the old files. A subPath bind keeps the
+  old inode, with its old bytes and **zero links**. Changing any key swaps the whole volume generation, so
+  all three files (`dsn`, `ca.crt`, `witness.json`) go to zero at once.
+- The Router's `readBudgetWitness` (llm-router `packages/adapters/worker-budget-reader/configuration.ts`)
+  requires exactly one link, until llm-router #193 ships. So after a change to `llm-router-worker-budget`:
+  - the plugin cannot start or re-enable (`plugin true` answers 500 `PLUGIN_FAILED`);
+  - an active plugin's 5 s refresh goes `read_failed`.
+- R0's first attempt failed this way at drill A's O_R step 1. W_R had force-synced A into both
+  Secrets; `wsha_router` still showed B, and `stat` showed links=0 on all three files.
+- `wsha_router` hashes bytes and cannot see this; `rlinks` (checklist step 5 helpers) can.
+
+R0 therefore never changes the Router's Secret:
+- Every W_R and R_R syncs Relay's ExternalSecret only (`force_sync_relay`, `wait_hashes_relay`). The
+  Router's Secret, and so its bound files, stay B.
+- The Router's ExternalSecret refreshes on its own every hour (`refreshInterval: 1h`), and a refresh while
+  OpenBao holds a drill witness would rewrite it. So before each drill's W_R, while OpenBao still holds B,
+  `force_sync_router` restarts that interval without changing data.
+- `router_es_next` must then show the next refresh after the drill's planned R_R end. A drill (W_R to R_R)
+  takes about 20 minutes, inside the hour.
+- With llm-router #193 deployed, a zero-link file is accepted (the start-time bytes are the subPath
+  contract). R0 still syncs only Relay's Secret: a Router container restart re-binds the subPaths to
+  whatever the Secret holds, and that must stay B.
 
 ## 4. Owner confirmations before R0 is signed
 
@@ -345,6 +369,13 @@ SQL
   history counts 0. `cap plugins-before plugins` shows `worker-budget-authority` `active`.
 - **Witness.** `wsha_bao`, both `wsha_secret`, `wsha_router` and `wsha_relay` all show B's hash (H6
   mounted B in Relay).
+- **The Router's files and plugin (NEW, 2026-11-21).**
+  - `cap router-links-before rlinks_ok`: all three files have one link. Otherwise `roll_router` first
+    (checklist step 5's R, OpenBao and both Secrets on B), then check again.
+  - Then one round trip of the plugin, before signing: `lwrite withdraw`, `plugin false`, `plugin true`,
+    `lwrite open-B`. Each must pass: the helper fails on any other answer. No worker exists, so the short
+    withdrawal affects nothing.
+  - `cap router-reader-before rreader` twice, at least 10 s apart, with a later `query_start`.
 - **Both client logins.** Step 4's `q` reads each login's password from OpenBao on stdin
   (`af/relay-budget/allocator` and `af/relay-budget/router`, field `password`, budget runbook "Credential
   delivery"); step 4's proofs already used both. Check them again from the new client Pod (NEW
@@ -438,15 +469,20 @@ are NEW.
      allocation to stop: `hub_counts` is unchanged.
   3. `sleep 20`.
   4. Write the drill's state to OpenBao, as each drill says.
-  5. `force_sync`, then `wait_hashes <expected sha256>`: it must return 0.
+  5. `force_sync_relay`, then `wait_hashes_relay <expected sha256> <B sha256>`: it must return 0. Relay's
+     Secret carries the drill's state; the Router's stays B. Before step 2 of each drill's W_R, while OpenBao
+     still holds B: `force_sync_router`, `wait_hashes <B sha256>`, then `cap router-es-X router_es_next`,
+     whose next refresh must fall after the drill's planned R_R end (NEW, 2026-11-21).
   6. `roll_relay`.
   7. `cap hub-after-roll hpod` (Running, every init exit 0, R0's pin unchanged);
      `cap relay-log-after-roll hlog` (no `worker_candidate_unavailable`, no
      `worker_budget_authority_unavailable`); `cap mounted-relay wsha_relay` shows the expected sha256;
-     `cap mounted-router wsha_router` still shows B.
+     `cap mounted-router wsha_router` still shows B; `cap router-links-X rlinks_ok` passes (all three
+     files one link).
 - **O_R, re-open, observe Relay, withdraw.** The drill protocol, steps 2-5.
   1. `lwrite open-B` (COMMITTED), then `plugin true`. The Router still mounts B, so this is `HTTP 200`
-     `active` in every drill, B and C included (unlike checklist B2).
+     `active` in every drill, B and C included (unlike checklist B2). Any other answer is a failed
+     readback: F_R (the helper returns 1).
   2. **Prove the gate open**, immediately before observing:
      - `cap plugins plugins`;
      - `cap control q relay_budget_router "SELECT worker_budget.current_epoch('<B instanceId>', '<B recoveryEpoch>', '<B witnessDigest>')"`
@@ -477,8 +513,9 @@ are NEW.
   2. `cap ledger-state ledger_state` and `cap hub-counts hub_counts`.
   3. If the authority row is not B's, a ledger history count is not 0, or a hub count differs from
      §6.1's, stop and escalate to the owner. Restore nothing (`relay-worker-budget-authority.md:615-622`).
-  4. Otherwise write B to OpenBao, `force_sync` and `wait_hashes <B sha256>`. Before `t_s + 105 min`,
-     also `roll_relay` and `cap mounted-relay wsha_relay` (B). If `wsha_router` is not B, `roll_router`
+  4. Otherwise write B to OpenBao, `force_sync` and `wait_hashes <B sha256>` (both Secrets back to B).
+     Before `t_s + 105 min`, also `roll_relay` and `cap mounted-relay wsha_relay` (B). If `wsha_router` is
+     not B, **or `rlinks_ok` fails** (restoring B does not re-link a bound file), `roll_router`
      as in checklist step 5's R.
   5. Stop. Go to §10. Re-opening needs the owner's review of the failure.
 
@@ -528,15 +565,16 @@ R_R ends withdrawn. Any other difference is F_R step 3: stop and escalate.
 - **B3. Soft delete, Relay's half.** The gate is withdrawn (O_R step 6). The form is checklist B3's,
   with the hub Pod in place of the Router's:
   1. `cap relay-pod-before hpod`.
-  2. `bao kv delete -mount=af relay-budget/witness`, then `force_sync`.
-  3. The bounded waits and hashes of checklist B3:
+  2. `bao kv delete -mount=af relay-budget/witness`, then `force_sync_relay` (Relay's only).
+  3. The bounded waits and hashes of checklist B3, Relay's half:
      `cap es-relay kubectl --context admin@ai -n relay wait --for=condition=Ready=false externalsecret/relay-worker-budget --timeout=3m`,
-     the same for `llm-router/llm-router-worker-budget`, `cap secret-hash-relay wsha_secret relay relay-worker-budget`
-     and `cap secret-hash-router wsha_secret llm-router llm-router-worker-budget`.
+     `cap secret-hash-relay wsha_secret relay relay-worker-budget`, and, unchanged,
+     `cap secret-hash-router wsha_secret llm-router llm-router-worker-budget` and `cap router-links-B3 rlinks_ok`.
   4. `cap relay-pod-after hpod` and `cap mounted-relay-after wsha_relay`.
 
-  Pass: both ExternalSecrets go not Ready; both Secrets remain with the empty witness's hash (ESO
-  Retain); the hub Pod's UID and its mounted witness are unchanged. Nothing changes until a deliberate
+  Pass: Relay's ExternalSecret goes not Ready and its Secret keeps the empty witness's hash (ESO Retain);
+  the Router's Secret is still B with one link on each file (its ExternalSecret was not synced, and its
+  refresh interval was restarted before W_R); the hub Pod's UID and its mounted witness are unchanged. Nothing changes until a deliberate
   roll. If a wait times out, read the ExternalSecret's status and events before treating it as a failed
   readback.
 - **B4.** R_R. A put after a soft delete writes a new live version, and both ExternalSecrets are Ready
