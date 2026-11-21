@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 1d65206575251e3f450a3b6c41650b40d17f42b8
-        chifor.me/release: router-0.1.0-20261120-budget-runtime-get
+        chifor.me/source-commit: bf19ce6f6078df130e51b458e79664fc86cb83a3
+        chifor.me/release: router-0.1.0-20261121-witness-unlinked
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -121,10 +121,10 @@ spec:
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       containers:
         - name: router
-          # Source 1d65206575251e3f450a3b6c41650b40d17f42b8: the live 5a5181b7 plus llm-router #192 (api-keys reads the
-          # worker-budget authority with ctx.get; the property read threw, so every worker-budget call returned 500).
-          # Relay run 143129; archive sha256:791e9ee726f8c1d5fb4fde704e86bfae9d9b6ace0332bd4949c0918edcc4e382.
-          image: registry.chifor.me/llm-router/router@sha256:f923c13a40de9e52948c122eb1528d77886cf0d431581ebce93da2b0a4a87647
+          # Source bf19ce6f6078df130e51b458e79664fc86cb83a3: the live 1d652065 plus llm-router #193 (the worker-budget
+          # witness reader accepts a subPath bind unlinked by a Secret change: zero or one link, hard links refused).
+          # Relay run 144626; archive sha256:89d1cd282b21eecc4b4a111d38dc1eab4e5f38064b64dd72862b9853d38f083b.
+          image: registry.chifor.me/llm-router/router@sha256:9687bdc673a62046b5b13b89c8962be0b5d31e1b6973d051b578ba219e63c9e7
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
