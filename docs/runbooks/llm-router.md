@@ -4844,12 +4844,14 @@ only in-process signal is the hourly warning, which this release does not write 
 - **Roll the Router in the same step** as any change under `af/relay-budget/*` or to that Secret (the interim rule),
   exactly once:
   - **Secret-only change** (no image or manifest change in Git, so Flux applies nothing): `roll_router`
-    (relay-researcher-remaining-live-steps.md), one `roll_deploy` under the field manager Flux keeps (#1906).
+    ([relay-researcher-remaining-live-steps.md](relay-researcher-remaining-live-steps.md)), one `roll_deploy` under the field manager Flux keeps (#1906).
   - **Together with an image or manifest change:** the merge is the roll; do not also run `roll_router`.
-- **Prove the new value is live** (helpers in relay-researcher-remaining-live-steps.md): `rlinks_ok` shows links 1 on
+- **Prove the new value is live** (helpers in [relay-researcher-remaining-live-steps.md](relay-researcher-remaining-live-steps.md)): `rlinks_ok` shows links 1 on
   every file of the fresh Pod, and `wsha_router` shows the new witness hash. Links 0 on a running Pod means it still
   serves the old value.
 - A Secret change that is not followed by a roll is an incident: roll, then re-check as above.
+- **Until llm-router #191 lands, `rlinks_ok` is the only detection of a stale witness** (the hourly warning is not on
+  stdout).
 
 **Verified on the release tree.**
 - `tests/worker-budget-runtime-io.test.ts` and `tests/worker-budget-runtime-wiring.test.ts`: 10 passed, 1 skipped
@@ -4876,7 +4878,7 @@ release digest needs File B reissued again.
 "Worker-budget authority release" above, with these values:
 1. **Merge = the roll** (no `roll_deploy`). One Pod of image `9687bdc673a62046b5b13b89c8962be0b5d31e1b6973d051b578ba219e63c9e7`; the revision rises by exactly 1 and is
    unchanged after Flux's next reconcile of `apps`.
-2. **Router readback** as above; `rlinks_ok` (relay-researcher-remaining-live-steps.md) shows links 1 on the fresh Pod.
+2. **Router readback** as above; `rlinks_ok` ([relay-researcher-remaining-live-steps.md](relay-researcher-remaining-live-steps.md)) shows links 1 on the fresh Pod.
 3. **Release gate (router-ab)** on the live router.
 4. **Readings R1-R5** and a new File B evidence file: expected `routerReleaseDigest`
    `28c8bd496299bf2680b8df2467119cc094ed995489f63026dabe06c2f9ddaea3`, the same openai adapter digest, and
@@ -4884,5 +4886,5 @@ release digest needs File B reissued again.
 5. **Reissue File B** with `--supersede`; the owner confirms the new digest.
 6. **`file_b_router_check`, once.** Exit 0, `status: pass`, `signingReady: true`.
 
-Then a new R0 with a fresh K5 under the R0 runbook as of ailab #1922. No other Router change may follow before the
+Then a new R0 with a fresh K5 under the [R0 runbook](relay-researcher-r0-relay-drills.md) as of ailab #1922. No other Router change may follow before the
 canary.
