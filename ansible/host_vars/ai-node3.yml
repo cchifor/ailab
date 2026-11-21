@@ -17,6 +17,9 @@ storage_router_enabled: true
 # 04:30, this host 04:50, ai-node1 05:10.
 pve_lxc_fstrim_enabled: true
 pve_lxc_fstrim_start: "04:50"
+# 5005 is the registry's NEW CT (the zot move, 2026-11-21). Kept out of this sweep: its trim is decided with the
+# move's follow-up (docs/runbooks/registry-cache.md "Thin-volume trim"), not inherited by accident on night one.
+pve_lxc_fstrim_exclude: [5005]
 
 # Thunderbolt/USB4 PCIe-tunnel boot params for the TB->10GbE storage adapter (Ubiquiti UACC,
 # AQC113/atlantic). On this BOSGAME M5 (Ryzen AI Max 395) the adapter won't enumerate without them —

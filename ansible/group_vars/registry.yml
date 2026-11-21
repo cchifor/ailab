@@ -2,3 +2,18 @@
 # Enable the registry_zot role (the registry.yml playbook is a no-op until this is true). The LXC
 # must exist first: tofu -chdir=kubernetes/infra/registry-lxc apply.
 registry_enabled: true
+
+# ---- The LIVE registry state, codified (2026-11-21, the zot move to ai-node3) ----
+# So that no registry play depends on `-e` values. Each line is temporary and is removed by its own owner PR.
+#
+# The strive retention HOLD (keep everything): lifting it is a separate, owner-approved change
+# (docs/runbooks/registry-cache.md "Changing tag retention").
+registry_zot_strive_keep_recent: 100000
+registry_zot_strive_keep_within: "87600h"
+# Retention dryRun across the v2.1.18 -> v2.1.23 binary change: v2.1.23's GC semantics differ from what the safety
+# scanners model, so nothing may be pruned until the owner has reviewed v2.1.23's dry-run decisions.
+registry_zot_retention_dry_run: true
+# TEMPORARY: the binary that runs today (v2.1.18) on CT 5004. The move installs v2.1.23 into the new CT offline,
+# and the move's follow-up PR deletes this line (the role default is v2.1.23). No `# renovate:` annotation on
+# purpose: renovate's regex manager must not bump this override.
+registry_zot_version: "v2.1.18"

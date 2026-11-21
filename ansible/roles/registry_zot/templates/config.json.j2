@@ -102,7 +102,7 @@
 {%- macro base_policies() %}
             {
               "users": ["{{ registry_zot_ci_user }}"],
-              "actions": ["read", "create", "update", "delete"]
+              "actions": {{ (["read"] if registry_zot_read_only | bool else ["read", "create", "update", "delete"]) | to_json }}
             },
             {
               "users": ["{{ registry_zot_pull_user }}"],
@@ -110,7 +110,7 @@
             }{% if registry_zot_admin_group %},
             {
               "groups": ["{{ registry_zot_admin_group }}"],
-              "actions": ["read", "create", "update", "delete"]
+              "actions": {{ (["read"] if registry_zot_read_only | bool else ["read", "create", "update", "delete"]) | to_json }}
             }{% endif %}
 {%- endmacro %}
         "**": {
@@ -123,14 +123,14 @@
           "policies": [{{ base_policies() }},
             {
               "users": [{{ p.user | to_json }}],
-              "actions": ["read", "create", "update"]
+              "actions": {{ (["read"] if registry_zot_read_only | bool else ["read", "create", "update"]) | to_json }}
             }
           ]
         }{% endfor %}
       }{% if registry_zot_admin_group %},
       "adminPolicy": {
         "groups": ["{{ registry_zot_admin_group }}"],
-        "actions": ["read", "create", "update", "delete"]
+        "actions": {{ (["read"] if registry_zot_read_only | bool else ["read", "create", "update", "delete"]) | to_json }}
       }{% endif %}
     }
   },

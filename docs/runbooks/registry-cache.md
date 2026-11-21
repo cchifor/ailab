@@ -17,6 +17,14 @@ reload allowlist, see "Reload or restart" below).
 
 ### Applying a config change (pin the live binary)
 
+**Since 2026-11-21 (the zot move to ai-node3) nothing here needs `-e`.** `ansible/group_vars/registry.yml` holds
+the live state: the strive retention hold (100000 / 87600h), `registry_zot_retention_dry_run: true` and the running
+binary (`registry_zot_version: v2.1.18`, removed again by the move's follow-up PR). The role also refuses any binary
+change unless `-e registry_zot_allow_binary_change=true` (a binary change is a full-parse restart), and `get_url`
+verifies the release sha256 from `registry_zot_sha256`. `-e registry_zot_read_only=true` is the registry-side writer
+fence (a reload): every accessControl action becomes read-only until a play without it runs. The older `-e` recipes
+below remain valid but are no longer needed for these values.
+
 There is no config-only apply: `registry.yml` always runs the WHOLE role. Besides `config.json`,
 it converges the htpasswd lines, the certs, the sync upstream credentials and the systemd unit, and
 a change to any of those restarts zot (a config.json change may reload instead, see "Reload or restart"). Its `get_url` task also converges `/usr/local/bin/zot` to
