@@ -14,11 +14,16 @@ fake /etc/pve (qemu-server confs and storage.cfg), a fake /proc/self/mountinfo a
     included); an empty export or a failed write is not ready;
   * the budget bounds the whole run, across storages; a hung probe is abandoned, not waited for, and killed with
     its whole process group: no descendant (a read's dd, pvesm's child) outlives the gate, and no job notice;
+  * a probe the budget cut short (granted less than its own limit) and that did not finish proves nothing: it never
+    replaces a real outcome. An empty export stays "failed" even when the last check's read is cut off, a probe that
+    overran its whole limit stays "timed out", and a hang that only the budget ever cut reads "timed out: the wait
+    budget ran out first" (the race that flaked test_an_empty_export_is_not_ready under CPU load);
   * on a timeout it exits 1 with a WARNING (priority warning under systemd) and hands over; ready = exit 0;
   * the drop-in runs the gate as a "-" ExecStartPre with the role's settings, and the role wiring.
 
     python3 -m unittest discover -s scripts/tests -p "test_pve_nfs_disk_gate.py" -v
 """
+import errno
 import os
 import re
 import shutil
@@ -175,6 +180,53 @@ class Gate(unittest.TestCase):
         t.start()
         self.addCleanup(t.cancel)
 
+    def mountinfo_fifo(self, content, before_serve):
+        """Serve the gate's mountinfo from a FIFO, one read per gate check (each check opens it exactly once, as
+        the storage is mounted). before_serve(n) runs before the n-th check gets its copy, i.e. strictly after
+        check n-1 finished. Returns (the FIFO's path, the list of checks served so far)."""
+        fifo = self.tmp / "mountinfo.fifo"
+        os.mkfifo(fifo)
+        stop = threading.Event()
+        served = []
+
+        def writer():
+            try:
+                return os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError as e:
+                if e.errno == errno.ENXIO:  # no reader has it open
+                    return None
+                raise
+
+        def run():
+            while not stop.is_set():
+                fd = writer()
+                if fd is None:
+                    time.sleep(0.005)
+                    continue
+                before_serve(len(served) + 1)
+                os.set_blocking(fd, True)
+                try:
+                    os.write(fd, content.encode())
+                except BrokenPipeError:
+                    pass
+                os.close(fd)
+                served.append(len(served) + 1)
+                # Wait until that reader has closed, so it cannot be counted twice. The next check opens the file
+                # at least STEP_S later.
+                until = time.monotonic() + 5
+                while not stop.is_set() and time.monotonic() < until:
+                    fd = writer()
+                    if fd is None:
+                        break
+                    os.close(fd)
+                    time.sleep(0.005)
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        self.addCleanup(t.join, 2)
+        self.addCleanup(stop.set)
+        return fifo, served
+
     # ---- ready / nothing to do ----
     def test_a_ready_storage_passes_at_once(self):
         self.vm(4001, *CP)
@@ -275,9 +327,45 @@ class Gate(unittest.TestCase):
         self.mount()
         self.assertEqual(1, self.run_gate(wait_s=3, PROBE_S=1), self.out)
         self.assertLess(self.elapsed, 10)
-        self.assertIn("vm-4001-disk-0.raw timed out", self.out)
+        # The first check's read got its whole PROBE_S and overran it: a real "timed out", with no budget note.
+        self.assertIn("vm-4001-disk-0.raw timed out. Handing over", self.out)
         self.assertEqual([], self.survivors(fifo.as_posix()), "a timed-out probe's dd outlived the gate")
         self.assertNotIn("Killed", self.out, "no job notice from the shell")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a FIFO")
+    def test_a_read_the_budget_cuts_short_does_not_replace_the_real_failure(self):
+        # The race behind the flaky empty-export test, made deterministic. Check 1 finds the export empty (a real
+        # "failed"). Before check 2, the image becomes a FIFO, so check 2's read hangs. PROBE_S is far above the
+        # budget, so only the budget can stop it. That cut-off read proves nothing, and the reason must stay
+        # check 1's "failed".
+        self.vm(4001, *CP)
+        img = self.qnap / "images" / "4001" / "vm-4001-disk-0.raw"
+        img.parent.mkdir(parents=True)
+
+        def before_serve(n):
+            if n == 2:
+                os.mkfifo(img)
+
+        fifo, served = self.mountinfo_fifo(self.mount_line(self.qnap), before_serve)
+        self.assertEqual(1, self.run_gate(wait_s=3, PROBE_S=30, MOUNTINFO=fifo.as_posix()), self.out)
+        self.assertGreaterEqual(len(served), 2, "a second check, against the hanging read, must have run")
+        self.assertIn(f"reading {img.as_posix()} failed. Handing over", self.out)
+        self.assertNotIn("timed out", self.out)
+        self.assertEqual([], self.survivors(img.as_posix()), "the cut-off dd outlived the gate")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs a FIFO")
+    def test_a_hang_only_the_budget_ever_cut_reads_as_timed_out(self):
+        # No check runs to its end: every read hangs, and PROBE_S is above the whole budget. It is still a timeout,
+        # and the reason says the budget ran out first.
+        self.vm(4001, *CP)
+        img = self.qnap / "images" / "4001" / "vm-4001-disk-0.raw"
+        img.parent.mkdir(parents=True)
+        os.mkfifo(img)
+        self.mount()
+        self.assertEqual(1, self.run_gate(wait_s=1, PROBE_S=30), self.out)
+        self.assertLess(self.elapsed, 10)
+        self.assertIn(f"reading {img.as_posix()} timed out: the wait budget ran out first. Handing over", self.out)
+        self.assertEqual([], self.survivors(img.as_posix()), "the cut-off dd outlived the gate")
 
     def test_a_hung_activation_is_tried_once_then_left_to_pvestatd(self):
         self.vm(4001, *CP)

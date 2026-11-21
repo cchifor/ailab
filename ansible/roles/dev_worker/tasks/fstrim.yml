@@ -1,0 +1,287 @@
+---
+# Daily trim of /workspace and / (dev_worker_fstrim_*; defaults/main.yml has the why). Own tag: --tags fstrim,
+# one worker at a time, --check --diff first (docs/runbooks/dev-workers.md "Daily trim"). Not gated in main.yml:
+# switched off, it removes what an earlier converge installed and hands the disks back to the stock weekly timer
+# (and does nothing on a worker that never had it).
+- name: Check the daily trim settings
+  ansible.builtin.assert:
+    that:
+      - dev_worker_fstrim_start is string
+      - dev_worker_fstrim_start is match('^([01][0-9]|2[0-3]):[0-5][0-9]$')
+      - dev_worker_fstrim_run_max_min | int >= 2
+      - dev_worker_fstrim_mounts | length > 0
+      - dev_worker_fstrim_mounts | select('match', '^/[A-Za-z0-9/_.-]*$') | list | length == dev_worker_fstrim_mounts | length
+      - dev_worker_fstrim_chunk_gb | int >= 1
+      - dev_worker_fstrim_sec_per_gb | int >= 1
+      - dev_worker_fstrim_psi_wait_max_s | int >= 1
+      - dev_worker_fstrim_psi_max | string is match('^[0-9]+(\.[0-9]+)?$')
+      - dev_worker_fstrim_psi_max | float <= 100
+    fail_msg: >-
+      dev_worker_fstrim_*: need a quoted HH:MM start, run_max_min >= 2, absolute mount paths, positive integers and
+      psi_max a number 0-100 (start={{ dev_worker_fstrim_start | to_json }}, mounts={{ dev_worker_fstrim_mounts | to_json }},
+      psi_max={{ dev_worker_fstrim_psi_max | to_json }})
+    quiet: true
+  when: dev_worker_fstrim_enabled | bool
+
+# ---- / without online discard (dev_worker_root_nodiscard) ----
+# The same three regexes as gitea_runner's (tasks/main.yml there; its tests/test-fstrim-chunked.sh applies them):
+# each needs a whole `discard` token, so `nodiscard` never matches and a second run changes nothing.
+- name: Drop the online `discard` option from the root fstab entry (every other option is kept)
+  ansible.builtin.replace:
+    path: /etc/fstab
+    regexp: "{{ item.regexp }}"
+    replace: "{{ item.replace }}"
+    backup: true
+  loop:
+    - regexp: '^(LABEL=cloudimg-rootfs[ \t]+/[ \t]+ext4[ \t]+(?:[^\s,]+,)*)discard,(?=[^\s,])'
+      replace: '\g<1>'
+    - regexp: '^(LABEL=cloudimg-rootfs[ \t]+/[ \t]+ext4[ \t]+[^\s,]+(?:,[^\s,]+)*),discard(?=[ \t]|$)'
+      replace: '\g<1>'
+    - regexp: '^(LABEL=cloudimg-rootfs[ \t]+/[ \t]+ext4[ \t]+)discard(?=[ \t]|$)'
+      replace: '\g<1>defaults'
+  when: dev_worker_root_nodiscard | bool
+  register: dev_worker_root_fstab_edit
+  tags: [fstrim]
+
+# The regexes only know the cloud image's LABEL=cloudimg-rootfs line. A root entry written another way (UUID=, a
+# rebuilt image) would be left alone, `discard` would come back at the next boot and the trim of / would quietly do
+# nothing again: refuse that instead. Read with findmnt's own fstab parser (rc 1: no entry for /, nothing to fix).
+- name: Read the root entry's options in /etc/fstab
+  ansible.builtin.command: findmnt --fstab -no OPTIONS --mountpoint /
+  register: dev_worker_root_fstab_opts
+  changed_when: false
+  failed_when: dev_worker_root_fstab_opts.rc not in [0, 1]
+  check_mode: false
+  when: dev_worker_root_nodiscard | bool
+  tags: [fstrim]
+
+- name: Check the root fstab entry no longer has `discard`
+  ansible.builtin.assert:
+    that: "'discard' not in dev_worker_root_fstab_opts.stdout.strip().split(',')"
+    fail_msg: >-
+      The root entry in /etc/fstab still has `discard` ({{ dev_worker_root_fstab_opts.stdout | trim }}): it is not the
+      cloud image's LABEL=cloudimg-rootfs line the role edits. Drop `discard` from it by hand (keep every other option)
+      or set dev_worker_root_nodiscard false; the live remount alone would be undone at the next boot.
+    quiet: true
+  when:
+    - dev_worker_root_nodiscard | bool
+    # --check did not write the edit it would make
+    - not (ansible_check_mode and dev_worker_root_fstab_edit is changed)
+  tags: [fstrim]
+
+# The live mount, read every run, so a play that stopped between the edit and the remount is finished next time.
+- name: Read the live options of the root mount
+  ansible.builtin.command: findmnt -no OPTIONS --mountpoint /
+  register: dev_worker_root_opts
+  changed_when: false
+  check_mode: false
+  when: dev_worker_root_nodiscard | bool
+  tags: [fstrim]
+
+- name: Remount / nodiscard (live-safe on ext4; groups already flagged as trimmed need one reboot)
+  ansible.builtin.command: mount -o remount,nodiscard /
+  changed_when: true # only runs when / is mounted with discard (the when below)
+  when:
+    - dev_worker_root_nodiscard | bool
+    - "'discard' in dev_worker_root_opts.stdout.strip().split(',')"
+  tags: [fstrim]
+
+# ---- the daily trim ----
+- name: Enabled -- the trim script, its unit and timer
+  when: dev_worker_fstrim_enabled | bool
+  tags: [fstrim]
+  block:
+    # One script for the Talos node trim and this one: the CronJob's ConfigMap is generated from the same file.
+    - name: Install the chunked trim (node-fstrim.sh)
+      ansible.builtin.copy:
+        src: "{{ role_path }}/../../../kubernetes/apps/node-fstrim/node-fstrim.sh"
+        dest: /usr/local/sbin/node-fstrim
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render the trim's settings
+      ansible.builtin.template:
+        src: dev-worker-fstrim.env.j2
+        dest: /etc/default/dev-worker-fstrim
+        owner: root
+        group: root
+        mode: "0644"
+
+    # A new slot (dev_worker_fstrim_start, or AccuracySec) must not start a trim. systemd keeps, in memory, when a
+    # loaded timer last fired (or was started, if it has not fired since) and plans the next run from that, at every
+    # daemon-reload and at every start, so also across a stop + start or a restart. A new slot between that time
+    # and now is already due, and the trim starts at once: 00:30 -> 00:42 converged at 06:35 trims at 06:35, in the
+    # working day. (The new slot itself does take effect at the reload.) A timer that systemd has UNLOADED keeps
+    # nothing and plans from now. So when the timer's file is about to change, the timer is stopped and disabled
+    # first: nothing holds the unit any more and systemd drops it. The last task here enables and starts it again,
+    # after the reload. A trim already running is left alone. Measured on Ubuntu 24.04 (systemd 255), for a timer
+    # that has fired and one that has not: a bare reload, stop + reload + start and restart all start the trim at
+    # once; this does not (tests/fstrim-converge/converge.sh, "a new slot").
+    - name: Look for the timer's unit file
+      ansible.builtin.stat:
+        path: /etc/systemd/system/dev-worker-fstrim.timer
+      register: dev_worker_fstrim_timer_file
+
+    - name: Would the timer's unit file change?
+      ansible.builtin.template:
+        src: dev-worker-fstrim.timer.j2
+        dest: /etc/systemd/system/dev-worker-fstrim.timer
+        owner: root
+        group: root
+        mode: "0644"
+      check_mode: true
+      diff: false
+      register: dev_worker_fstrim_timer_next
+
+    - name: Stop and disable the timer before its unit file changes (enabled and started again below)
+      ansible.builtin.systemd:
+        name: dev-worker-fstrim.timer
+        state: stopped
+        enabled: false
+      when:
+        - dev_worker_fstrim_timer_file.stat.exists
+        - dev_worker_fstrim_timer_next is changed
+
+    - name: Install the trim's unit and timer
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - dev-worker-fstrim.service
+        - dev-worker-fstrim.timer
+      register: dev_worker_fstrim_units
+
+    - name: Ensure node_exporter's textfile directory exists
+      ansible.builtin.file:
+        path: "{{ dev_worker_fstrim_textfile_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    # Written by the role, not the script: a worker whose timer never fires still says the trim should run.
+    # DevWorkerTrimNotSucceeding reads it with the script's node_fstrim_last_success_timestamp_seconds
+    # (kubernetes/apps/infrastructure/monitoring/thin-pool-rules.yaml, job dev-worker-node): no complete run for
+    # 50 h, counted from this file's mtime on a new install. That covers a timer that stopped firing and nights
+    # that keep ending partial (exit 9 after 7 days).
+    - name: Mark the trim as enabled for the alerts
+      ansible.builtin.copy:
+        dest: "{{ dev_worker_fstrim_textfile_dir }}/dev_worker_fstrim_enabled.prom"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # HELP dev_worker_fstrim_enabled 1 while the dev_worker role has the daily chunked trim on for this worker.
+          # TYPE dev_worker_fstrim_enabled gauge
+          dev_worker_fstrim_enabled 1
+
+    # The stock weekly timer would trim every mount at once (one burst on the host's NVMe), on top of this one.
+    # Stopped before it is masked: the module masks first, and a running timer whose unit is masked loses what it
+    # triggers, so systemd fails it ("Unit to trigger vanished", result resources) and the worker is `degraded`.
+    - name: Stop and disable the stock weekly fstrim.timer
+      ansible.builtin.systemd:
+        name: fstrim.timer
+        state: stopped
+        enabled: false
+
+    - name: Mask the stock weekly fstrim.timer
+      ansible.builtin.systemd:
+        name: fstrim.timer
+        masked: true
+
+    # Loaded afresh after the stop above, the timer plans from now: no catch-up of a slot already passed today.
+    - name: Enable and start the daily trim timer
+      ansible.builtin.systemd:
+        name: dev-worker-fstrim.timer
+        enabled: true
+        state: started
+        daemon_reload: true
+      when: not (ansible_check_mode and dev_worker_fstrim_units is changed)
+
+- name: Disabled -- remove the daily trim and give the disks back to the stock weekly timer
+  when: not (dev_worker_fstrim_enabled | bool)
+  tags: [fstrim]
+  block:
+    # The settings file is the ownership marker: written before the stock timer is masked, removed only after it
+    # is back. So a takedown that stopped part-way (after the units went, before the stock timer came back) is
+    # finished by the next converge, and a worker that never had the daily trim is left alone.
+    - name: Look for an installed daily trim (its timer, or its settings file)
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - /etc/systemd/system/dev-worker-fstrim.timer
+        - /etc/default/dev-worker-fstrim
+      register: dev_worker_fstrim_installed
+
+    - name: Take down the daily trim
+      when: dev_worker_fstrim_installed.results | selectattr('stat.exists') | list | length > 0
+      block:
+        # Stopping a run is clean: the chunk in flight finishes first.
+        - name: Stop the timer and a running trim
+          ansible.builtin.systemd:
+            name: "{{ item.name }}"
+            state: stopped
+            enabled: "{{ item.enabled | default(omit) }}"
+          loop:
+            - { name: dev-worker-fstrim.timer, enabled: false }
+            - { name: dev-worker-fstrim.service }
+          loop_control:
+            label: "{{ item.name }}"
+          register: dev_worker_fstrim_stop
+          failed_when:
+            - dev_worker_fstrim_stop is failed
+            - "'Could not find the requested service' not in (dev_worker_fstrim_stop.msg | default(''))"
+
+        - name: Remove the trim, its units, state and metrics (the settings file goes last, below)
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "{{ dev_worker_fstrim_textfile_dir }}/dev_worker_fstrim_enabled.prom"
+            - "{{ dev_worker_fstrim_textfile_dir }}/node_fstrim.prom"
+            - /etc/systemd/system/dev-worker-fstrim.timer
+            - /etc/systemd/system/dev-worker-fstrim.service
+            - /usr/local/sbin/node-fstrim
+            - /var/lib/node-fstrim
+
+        # Ubuntu's fstrim.timer is OnCalendar=weekly, Persistent=true, RandomizedDelaySec=100min. Started, it plans
+        # its next run from its stamp, the time it last fired. Masked for weeks, that stamp is over a week old and
+        # the run is overdue: systemd 255 schedules it at its own start (the boot) plus the random delay, already
+        # past on a worker up for over 100 min, so it runs AT ONCE. That is a full fstrim of every mount, at
+        # whatever time this converge runs (06:35 for the fleet converge), on the NVMe the host's CI runners and
+        # other guests share, maybe during a runner's trim: the burst the daily trim exists to avoid. With the stamp
+        # set to now, the next run is the next weekly boundary (Monday 00:00 local, plus up to 100 min). The daily
+        # trim kept the disks trimmed until now, so nothing is owed. converge.sh (the control at the top, and "the
+        # kill switch") shows the catch-up with an old stamp, and none after this.
+        - name: Make sure the timers' stamp directory exists
+          ansible.builtin.file:
+            path: /var/lib/systemd/timers
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: Set the stock timer's last run to now, so starting it does not catch up the masked weeks at once
+          ansible.builtin.file:
+            path: /var/lib/systemd/timers/stamp-fstrim.timer
+            state: touch
+            owner: root
+            group: root
+            mode: "0644"
+
+        - name: Unmask and start the stock weekly fstrim.timer again
+          ansible.builtin.systemd:
+            name: fstrim.timer
+            masked: false
+            enabled: true
+            state: started
+            daemon_reload: true
+
+        - name: Remove the settings file, now that the stock timer is back
+          ansible.builtin.file:
+            path: /etc/default/dev-worker-fstrim
+            state: absent

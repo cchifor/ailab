@@ -259,3 +259,78 @@ tests:
             exp_annotations:
               summary: "Dev worker 192.168.0.9:9100: the daily trim has not completed for over 50 h"
               description: "dev-worker-fstrim on 192.168.0.9:9100 has not trimmed all of its mounts for over 50 h (two nights), so what the worker frees stays allocated in its host's thin pool. The beacon says why: `cat /var/lib/prometheus/node-exporter/node_fstrim.prom` (partial = the slot ran out; failed with exit 3 = IO pressure stayed high), and `journalctl -u dev-worker-fstrim`. Runbook: docs/runbooks/dev-workers.md \"Daily trim\"."
+
+  # The live dev-worker series carry the ServiceMonitor's endpoint/namespace/service labels too (checked on
+  # 2026-11-21: node_textfile_mtime_seconds{job="dev-worker-node", instance="192.168.0.9:9100",
+  # file="/var/lib/prometheus/node-exporter/...", endpoint="metrics", namespace="monitoring",
+  # service="dev-worker-node"}); the rule matches on (job, instance) only, so they ride along.
+  - interval: 1m
+    name: a dev worker whose trim never completed since it was enabled warns (the live label set)
+    input_series:
+      - series: 'node_textfile_mtime_seconds{job="dev-worker-node", instance="192.168.0.11:9100", endpoint="metrics", namespace="monitoring", service="dev-worker-node", file="/var/lib/prometheus/node-exporter/dev_worker_fstrim_enabled.prom"}'
+        values: "0x3200"
+      - series: 'dev_worker_fstrim_enabled{job="dev-worker-node", instance="192.168.0.11:9100", endpoint="metrics", namespace="monitoring", service="dev-worker-node"}'
+        values: "1x3200"
+      # nightly runs that end partial or fail: a beacon, but no success line
+      - series: 'node_fstrim_last_run_exit_code{job="dev-worker-node", instance="192.168.0.11:9100", endpoint="metrics", namespace="monitoring", service="dev-worker-node"}'
+        values: "0x3200"
+    alert_rule_test:
+      - eval_time: 50h30m
+        alertname: DevWorkerTrimNotSucceeding
+        exp_alerts: []
+      - eval_time: 52h
+        alertname: DevWorkerTrimNotSucceeding
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.11:9100"
+              endpoint: metrics
+              namespace: monitoring
+              service: dev-worker-node
+              file: /var/lib/prometheus/node-exporter/dev_worker_fstrim_enabled.prom
+            exp_annotations:
+              summary: "Dev worker 192.168.0.11:9100: the daily trim has not completed for over 50 h"
+              description: "dev-worker-fstrim on 192.168.0.11:9100 has not trimmed all of its mounts for over 50 h (two nights), so what the worker frees stays allocated in its host's thin pool. The beacon says why: `cat /var/lib/prometheus/node-exporter/node_fstrim.prom` (partial = the slot ran out; failed with exit 3 = IO pressure stayed high), and `journalctl -u dev-worker-fstrim`. Runbook: docs/runbooks/dev-workers.md \"Daily trim\"."
+
+  - interval: 1m
+    name: a dev worker whose timer stopped after a success warns once the success is 50 h old
+    input_series:
+      - series: 'node_textfile_mtime_seconds{job="dev-worker-node", instance="192.168.0.10:9100", file="/var/lib/prometheus/node-exporter/dev_worker_fstrim_enabled.prom"}'
+        values: "0x6000"
+      - series: 'dev_worker_fstrim_enabled{job="dev-worker-node", instance="192.168.0.10:9100"}'
+        values: "1x6000"
+      # the last success at 24 h, then nothing: the beacon stops changing
+      - series: 'node_fstrim_last_success_timestamp_seconds{job="dev-worker-node", instance="192.168.0.10:9100"}'
+        values: "_x1439 86400x4560"
+    alert_rule_test:
+      - eval_time: 74h30m
+        alertname: DevWorkerTrimNotSucceeding
+        exp_alerts: []
+      - eval_time: 76h
+        alertname: DevWorkerTrimNotSucceeding
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: dev-worker-node
+              instance: "192.168.0.10:9100"
+              file: /var/lib/prometheus/node-exporter/dev_worker_fstrim_enabled.prom
+            exp_annotations:
+              summary: "Dev worker 192.168.0.10:9100: the daily trim has not completed for over 50 h"
+              description: "dev-worker-fstrim on 192.168.0.10:9100 has not trimmed all of its mounts for over 50 h (two nights), so what the worker frees stays allocated in its host's thin pool. The beacon says why: `cat /var/lib/prometheus/node-exporter/node_fstrim.prom` (partial = the slot ran out; failed with exit 3 = IO pressure stayed high), and `journalctl -u dev-worker-fstrim`. Runbook: docs/runbooks/dev-workers.md \"Daily trim\"."
+
+  - interval: 1m
+    name: a dev worker enabled under 50 h ago, or switched off with an old beacon left behind, never warns
+    input_series:
+      # enabled at ~42 h, no success yet
+      - series: 'node_textfile_mtime_seconds{job="dev-worker-node", instance="192.168.0.8:9100", file="/var/lib/prometheus/node-exporter/dev_worker_fstrim_enabled.prom"}'
+        values: "150000x3600"
+      - series: 'dev_worker_fstrim_enabled{job="dev-worker-node", instance="192.168.0.8:9100"}'
+        values: "1x3600"
+      # switched off (the marker gone), an old success still scraped
+      - series: 'node_fstrim_last_success_timestamp_seconds{job="dev-worker-node", instance="192.168.0.9:9100"}'
+        values: "0x3600"
+    alert_rule_test:
+      - eval_time: 58h
+        alertname: DevWorkerTrimNotSucceeding
+        exp_alerts: []
