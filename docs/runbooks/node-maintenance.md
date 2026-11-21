@@ -305,7 +305,10 @@ Rollback: `pve_nfs_disk_gate_enabled: false` (removes the drop-in and the script
 `systemctl daemon-reload`.
 
 **The owner-gated test: one host reboot.** The owner picks the host and the window: the ai-nodes are processing
-data. This test has not been run; the timeout path is covered only by the Docker test (below).
+data. Run so far: **ai-node3, 2026-11-21, pass.** The gate logged "waiting" at 07:07:23.8Z and "ready after 5s" at
+07:07:28.7Z, and the first "Starting VM 4003" came at 07:07:29.1Z. The share itself mounted at 07:07:28.4Z, after
+pve-guests had begun, so the gate held cp3 for real. N = 5 s on ai-node3. ai-node1 and ai-node2 have not had a guarded
+boot yet. The timeout path is covered only by the Docker test (below).
 
 1. The rollout above is done on that host, and step 3 said ready.
 2. Take the host down as in "Planned drain / host reboot" (steps 0-4, with the CP shut down gracefully), and reboot it.
