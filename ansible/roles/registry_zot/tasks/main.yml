@@ -73,10 +73,36 @@
     group: "{{ registry_zot_group }}"
     mode: "0750"
 
+# A binary change restarts zot, and every start re-parses the whole store (7-19 min outage): never by accident.
+# stat runs in check mode too, so `--check` reports exactly what a real run would refuse or replace.
+- name: Read the installed zot binary's checksum
+  ansible.builtin.stat:
+    path: /usr/local/bin/zot
+    get_checksum: true
+    checksum_algorithm: sha256
+  register: registry_zot_installed
+
+- name: Refuse an unpinned version, or a binary change without registry_zot_allow_binary_change
+  ansible.builtin.assert:
+    that:
+      - registry_zot_version in registry_zot_sha256
+      - registry_zot_arch in registry_zot_sha256[registry_zot_version]
+      - >-
+        (not registry_zot_installed.stat.exists)
+        or registry_zot_installed.stat.checksum == registry_zot_sha256[registry_zot_version][registry_zot_arch]
+        or (registry_zot_allow_binary_change | bool)
+    fail_msg: >-
+      zot {{ registry_zot_version }} ({{ registry_zot_arch }}): either no sha256 in registry_zot_sha256 for that
+      version and arch (add it), or the installed binary
+      differs from it and registry_zot_allow_binary_change is false. Replacing the binary restarts zot (a full
+      store parse, 7-19 min): opt in explicitly, in a quiet window. docs/runbooks/registry-cache.md.
+    quiet: true
+
 - name: Install the zot binary
   ansible.builtin.get_url:
     url: "https://github.com/project-zot/zot/releases/download/{{ registry_zot_version }}/zot-linux-{{ registry_zot_arch }}"
     dest: /usr/local/bin/zot
+    checksum: "sha256:{{ registry_zot_sha256[registry_zot_version][registry_zot_arch] }}"
     mode: "0755"
     owner: root
     group: root
