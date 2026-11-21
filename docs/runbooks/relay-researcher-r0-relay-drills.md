@@ -197,7 +197,7 @@ R0 therefore never changes the Router's Secret:
   Router's Secret, and so its bound files, stay B.
 - The Router's ExternalSecret refreshes on its own every hour (`refreshInterval: 1h`), and a refresh while
   OpenBao holds a drill witness would rewrite it. So before each drill's W_R withdraws, while OpenBao still
-  holds B, `router_presync <latest R_R end>` (checklist step 5 helpers) requests a refresh and waits until ESO
+  holds B, `router_presync <B sha256> <latest R_R end>` (checklist step 5 helpers) requests a refresh and waits until ESO
   has done it (a newer `refreshTime`, Ready). The refresh changes no data. Its next scheduled refresh must
   fall after the drill's planned R_R end; a drill (W_R to R_R) takes about 20 minutes, inside the hour.
 - ESO also reconciles outside its schedule: on an ESO controller restart or leader change, a SecretStore or
@@ -471,7 +471,7 @@ are NEW.
 - **W_R, install a witness state in Relay; authority stays withdrawn.**
   1. Check the clock: it is no later than `t_s + 85 min` for a drill's install, and no later than
      `t_s + 105 min` for any roll. Otherwise §9. Then, **while OpenBao still holds B and before anything
-     else** (NEW, 2026-11-21): `router_presync <the drill's planned R_R end, epoch seconds>` must return 0,
+     else** (NEW, 2026-11-21): `router_presync <B sha256> <the drill's planned R_R end, epoch seconds>` must return 0,
      then `cap router-es-before-X router_es_refresh`. In R_R's own W_R (restoring B) this step is skipped: the
      drill's refresh window is still open.
   2. Withdraw: `lwrite withdraw`, then `plugin false` (`HTTP 200`, `disabled`). Relay has no worker
@@ -598,7 +598,9 @@ R_R ends withdrawn. Any other difference is F_R step 3: stop and escalate.
   (F3).
 - **C3.** R_R.
 
-**Production re-open (the owner confirms it after C3's readback).** Commands as checklist steps 7 and 8:
+**Production re-open (the owner confirms it after C3's readback).** First (NEW, 2026-11-21): the last
+drill's R_R step 5 passed (`router_es_refresh` unchanged, `rlinks_ok`), and `cap router-links-reopen rlinks_ok`
+passes again now; otherwise `roll_router` (checklist step 5's R) before the re-open. Commands as checklist steps 7 and 8:
 `lwrite open-B`, then `plugin true`. Readback:
 
 - `cap plugins-end plugins` (`active`), and `cap router-log-end rlog` (`available`);

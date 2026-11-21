@@ -843,14 +843,14 @@ router_es_next() {
   [ "${s:-0}" -gt 0 ] || { echo "cannot read refreshInterval '$i'"; return 1; }
   echo "last=$t interval=$i next=$(date -u -d "@$(( $(date -u -d "$t" +%s) + s ))" +%FT%TZ) next_epoch=$(( $(date -u -d "$t" +%s) + s ))"
 }
-# router_presync <latest R_R end, epoch seconds>: run BEFORE a drill's W_R withdraws, while OpenBao still holds B.
+# router_presync <B sha256> <latest R_R end, epoch seconds>: run BEFORE a drill's W_R withdraws, while OpenBao still holds B.
 # It requests a Router ExternalSecret refresh and waits (bounded, 2 minutes) until ESO has actually done it: a
 # refreshTime newer than before and Ready=True. Only then are the hashes checked (all B: the refresh changed no
 # data) and the next scheduled refresh compared with the drill's planned end. An annotation alone proves nothing:
 # a reconcile that ran later, with the drill witness in OpenBao, would rewrite the Router's Secret.
 router_presync() {
   local -; set -o pipefail
-  [ $# -eq 1 ] || { echo "usage: router_presync <latest R_R end, epoch seconds>"; return 2; }
+  [ $# -eq 2 ] || { echo "usage: router_presync <B sha256> <latest R_R end, epoch seconds>"; return 2; }
   local before now i next
   before="$(router_es_refresh | cut -d' ' -f1)" || return 1
   force_sync_router || return 1
@@ -860,10 +860,10 @@ router_presync() {
     sleep 5
   done
   [ "${now%% *}" -gt "$before" ] && [ "${now##* }" = True ] || { cap router-presync-timeout echo "refresh before=$before now=$now"; return 1; }
-  wait_hashes "$B_SHA" || return 1
+  wait_hashes "$1" || return 1
   next="$(router_es_next)" || return 1
-  cap router-es-presync echo "$next drill-end=$1"
-  [ "${next##*next_epoch=}" -gt "$1" ] || { echo "the Router ExternalSecret refreshes before the drill ends"; return 1; }
+  cap router-es-presync echo "$next drill-end=$2"
+  [ "${next##*next_epoch=}" -gt "$2" ] || { echo "the Router ExternalSecret refreshes before the drill ends"; return 1; }
 }
 # rlinks: the link count of the Router's three bound files, in EVERY Router Pod (selector app=llm-router, container
 # router). A subPath bind keeps the inode bound at container start; when the Secret's data changes, kubelet unlinks
