@@ -7,11 +7,12 @@ it ignores keepTags for that decision. So deleteReferrers is only safe for a rep
   1. every digest referenced from inside any index is ALSO a top-level entry (else a referrer of a live platform
      child would look orphaned), and
   2. no referrer that would be deleted carries a tag (it would lose a tag keepTags promises to keep).
-This walks the store READ-ONLY and exits 1 if either rule is broken for any repo. Run it on the registry LXC
-(node-ssh.py does not forward stdin, so push a temporary copy and remove it):
+This walks the store READ-ONLY and exits 1 if either rule is broken for any repo. Run it on the registry LXC, CT
+5005 on ai-node3 since the 2026-11-21 zot move (CT 5004 on ai-node1 is parked; node-ssh.py does not forward stdin,
+so push a temporary copy and remove it):
   B=$(base64 -w0 scripts/zot-referrer-orphan-check.py)
-  python scripts/node-ssh.py 192.168.0.2 "echo $B | base64 -d > /tmp/zroc.py && pct push 5004 /tmp/zroc.py \
-    /tmp/zroc.py && pct exec 5004 -- python3 /tmp/zroc.py strive/web; rc=\$?; pct exec 5004 -- rm -f /tmp/zroc.py; \
+  python scripts/node-ssh.py 192.168.0.4 "echo $B | base64 -d > /tmp/zroc.py && pct push 5005 /tmp/zroc.py \
+    /tmp/zroc.py && pct exec 5005 -- python3 /tmp/zroc.py strive/web; rc=\$?; pct exec 5005 -- rm -f /tmp/zroc.py; \
     rm -f /tmp/zroc.py; echo check-rc=\$rc; exit \$rc"
 The cleanup must not hide the result: only `check-rc=0` (and every line `"safe": true`) is a pass.
 Default store: /var/lib/registry/store; override with --root.
