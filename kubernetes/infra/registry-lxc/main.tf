@@ -92,9 +92,14 @@ resource "proxmox_virtual_environment_container" "registry" {
   # `start_on_boot` from its onboot flag. After the cutover CT 5004 is stopped with onboot 0 on purpose (it is the
   # rollback copy, kept off 192.168.0.36), and an apply must never start it or re-arm it at boot. Run state and
   # onboot of this CT are set by hand (pct) from here on.
+  # network_interface (review #1927): its net0 carries link_down=1, set by hand, so this copy can never answer
+  # on .36 next to CT 5005. bpg 0.123.1 does not model link_down for containers (it reads `enabled` back as true),
+  # so any apply that rewrote net0 would drop link_down=1 and put a second .36 on the wire. Do NOT express it as
+  # `enabled = false` either: for a container that DELETES net0 (container.go: !ni.Enabled -> Delete). So tofu
+  # never touches this CT's NIC.
   lifecycle {
     prevent_destroy = true
-    ignore_changes  = [started, start_on_boot]
+    ignore_changes  = [started, start_on_boot, network_interface]
   }
 }
 

@@ -250,7 +250,10 @@ class ActiveRegistryAfterCutover(unittest.TestCase):
         old = self._block(main, 'resource "proxmox_virtual_environment_container" "registry" ')
         self.assertRegex(old, r"node_name\s*=\s*var\.registry_lxc\.node_name")
         self.assertRegex(old, r"vm_id\s*=\s*var\.registry_lxc\.vm_id")
-        self.assertRegex(old, r"ignore_changes\s*=\s*\[started, start_on_boot\]")
+        # the hand-set link_down=1 on net0 must survive any apply: tofu never touches the retired CT's NIC
+        self.assertRegex(old, r"ignore_changes\s*=\s*\[started, start_on_boot, network_interface\]")
+        # and never as enabled = false, which deletes a container's net0 in bpg 0.123.1
+        self.assertNotRegex(old, r"(?m)^\s*enabled\s*=\s*false")
         self.assertRegex(old, r"prevent_destroy\s*=\s*true")
         new = self._block(main, 'resource "proxmox_virtual_environment_container" "registry_n3" ')
         self.assertRegex(new, r"ignore_changes\s*=\s*\[started\]")
