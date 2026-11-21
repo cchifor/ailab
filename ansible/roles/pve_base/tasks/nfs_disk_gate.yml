@@ -1,0 +1,88 @@
+---
+# Boot-order guard for onboot VMs with a disk on NFS (pve_nfs_disk_gate_*; defaults/main.yml has the why).
+# `just nfs-disk-gate --limit <host>` (tags: nfs_disk_gate) converges only this; every task here carries the tag.
+# Not gated in main.yml: switched off, it removes what an earlier converge installed.
+# It never starts, stops or restarts pve-guests (that would start or stop every guest, and PVE refuses it): the
+# drop-in takes effect at the next boot. A daemon-reload makes systemd load it now, so the check below reads it.
+- name: Check the NFS disk gate settings
+  ansible.builtin.assert:
+    that:
+      - pve_nfs_disk_gate_storages | length > 0
+      - pve_nfs_disk_gate_storages | select('match', '^[A-Za-z][A-Za-z0-9_.-]*$') | list | length == pve_nfs_disk_gate_storages | length
+      - (pve_nfs_disk_gate_timeout_s | string) is match('^[0-9]+$')
+      - pve_nfs_disk_gate_timeout_s | int >= 30
+      - pve_nfs_disk_gate_timeout_s | int <= 3600
+    fail_msg: >-
+      pve_nfs_disk_gate_storages={{ pve_nfs_disk_gate_storages | to_json }} must be Proxmox storage IDs, and
+      pve_nfs_disk_gate_timeout_s={{ pve_nfs_disk_gate_timeout_s }} whole seconds from 30 to 3600
+    quiet: true
+  when: pve_nfs_disk_gate_enabled | bool
+  tags: [nfs_disk_gate]
+
+- name: Enabled -- the gate script and its pve-guests drop-in
+  when: pve_nfs_disk_gate_enabled | bool
+  tags: [nfs_disk_gate]
+  block:
+    - name: Install the NFS disk gate script
+      ansible.builtin.copy:
+        src: pve-nfs-disk-gate.sh
+        dest: /usr/local/sbin/pve-nfs-disk-gate
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Ensure the pve-guests drop-in directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/pve-guests.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Install the pve-guests drop-in
+      ansible.builtin.template:
+        src: pve-guests-nfs-disk-gate.conf.j2
+        dest: /etc/systemd/system/pve-guests.service.d/10-ailab-nfs-disk-gate.conf
+        owner: root
+        group: root
+        mode: "0644"
+      register: pve_nfs_disk_gate_dropin
+
+    - name: Reload systemd (pve-guests itself is not touched)
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: pve_nfs_disk_gate_dropin is changed and not ansible_check_mode
+
+    # A drop-in that --check did not write cannot be read back in check mode either.
+    - name: Read pve-guests' ExecStartPre as systemd loaded it
+      ansible.builtin.command: systemctl show -p ExecStartPre --value pve-guests.service
+      register: pve_nfs_disk_gate_loaded
+      changed_when: false
+      check_mode: false
+      when: not (ansible_check_mode and pve_nfs_disk_gate_dropin is changed)
+
+    - name: Check that systemd runs the gate before startall and ignores its exit status
+      ansible.builtin.assert:
+        that:
+          - pve_nfs_disk_gate_loaded.stdout is search('argv\[\]=/usr/bin/env GATE_STORAGES=[^;]* /usr/local/sbin/pve-nfs-disk-gate ; ignore_errors=yes')
+        fail_msg: "pve-guests.service does not run the gate as '-' ExecStartPre: {{ pve_nfs_disk_gate_loaded.stdout }}"
+        quiet: true
+      when: pve_nfs_disk_gate_loaded is not skipped
+
+- name: Disabled -- remove the drop-in and the script
+  when: not (pve_nfs_disk_gate_enabled | bool)
+  tags: [nfs_disk_gate]
+  block:
+    - name: Remove the pve-guests drop-in and the gate script
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/systemd/system/pve-guests.service.d/10-ailab-nfs-disk-gate.conf
+        - /usr/local/sbin/pve-nfs-disk-gate
+      register: pve_nfs_disk_gate_removed
+
+    - name: Reload systemd after removing the drop-in
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: pve_nfs_disk_gate_removed is changed and not ansible_check_mode

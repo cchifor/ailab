@@ -1,8 +1,10 @@
 """The nightly Talos node trim's manifests (kubernetes/apps/node-fstrim).
 
-A trim is a discard burst on the NVMe that a Proxmox host's etcd member shares, so the trims take turns:
-- every Talos node the tofu modules declare (the control planes, the agent nodes, the relay-worker pool) has
-  exactly one CronJob, pinned to that node by hostname, and no CronJob names a node that does not exist;
+A trim is a discard burst on a Proxmox host's local NVMe, so the trims take turns:
+- every Talos node the tofu modules declare ON local-lvm (its module's vm_datastore) has exactly one CronJob,
+  pinned to that node by hostname, and no CronJob names a node that does not exist or is not on local-lvm;
+- no CronJob targets a control plane: their disks are raw files on qnap-nfs since 2026-11-20 (ADR 0043), where a
+  discard reclaims no thin space and becomes hole-punching over NFS on the share etcd's WAL fsync depends on;
 - each CronJob's worst case (a start up to startingDeadlineSeconds late, the Job's activeDeadlineSeconds, then
   terminationGracePeriodSeconds for the chunk in flight) ends before the next node's slot starts, all of it
   between Velero (02:00, + 30 min) and the off-site sync (04:00);
@@ -36,19 +38,35 @@ def hm(m):
     return f"{m // 60:02d}:{m % 60:02d}"
 
 
-def tofu_nodes():
-    """{k8s node name: (proxmox host, taints)} from the tofu modules."""
-    out = {}
+def vm_datastore(variables_tf):
+    """The default of a tofu module's `vm_datastore` variable: where its VMs' boot disks live."""
+    text = variables_tf.read_text(encoding="utf-8")
+    m = re.search(r'variable\s+"vm_datastore"\s*\{.*?^\s*default\s*=\s*"([^"]+)"', text, re.S | re.M)
+    assert m, f"no vm_datastore default in {variables_tf}"
+    return m.group(1)
+
+
+def control_planes():
+    """The control-plane node names, from the CP module's control_planes map."""
     cps = (INFRA / "variables.tf").read_text(encoding="utf-8")
-    for key, host in re.findall(r'^\s*(cp\d+)\s*=\s*\{\s*host_node\s*=\s*"([^"]+)"', cps, re.M):
-        out[f"talos-{key}"] = (host, set())
+    return {f"talos-{key}": host
+            for key, host in re.findall(r'^\s*(cp\d+)\s*=\s*\{\s*host_node\s*=\s*"([^"]+)"', cps, re.M)}
+
+
+def tofu_nodes():
+    """{k8s node name: (proxmox host, taints, the boot disk's datastore)} from the tofu modules."""
+    out = {}
+    cp_ds = vm_datastore(INFRA / "variables.tf")
+    for name, host in control_planes().items():
+        out[name] = (host, set(), cp_ds)
+    agent_ds = vm_datastore(INFRA / "agent-nodes/variables.tf")  # the agent nodes and the relay workers
     agents = (INFRA / "agent-nodes/variables.tf").read_text(encoding="utf-8")
     labels = (INFRA / "agent-nodes/node-labels.tf").read_text(encoding="utf-8")
     m = re.search(r'kubernetes_node_taint" "agent".*?key\s*=\s*"([^"]+)".*?value\s*=\s*"([^"]+)".*?effect\s*=\s*"([^"]+)"',
                   labels, re.S)
     agent_taint = (m.group(1), m.group(2), m.group(3))
     for host, hostname in re.findall(r'node_name\s*=\s*"([^"]+)".*?hostname\s*=\s*"([^"]+)"\s*\}', agents):
-        out[f"talos-{hostname}"] = (host, {agent_taint})
+        out[f"talos-{hostname}"] = (host, {agent_taint}, agent_ds)
     # The relay workers' taint is Talos's own (machine.nodeTaints in their machine-config template).
     tpl = yaml.safe_load((INFRA / "agent-nodes/machine-config/relay-worker.yaml.tftpl").read_text(encoding="utf-8"))
     [(k, v)] = tpl["machine"]["nodeTaints"].items()
@@ -62,8 +80,13 @@ def tofu_nodes():
     listed = dict(re.findall(r'^\s*(relay-worker-\d+)\s*=\s*\{\s*\n\s*node_name\s*=\s*"([^"]+)"', example, re.M))
     assert allowed and allowed == listed, f"relay-workers.tf allows {allowed}, the example lists {listed}"
     for name, host in allowed.items():
-        out[name] = (host, {rw_taint})
+        out[name] = (host, {rw_taint}, agent_ds)
     return out
+
+
+def trimmed_nodes():
+    """The nodes that get a CronJob: those whose boot disk is a thin LV on local-lvm."""
+    return {n: v for n, v in tofu_nodes().items() if v[2] == "local-lvm"}
 
 
 def load_tree():
@@ -112,16 +135,26 @@ class NodeFstrimManifests(unittest.TestCase):
         self.ctr = self.pod["containers"][0]
         self.env = {e["name"]: e["value"] for e in self.ctr["env"]}
 
-    def test_one_cronjob_per_talos_node(self):
-        nodes = tofu_nodes()
-        self.assertEqual(7, len(nodes), nodes)
-        self.assertEqual(sorted(nodes), sorted(o["node"] for o in self.overlays.values()))
+    def test_one_cronjob_per_talos_node_on_local_lvm(self):
+        self.assertEqual(7, len(tofu_nodes()), tofu_nodes())
+        self.assertEqual(sorted(trimmed_nodes()), sorted(o["node"] for o in self.overlays.values()))
         for name, o in self.overlays.items():
             self.assertEqual(name, o["node"], "the overlay's directory names its node")
             self.assertEqual(f"-{name}", o["suffix"])
             self.assertEqual(["../../base"], o["resources"])
         self.assertEqual(sorted(f"nodes/{n}" for n in self.overlays),
                          sorted(r for r in self.top["resources"] if r.startswith("nodes/")))
+
+    def test_no_cronjob_targets_a_control_plane(self):
+        cps = control_planes()
+        self.assertEqual(["talos-cp1", "talos-cp2", "talos-cp3"], sorted(cps))
+        self.assertEqual("qnap-nfs", vm_datastore(INFRA / "variables.tf"),
+                         "the CP disks are back on local-lvm? Then restore their CronJobs (ADR 0043 Rollback)")
+        for name, o in self.overlays.items():
+            self.assertNotIn(o["node"], cps, f"nodes/{name} trims a control plane")
+        self.assertEqual([], [r for r in self.top["resources"] if any(cp in r for cp in cps)])
+        for d in (TREE / "nodes").iterdir():
+            self.assertNotIn(d.name, cps, "a control plane's overlay directory is still in the tree")
 
     def test_the_slots_are_one_node_at_a_time_inside_the_band(self):
         self.assertEqual([], slot_problems(self.base, self.overlays))
@@ -136,7 +169,7 @@ class NodeFstrimManifests(unittest.TestCase):
 
     def test_tolerations_cover_every_node_taint_and_nothing_broader(self):
         tol = {(t["key"], t.get("value"), t["effect"]) for t in self.pod["tolerations"]}
-        for name, (_host, taints) in tofu_nodes().items():
+        for name, (_host, taints, _ds) in trimmed_nodes().items():
             for t in taints:
                 self.assertIn(t, tol, f"{name} carries {t}")
         for t in self.pod["tolerations"]:
@@ -188,10 +221,10 @@ class NodeFstrimManifests(unittest.TestCase):
         return slot_problems(self.base, o)
 
     def test_two_nodes_in_one_slot_overlap(self):
-        self.assertTrue(any("overlaps" in p for p in self.mutate("talos-cp3", "42 2 * * *")))
+        self.assertTrue(any("overlaps" in p for p in self.mutate("talos-agent-node-2", "30 2 * * *")))
 
     def test_a_slot_too_close_to_the_next_overlaps(self):
-        self.assertTrue(any("overlaps" in p for p in self.mutate("talos-cp3", "52 2 * * *")))
+        self.assertTrue(any("overlaps" in p for p in self.mutate("talos-agent-node-2", "40 2 * * *")))
 
     def test_a_slot_into_the_offsite_sync_leaves_the_band(self):
         self.assertTrue(any("band" in p for p in self.mutate("relay-worker-1", "52 3 * * *")))

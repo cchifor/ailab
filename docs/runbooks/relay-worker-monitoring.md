@@ -1,6 +1,9 @@
 # Relay worker and independent authority monitoring
 
-These components are opt-in; this PR selects none in a live Kustomization.
+These components are opt-in. Hub upgrade step H6
+([relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md)) selects
+`relay-worker-monitoring` in the Relay overlay with `relay-control-monitoring`;
+`relay-candidate-monitoring` stays unselected.
 Activate only after the matching Relay collector implementation and its full
 migration set are reviewer-merged and deployed. [Relay #277](https://git.chifor.me/cchifor/relay/issues/277)
 tracks that delivery. The [Relay operations runbook](https://git.chifor.me/cchifor/relay/src/branch/main/docs/worker-operations-monitoring.md)
@@ -14,7 +17,7 @@ Enable `kubernetes/components/relay-worker-monitoring` only alongside the existi
 `relay-control-monitoring` component and its separately provisioned collector
 Secrets. The application collector limit is 200; Relay's complete render currently
 has 126 samples (including 40 histogram samples), with a tested ceiling of 160.
-Both components stay off until the operator's reviewed rollout. Remove their
+Both came on together in the operator's reviewed rollout (hub upgrade step H6). Remove their
 collector and absence/schema rules together during intentional deactivation.
 
 The worker rules cover delayed enrollment/fence receipt, queued lifecycle work,

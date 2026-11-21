@@ -9,20 +9,23 @@ exact settings, their order, the readbacks and what rollback means. The installa
 [relay-researcher-installation.md](relay-researcher-installation.md), staged with its manifests in
 ailab #1766 (a separate PR; either can merge first).
 
-State (hub operator readback on 2026-11-16 after the H4a roll, 17:33Z; agent pin updated 2026-11-18;
-recheck before acting):
+State (hub operator readbacks through 2026-11-21 01:00Z: H4a on 2026-11-16, H6 on 2026-11-20; agent
+pin updated 2026-11-18; recheck before acting):
 - Relay v0.10.4, source `e77bd09a`, image `registry.chifor.me/relay/control-plane@sha256:d1482bc1…57a7`
-  (ailab #1789), schema 79;
+  (ailab #1789), schema 79, is live until H8's roll; H8 (ailab #1915) pins v0.10.9, source `04a897f2`,
+  image `…@sha256:1b0f2f72…7a39`, and this line changes to it with H8's readback;
 - the first recovery generation is initialized, and installations are enabled (H3);
 - installation `b380ff7f-0716-478d-8b01-3d39f30e750b` is `ready`, epoch 2, with its fence UID pinned
   (installation runbook I1-I10), and the slot is on its qualification egress stage (Q1-Q5);
 - the budget client files are mounted (H4a, ailab #1805);
 - the infrastructure agent is now v0.10.6 (`1599d06e`), an agent-only update pinned by
   `docs/relay-workers/researcher-binding-inputs.json` `agentRelease`. Its `release` still pins the
-  runtime and binding to v0.10.3 (`c0fe50f0`); the hub remains v0.10.4. A later agent update is not a
+  runtime and binding to v0.10.3 (`c0fe50f0`); the hub is v0.10.4 until H8. A later agent update is not a
   replacement pin until its own reviewed update lands;
-- no Router connection, no agent control plane, no control monitoring, no candidate files and no profile
-  registry yet. H6 is ailab #1811, held while its preconditions are open.
+- H6 is applied (ailab #1811, 2026-11-20): the Router connection file, the agent control plane and control
+  monitoring are in the running Pod. No worker pool is approved and `router_connections` is empty: in
+  v0.10.4 the first inference pool cannot be approved (H8). No candidate files and no profile registry
+  yet.
 
 Before this work the hub was Relay v0.9.1 (`a53a3ee8`, schema 56, no installation and no recovery
 generation). Every write below is an operator action with the owner's direct confirmation for the exact
@@ -32,7 +35,7 @@ The per-run ceremony for H7's signed candidate runs is [relay-researcher-qualifi
 
 ## Staged here
 
-| Component (H3 and H4a included by `kubernetes/apps/apps/relay`) | Sets | Step |
+| Component (`kubernetes/apps/apps/relay` includes each from its step: H3, H4a and H6 so far) | Sets | Step |
 | --- | --- | --- |
 | `relay-restore-fencing` (existing) | `RELAY_RECOVERY_GENERATION_FILE` from the operator's `relay-recovery-generation` ConfigMap | H3 |
 | `relay-infrastructure-installations` (new) | `RELAY_INFRASTRUCTURE_INSTALLATIONS=1` | H3 |
@@ -43,14 +46,16 @@ The per-run ceremony for H7's signed candidate runs is [relay-researcher-qualifi
 | `relay-control-monitoring`, `relay-worker-monitoring` (existing) | control metrics and worker alerts | H6 |
 | `relay-worker-candidate` (new) | `RELAY_WORKER_CANDIDATE_FILE`, `_SHA256`, `_SESSION_KEY_FILE`; the run's document ConfigMap and the key-copy init container; `run/` is generated per signed run ([relay-candidate-run-generator.md](relay-candidate-run-generator.md)) | H7 |
 
-`scripts/tests/test_relay_v060_activation_gate.py` refuses H6's Router connection and agent control plane,
-H7's candidate files and H4b's profile registry in the live overlay (not H6's monitoring components); each step's PR removes exactly its own
-entries from that list. `relay-restore-fencing` stays includable on its own, because
-a restore of the hub needs it with or without installations. `test_relay_researcher_hub_upgrade.py`
+`scripts/tests/test_relay_v060_activation_gate.py` refuses H7's candidate files and H4b's profile registry in
+the live overlay; each step's PR removes exactly its own entries from that list (H3's installation pair and
+H6's Router connection and agent control plane are gone; H6's monitoring components were never on it).
+`relay-restore-fencing` stays includable on its own, because a restore of the hub needs it with or without
+installations. `test_relay_researcher_hub_upgrade.py`
 pins each patch, and refuses installations without the recovery generation (one way only), the profile
 registry without the installations and budget client or with a placeholder or wrong SHA, the control
 plane without the Router connection or next to `RELAY_ENVIRONMENTS`, `relay-gitea-authority` or
-`relay-notifications`, the candidate files without H6 or next to the profile registry, and an H3 that
+`relay-notifications`, the control-plane collector without the control plane (Relay refuses to start)
+and the worker alerts without the collector, the candidate files without H6 or next to the profile registry, and an H3 that
 runs the fence script; `test_relay_candidate_run.py` refuses a placeholder `run/` in the overlay and any
 committed `run/` or agent candidate value that is not `scripts/relay-candidate-run.py`'s output for the
 committed run. It does not require the registry for the
@@ -66,8 +71,8 @@ includes (H3 and H4a on).
 | Value | Where it goes | From |
 | --- | --- | --- |
 | Hub image digest | both `registry.chifor.me/relay/control-plane@sha256:…` lines of `kubernetes/apps/apps/relay/relay.yaml` (`migrate` and `relay`) | the release's `deployment-images-<run>.json` receipt |
-| Source commit, release name | the `chifor.me/source-commit` and `chifor.me/release` annotations and the two image comments | the hub receipt: `e77bd09a4d9179d81ebf5d01ac26c535d1eb8433`, `relay-0.10.4-release-134512`; distinct from the installation's runtime `sourceCommit` |
-| N, the target schema | readback only | `CURRENT_SCHEMA_VERSION` in `server/schema.ts` and the highest `migrations/NNN_*.sql` at the hub commit `e77bd09a` (both 79) |
+| Source commit, release name | the `chifor.me/source-commit` and `chifor.me/release` annotations and the two image comments | the hub receipt: `04a897f22678cd59d2af3e01680a793bf63eb85f`, `relay-0.10.9-release-143446` (H8; before it `e77bd09a…`, `relay-0.10.4-release-134512`); distinct from the installation's runtime `sourceCommit` |
+| N, the target schema | readback only | `CURRENT_SCHEMA_VERSION` in `server/schema.ts` and the highest `migrations/NNN_*.sql` at the pinned hub commit (`04a897f2` after H8, `e77bd09a` before; both 79) |
 | Recovery generation UUID | the operator-created ConfigMap `relay/relay-recovery-generation` (never in git, never in a backup) | `uuid.uuid4()` at step H3 |
 | Profile registry, its SHA-256 | `kubernetes/components/relay-worker-profiles/profiles.json` and that component's `RELAY_WORKER_PROFILES_SHA256` | the release's researcher profile package, with the genuine release approval and the qualified `tokenPolicyDigests` (step H4b) |
 
@@ -484,6 +489,46 @@ activation gate's forbidden list. Readback: the mounted file's SHA-256 inside th
 the log has no `worker_budget_authority_unavailable` with reason `profiles-unavailable` (the registry
 failed to load or validate); budget startup is still `started`.
 
+### H8. v0.10.9: owner pool approval materializes the Router connection
+
+Why: in v0.10.4 pool approval (`POST /api/worker-pools`) refuses any pool with an inference policy
+unless an enabled `router_connections` row exists, and only Router credential issuance wrote that row;
+issuance needs an approved pool. The first inference pool could never be approved (ailab #1753
+comment 134379; live: `router_connections` and `agent_environment_pools` empty). Relay #569 (main
+`69b1ae62`), released as v0.10.9 (#570, `04a897f2`, run 143446): in the approval transaction, under the
+router-credentials lock taken after the environment lock, Relay inserts the row issuance would write
+from the mounted connection record whose `tenants` include the approving tenant (`ON CONFLICT DO
+NOTHING`), re-reads it and refuses on a disabled row or origin/digest drift. It never updates or
+re-enables a row; a failed approval leaves none. No Router call, key, binding or budget change. Hub
+only, no migrations (schema 79), so re-pinning v0.10.4 (`d1482bc1…57a7`) is a valid rollback; a rollback
+does not remove a row or pool approved meanwhile.
+
+Change: this PR pins the v0.10.9 digest in `migrate` and `relay`, with the annotations. One Recreate
+roll by the merge itself (Flux), with the pre-migration backup; outside the QNAP windows.
+
+Readback after the roll (operator):
+
+- one Running Pod; source `04a897f22678cd59d2af3e01680a793bf63eb85f`, release
+  `relay-0.10.9-release-143446`; the `relay` container's image ID ends in `sha256:1b0f2f729f78d4b166d9f6e6d36402df924ae2fe1481dbb5c486e9bb0ab37a39`; the migrate init
+  container exited 0 and `schema_migrations` reads `79|79`; the env is unchanged from H6 (the
+  generation file, installations, budget files, `RELAY_ROUTER_CONNECTIONS_FILE`,
+  `RELAY_AGENT_CONTROL_PLANE`);
+- the admin `GET /api/router-credentials/connections` lists `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`
+  with origin `https://router.chifor.me`;
+- `SELECT count(*) FROM router_connections` and `SELECT count(*) FROM agent_environment_pools` are
+  still 0 (tenant-scoped; nothing is created by the roll).
+
+After the owner approves the pool in their own session (owner rule, ailab #1799), tenant-scoped:
+
+- exactly one `router_connections` row: tenant `00000000-0000-4000-8000-000000000001`, id
+  `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`, name `ailab llm-router`, origin `https://router.chifor.me`,
+  `enabled` true, `deployment_digest`
+  `547353ac649b454646cad921598d8e231c5e9db41c8e99b028351969e1a261ad` (Relay's `deploymentDigest` of
+  the mounted record);
+- the pool at revision 1 with `approved_by` the owner's `users.id` and its approval audit entry;
+- credential, binding and issuance-operation counts unchanged by the approval. Pool approval does not
+  establish worker readiness.
+
 ## Enablement order at a glance
 
 | Step | Change | Must already hold | Readback that gates the next step |
@@ -498,7 +543,8 @@ failed to load or validate); budget startup is still `started`.
 | Q1-Q6 | internal TLS terminators (`relay-internal-tls`), then the slot's qualification egress stage (Q6 is the drill configuration) | I10; the release's G3 binding and CA pins | Q5: both Certificates Ready and chaining to the pinned root, Services `10.96.0.40`/`.41`, live policy digest `f6d3187c…282f`. The third alias, the candidate journal's Service at `10.96.0.42`, is not created here: it comes with the journal itself ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) before H7's candidate files |
 | journal | the independent candidate journal ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) | per that runbook | its Service on exactly `10.96.0.42` (Q2's `pinned` check) |
 | File B | budget ledger step 7's `qualifications` row (ailab #1753 comment 124071) | the final Router rollout read back | the stored policy re-verified, its `tokenPolicyDigest` recorded for the signed runs |
-| H7 | candidate files: `relay-worker-candidate`, first included for R0 (never granted), reset, then included again for R1; each run's values generated (the canary file follows the approval; the qualification file is general activation, step 11) | H6, Q5's readback, the journal at `10.96.0.42`, File B, the run's session-key Secret | init container exit 0, the run's pin in the Pod, budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
+| H8 | hub image → v0.10.9 (pool approval materializes the Router connection) | the roll: H4a's state only (no new settings); its connection readback and the owner's pool approval: H6 (applied) | v0.10.9 digest running, schema still 79, connection listed, `router_connections` and pools still empty; then the owner approves the pool and exactly one connection row appears |
+| H7 | candidate files: `relay-worker-candidate`, first included for R0 (never granted), reset, then included again for R1; each run's values generated (the canary file follows the approval; the qualification file is general activation, step 11) | H6, H8 with the owner-approved pool (one connection row), Q5's readback, the journal at `10.96.0.42`, File B, the run's session-key Secret | init container exit 0, the run's pin in the Pod, budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
 | scenarios | the nineteen qualification scenarios | H7's candidate files | the nineteen reports, independently accepted |
 | approval | a genuine `ReleaseApproval` | the nineteen reports and the other release gates accepted | its `workerTemplates` subject asserts the nine passed gates |
 | canary | H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
@@ -525,6 +571,8 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
   generation. That fence retires the restored database's connectors, keys, sessions and memberships:
   it is the cost of restoring, not of initializing.
 - **H4a, H6 and H4b:** revert that step's inclusion PR; nothing in the database changes.
+- **H8:** a reviewed PR re-pins v0.10.4 (`d1482bc1…57a7`); schema 79 is unchanged. A connection row or
+  pool approved under v0.10.9 stays, and v0.10.4 accepts it (its check only reads the row).
 - **H7's candidate files:** the next run's PR replaces a run's values; before the canary one PR drops
   the component and resets `run/` and the agent's candidate values (`scripts/relay-candidate-run.py reset`). Removing the file stops
   new candidate admission; Relay keeps the candidate rows it already wrote. Before

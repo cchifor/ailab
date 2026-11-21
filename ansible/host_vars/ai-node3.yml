@@ -11,6 +11,13 @@
 # clean boolean conditional under ansible-core 2.21's strict checking.
 storage_router_enabled: true
 
+# Nightly trim of the running containers' local-lvm volumes (role pve_base, tag lxc_fstrim;
+# docs/runbooks/node-maintenance.md "LXC volume trim (nightly)"): the LLM container 5003's rootfs and
+# /models-local (134 GiB freed but untrimmed on 2026-11-20). The hosts take turns, 20 min each: ai-node2
+# 04:30, this host 04:50, ai-node1 05:10.
+pve_lxc_fstrim_enabled: true
+pve_lxc_fstrim_start: "04:50"
+
 # Thunderbolt/USB4 PCIe-tunnel boot params for the TB->10GbE storage adapter (Ubiquiti UACC,
 # AQC113/atlantic). On this BOSGAME M5 (Ryzen AI Max 395) the adapter won't enumerate without them —
 # a retimer-disconnect / "PCIe tunnel activation failed: -19" loop until link-up. Confirmed AMD-USB4

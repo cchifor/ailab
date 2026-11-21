@@ -24,14 +24,17 @@ kind: Component
 #   * NODE_EXTRA_CA_CERTS = the ailab-ca root, because baoOrigin is the in-cluster OpenBao Service
 #     whose certificate ailab-ca issues; public origins keep Node's bundled roots;
 #   * one additive egress NetworkPolicy to the OpenBao server pods on 8200.
-# It does NOT set RELAY_AGENT_CONTROL_PLANE: the credential APIs and worker admission stay with the
-# reviewed researcher release and its own flags.
+# It does NOT set RELAY_AGENT_CONTROL_PLANE: that is ../relay-agent-control-plane, its own component.
 #
-# NOT INCLUDED by kubernetes/apps/apps/relay. scripts/tests/test_relay_v060_activation_gate.py refuses
-# both RELAY_ROUTER_CONNECTIONS_FILE and this component's name in the live Relay overlay, and
-# scripts/tests/test_relay_router_connection.py refuses any inclusion of this directory. The operator's
-# inclusion PR changes both deliberately, LAST in the runbook order: after the budget authority is
-# ready=true and the researcher release that reads these settings is deployed.
+# INCLUDED by kubernetes/apps/apps/relay since hub upgrade step H6
+# (docs/runbooks/relay-researcher-hub-upgrade.md; step 10 of relay-router-connection.md), together with
+# ../relay-agent-control-plane and the control and worker monitoring. The live hub (Relay v0.10.4,
+# e77bd09a) reads RELAY_ROUTER_CONNECTIONS_FILE (server/config.ts); NODE_EXTRA_CA_CERTS is read by
+# the Node runtime at startup, not by Relay's code. scripts/tests/test_relay_router_connection.py
+# requires the live Relay overlay to be the only includer. Including it needs the budget authority
+# ready=true, the Router plugin enabled and Secret relay/relay-router-files Ready (the escrow token
+# minted); without that Secret the Pod cannot mount its volumes. Including or removing it is a Recreate
+# rollout of Relay (with its pre-migration backup).
 configMapGenerator:
 - name: relay-router-connection
   namespace: relay

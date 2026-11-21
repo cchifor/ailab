@@ -7,11 +7,14 @@
 #   * chifor.me/source-commit records the pinned Relay commit (from ../pins), as the hub's does.
 # The image is the ONLY other pinned value; it also comes from ../pins.
 #
-# Placement: the control agent stays OFF the worker pool. talos-agent-node-3 was the least-loaded
-# agent node in the operator's 2026-11-10 report; re-check headroom read-only before including this
-# (runbook step I7). Relay's preparation refuses the definition unless every worker placement has a
-# nodeSelector key that the control placement sets to a different value, so the researcher binding's
-# placement must carry kubernetes.io/hostname: relay-worker-1.
+# Placement: the control agent stays OFF the worker pool and may run on ANY agent node
+# (talos-agent-node-1/2/3). Until 2026-11-20 it was pinned to talos-agent-node-3 by hostname, and the
+# drain of that node on 2026-11-19 left it unschedulable for 31 minutes. Relay's preparation refuses
+# the definition unless every worker placement has a nodeSelector key that the control placement sets
+# to a different value: the worker placement (relay-worker-1) carries ailab.io/relay-worker-pool=true,
+# and the agent selects ailab.io/relay-worker-pool=false, which kubernetes/infra/agent-nodes/
+# node-labels.tf sets on the three agent nodes. That label must exist before this selector rolls out
+# (runbook "Names and placement", step I7); re-check headroom across the pool read-only first.
 #
 # Secrets, by NAME only (no value is in git): relay-infrastructure-agent-key (key installation.pem,
 # PKCS#8 Ed25519), created by the operator at runbook step I8. The one-use enrollment token
@@ -56,7 +59,7 @@ spec:
       terminationGracePeriodSeconds: 30
       nodeSelector:
         ailab.io/agent-pool: "true"
-        kubernetes.io/hostname: talos-agent-node-3
+        ailab.io/relay-worker-pool: "false"
       tolerations:
       - key: dedicated
         operator: Equal

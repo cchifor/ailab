@@ -198,6 +198,16 @@ def _row_inventory(page, base, uid, row_text):
     return titles, collapsed
 
 
+def _mounted(model_title, titles):
+    """Whether a panel of the model is among the mounted titles. A repeated panel mounts as clones whose titles
+    have its variables filled in ("... $host ..." -> "... ai-node1 ..."), so a $var or ${var} matches any text
+    without a "$": a panel still titled "... $host ..." is a repeat that never expanded, not a clone
+    (reviewer-claude on #1896)."""
+    parts = re.split(r"\$\{?\w+\}?", model_title)
+    pattern = re.compile("[^$]+".join(re.escape(p) for p in parts))
+    return any(pattern.fullmatch(t) for t in titles)
+
+
 def check(a):
     from playwright.sync_api import sync_playwright
     base = a.url.rstrip("/")
@@ -260,7 +270,7 @@ def check(a):
             # An --ignore'd panel must still MOUNT (it is in the model) but does not gate
             # settling: a stat with no series renders nothing at all, and a panel skipped
             # for lacking a datasource locally would otherwise hold the whole row hostage.
-            ready = (all(t in byt for t in expected)
+            ready = (all(_mounted(t, byt) for t in expected)
                      and all((x["content"] or x["graphic"]) and not x["loading"]
                              for t, x in byt.items() if not skip(t)))
             # The signature excludes --ignore'd panels too: a live logs panel changes its text
@@ -286,7 +296,7 @@ def check(a):
         failures.append(f"row {a.row!r} found, but no panel mounted under it within {a.timeout}s "
                         f"(model lists {len(expected)}: {expected})")
     for t in expected:
-        if t not in titles:
+        if not _mounted(t, titles):
             failures.append(f"panel in the model but not mounted: {t!r}")
     if not settled:
         stuck = [x["title"] for x in panels

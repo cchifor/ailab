@@ -35,13 +35,12 @@ spec:
           terminationGracePeriodSeconds: 150
           nodeSelector:
             kubernetes.io/hostname: REPLACED-PER-NODE
-          # Exactly the taints the Talos nodes carry, so the pod lands on the one node it selects: the agent
-          # pool (dedicated=agent), the relay-worker pool (dedicated=relay-worker), and a control plane should
-          # it ever be tainted again.
+          # Exactly the taints the trimmed nodes carry, so the pod lands on the one node it selects: the agent
+          # pool (dedicated=agent) and the relay-worker pool (dedicated=relay-worker). No control plane is
+          # trimmed (ADR 0043; ../kustomization.yaml), so none is tolerated.
           tolerations:
             - { key: dedicated, operator: Equal, value: agent, effect: NoSchedule }
             - { key: dedicated, operator: Equal, value: relay-worker, effect: NoSchedule }
-            - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
           containers:
             - name: fstrim
               # Debian keeps util-linux (fstrim, flock, mountpoint) in every image, slim included.

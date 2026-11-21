@@ -17,12 +17,49 @@ which workloads must survive a node loss (Tier A) and which singletons are *acce
   off. Expect ~5 min, poll `qm status <vmid>` for `stopped`.
 - kubectl: `--context admin@ai` or `KUBECONFIG=kubernetes/infra/_out/kubeconfig` (the default context
   is a DIFFERENT cluster).
+- **The CP disks are on the QNAP** (`scsi0` on `qnap-nfs` since 2026-11-20, ADR 0043). A host reboot or loss
+  still takes ONE CP down. A QNAP outage takes all THREE: see "QNAP maintenance is control-plane maintenance".
 
 | Proxmox host | mgmt IP | Talos CP | CP IP | CP vmid | AI LXC ctid |
 |---|---|---|---|---|---|
 | ai-node1 | 192.168.0.2 | talos-cp1 | 192.168.0.41 | 4001 | 5001 |
 | ai-node2 | 192.168.0.3 | talos-cp2 | 192.168.0.42 | 4002 | 5002 |
 | ai-node3 | 192.168.0.4 | talos-cp3 | 192.168.0.43 | 4003 | 5003 |
+
+## QNAP maintenance is control-plane maintenance (since 2026-11-20)
+
+All three etcd members' disks are raw files on the QNAP (`qnap-nfs`, ADR 0043). Anything that takes the share away
+stalls the whole control plane at once, not one node:
+- a NAS reboot, including a QuTS firmware update, which reboots it;
+- pool work that takes the pool or the `/pve-nfs` export offline;
+- work on its Thunderbolt or network (the NFS service IP `10.55.0.254` lives on its `tbtbr0` bridge).
+
+Source: by construction (ADR 0043 risk 1). The disks are files on that share, so not having the share is not having
+the disks. It has not been observed since the move.
+
+For the outage list above: every database, Gitea and Prometheus were already on its iSCSI LUNs. Now the API server,
+the scheduling and every lease go with them.
+
+- **Plan it as a full-cluster outage**, with the owner, never as routine NAS upkeep.
+- **Take an etcd snapshot first:**
+  `_out/talosctl-1142.exe -n <cp-ip> -e <cp-ip> etcd snapshot _out/etcd-snapshots/<name>.db`. talos-backup's own
+  copies land on versitygw, which runs in the NAS chassis itself.
+- **What the CPs see:** the mount is `hard,timeo=600,retrans=2`, so their disk I/O blocks while the NAS is away and
+  resumes when it answers. How Talos rides out a multi-minute stall (guest SCSI timeouts, the XFS on EPHEMERAL) has
+  not been tested.
+- **Open item:** there is no rehearsed procedure yet for a planned NAS outage (stopping the CPs before, starting them
+  after the share is mounted on every host). Write and rehearse one before the first planned NAS reboot.
+- **Afterwards, on every host:** `findmnt /mnt/pve/qnap-nfs`; `qm status <vmid>` running for each CP (`qm start` any
+  that is not); etcd 3/3 in sync; then the post-maintenance checklist.
+- **After a host boot**, check that its CP is running (`qm status <vmid>`). The boot-order guard (#1899; its state
+  is under "Implementation state" in ADR 0043) holds the start until the share is ready, and logs that it did.
+
+**A scrub, a resilver or a large copy is a latency event, not an outage** (ADR 0043 risk 5). Nothing has measured one
+stalling etcd: no scrub has run since the move, and the first scrub on this pool took 3m43s (`qnap-storage-setup.md`
+§4). Run them off-hours: the monthly scrub is already a NAS cron job at 05:00 on the 1st. Watch the etcd alerts while
+they run: `etcdHighFsyncDurations` (WAL fsync p99 > 0.5 s / 1 s for 10 min), `etcdHighCommitDurations` (> 0.25 s) and
+`etcdHighNumberOfLeaderChanges` (4 or more in 15 min). If one fires, stop the scrub with
+`python scripts/qnap-ssh.py --sudo "zpool scrub -s zpool1"`. It needs no owner-planned outage.
 
 ## Planned drain / host reboot
 
@@ -84,6 +121,10 @@ python scripts/node-ssh.py <host-ip> "for i in \$(seq 1 90); do qm status <vmid>
 
 # 5. boot race: the AI LXC often fails its first autostart (amdgpu device appears ~6 s after LXC start).
 python scripts/node-ssh.py <host-ip> "pct start <ctid>"
+
+# 5b. the CP's disk is on qnap-nfs: the boot-order guard must have said "ready" (section "Boot-order guard").
+#     A WARNING instead means the CP may be stopped: `qm start <vmid>` once the share is back.
+python scripts/node-ssh.py <host-ip> "journalctl -b -u pve-guests --no-pager | grep pve-nfs-disk-gate; qm status <vmid>"
 
 # 6. gates before the next node: see the post-maintenance checklist below.
 ```
@@ -201,6 +242,143 @@ Tier-B RWO singletons recover in ~2–3 min instead of ~13. **Remove the taint o
 kubectl --context admin@ai taint nodes <node> node.kubernetes.io/out-of-service=nodeshutdown:NoExecute-
 ```
 
+## Boot-order guard (`pve_nfs_disk_gate`, all three ai-nodes)
+
+Since 2026-11-20 each host's Talos CP disk is a raw file on `qnap-nfs` (ADR 0043). `pve-guests.service` starts the
+onboot guests once per boot and never retries. PVE refuses to start a VM whose storage is offline (`storage
+'qnap-nfs' is not online`). The hosts reach the NAS over the storage link (Thunderbolt on node1/2, the 10G adapter
+on node3), which comes up during boot. After the 2026-10-30 power cut the NAS served NFS ~6 min after the hosts.
+Either way a CP could stay stopped until someone started it by hand.
+
+`pve_base` (tag `nfs_disk_gate`, on by default) adds a drop-in, `pve-guests.service.d/10-ailab-nfs-disk-gate.conf`.
+It runs `/usr/local/sbin/pve-nfs-disk-gate` as a `-` ExecStartPre, after the stock `pve-startall-delay` and before
+startall. For each storage in `pve_nfs_disk_gate_storages` that holds a disk of an onboot VM on the host, the gate
+waits until the storage is:
+
+1. **mounted:** an NFS mount exactly at its path, read from `/proc/self/mountinfo`, never a stat. pvestatd mounts the
+   storage once the server answers. Meanwhile the gate asks PVE to activate it (`pvesm status --storage`), as
+   `qm start` would.
+2. **writable:** `<path>/.pve-nfs-disk-gate/<node>` is written, fsync'ed and read back.
+3. **serving the disk:** the first 4 KiB of each such disk image is read, so an empty export does not pass.
+
+The wait is bounded by `pve_nfs_disk_gate_timeout_s` (600 s) across all storages. Each probe runs in a process group of
+its own: a hung one is SIGKILLed with everything it started (a `dd`, pvesm's `mount.nfs`) and never waited for, so
+only a process stuck in uninterruptible NFS I/O can outlive it. With the share up it passes in seconds. A host with nothing on these storages passes at once.
+
+**After a timeout the CPs are started anyway, not skipped.** The gate logs a WARNING and pve-guests starts every
+guest as before. PVE's own storage check then fails a CP's start while the share is offline, so a CP never boots
+against a missing disk. If the share came back after the deadline, the CP starts with nobody involved. On PVE 9.2,
+startall runs starts in parallel worker slots (up to 8), so a CP start stuck on a hung share holds no other guest.
+The full reasoning is in `ansible/roles/pve_base/defaults/main.yml`. **A CP that PVE refused stays stopped:** run
+`qm start <vmid>` once the share is back, then check etcd 3/3.
+
+Reading it after any host boot:
+
+```bash
+python scripts/node-ssh.py <host-ip> "journalctl -b -u pve-guests -o short-iso --no-pager | grep -E 'pve-nfs-disk-gate|Starting (VM|CT)'"
+# ready:   pve-nfs-disk-gate: waiting up to 600s for qnap-nfs at /mnt/pve/qnap-nfs (VM 4001)
+#          pve-nfs-disk-gate: qnap-nfs ready after 7s: mounted, writable, serving the disks of VM 4001
+#          ...then the "Starting VM/CT" lines
+# timeout: pve-nfs-disk-gate: WARNING: qnap-nfs not ready after 600s: <the last check that failed>. Handing over ...
+#          (priority warning: `journalctl -b -u pve-guests -p warning` shows it alone)
+```
+
+**Rollout, one host at a time.** The drop-in only takes effect at the next boot. Nothing is restarted: the role runs
+a daemon-reload and never touches pve-guests or a guest.
+
+```bash
+# 0. What the host runs now: the stock unit, no drop-in yet.
+python scripts/node-ssh.py <host-ip> "systemctl show -p ExecStartPre --value pve-guests.service; ls /etc/systemd/system/pve-guests.service.d/ 2>&1"
+# 1. Preview (from WSL, ANSIBLE_CONFIG set; see the ailab-ansible notes in CLAUDE.md): the script and the drop-in.
+just nfs-disk-gate --limit ai-node1 --check --diff
+# 2. Apply, then a second run must change nothing.
+just nfs-disk-gate --limit ai-node1
+just nfs-disk-gate --limit ai-node1                          # changed=0
+# 3. Verify that systemd loaded it (the role asserts this too), and dry-run the gate on the live host. The run is
+#    safe: it writes only its probe file on the share and reads the first 4 KiB of the running CP's disk image.
+python scripts/node-ssh.py <host-ip> "systemctl show -p ExecStartPre --value pve-guests.service | grep -c 'pve-nfs-disk-gate ; ignore_errors=yes'; WAIT_S=30 /usr/local/sbin/pve-nfs-disk-gate; echo rc=\$?"
+#    expect 1, "qnap-nfs ready after 0s: mounted, writable, serving the disks of VM 400N", rc=0
+# 4. The next host.
+```
+
+Rollback: `pve_nfs_disk_gate_enabled: false` (removes the drop-in and the script), or remove the drop-in by hand and
+`systemctl daemon-reload`.
+
+**The owner-gated test: one host reboot.** The owner picks the host and the window: the ai-nodes are processing
+data. This test has not been run; the timeout path is covered only by the Docker test (below).
+
+1. The rollout above is done on that host, and step 3 said ready.
+2. Take the host down as in "Planned drain / host reboot" (steps 0-4, with the CP shut down gracefully), and reboot it.
+3. Read the boot as above. **Pass** = the gate's "waiting" and "ready after Ns" lines come before every
+   "Starting VM/CT" line, the CP is `running` without a hand `qm start`, and etcd is 3/3 (post-maintenance
+   checklist). Record N, the storage link's bring-up time on that host.
+4. **Fail** = no gate line (the drop-in was not loaded) or a WARNING. Start the CP by hand if it is stopped, finish
+   the checklist, and report before the next host.
+
+Tests: `scripts/tests/test_pve_nfs_disk_gate.py` (the real script against a fake `/etc/pve`, mountinfo and `pvesm`;
+in script-tests CI) and `bash ansible/roles/pve_base/tests/test-nfs-disk-gate-converge-docker.sh` (manual: the role
+converged into a systemd container, then a stand-in pve-guests booted with the share ready, late and never there).
+
+## Thin pool fill (`pve_thin_textfile`, all three ai-nodes)
+
+Every guest disk on a host is a thin LV in `pve/data` (`local-lvm`), except the Talos CP's boot disk, which is on
+`qnap-nfs` since 2026-11-20 (ADR 0043). The CP's cloud-init drive is still here, and PVE rewrites it on every start,
+so a full pool can also keep the CP from starting. A full pool fails every guest's writes
+on that host, and a pool with full metadata goes read-only. Space a guest frees stays allocated until it is
+trimmed. On 2026-11-20 about 1.1 TiB of the three pools was freed-but-untrimmed space, and nothing showed
+it. `pve_base` (tag `thin_textfile`, on by default) installs a read-only exporter.
+`/usr/local/sbin/pve-thin-textfile` runs every 2 min and turns one `lvs` call into node_exporter textfile
+metrics (`pve_thin.prom`, job `proxmox-node`):
+
+- `pve_thin_pool_data_percent`, `pve_thin_pool_metadata_percent` and the pool's sizes;
+- per thin volume, `pve_thin_lv_size_bytes`, `pve_thin_lv_data_percent` and `pve_thin_lv_allocated_bytes`
+  (labels `lv` and `vmid`), and `pve_thin_lv_open` (1 while its device is open: an attached disk or a mounted
+  volume; 0 for a source kept after a disk move or an unused disk);
+- `pve_thin_textfile_read_errors` and `pve_thin_textfile_timestamp_seconds`.
+
+The recording rule `pve:lxc_volume_untrimmed_bytes` is, for a container volume whose guest runs
+node_exporter (the LLM containers), the pool allocation minus the guest filesystem's use. That is what a
+trim would give back, joined on the `/dev/mapper/pve-vm--<id>--disk--<n>` name both sides see. For a VM,
+compare `pve_thin_lv_allocated_bytes{vmid="<id>"}` with the guest's own `node_filesystem_*`. The Local Drives
+dashboard (uid `ailab-local-drives`) shows that per guest as the "untrimmed gap", for a VM only when its disks
+are provably its open local volumes.
+
+Alerts (`kubernetes/apps/infrastructure/monitoring/thin-pool-rules.yaml`):
+
+- `ProxmoxThinPoolDataHigh` (data over 85 % for 15m, warning) and `...DataCritical` (over 95 % for 5m).
+- `ProxmoxThinPoolMetadataHigh` (metadata over 80 % for 15m) and `...MetadataCritical` (over 90 % for 5m).
+- `ProxmoxThinTextfileStale` (no update for 15 min), `ProxmoxThinTextfileMissing` (the role's
+  `pve_thin_textfile_enabled` marker is there but the file's series are not: never written, removed or
+  unparsable) and `ProxmoxThinTextfileReadErrors`. A read error leaves the affected series out, so the fill
+  alerts could not fire for them; the exporter says why on stderr (`journalctl -u pve-thin-textfile`), with
+  lvs's message or the rejected row.
+- `ProxmoxLxcTrimNotSucceeding` and `DevWorkerTrimNotSucceeding`: the nightly LXC volume trim, or a dev
+  worker's daily trim, has not completed a pass for 50 h. Each keys on its `enabled` marker, whose mtime
+  gives a new install 50 h first. The Talos node trim alerts from kube-state-metrics
+  (`node-fstrim-rules.yaml`).
+
+When the pool fills, find what holds it, then free it:
+
+```bash
+python scripts/node-ssh.py <host-ip> "lvs -o lv_name,lv_size,data_percent --sort -data_percent pve | head -20; lvs -o lv_name,data_percent,metadata_percent pve/data"
+```
+
+In Prometheus, `topk(10, pve:lxc_volume_untrimmed_bytes)` and
+`topk(10, pve_thin_lv_allocated_bytes{job="proxmox-node"})` show the same thing.
+
+- Untrimmed space: check the trims ran (`journalctl -u pve-lxc-fstrim` on the host, the `node-fstrim`
+  CronJobs, a worker's `dev-worker-fstrim`, a runner's `gitea-runner-fstrim`), or trim by hand off-hours.
+- Metadata: grow it online, `lvextend --poolmetadatasize +1G pve/data`.
+
+Rollout: `ansible-playbook site.yml --limit <host> --tags thin_textfile --check --diff`, then without `--check`.
+Then `cat /var/lib/prometheus/node-exporter/pve_thin.prom` on the host. Off: `pve_thin_textfile_enabled: false`
+removes the timer, the script and the file. Tests: `scripts/tests/test_pve_thin_textfile.py` (script-tests),
+promtool fixtures in `thin-pool-rules.test.yaml`, and the manual Docker converge
+`bash ansible/roles/pve_base/tests/test-thin-textfile-converge-docker.sh`. Docker Desktop's kernel has no
+dm-thin-pool, so the converge runs the real `lvs` against a real VG with a linear LV (its output format, and
+the unit's hardening under real LVM locking) and takes the thin numbers from a stub thin listing in that
+format: it is not thin-pool coverage.
+
 ## Thin-pool zeroing (`pve_thin_pool_zero`, OFF on ai-node1/2 since 2026-11-17)
 
 The LVM thin pool `pve/data` (64 KiB chunks) zero-fills the rest of each newly provisioned chunk
@@ -229,6 +407,85 @@ just thinpool --limit ai-node1                              # changed=0
 
 Rollback: `pve_thin_pool_zero: true` in that host's host_vars (or `lvchange --zero y pve/data`).
 Re-enabling does NOT scrub chunks provisioned while zeroing was off.
+
+## LXC volume trim (nightly; `pve_lxc_fstrim`, all three ai-nodes)
+
+The host's `fstrim.timer` never reaches a container's volumes, so what a container frees stays allocated
+in `pve/data`. On 2026-11-20 the LLM containers held 62 GiB (5002, ai-node2) and 134 GiB (5003, ai-node3)
+of freed-but-untrimmed blocks, mostly from model swaps on `/models-local`. `pve_base` (tag `lxc_fstrim`)
+installs a nightly sweep that trims them:
+
+- `/usr/local/sbin/pve-lxc-fstrim` (`ansible/roles/pve_base/files/pve-lxc-fstrim.sh`) picks the
+  `rootfs` and `mpN` volumes on `local-lvm` of every **running** container without a lock, minus
+  `pve_lxc_fstrim_exclude`. Bind mounts, read-only mount points and stopped containers are never touched.
+- Each volume goes through `/usr/local/sbin/lxc-fstrim-chunked.sh` (`scripts/lxc-fstrim-chunked.sh`, the
+  registry's weekly trim, now installed by the role): host-side only, 4 GiB chunks, waiting while host IO
+  pressure is above 45 %, 15 s between chunks (1 s after a chunk that trimmed nothing).
+- A deadline: no chunk starts after the slot's 13 min unless it can end by then. Progress is kept in
+  `/var/lib/pve-lxc-fstrim` (the unit's `StateDirectory`): per volume a cursor, so a cut-short night is
+  continued at that chunk and every pass reaches the end of the volume, and the time of its last complete
+  pass. Volumes go least recently completed first, so no volume is starved by another that keeps running out
+  of time. ext4 also skips the block groups it has trimmed since the container mounted the volume, so a
+  quiet night costs seconds.
+- It shares `/run/lxc-fstrim-chunked.lock` and `/run/lxc-fstrim-chunked.stop` with the registry trim:
+  the two never trim at once, and `touch /run/lxc-fstrim-chunked.stop` stops both. **Remove it afterwards**
+  (`rm -f /run/lxc-fstrim-chunked.stop`): a stop file still there when the sweep starts fails it (exit 3)
+  instead of letting every night skip quietly. `/run` is a tmpfs, so a reboot clears it too.
+- The inner script's chunk lines go to the unit's journal as they happen (`journalctl -fu pve-lxc-fstrim`).
+
+**Slots (UTC, every day).** The hosts take turns, 20 min each including the unit's stop allowance:
+
+| Host | Sweep | What it trims today |
+|---|---|---|
+| ai-node2 | 04:30-04:49 | 5002 (rootfs, `/models-local`) |
+| ai-node3 | 04:50-05:09 | 5003 (rootfs, `/models-local`) |
+| ai-node1 | 05:10-05:29 | nothing: 5004 is excluded, its weekly unit trims it ([registry-cache.md](registry-cache.md)) |
+
+`scripts/tests/test_pve_lxc_fstrim_schedule.py` (run by script-tests) fails if a slot leaves 00:30-05:30,
+two hosts overlap (worst case: TimeoutStartSec plus TimeoutStopSec), the timeouts do not cover a chunk, or
+the registry container is not excluded on its host.
+
+**Other trims on the same drives.** The CI runners trim inside their VMs every night
+([ci-runners.md](ci-runners.md), "Thin-pool trim"). On ai-node2 (ci-runner-10, 03:40-05:25) and ai-node1
+(ci-runner-9, 04:15-05:25, not Sundays) a runner window covers this slot; ai-node2 has no runner-free
+time between 00:00 and 05:30 at all. The sweep does not see a runner's slices; it waits while host IO
+pressure is high, which a runner slice raises. After the one-time cleanup a night's work is small (what
+a container freed that day). That overlap is the same class of residual risk as the runners' own, and the
+interlock that ci-runners.md requires on its triggers would cover this sweep too.
+
+**Rollout, one host at a time** (from WSL with `ANSIBLE_CONFIG` set):
+
+```bash
+# 0. What is untrimmed now: a container's thin LV against its filesystem's use.
+python scripts/node-ssh.py 192.168.0.3 "lvs -o lv_name,lv_size,data_percent pve; pct df 5002"
+# 1. Preview. On ai-node1 this also shows the diff against the hand-installed lxc-fstrim-chunked.sh.
+just lxc-fstrim --limit ai-node2 --check --diff
+# 2. Apply; a second run changes nothing. The converge never starts a trim, only the timer.
+just lxc-fstrim --limit ai-node2
+just lxc-fstrim --limit ai-node2                       # changed=0
+python scripts/node-ssh.py 192.168.0.3 "systemctl list-timers pve-lxc-fstrim.timer; cat /etc/default/pve-lxc-fstrim"
+# 3. After its first night: the sweep's log, the beacon, the LV.
+python scripts/node-ssh.py 192.168.0.3 "journalctl -u pve-lxc-fstrim --since -1d --no-pager | tail -30; cat /var/lib/prometheus/node-exporter/pve_lxc_fstrim.prom; lvs pve/vm-5002-disk-1"
+```
+
+Verify it did not hurt etcd the same way as the registry trim (registry-cache.md, "Verify a run"): WAL
+fsync p99 per member over the slot against the slot before, and leader changes. Exit codes are in the
+script headers: the sweep exits 1 when a volume's trim failed (the beacon's
+`pve_lxc_fstrim_volume_exit_code` names it; 3 pressure never dropped, 4 pressure unreadable, 5 fstrim
+failed, 6 mount not released), and exits 3 when the stop file was already there at the start.
+`pve_lxc_fstrim_last_success_timestamp_seconds` is the oldest of the volumes' last complete passes
+(`pve_lxc_fstrim_volume_last_complete_timestamp_seconds`): every volume has completed a pass since then. It does not move on a night
+whose discovery skipped a container (a lock, or a config that could not be read), whose volumes it
+cannot vouch for.
+
+Kill switch: `pve_lxc_fstrim_enabled: false` in the host's host_vars, then `just lxc-fstrim --limit
+<host>`. It stops a running sweep cleanly and removes the timer, the unit, the settings and the metrics;
+`lxc-fstrim-chunked.sh` stays for the registry unit.
+
+Tests: `bash scripts/tests/test-lxc-fstrim-chunked.sh` and `bash ansible/roles/pve_base/tests/test-pve-lxc-fstrim.sh`
+(stubs, run in CI by manifests.yaml), the schedule test above, and the manual Docker converge
+`bash ansible/roles/pve_base/tests/test-lxc-fstrim-converge-docker.sh` (systemd, idempotence, `--check`, a real
+trim of a loop-backed ext4 volume, disable).
 
 ## EC fan curve (`pve_ec_fan`, all three ai-nodes since 2026-11-19)
 
@@ -370,15 +627,22 @@ installed, a new pin that does not build (the installed module stays), and the l
 level it was given. A clean shutdown or reboot stops `ec-fan-profile` first, so the fans are back on auto
 before the kernel goes down.
 
-## Talos node trim (nightly; `kubernetes/apps/node-fstrim`, all seven Talos nodes)
+## Talos node trim (nightly; `kubernetes/apps/node-fstrim`, the agent nodes and relay-worker-1)
 
-Each Talos VM's disk is a thin LV on its host's `local-lvm`, `discard=on`, on the QLC NVMe that the host's
-etcd member shares. Talos mounts `/var` (XFS) without `discard`, and nothing trimmed it, so what a node
-freed (images, logs, emptyDirs, etcd compaction) stayed allocated in the thin pool: about 195 GiB across
-the seven nodes on 2026-11-20. The Flux Kustomization `node-fstrim` runs one CronJob per node:
+Each trimmed Talos VM's disk is a thin LV on its host's `local-lvm`, `discard=on`, on the host's QLC NVMe.
+Talos mounts `/var` (XFS) without `discard`, and nothing trimmed it, so what a node freed (images, logs,
+emptyDirs) stayed allocated in the thin pool: about 195 GiB across the seven Talos nodes on 2026-11-20. The
+Flux Kustomization `node-fstrim` runs one CronJob per node whose disk is on `local-lvm`.
 
-- The pod is pinned to its node by hostname and tolerates only the nodes' own taints (`dedicated=agent`,
-  `dedicated=relay-worker`, a control plane's). It runs `node-fstrim.sh /host/var` from a ConfigMap in a
+**Not the control planes.** Since 2026-11-20 the disks of talos-cp1/2/3 are raw files on `qnap-nfs` (ADR 0043).
+There is no `local-lvm` thin space left to reclaim for them, and a guest discard there becomes hole-punching over
+NFS on the share that etcd's WAL fsync depends on. So they have no CronJob.
+`scripts/tests/test_node_fstrim_manifests.py` takes the trimmed set from the tofu modules' `vm_datastore`
+(`local-lvm` only) and fails on a CronJob for any control plane. If the CP disks ever move back (ADR 0043,
+"Rollback"), restore their overlays from git history, with slots of their own.
+
+- The pod is pinned to its node by hostname and tolerates only the trimmed nodes' own taints
+  (`dedicated=agent`, `dedicated=relay-worker`). It runs `node-fstrim.sh /host/var` from a ConfigMap in a
   digest-pinned Debian slim image. `/var` is mounted read-only, and the pod has CAP_SYS_ADMIN only (FITRIM),
   no service-account token, a read-only root and no network. The namespace is PSA `privileged` for that
   capability and the hostPath.
@@ -396,25 +660,25 @@ the seven nodes on 2026-11-20. The Flux Kustomization `node-fstrim` runs one Cro
   pool drops what is already unmapped at once, so only what the node freed since the last night costs the
   NVMe anything.
 
-**Slots (UTC, daily), one node at a time, 12 min each:** 02:30 talos-agent-node-1 (ai-node1), 02:42
-talos-cp2 (ai-node2), 02:54 talos-cp3 (ai-node3), 03:06 talos-cp1 (ai-node1; its disk is on the QNAP, so
-the NVMe sees nothing), 03:18 talos-agent-node-2 (ai-node2), 03:30 talos-agent-node-3 (ai-node3), 03:42
-relay-worker-1 (ai-node3), done by 03:54. That is after Velero (02:00) and before the off-site sync
+**Slots (UTC, daily), one node at a time, 12 min each:** 02:30 talos-agent-node-1 (ai-node1), 03:18
+talos-agent-node-2 (ai-node2), 03:30 talos-agent-node-3 (ai-node3), 03:42 relay-worker-1 (ai-node3), done
+by 03:54. 02:42-03:18 held the control planes' slots until they were taken out. That is after Velero (02:00) and before the off-site sync
 (04:00). Each slot is a hard bound: a start at most 60 s late (`startingDeadlineSeconds`), the Job
 killed at 480 s (`activeDeadlineSeconds`), then 150 s for the chunk in flight
 (`terminationGracePeriodSeconds`), so 690 s at worst. There are no retries (`backoffLimit: 0`).
 `scripts/tests/test_node_fstrim_manifests.py` checks that arithmetic, the node set against the tofu
-modules, the tolerations against the nodes' taints, and the pod's privileges.
+modules (the nodes on `local-lvm`, never a control plane), the tolerations against the nodes' taints, and the
+pod's privileges.
 
 **Other trims on the same drives.** The CI runners trim inside their VMs every night (ci-runners.md,
 "Thin-pool trim"), and their windows cover every slot here but relay-worker-1's (ai-node1: ci-runner-4
 to 03:10; ai-node2 and ai-node3: ci-runner-5 and -6 to 03:35). A runner slice raises the node's IO pressure
 only when it slows the node's own disk, so the pressure wait is a partial guard, not an interlock. That overlap is the same class of residual risk as the runners' own (ci-runners.md
-"Residual risk"). After the one-time cleanup a node frees little per night. iocost (when on) gives the
-host's etcd VM the drive first.
+"Residual risk"). After the one-time cleanup a node frees little per night. No etcd member is on these drives
+any more (ADR 0043).
 
-**Rollout.** Merging deploys the CronJobs; the first run is that night's slot. To watch the first one by
-hand without waiting, trigger a single node, a control plane last:
+**Rollout.** Merging deploys the four CronJobs; the first run is that night's slot. To watch the first one
+by hand without waiting, trigger a single node:
 
 ```bash
 kubectl --context admin@ai -n node-fstrim get cronjobs
@@ -424,8 +688,7 @@ kubectl --context admin@ai -n node-fstrim logs -f job/fstrim-manual-1   # one li
 python scripts/node-ssh.py 192.168.0.2 "lvs pve/vm-4301-disk-0"
 ```
 
-Check etcd during a control plane's slot as for the registry trim (registry-cache.md, "Verify a run").
-That means WAL fsync p99 per member and leader changes over the slot.
+No slot touches a control plane's disk, so a run needs no etcd watch beyond the usual alerts.
 
 **Alert.** `TalosNodeFstrimNotSucceeding` (warning,
 `kubernetes/apps/infrastructure/monitoring/node-fstrim-rules.yaml`) fires when a node's CronJob has not

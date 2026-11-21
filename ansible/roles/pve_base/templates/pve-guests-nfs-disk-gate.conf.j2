@@ -1,0 +1,9 @@
+# Managed by ansible (role: pve_base, tag nfs_disk_gate; docs/runbooks/node-maintenance.md "Boot-order guard").
+# Before pve-guests starts this node's onboot guests, wait at most {{ pve_nfs_disk_gate_timeout_s }} s until each
+# storage in {{ pve_nfs_disk_gate_storages | join(', ') }} that holds an onboot VM's disk (the Talos control
+# planes on qnap-nfs, ADR 0043) is mounted, writable and serving that disk. A drop-in's ExecStartPre= adds to the
+# stock list, so this runs after pve-startall-delay and before startall. The "-" prefix means the gate never fails
+# pve-guests: after the budget it hands over, with a WARNING in the journal. The settings are passed with env so
+# they reach the gate only, not startall.
+[Service]
+ExecStartPre=-/usr/bin/env "GATE_STORAGES={{ pve_nfs_disk_gate_storages | join(' ') }}" WAIT_S={{ pve_nfs_disk_gate_timeout_s | int }} /usr/local/sbin/pve-nfs-disk-gate

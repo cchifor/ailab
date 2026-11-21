@@ -12,6 +12,9 @@ three times, and the LiteLLM fallback returned `model_not_found`. Its brief is r
 **Related:** the 2026-11-18 RCA (shared QLC NVMe, etcd stalls); #1857 and #1858 (runner disk cleanup and thin-pool
 trim); the D1 write caps (kubernetes/infra/runners/variables.tf).
 
+**Update (2026-11-20):** the Talos control-plane disks are no longer on this drive. They moved to the QNAP
+(`qnap-nfs`), ADR 0043. The rest of this ADR still applies to the guests that remain on it.
+
 ## Context
 
 Each Proxmox node has ONE Kingston OM8TAP42048K1 2 TB QLC DRAM-less NVMe:

@@ -6,17 +6,19 @@ OpenBao escrow writer, and the order in which the operator brings them up. Owner
 the connection, binding and reader identity: [relay#277 comment 120817](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-120817)
 (caps in 120818 as corrected, amendments in 120903), 2026-11-14.
 
-**State on 2026-11-18.** The signer keys and trust document are written, and the Router trust and
-budget-reader components are included (`kubernetes/apps/apps/llm-router/kustomization.yaml`;
-remaining-live-steps checklist steps 1-2 DONE). The hub release and budget client are deployed (H2-H4a).
-The live Relay overlay still refuses a router connection (`test_relay_v060_activation_gate.py`);
-`relay-router-files` awaits step 9's escrow token, and the Relay connection is the **last** step below.
+**State.** The signer keys and trust document are written, and the Router trust and budget-reader
+components are included (`kubernetes/apps/apps/llm-router/kustomization.yaml`; remaining-live-steps
+checklist steps 1-2 DONE). The hub release and budget client are deployed (H2-H4a). The Relay
+connection is the **last** step below; its inclusion PR is hub upgrade step H6
+([relay-researcher-hub-upgrade.md](relay-researcher-hub-upgrade.md)), which also took it off
+`test_relay_v060_activation_gate.py`'s forbidden list. `relay-router-files` needs step 9's escrow token
+before H6 merges.
 
 | Source | Flux Kustomization | Merge effect |
 | --- | --- | --- |
 | `apps/infrastructure/security/openbao/relay-router-provision-job.yaml` | `openbao` | Policies `relay-router-escrow`, `af-app-relay-router`, `af-app-router-relay-keys`; k8s-auth roles of the two `af-app-*` names; token role `relay-router-escrow`. No KV document, no token |
 | `apps/relay-router-connection/credentials/` | `relay-router-credentials` (no wait) | SecretStore + ExternalSecret in `relay` and `llm-router`, not Ready until their documents exist |
-| `components/relay-router-connection` | none (not included) | Nothing until the last step |
+| `components/relay-router-connection` | `apps` (through `kubernetes/apps/apps/relay`, since hub step H6) | Step 10, the Relay connection |
 | `components/llm-router-relay-keys-trust` | `apps` (included) | Step 6 complete; Router loads the public trust |
 
 `scripts/tests/test_relay_router_connection.py` pins the record, the digest, the trust mapping,
@@ -340,8 +342,11 @@ key generation or inclusion. H2-H4a ran before the remaining budget proofs. The 
     `connections.json` equals the committed file; NetworkPolicy `relay-router-openbao-egress` exists;
     the admin `GET /api/router-credentials/connections` lists `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`
     with origin `https://router.chifor.me` (when the release enables the control plane). The
-    connection row and the `relay-researcher` binding are created by the first budgeted worker
-    issuance, never by hand; afterwards
+    connection row is created by Relay, never by hand: from Relay v0.10.9 (relay #569, hub-upgrade
+    H8) by the owner's first pool approval whose inference policy names this connection, else by the
+    first budgeted worker issuance. Relay inserts it from the mounted record (its `deploymentDigest`),
+    never updates or re-enables a row, and refuses the approval on a disabled or drifted row. The
+    `relay-researcher` binding and its key are still created only by budgeted issuance. Afterwards
     `SELECT id, origin, deployment_digest FROM router_connections;` (tenant-scoped) shows this digest.
 
 ## Rollback

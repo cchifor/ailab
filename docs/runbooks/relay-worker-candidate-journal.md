@@ -41,8 +41,11 @@ runs as UID/GID 0 with all capabilities dropped, no privilege escalation,
 RuntimeDefault seccomp, no host access, no RBAC and no service-account token. This
 exception does not apply to database or worker namespaces. Its immutable image
 filesystem remains read-only. Both namespaces' workloads explicitly exclude
-`ailab.io/relay-worker-pool` through required node affinity; they have no
-`dedicated=relay-worker` toleration. They must stay off the VM spike worker pool.
+`ailab.io/relay-worker-pool=true` through required node affinity (`NotIn ["true"]`,
+which also matches nodes without the label; not `DoesNotExist`, because the agent
+nodes carry `ailab.io/relay-worker-pool=false` for the researcher agent's placement);
+they have no `dedicated=relay-worker` toleration. They must stay off the VM spike
+worker pool.
 
 Each namespace starts with default-deny ingress and egress. The service renderer
 admits only the signed control namespace's infrastructure-agent selector and the
@@ -241,8 +244,8 @@ TLS verification to cover a missed renewal.
 
 The selected Relay image must contain compiled
 `/app/dist/scripts/candidate-journal-service.js` and its production dependencies.
-The current hub pin is v0.10.4 (`e77bd09a`, `control-plane@sha256:d1482bc1…57a7` in
-`kubernetes/apps/apps/relay/relay.yaml`), whose source includes that service and the Dockerfile's
+The current hub pin is v0.10.9 (`04a897f2`, `control-plane@sha256:1b0f2f72…7a39` in
+`kubernetes/apps/apps/relay/relay.yaml`; hub-upgrade H8), whose source includes that service and the Dockerfile's
 compiled scripts. The old v0.9.1 predates it. There is deliberately no service image default in this bundle.
 Require the reviewed publication receipt's digest-only image and source commit;
 inspect the actual compiled image before activation. The Relay Dockerfile compiles

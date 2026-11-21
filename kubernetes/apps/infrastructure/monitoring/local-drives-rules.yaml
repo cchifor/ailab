@@ -1,0 +1,64 @@
+# The Proxmox hosts' local NVMe drives: one consumer QLC NVMe per host (Kingston OM8TAP42048K1, no power-loss
+# protection) holding the host's root and swap and the local-lvm thin pool, with every local guest disk on it
+# (etcd's included). Dashboard: Local Drives (uid ailab-local-drives, scripts/gen-local-drives-dashboard.py).
+#
+# Already alerted elsewhere, so not here: rated wear >= 95% (AiNodeNvmeWearHigh, ci-runners-rules.yaml), the
+# controller temperature (ProxmoxNvmeTemperatureHigh, control-plane-storage-rules.yaml), the thin pool's fill
+# (thin-pool-rules.yaml), the etcd members' fsync and commit latency (the kube-prometheus-stack etcd rules).
+#
+# This file adds what the drive itself reports and nothing watched. Source: the hosts' nvme textfile collector
+# (Debian prometheus-node-exporter-collectors, prometheus-node-exporter-nvme.timer, every 15 min; job
+# proxmox-node). On 2026-11-20 node1/node2's drives had written ~320 TB each and used 91%/87% of their rated
+# endurance (node3: ~217 TB, 56%), so the drives' own failure signals matter more each week.
+# - ProxmoxNvmeCriticalWarning (critical): a bit other than temperature is set in the drive's critical-warning
+#   byte: spare below its threshold (1), reliability degraded (4), media read-only (8), volatile memory backup
+#   failed (16), persistent memory region read-only (32). Read-only fails every guest's writes on the host. The
+#   temperature bit (2) is left to ProxmoxNvmeTemperatureHigh.
+# - ProxmoxNvmeMediaErrors (warning): the drive reported new unrecovered data-integrity errors in the last 24 h.
+#   It fires for 24 h after each new error and then resolves, so a past error does not page forever.
+# - ProxmoxNvmeSmartMetricsStale (warning): nvme.prom is older than 1 h (four missed runs) or missing while the
+#   host's node_exporter is up. Without it, AiNodeNvmeWearHigh (the ADR 0042 trigger) and the two rules above
+#   judge stale numbers or nothing at all.
+# Fixtures: local-drives-rules.test.yaml.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: local-drives
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: proxmox-nvme-health
+      rules:
+        - alert: ProxmoxNvmeCriticalWarning
+          # The byte with bit 1 (temperature) cleared: x - 2 * bit1, bit1 = floor(x / 2) % 2.
+          expr: |
+            (
+              nvme_critical_warning{job="proxmox-node"}
+              - 2 * (floor(nvme_critical_warning{job="proxmox-node"} / 2) % 2)
+            ) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: NVMe {{ $labels.device }} reports a critical warning ({{ $value }})"
+            description: "The local NVMe {{ $labels.device }} on {{ $labels.instance }} has set its critical-warning byte (temperature bit excluded; value {{ $value }}): 1 = spare below threshold, 4 = reliability degraded, 8 = media read-only, 16 = volatile memory backup failed, 32 = persistent memory region read-only; values add up. Every local guest disk on that host (etcd's included) is on this drive, and a read-only drive fails all their writes. Check `nvme smart-log /dev/nvme0` and `nvme error-log /dev/nvme0` on the host, move what can move off the host, and tell the owner (the drive needs replacing). Dashboard: Local Drives."
+        - alert: ProxmoxNvmeMediaErrors
+          expr: increase(nvme_media_errors_total{job="proxmox-node"}[24h]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: NVMe {{ $labels.device }} reported new media errors in the last 24 h"
+            description: "The local NVMe {{ $labels.device }} on {{ $labels.instance }} has reported unrecovered data-integrity errors in the last 24 h (media_errors rose by about {{ $value | printf \"%.0f\" }}). The drive could not read data it had stored; a guest may have seen an I/O error. Check `nvme smart-log /dev/nvme0` and `nvme error-log /dev/nvme0` on the host and the guests' kernel logs for I/O errors, and tell the owner. This resolves 24 h after the last new error. Dashboard: Local Drives."
+        - alert: ProxmoxNvmeSmartMetricsStale
+          expr: |
+            (time() - node_textfile_mtime_seconds{job="proxmox-node", file=~".*/nvme\\.prom"}) > 3600
+            or on (instance)
+            (up{job="proxmox-node"} == 1 unless on (instance) node_textfile_mtime_seconds{job="proxmox-node", file=~".*/nvme\\.prom"})
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: the NVMe SMART metrics are stale or missing"
+            description: "nvme.prom on {{ $labels.instance }} is over an hour old or gone, so the drive's wear, spare, media errors and critical warning are not being read: AiNodeNvmeWearHigh, ProxmoxNvmeCriticalWarning and ProxmoxNvmeMediaErrors judge stale numbers or nothing. The file comes from the Debian prometheus-node-exporter-collectors package: check `systemctl status prometheus-node-exporter-nvme.timer prometheus-node-exporter-nvme.service` and `journalctl -u prometheus-node-exporter-nvme` on the host (nvme-cli must be installed)."

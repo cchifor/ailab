@@ -218,6 +218,70 @@ class Output(unittest.TestCase):
                 self.assertNotEqual(placement["nodeSelector"][key], value, "control and worker placements overlap")
         self.assertIn(placement["tier"], ("restricted-pod", "sandboxed-pod"))
 
+    def test_agent_placement_is_the_pool_and_disjoint_from_every_worker_placement(self):
+        # Relay's preparation (c0fe50f0 packages/infrastructure-agent/installation-preparation.ts,
+        # refuse("control-placement-not-disjoint")): every worker placement needs a nodeSelector key
+        # that the control placement also sets, to a different value. The agent selects the agent POOL,
+        # never one hostname: a hostname pin turned a drain of talos-agent-node-3 into a 31-minute
+        # agent outage on 2026-11-19.
+        for name, control in (("template", template()["controlPlacement"]),
+                              ("I4 definition", self.definition["controlPlacement"])):
+            with self.subTest(name):
+                selector = control["nodeSelector"]
+                self.assertNotIn("kubernetes.io/hostname", selector, "the agent must not be pinned to one node")
+                self.assertEqual(selector.get("ailab.io/agent-pool"), "true")
+                self.assertIn({"key": "dedicated", "operator": "Equal", "value": "agent", "effect": "NoSchedule"},
+                              control["tolerations"])
+                self.assertTrue(self.binding["placements"])
+                for placement in self.binding["placements"]:
+                    self.assertTrue(any(key in selector and selector[key] != value
+                                        for key, value in placement["nodeSelector"].items()),
+                                    f"control placement {selector} does not conflict with worker placement "
+                                    f"{placement['nodeSelector']} on any key")
+        # The pool label the agent selects is applied to every agent node, and only there.
+        labels = (ROOT / "kubernetes/infra/agent-nodes/node-labels.tf").read_text(encoding="utf-8")
+        block = re.search(r'resource "kubernetes_labels" "agent_pool" \{(.*?)\n\}', labels, re.S).group(1)
+        self.assertIn("for_each    = var.agent_nodes", block)
+        for key, value in template()["controlPlacement"]["nodeSelector"].items():
+            self.assertRegex(block, rf'"{re.escape(key)}"\s*=\s*"{re.escape(value)}"')
+
+    def test_nothing_selects_the_worker_pool_key_by_existence(self):
+        # The agent nodes carry ailab.io/relay-worker-pool=false, so `DoesNotExist` no longer means "off the
+        # worker pool" (it would also exclude the agent nodes) and `Exists` no longer means "on it". Select
+        # by value: In ['true'] / NotIn ['true'].
+        key = "ailab.io/relay-worker-pool"
+        found = []
+
+        def walk(value, where):
+            if isinstance(value, dict):
+                if value.get("key") == key and value.get("operator") in ("Exists", "DoesNotExist"):
+                    found.append(where)
+                for child in value.values():
+                    walk(child, where)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child, where)
+
+        near = re.compile(rf"{re.escape(key)}(?:(?!key)[\s\S]){{0,120}}?\b(?:DoesNotExist|Exists)\b"
+                          rf"|\b(?:DoesNotExist|Exists)\b(?:(?!key)[\s\S]){{0,40}}?key\W{{0,6}}{re.escape(key)}")
+        for path in sorted((ROOT / "kubernetes").rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts or path.suffix not in (
+                    ".yaml", ".yml", ".json", ".py", ".tf", ".tftpl", ".sh", ".j2"):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if key not in text:
+                continue
+            where = path.relative_to(ROOT).as_posix()
+            if near.search(text):
+                found.append(where)
+            if path.suffix in (".yaml", ".yml", ".json"):
+                try:
+                    for document in yaml.safe_load_all(text):
+                        walk(document, where)
+                except yaml.YAMLError:
+                    pass
+        self.assertEqual(sorted(set(found)), [], "select ailab.io/relay-worker-pool by value, not by existence")
+
     def test_template_is_the_researcher_baseline_with_the_decided_pins(self):
         (sealed,) = self.binding["templates"]
         d, t = sealed["definition"], self.inputs["decisions"]["template"]

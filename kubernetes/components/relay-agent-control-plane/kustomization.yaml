@@ -7,11 +7,11 @@ kind: Component
 #
 # Why the researcher needs it: a worker's holder installs its Router credential through the holder
 # launch transport, and Relay passes that transport its credential manager only when the control plane
-# is on (server/main.ts launchTransportRoutes `manager: controlPlane ? credentials : undefined`;
-# server/agent-sessions/holder-router.ts refuses a routed launch with "Routed holder installation is
-# unavailable" without it).
+# is on (server/main.ts launchTransportRoutes `manager: config.agentControlPlane ? credentials :
+# undefined`; server/agent-sessions/holder-router.ts refuses a routed launch with "Routed holder
+# installation is unavailable" without it).
 #
-# Everything else it turns on, on Relay main (re-check on the pinned release):
+# Everything else it turns on, on the live hub (Relay v0.10.4, e77bd09a; server/main.ts):
 #   * launch profiles (approval and launch admission routes);
 #   * session control, permission decisions and elicitations;
 #   * the Router access manager, IMPLICITLY: RELAY_LLM_URL is https://router.chifor.me/v1, so
@@ -22,14 +22,18 @@ kind: Component
 #     connection file of ../relay-router-connection);
 #   * the connector control loops (the control-plane variants of the session, holder-event,
 #     messaging and conversation routes Relay already serves for agent communication);
-#   * control health and metrics routes (../relay-control-monitoring supplies the metrics file).
+#   * control health and metrics routes (../relay-control-monitoring supplies the metrics file; Relay
+#     refuses to start with a metrics file and no control plane).
 #
 # Deliberately NOT turned on with it: RELAY_ENVIRONMENTS stays unset (the Incus environment routes stay
 # off, /api/settings reports environments: false), and the relay-gitea-authority and
 # relay-notifications components stay out. scripts/tests/test_relay_researcher_hub_upgrade.py refuses
 # this component next to either of them or next to RELAY_ENVIRONMENTS in the live overlay.
 #
-# NOT INCLUDED by kubernetes/apps/apps/relay. scripts/tests/test_relay_v060_activation_gate.py already
-# refuses RELAY_AGENT_CONTROL_PLANE in the live overlay; step H6 amends it for this component only.
+# INCLUDED by kubernetes/apps/apps/relay since hub upgrade step H6, in the same PR as
+# ../relay-router-connection, ../relay-control-monitoring and ../relay-worker-monitoring; that PR
+# removed this component and RELAY_AGENT_CONTROL_PLANE from the forbidden list of
+# scripts/tests/test_relay_v060_activation_gate.py. Including or removing it is a Recreate rollout of
+# Relay (with its pre-migration backup).
 patches:
 - path: deployment.yaml

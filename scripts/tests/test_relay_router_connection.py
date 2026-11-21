@@ -7,8 +7,9 @@ docs/runbooks/relay-router-connection.md is the contract. These checks pin what 
 the fixed connection record and its deployment digest (recomputed here exactly as Relay's
 deploymentDigest does), the Router trust mapping agreeing with the record, the record's files agreeing
 with the Relay component's mounts, the OpenBao policies agreeing with the record and with the
-ExternalSecrets, no secret material in git, and neither component being included. Nothing here
-touches a cluster.
+ExternalSecrets, no secret material in git, the Relay component included only by the live Relay
+overlay (hub upgrade step H6) and the Router component never live with the token placeholder. Nothing
+here touches a cluster.
 """
 
 from pathlib import Path
@@ -411,12 +412,18 @@ class OpenBaoProvision(unittest.TestCase):
 
 
 class InclusionGate(unittest.TestCase):
-    def test_relay_component_is_not_included(self):
-        # The LAST step of the runbook order. The inclusion PR changes this test deliberately, together
-        # with test_relay_v060_activation_gate.py, once the budget authority is ready=true and the
-        # researcher release that reads these settings is deployed.
-        self.assertEqual(including(RELAY_COMPONENT), [],
-                         "the Relay connection is included last (docs/runbooks/relay-router-connection.md)")
+    def test_relay_component_is_included_by_the_live_relay_overlay_only(self):
+        # The LAST step of the runbook order (relay-router-connection.md step 10), which is hub upgrade
+        # step H6 (relay-researcher-hub-upgrade.md): that inclusion PR changed this test deliberately,
+        # together with test_relay_v060_activation_gate.py. Exactly one includer, the live Relay
+        # overlay, and there exactly once, as a component: never a resource, never another overlay.
+        relay = K8S / "apps/apps/relay/kustomization.yaml"
+        self.assertEqual(including(RELAY_COMPONENT), [relay],
+                         "only the live Relay overlay includes the connection (hub upgrade step H6)")
+        k = yaml.safe_load(relay.read_text(encoding="utf-8"))
+        resolved = lambda key: [(relay.parent / e).resolve() for e in k.get(key) or []]
+        self.assertEqual(resolved("components").count(RELAY_COMPONENT.resolve()), 1, "included once, as a component")
+        self.assertNotIn(RELAY_COMPONENT.resolve(), resolved("resources"))
 
     def test_router_component_is_not_live_with_the_token_placeholder(self):
         tokens = trust_document()["issuers"][0]["tenants"][0]["workerBudgets"]["maxTokens"]

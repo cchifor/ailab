@@ -11,9 +11,9 @@ tests:
   - interval: 1m
     name: a node whose trim last succeeded over 50 h ago warns after 1 h
     input_series:
-      - series: 'kube_cronjob_status_last_successful_time{namespace="node-fstrim", cronjob="node-fstrim-talos-cp2"}'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="node-fstrim", cronjob="node-fstrim-talos-agent-node-2"}'
         values: "0x3700"
-      - series: 'kube_cronjob_spec_suspend{namespace="node-fstrim", cronjob="node-fstrim-talos-cp2"}'
+      - series: 'kube_cronjob_spec_suspend{namespace="node-fstrim", cronjob="node-fstrim-talos-agent-node-2"}'
         values: "0x3700"
     alert_rule_test:
       - eval_time: 50h30m
@@ -25,15 +25,15 @@ tests:
           - exp_labels:
               severity: warning
               namespace: node-fstrim
-              cronjob: node-fstrim-talos-cp2
+              cronjob: node-fstrim-talos-agent-node-2
             exp_annotations:
-              summary: "Talos node trim node-fstrim-talos-cp2 has not succeeded for over 50 h"
-              description: "The nightly trim CronJob node-fstrim-talos-cp2 in node-fstrim has not completed a run for over 50 h (two nights), so what that node frees stays allocated in its host's thin pool. Check the last Job's pod log: `kubectl --context admin@ai -n node-fstrim logs job/<last job>` (exit 3 = IO pressure stayed high, 4 = pressure unreadable, 5 = fstrim failed, 6 = the progress could not be written to /var/lib/node-fstrim, 9 = partial nights and no complete pass for 7 days, DeadlineExceeded = the slot ran out). Runbook: docs/runbooks/node-maintenance.md \"Talos node trim (nightly)\"."
+              summary: "Talos node trim node-fstrim-talos-agent-node-2 has not succeeded for over 50 h"
+              description: "The nightly trim CronJob node-fstrim-talos-agent-node-2 in node-fstrim has not completed a run for over 50 h (two nights), so what that node frees stays allocated in its host's thin pool. Check the last Job's pod log: `kubectl --context admin@ai -n node-fstrim logs job/<last job>` (exit 3 = IO pressure stayed high, 4 = pressure unreadable, 5 = fstrim failed, 6 = the progress could not be written to /var/lib/node-fstrim, 9 = partial nights and no complete pass for 7 days, DeadlineExceeded = the slot ran out). Runbook: docs/runbooks/node-maintenance.md \"Talos node trim (nightly)\"."
 
   - interval: 1m
     name: one failed night (last success 30 h ago) does not warn
     input_series:
-      - series: 'kube_cronjob_status_last_successful_time{namespace="node-fstrim", cronjob="node-fstrim-talos-cp3"}'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="node-fstrim", cronjob="node-fstrim-talos-agent-node-3"}'
         values: "108000x3700"
     alert_rule_test:
       - eval_time: 60h
@@ -60,7 +60,7 @@ tests:
   - interval: 1m
     name: a new CronJob that has not had its first nights yet does not warn
     input_series:
-      - series: 'kube_cronjob_created{namespace="node-fstrim", cronjob="node-fstrim-talos-cp1"}'
+      - series: 'kube_cronjob_created{namespace="node-fstrim", cronjob="node-fstrim-relay-worker-1"}'
         values: "144000x3700"
     alert_rule_test:
       - eval_time: 60h
@@ -70,9 +70,9 @@ tests:
   - interval: 1m
     name: a CronJob that also has a success is judged by the success, not by its age
     input_series:
-      - series: 'kube_cronjob_created{namespace="node-fstrim", cronjob="node-fstrim-talos-cp1"}'
+      - series: 'kube_cronjob_created{namespace="node-fstrim", cronjob="node-fstrim-relay-worker-1"}'
         values: "0x3700"
-      - series: 'kube_cronjob_status_last_successful_time{namespace="node-fstrim", cronjob="node-fstrim-talos-cp1"}'
+      - series: 'kube_cronjob_status_last_successful_time{namespace="node-fstrim", cronjob="node-fstrim-relay-worker-1"}'
         values: "180000x3700"
     alert_rule_test:
       - eval_time: 60h

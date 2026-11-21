@@ -1,0 +1,12 @@
+# Managed by ansible (role: pve_base, tag lxc_fstrim). This host's nightly slot (pve_lxc_fstrim_start, UTC).
+# A missed night is skipped, never run late into the day (Persistent=false).
+[Unit]
+Description=Nightly trim of the running containers' local-lvm volumes, {{ pve_lxc_fstrim_start }} UTC
+
+[Timer]
+OnCalendar=*-*-* {{ pve_lxc_fstrim_start }}:00 UTC
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

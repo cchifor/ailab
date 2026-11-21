@@ -172,18 +172,55 @@ registry_zot_config_allow_restart: false
 
 # ---- Retention (storage.retention in config.json.j2) ----
 # Without retention the store grows unbounded (~one sha-<commit> tag per repo per platform main
-# build) and eventually fills the data disk → 100%-full blob-write failures. The strive/** policy
-# keeps `latest` + the N most-recently-pushed sha tags per repo (GC reclaims the rest). The mirror
+# build) and eventually fills the data disk → 100%-full blob-write failures. The mirror
 # repos (everything else) are a CACHE: they are explicitly PROTECTED (deleteUntagged:false, keep
 # all tags) so digest-pinned base-image pulls are never GC'd (Zot can't re-sync a bare digest).
-# 100 covers the deployed ailab pin PLUS deep rollback headroom. A GC'd target sha can't be
-# re-pulled (only rebuilt), and re-pinning off a pruned sha can surface new required config, so
-# keep ~100 most-recently-pushed sha tags per repo. COUNT-based on purpose (mostRecentlyPushedCount)
-# — do NOT switch to a time window (pushedWithin/pulledWithin): age pruning is non-deterministic
-# (drops the deployed pin in quiet periods, balloons under heavy CI). Was 25 — too shallow: at
-# ~5-6 strive builds/day it pruned sha-b80a376c out from under the LIVE ailab pins in ~4 days,
-# causing registry-404 ImagePullBackOff on every reschedule (2026-06-28 incident).
-registry_zot_strive_keep_recent: 100
+#
+# strive/** keeps `latest`, `ailab` and `ailab-prev*`, and two bounded families: the `sha-<commit>`
+# builds and the `ailab-<digest>` protect tags (platform protect-ailab-images.yml writes one per
+# pinned digest). Each family keeps its N most recently pushed tags (registry_zot_strive_keep_recent)
+# OR any pushed within registry_zot_strive_keep_within; GC reclaims the rest. The two rules sit in
+# ONE keepTags entry, and zot v2.1.18 ORs the rules of one entry: pkg/retention/retention.go
+# GetRetainedTagsFromMetaDB runs every rule over all of the entry's tags and keeps the union ("we
+# retain candidates if any of the below rules are met (OR logic between rules)"). So the N newest
+# are always kept and the window can only keep MORE.
+# A time window as the SOLE criterion stays wrong: age pruning alone is non-deterministic (it drops
+# the deployed pin in a quiet period and balloons under heavy CI). Count-only history: 25 pruned
+# sha-b80a376c out from under the LIVE ailab pins in ~4 days (registry-404 ImagePullBackOff on every
+# reschedule, 2026-06-28), then 100 with every ailab-<digest> tag kept forever. A count plus 14 days
+# since 2026-11-20 (owner): a GC'd digest can't be re-pulled, only rebuilt, so what is deployed must stay
+# tagged. "Pushed" is zot's per-DIGEST metaDB PushTimestamp: re-tagging an existing digest (the
+# protect job's `imagetools create`) does NOT refresh it, so an ailab-<digest> tag ages from its
+# build, not from its tagging. BEFORE lowering either knob (or editing the macro), run
+# scripts/zot-retention-pin-scan.py: it fails if an image in use would be deleted.
+# ailab-<digest> tags ALSO stay while their digest was PULLED within the window (pulledWithin: zot's
+# DaysPull keeps a tag pulled OR pushed in it). The count alone failed that gate on 2026-11-20: the
+# platform pins historical digests (app-runner templates, airlock, workflow runtimes) far below the 10
+# newest protect tags (app-runner's oldest pinned one ranked 54th), and no count follows a pinned SET.
+# platform protect-ailab-images.yml GETs every pinned digest daily (06:17Z), and a manifest GET updates
+# the metaDB LastPullTimestamp (v2.1.18 routes.go GetManifest -> meta.OnGetManifest ->
+# UpdateStatsOnDownload; a HEAD does not). So "pulled within 14 days" tracks "still pinned", with 13
+# days of slack if that job stops. A digest the job does not fetch is NOT covered: the gate shows it.
+# 30, not the 10 the owner asked for, until that gap closes. On 2026-11-20 the gate failed at 10 and
+# 15: airlock's processingRuntimeAdmissions name 8 workflow runtimes that platform list-ailab-pins.py
+# does not list, so they are never re-fetched. They rank 11th-20th among workflow's protect tags by
+# push time. 20 passes with no spare rank; 30 leaves 10 (workflow gained 24 protect tags in the 30
+# days before, 3 in the last 14). Lower it to 10 once the platform protects those admissions and the
+# gate passes at 10. The FIRST REAL (non-dry-run) apply of this policy waits for that platform change.
+# Once live, GC re-evaluates every hour, and each new workflow pin moves those 8 one rank down, with or
+# without another apply: the 10 spare ranks are a buffer of about two weeks at October's pin rate, not
+# protection.
+registry_zot_strive_keep_recent: 30
+# ...OR pushed within this window (and, for ailab-<digest>, pulled within it). A Go duration string
+# (zot parses it like gcDelay): 336h = 14 days.
+registry_zot_strive_keep_within: "336h"
+
+# storage.retention.dryRun. While true, zot's GC logs every retention decision ("applied policy",
+# "decision":"delete", "dry-run":true) and deletes NO tag or manifest. It is GLOBAL: deleteReferrers,
+# deleteUntagged and the strive/ci-build/** and agentforge/** pruning all pause with it. Turn it on
+# for one GC cycle when retention changes (`-e registry_zot_retention_dry_run=true`, a reload), read the
+# log, then apply again without it. docs/runbooks/registry-cache.md "Changing tag retention".
+registry_zot_retention_dry_run: false
 
 # Repos (zot globs) whose retention also drops ORPHANED REFERRERS: buildx attestation manifests whose subject
 # image retention already deleted (deleteReferrers; zot GC removes a referrer whose subject is no longer in the
@@ -196,11 +233,74 @@ registry_zot_strive_keep_recent: 100
 # against TOP-LEVEL index.json entries only and ignores keepTags, so the check must report nested_not_top == 0 and
 # tagged_orphans == 0 (2026-11-18: strive/web, strive/sentinel, strive/knowledge all safe; 2026-11-19 09:0xZ, B1:
 # strive/e2e-runner 1843 orphans, strive/keycloak-realm-sync 1836, strive/notification 1774, all safe, check-rc=0).
-# Widening, in batches (owner go 2026-11-19; ~4 MB of metaDB writes per deletion on node1, so ~100 GB in all):
-#   B1 e2e-runner, keycloak-realm-sync, notification (5.4k orphans) -> B2 profile, knowledge, tms, mcp (7.0k)
-#   -> B3 workflow, airlock, integration, sentinel (5.8k) -> B4 ["strive/**"] (the rest, 3.6k). One GC hour
-#   observed between batches, with the abort budget in docs/runbooks/registry-cache.md.
-registry_zot_strive_delete_referrers_repos: ["strive/web", "strive/e2e-runner", "strive/keycloak-realm-sync", "strive/notification"]
+# Widened on 2026-11-20 (owner go: "cleanup the registry"; strive/web canary clean, B1 applied 10:17Z). Pre-check of
+# EVERY strive/** repo, 2026-11-20 10:14Z, 64 repos: 63 safe (nested_not_top 0, tagged_orphans 0, unreadable 0).
+# Orphans per repo: airlock 1696, app-runner 1263, deepagent 1172, digest 1269, doc-search 997, e2e-runner 1864,
+# gatekeeper 983, harness 654, integration 1286, keycloak 802, keycloak-realm-sync 1857, knowledge 1780, mcp 1773,
+# notification 1795, profile 1790, sentinel 1271, tms 1776, web 0, workflow 1755; strive/ci/* 1 each (12, their only
+# manifest); pin-manifest and strive/cache/* 0. New beyond the canary and B1: 20,279 deletions, ~4 MB of metaDB
+# writes each on node1 (~80 GB). check-rc=1 for ONE repo, strive/keycloak-sync: its index is EMPTY ("manifests":
+# null, no blobs), which the check fails closed on. zot globs have no negation, so instead of "strive/**" the list
+# names every safe repo and keycloak-sync stays on plain strive/**. strive/ci-build/* (12, all safe) is not listed:
+# the strive/ci-build/** policy above claims those repos first. A new strive repo gets deleteReferrers only when it
+# is added here after its own pre-check. ["strive/**"] (the template supports it) once keycloak-sync is gone or passes.
+registry_zot_strive_delete_referrers_repos:
+  # the 19 service repos (strive/web = the 2026-11-18 canary; e2e-runner, keycloak-realm-sync, notification = B1)
+  # and strive/pin-manifest
+  - "strive/airlock"
+  - "strive/app-runner"
+  - "strive/deepagent"
+  - "strive/digest"
+  - "strive/doc-search"
+  - "strive/e2e-runner"
+  - "strive/gatekeeper"
+  - "strive/harness"
+  - "strive/integration"
+  - "strive/keycloak"
+  - "strive/keycloak-realm-sync"
+  - "strive/knowledge"
+  - "strive/mcp"
+  - "strive/notification"
+  - "strive/profile"
+  - "strive/sentinel"
+  - "strive/tms"
+  - "strive/web"
+  - "strive/workflow"
+  - "strive/pin-manifest"
+  # buildx cache repos (one manifest each, no referrers today)
+  - "strive/cache/airlock"
+  - "strive/cache/app-runner"
+  - "strive/cache/deepagent"
+  - "strive/cache/digest"
+  - "strive/cache/doc-search"
+  - "strive/cache/e2e"
+  - "strive/cache/gatekeeper"
+  - "strive/cache/harness"
+  - "strive/cache/integration"
+  - "strive/cache/keycloak"
+  - "strive/cache/keycloak-realm-sync"
+  - "strive/cache/knowledge"
+  - "strive/cache/mcp"
+  - "strive/cache/notification"
+  - "strive/cache/profile"
+  - "strive/cache/sentinel"
+  - "strive/cache/tms"
+  - "strive/cache/web"
+  - "strive/cache/workflow"
+  # strive/ci/*: each holds one orphaned referrer and nothing else (no tag). GC then empties and removes
+  # them; once /v2/_catalog no longer lists them, drop these 12 entries (and the tests' fixture for them).
+  - "strive/ci/platform-app-runner-latest"
+  - "strive/ci/platform-digest-test"
+  - "strive/ci/platform-doc-search-latest"
+  - "strive/ci/platform-e2e-local"
+  - "strive/ci/platform-echo-http"
+  - "strive/ci/platform-hatchet-init"
+  - "strive/ci/platform-integration"
+  - "strive/ci/platform-mock-mcp"
+  - "strive/ci/platform-mock-mcp-oauth"
+  - "strive/ci/platform-mock-model"
+  - "strive/ci/platform-sentinel-latest"
+  - "strive/ci/platform-stub-oauth"
 
 # strive/ci-build/** holds cchifor/platform's per-commit e2e images (`ci-<40-hex commit>`, pushed by
 # strive-ci-push above). Its policy is listed BEFORE strive/** in config.json.j2: zot applies only
@@ -242,15 +342,15 @@ registry_zot_strive_ci_build_keep_within: "24h"
 # would let BOTH tags of one build count as one push against a shared count, halving the
 # platform's effective retention window to N/2 builds instead of N.
 #
-# Same shape and same reasoning as registry_zot_strive_keep_recent above: exactly like ailab
-# pins, the deployed agentforge/agentforge-platform manifests pin these images by DIGEST, and
+# Same reasoning as registry_zot_strive_keep_recent above (strive adds a time floor; this is
+# count only): exactly like ailab pins, the deployed agentforge/agentforge-platform manifests pin these images by DIGEST, and
 # Zot's GC removes untagged manifests — a GC'd build (short-sha OR full-sha tag) is
 # un-rollback-able (only rebuildable from git, and re-pinning off a rebuild can surface
 # newly-required config), so the window must comfortably outlive how far the deployed pin can lag
 # main. 40 covers the current + previous pin per repo plus deep rollback headroom (agentforge
 # merges far less often than strive's ~5-6 builds/day, so 40 is proportionally more headroom, not
-# less). COUNT-based (mostRecentlyPushedCount), NOT a time window, for the same non-determinism
-# reason as registry_zot_strive_keep_recent (a pushedWithin/pulledWithin window drops the deployed
+# less). COUNT-based (mostRecentlyPushedCount), NOT a time window alone, for the non-determinism
+# reason in registry_zot_strive_keep_recent's comment (a window as the sole rule drops the deployed
 # pin in quiet periods and balloons under heavy CI).
 registry_zot_agentforge_keep_recent: 40
 # Keeps actively-PULLED tags alive past the pushed-count window: digest-pinned LIVE images

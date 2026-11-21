@@ -9,4 +9,4 @@ metadata:
   name: relay-candidate-journal-postgres
   namespace: relay-candidate-journal-db
 spec:
-  replicas: 0
+  replicas: 1

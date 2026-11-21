@@ -23,8 +23,11 @@ REVIEWED_SCHEMA_SHA256 = {
 }
 SECURITY = {'allowPrivilegeEscalation': False, 'readOnlyRootFilesystem': True,
             'capabilities': {'drop': ['ALL']}, 'seccompProfile': {'type': 'RuntimeDefault'}}
+# Off the Relay worker pool. NotIn ['true'], not DoesNotExist: the agent nodes carry
+# ailab.io/relay-worker-pool=false (kubernetes/infra/agent-nodes/node-labels.tf, the researcher agent's
+# placement), and NotIn also matches a node without the label.
 AFFINITY = {'nodeAffinity': {'requiredDuringSchedulingIgnoredDuringExecution': {'nodeSelectorTerms': [
-    {'matchExpressions': [{'key': 'ailab.io/relay-worker-pool', 'operator': 'DoesNotExist'},
+    {'matchExpressions': [{'key': 'ailab.io/relay-worker-pool', 'operator': 'NotIn', 'values': ['true']},
                           {'key': 'kubernetes.io/arch', 'operator': 'In', 'values': ['amd64']}]}]}}}
 
 
