@@ -6,9 +6,13 @@ registry_zot_arch: "amd64"
 # The release binary's sha256 per version (`zot-linux-amd64`, from the release's checksums.sha256.txt AND the GitHub
 # asset digest). get_url verifies it, and the binary-change guard below compares the installed file with it. A
 # version without an entry FAILS the play (fail closed): add the hash in the same PR as a renovate bump.
+# Keyed by version, then registry_zot_arch (the release asset is zot-linux-<arch>): a version or an arch without an
+# entry fails closed.
 registry_zot_sha256:
-  v2.1.18: "a359a0af159db6758b24f8e26d6a244aae95caf3ff382c462875f42d9e082898"
-  v2.1.23: "1f6bab0b9eee426d0785de701ff510df5c02bdb8d7287494a582634abfc5d638"
+  v2.1.18:
+    amd64: "a359a0af159db6758b24f8e26d6a244aae95caf3ff382c462875f42d9e082898"
+  v2.1.23:
+    amd64: "1f6bab0b9eee426d0785de701ff510df5c02bdb8d7287494a582634abfc5d638"
 # Replacing the binary restarts zot, and every start re-parses the whole store (7-19 min registry outage). Like
 # registry_zot_config_allow_restart, it is an explicit opt-in: the play FAILS when the installed binary is not the
 # pinned version's, unless this is true (`-e registry_zot_allow_binary_change=true`, in a quiet window).

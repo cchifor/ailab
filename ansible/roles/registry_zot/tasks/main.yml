@@ -86,12 +86,14 @@
   ansible.builtin.assert:
     that:
       - registry_zot_version in registry_zot_sha256
+      - registry_zot_arch in registry_zot_sha256[registry_zot_version]
       - >-
         (not registry_zot_installed.stat.exists)
-        or registry_zot_installed.stat.checksum == registry_zot_sha256[registry_zot_version]
+        or registry_zot_installed.stat.checksum == registry_zot_sha256[registry_zot_version][registry_zot_arch]
         or (registry_zot_allow_binary_change | bool)
     fail_msg: >-
-      zot {{ registry_zot_version }}: either no sha256 in registry_zot_sha256 (add it), or the installed binary
+      zot {{ registry_zot_version }} ({{ registry_zot_arch }}): either no sha256 in registry_zot_sha256 for that
+      version and arch (add it), or the installed binary
       differs from it and registry_zot_allow_binary_change is false. Replacing the binary restarts zot (a full
       store parse, 7-19 min): opt in explicitly, in a quiet window. docs/runbooks/registry-cache.md.
     quiet: true
@@ -100,7 +102,7 @@
   ansible.builtin.get_url:
     url: "https://github.com/project-zot/zot/releases/download/{{ registry_zot_version }}/zot-linux-{{ registry_zot_arch }}"
     dest: /usr/local/bin/zot
-    checksum: "sha256:{{ registry_zot_sha256[registry_zot_version] }}"
+    checksum: "sha256:{{ registry_zot_sha256[registry_zot_version][registry_zot_arch] }}"
     mode: "0755"
     owner: root
     group: root

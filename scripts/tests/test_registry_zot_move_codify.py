@@ -63,6 +63,8 @@ def _actions(cfg):
     out = []
     for repo, pol in ac["repositories"].items():
         out.append((f"anonymous {repo}", pol.get("anonymousPolicy", [])))
+        # zot grants defaultPolicy to any authenticated user no policy matches: a write there would bypass the fence.
+        out.append((f"default {repo}", pol.get("defaultPolicy", [])))
         for p in pol.get("policies", []):
             out.append((f"{repo} {p.get('users') or p.get('groups')}", p["actions"]))
     if "adminPolicy" in ac:
@@ -79,10 +81,8 @@ class LiveStateCodified(unittest.TestCase):
         self.assertEqual(g["registry_zot_version"], "v2.1.18")
 
     def test_the_pin_is_invisible_to_renovate(self):
-        lines = GROUP_VARS.read_text().splitlines()
-        i = next(n for n, line in enumerate(lines) if line.startswith("registry_zot_version:"))
-        self.assertNotIn("renovate:", lines[i - 1])
-        self.assertNotIn("renovate", lines[i])
+        # renovate's regex manager keys on the literal "renovate:" marker: none may appear anywhere in the file.
+        self.assertNotIn("renovate:", GROUP_VARS.read_text())
 
     def test_rendered_retention_holds_and_is_dry_run(self):
         ret = _render()["storage"]["retention"]
@@ -103,8 +103,9 @@ class BinaryGuard(unittest.TestCase):
         self.get_url = tasks[self.get_i]["ansible.builtin.get_url"]
         self.defaults = yaml.safe_load((ROLE / "defaults" / "main.yml").read_text())
 
-    def _passes(self, version, installed, allow=False):
-        ctx = {"registry_zot_version": version, "registry_zot_sha256": self.defaults["registry_zot_sha256"],
+    def _passes(self, version, installed, allow=False, arch="amd64", sha_map=None):
+        ctx = {"registry_zot_version": version, "registry_zot_arch": arch,
+               "registry_zot_sha256": sha_map if sha_map is not None else self.defaults["registry_zot_sha256"],
                "registry_zot_allow_binary_change": allow,
                "registry_zot_installed": {"stat": {"exists": installed is not None, "checksum": installed}}}
         env = _env()
@@ -115,15 +116,26 @@ class BinaryGuard(unittest.TestCase):
         self.assertLess(self.guard_i, self.get_i)
 
     def test_get_url_verifies_the_same_checksum(self):
-        self.assertEqual(self.get_url["checksum"], "sha256:{{ registry_zot_sha256[registry_zot_version] }}")
+        self.assertEqual(self.get_url["checksum"],
+                         "sha256:{{ registry_zot_sha256[registry_zot_version][registry_zot_arch] }}")
+        self.assertIn("{{ registry_zot_arch }}", self.get_url["url"])
 
     def test_defaults(self):
-        self.assertIs(self.defaults["registry_zot_allow_binary_change"], False)
-        self.assertIn(self.defaults["registry_zot_version"], self.defaults["registry_zot_sha256"])
-        self.assertIn("v2.1.18", self.defaults["registry_zot_sha256"])
+        d = self.defaults
+        self.assertIs(d["registry_zot_allow_binary_change"], False)
+        self.assertIn(d["registry_zot_version"], d["registry_zot_sha256"])
+        self.assertIn(d["registry_zot_arch"], d["registry_zot_sha256"][d["registry_zot_version"]])
+        self.assertIn("v2.1.18", d["registry_zot_sha256"])
+
+    def test_checksum_is_selected_by_arch(self):
+        fake = {"v1": {"amd64": "a" * 64, "arm64": "b" * 64}}
+        self.assertTrue(self._passes("v1", "b" * 64, arch="arm64", sha_map=fake), "arm64 bytes match arm64 entry")
+        self.assertFalse(self._passes("v1", "a" * 64, arch="arm64", sha_map=fake), "amd64 bytes on arm64")
+        self.assertFalse(self._passes("v2.1.23", None, arch="arm64"), "no arm64 entry fails closed")
+        self.assertFalse(self._passes("v2.1.23", None, arch="arm64", allow=True), "no entry even with opt-in")
 
     def test_scenarios(self):
-        sha = self.defaults["registry_zot_sha256"]
+        sha = {v: by_arch["amd64"] for v, by_arch in self.defaults["registry_zot_sha256"].items()}
         self.assertTrue(self._passes("v2.1.18", sha["v2.1.18"]), "matching bytes")
         self.assertFalse(self._passes("v2.1.23", sha["v2.1.18"]), "upgrade without opt-in")
         self.assertFalse(self._passes("v2.1.18", sha["v2.1.23"]), "downgrade without opt-in")
