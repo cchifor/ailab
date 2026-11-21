@@ -18,16 +18,16 @@ reload allowlist, see "Reload or restart" below).
 ### Applying a config change (pin the live binary)
 
 **Since 2026-11-21 (the zot move to ai-node3) nothing here needs `-e`.** `ansible/group_vars/registry.yml` holds
-the live state: the strive retention hold (100000 / 87600h), `registry_zot_retention_dry_run: true` and the running
-binary (`registry_zot_version: v2.1.18`, removed again by the move's follow-up PR). The role also refuses any binary
+the live state: the strive retention hold (100000 / 87600h) and `registry_zot_retention_dry_run: true`. The
+v2.1.18 binary pin is gone (#1927): CT 5005 runs v2.1.23, the role default. The role also refuses any binary
 change unless `-e registry_zot_allow_binary_change=true` (a binary change is a full-parse restart), and `get_url`
 verifies the release sha256 from `registry_zot_sha256`. `-e registry_zot_read_only=true` is the registry-side writer
 fence (a reload): every accessControl action becomes read-only until a play without it runs. On cutover night that
-fence-off play runs against the new CT while the v2.1.18 pin is still in group_vars, so it is exactly
+fence-off play ran against the new CT while the v2.1.18 pin was still in group_vars, as
 `ansible-playbook registry.yml -e registry_zot_version=v2.1.23 -e registry_zot_read_only=false`: the installed bytes
-match the v2.1.23 entry, so the guard passes with no download and no restart. Any other registry play waits for the
-move's follow-up PR, which drops the pin. The older `-e` recipes below remain valid but are no longer needed for
-these values.
+matched the v2.1.23 entry, so the guard passed with no download and no restart. #1927 then dropped the pin, so a
+plain `ansible-playbook registry.yml` matches the live binary. The older `-e` recipes below remain valid but are no
+longer needed for these values.
 
 There is no config-only apply: `registry.yml` always runs the WHOLE role. Besides `config.json`,
 it converges the htpasswd lines, the certs, the sync upstream credentials and the systemd unit, and
@@ -36,7 +36,7 @@ a change to any of those restarts zot (a config.json change may reload instead, 
 live `v2.1.18`, pin `v2.1.23`). For a config or auth change, pin the version that is running:
 
 ```bash
-python scripts/node-ssh.py 192.168.0.2 "pct exec 5004 -- /usr/local/bin/zot -v"   # e.g. commit v2.1.18-0-g...
+python scripts/node-ssh.py 192.168.0.4 "pct exec 5005 -- /usr/local/bin/zot -v"   # ai-node3; e.g. commit v2.1.23-0-g...
 # WSL: ansible ignores the world-writable /mnt/c ansible.cfg, so name it explicitly
 export ANSIBLE_CONFIG=/mnt/c/Users/chifo/work/home/ailab/ansible/ansible.cfg
 cd /mnt/c/Users/chifo/work/home/ailab/ansible
@@ -111,10 +111,13 @@ consulting `keepTags`. So, for every repo before it goes on the list:
 2. Note one kept tag's index digest and its platform manifests, and their `GET /v2/<repo>/referrers/<digest>`.
 3. Apply (a reload, no restart). After the next GC cycle (`gcInterval` 1h), the orphan count should drop. Step 2's
    referrers must be unchanged. Watch, per 1-min sample:
-   - ai-node1 host writes, `rate(node_disk_written_bytes_total{device="nvme0n1"}[1m])`;
-   - cp1 WAL fsync p99.
-   **Abort when** node1 writes stay above 150 MiB/s for 3 consecutive samples, or cp1 fsync p99 is above 1 s for 2
-   consecutive samples.
+   - the registry host's writes, `rate(node_disk_written_bytes_total{device="nvme0n1"}[1m])` on that host (ai-node3
+     since the 2026-11-21 move; it was ai-node1 when this recipe was written). `nvme0n1` holds ai-node3's `pve` volume
+     group and the `local-lvm` thin pool with 5005's mp0 (`pvs`: `/dev/nvme0n1p3`; `vm-5005-disk-1` in pool `data`;
+     checked 2026-11-21). Re-check with `pvs` if the registry moves again;
+   - the WAL fsync p99 of the control plane on that host (cp3 on ai-node3; cp1 before the move).
+   **Abort when** the host's writes stay above 150 MiB/s for 3 consecutive samples, or that CP's fsync p99 is above
+   1 s for 2 consecutive samples.
    **Abort** = remove the repo from the list and apply. Then VERIFY that the reload took: the play's `Report how the
    zot config was applied` shows `mode: reload`, and the live config.json no longer lists the repo. zot only stops
    between GC passes, so a pass already running finishes its repo. If the disabling apply fails or is `blocked` (the
@@ -172,7 +175,7 @@ step is a reload (`storage.retention` is on the apply helper's allowlist). Alway
    strive/ci-build/** and agentforge/** pruning all pause, so finish a deleteReferrers widening first. A reload
    restarts zot's background tasks, so a GC pass can start soon after it, and the next one `gcInterval` (1h)
    later. Each pass logs one line per tag, so count DISTINCT strive repo:tag pairs, not lines. Do it on the registry
-   LXC (`ssh registry`, or `pct exec 5004 -- sh -c '...'` on ai-node1), with `SINCE` = the reload time (the
+   LXC (`ssh registry`, or `pct exec 5005 -- sh -c '...'` on ai-node3), with `SINCE` = the reload time (the
    `loaded new configuration settings` line):
    ```bash
    journalctl -u zot --since "$SINCE" -o cat | grep 'applied policy' | grep '"decision":"delete"' \
@@ -312,7 +315,7 @@ path. Zot `gc` (every `gcInterval`, now 1h) reclaims the orphaned blobs.
 ## Disk / retention
 
 The store lives on the mp0 data disk; its desired size is `kubernetes/infra/registry-lxc`
-`data_gb` (including effective overrides). Check `pct config 5004` and the filesystem for the live size. A
+`data_gb` (including effective overrides). Check `pct config 5005` (ai-node3) and the filesystem for the live size. A
 `storage.retention` policy (config.json.j2) bounds growth with policies evaluated **in order**,
 each more specific one listed before the catch-all it would otherwise fall through to (zot applies
 only the FIRST policy whose glob matches a repo):
@@ -363,6 +366,13 @@ tag" above for the delete pattern) — `ansible-playbook ansible/registry.yml` t
 new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs within ~3h.
 
 ## Thin-volume trim (weekly, ai-node1)
+
+> **Status since the 2026-11-21 zot move.** This section describes CT 5004 on ai-node1, which is now parked
+> (stopped, net0 `link_down=1`, `backup` lock) until the owner approves its decommission. Its
+> `registry-lxc-fstrim.timer` on ai-node1 is **disabled** (owner decision for the move), and ai-node1's
+> `pve-lxc-fstrim` sweep still excludes 5004. The live registry, CT 5005 on ai-node3, is excluded from ai-node3's
+> sweep (`ansible/host_vars/ai-node3.yml`), and **its trim is not set up yet**: that is decided with the move's
+> follow-up. Until then, freed blobs on 5005's mp0 stay allocated in ai-node3's `local-lvm` thin pool.
 
 Zot's GC frees blobs inside the container, but the host's `fstrim.timer` never reaches LXC mount
 points, so freed space stays allocated in ai-node1's `local-lvm` thin pool. By 2026-10-06 mp0 held

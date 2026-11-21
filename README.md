@@ -46,7 +46,7 @@ See [`docs/network-plan.md`](docs/network-plan.md) for the authoritative IP plan
 | AI LLM GPU LXCs (privileged, llama.cpp/Vulkan; node2 + node3) | .45 / .46 | 5002–5003 |
 | CI runner VMs (GitHub + Gitea Actions) | .14 / .15 / .16 / .17 / .18 | 4101–4105 |
 | Dev-worker VMs `dev-worker-1..4` (user `c4`; `docs/runbooks/dev-workers.md`; slot ≠ vmid since 2026-09-23) | .8–.11 | 4201, 4202, 4204, 4205 |
-| Registry pull-through LXC (node1) | — | 5004 |
+| Registry pull-through LXC (node3; CT 5004 on node1 parked until decommission) | — | 5005 |
 
 ---
 
