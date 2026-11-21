@@ -4812,3 +4812,79 @@ back, and a rolled-back release digest needs File B reissued again.
 6. **`file_b_router_check`, once** (a second nonce). It must return exit 0, `status: pass` and `signingReady: true`.
 
 No other Router change may follow before the canary.
+
+## Unlinked witness release (2026-11-21, llm-router #193)
+
+Release `router-0.1.0-20261121-witness-unlinked`: source `bf19ce6f6078df130e51b458e79664fc86cb83a3` (llm-router branch
+`release/router-20261121-witness-unlinked`: the live `1d652065` plus a release port of
+[#193](https://git.chifor.me/cchifor/llm-router/pulls/193) and its tests; main has since moved the reader into
+`packages/adapters/`, so the port keeps it in the plugin index), archive
+`router-0.1.0-20261121-witness-unlinked.tar.gz`, SHA-256
+`89d1cd282b21eecc4b4a111d38dc1eab4e5f38064b64dd72862b9853d38f083b`, Relay branch
+`release/router-20261121-witness-unlinked`, packaging commit `f49d08356cea6926b944bbff281b5364afbc0f56`,
+Relay run [144626](https://git.chifor.me/cchifor/relay/actions/runs/144626), image `registry.chifor.me/llm-router/router@sha256:9687bdc673a62046b5b13b89c8962be0b5d31e1b6973d051b578ba219e63c9e7`.
+
+**Why.** R0 drill A (2026-11-21, ailab #1753) failed at O1. The Router mounts its worker-budget files as `subPath`
+files. When the Secret's data changes, kubelet's atomic writer unlinks the bound file, so the inode keeps its
+start-time bytes with zero links. `readBudgetWitness` required exactly one link. After any change to the Secret, the
+plugin could not start or re-enable (500), and an active plugin's 5 s refresh went `read_failed` until the next
+rollout.
+
+**What it changes.** The witness reader accepts zero or one link. Hard links (two or more), symlinks, a path that does
+not resolve to itself, another inode behind the path, group or world write, another owner and files over 4 KiB are
+refused as before. While the file stays unlinked, the plugin logs a fixed warning at most once an hour. Note that the
+cordis logger on this release buffers in memory only (llm-router #191), so the warning is not on stdout yet.
+- Against the live archive, only `dist/packages/plugins/worker-budget-authority/index.{js,d.ts,js.map}` differ, apart
+  from `SOURCE_COMMIT` and pnpm's bookkeeping timestamps (`deploy/backup-router.mjs` is added by the publisher).
+- No schema, migration, KV, plugin-settings or configuration change.
+
+**After an intentional worker-budget Secret change.** This release turns a loud failure into a quiet one: after a change
+to the Router's worker-budget Secret (witness, DSN or CA), the running Router keeps serving its start-time bytes, and the
+only in-process signal is the hourly warning, which this release does not write to stdout (llm-router #191). So:
+- **Roll the Router in the same step** as any change under `af/relay-budget/*` or to that Secret (the interim rule),
+  exactly once:
+  - **Secret-only change** (no image or manifest change in Git, so Flux applies nothing): `roll_router`
+    ([relay-researcher-remaining-live-steps.md](relay-researcher-remaining-live-steps.md)), one `roll_deploy` under the field manager Flux keeps (#1906).
+  - **Together with an image or manifest change:** the merge is the roll; do not also run `roll_router`.
+- **Prove the new value is live** (helpers in [relay-researcher-remaining-live-steps.md](relay-researcher-remaining-live-steps.md)): `rlinks_ok` shows links 1 on
+  every file of the fresh Pod, and `wsha_router` shows the new witness hash. Links 0 on a running Pod means it still
+  serves the old value.
+- A Secret change that is not followed by a roll is an incident: roll, then re-check as above.
+- **Until llm-router #191 lands, `rlinks_ok` is the only detection of a stale witness** (the hourly warning is not on
+  stdout).
+
+**Verified on the release tree.**
+- `tests/worker-budget-runtime-io.test.ts` and `tests/worker-budget-runtime-wiring.test.ts`: 10 passed, 1 skipped
+  (the opt-in bind-mount test). `tsc --noEmit` clean.
+- The bind-mount test (`ROUTER_TEST_BIND_MOUNT=1`, root with `CAP_SYS_ADMIN`) binds a witness, unlinks the source as
+  kubelet does, and reads it twice: 8/8 passed.
+- **Archive.** Built from `git archive bf19ce6f` in the pinned Node 26.10.0 runtime. The production smoke passed with
+  no network, uid 1000, a read-only root and all capabilities dropped.
+
+**Worker budgets: the release changes the qualification.** `executingRelease` on the archive gives
+`routerReleaseDigest` `28c8bd496299bf2680b8df2467119cc094ed995489f63026dabe06c2f9ddaea3` (the live image, reproduced
+by the same method: `414e8520031dae7fb20cc3548c3fbb837cb8f446b64e397335205b63556af6a5`). `adapterDigests.openai` is
+unchanged (`bae4379dd7e924b2cf045475101955b54a8fd92993037f8cb5a31331be0061ba`). The qualified File B row (digest
+`7cebab8d…6e4c`) names the old release digest, so after the roll the Router filters it out, and File B is reissued.
+
+**Rollback.** Revert the image, the comment above it and both annotations together, to image
+`registry.chifor.me/llm-router/router@sha256:f923c13a40de9e52948c122eb1528d77886cf0d431581ebce93da2b0a4a87647`,
+source `1d65206575251e3f450a3b6c41650b40d17f42b8`, release `router-0.1.0-20261120-budget-runtime-get`. A rolled-back
+release digest needs File B reissued again.
+
+**Before the roll.** Take the `validate-live` baseline and save `GET /v1/routes` as the administrator.
+
+**The roll and what follows, in this order.** Stop at the first step that fails. Steps 1-6 are the same as in
+"Worker-budget authority release" above, with these values:
+1. **Merge = the roll** (no `roll_deploy`). One Pod of image `9687bdc673a62046b5b13b89c8962be0b5d31e1b6973d051b578ba219e63c9e7`; the revision rises by exactly 1 and is
+   unchanged after Flux's next reconcile of `apps`.
+2. **Router readback** as above; `rlinks_ok` ([relay-researcher-remaining-live-steps.md](relay-researcher-remaining-live-steps.md)) shows links 1 on the fresh Pod.
+3. **Release gate (router-ab)** on the live router.
+4. **Readings R1-R5** and a new File B evidence file: expected `routerReleaseDigest`
+   `28c8bd496299bf2680b8df2467119cc094ed995489f63026dabe06c2f9ddaea3`, the same openai adapter digest, and
+   `providerGeneration` 1.
+5. **Reissue File B** with `--supersede`; the owner confirms the new digest.
+6. **`file_b_router_check`, once.** Exit 0, `status: pass`, `signingReady: true`.
+
+Then a new R0 with a fresh K5 under the [R0 runbook](relay-researcher-r0-relay-drills.md) as of ailab #1922. No other Router change may follow before the
+canary.
