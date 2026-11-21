@@ -3874,7 +3874,7 @@ gate, provider `codex` (the `codex` arm via the router against its direct contro
 tokens read router 4,116 vs direct 10,287 (0.40x, 3 pairs, 20:10Z), then router 39,050 vs direct 20,642 (1.89x,
 6 pairs, 20:18Z) on the same image minutes apart, with Layer (a) identical (19,047 input tokens) and every other
 metric inside its margin. The FAIL was recorded and the release kept as a documented exception (#1910). A matched
-parent-versus-release comparison is still owed; concurrent router traffic during the gate remains the only lead.
+parent-versus-release comparison is still owed by the ailab operator session (the gate result and this open item are recorded in #1910); concurrent router traffic during the gate remains the only lead.
 
 **Open at rev 2247:** `qwen-cloud3` `code-edit` is FAIL on uncached tokens in 2 of 2 runs (1.29x, 1.20x), with Layer (a)
 clean and the model doing more work via the router (1.30x, 1.91x output tokens). cloud2 passes on the same day. On one
