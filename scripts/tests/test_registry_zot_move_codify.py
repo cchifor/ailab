@@ -190,5 +190,40 @@ class WriterFence(unittest.TestCase):
         self.assertTrue(paths and all(p.startswith("http.accessControl") for p in paths), paths)
 
 
+class ActiveRegistryAfterCutover(unittest.TestCase):
+    """After the cutover the registry_* outputs follow CT 5005; the old resource stays bound to CT 5004."""
+
+    TF = REPO / "kubernetes" / "infra" / "registry-lxc"
+
+    def _block(self, text, header):
+        start = text.index(header)
+        depth, i = 0, text.index("{", start)
+        for j in range(i, len(text)):
+            depth += {"{": 1, "}": -1}.get(text[j], 0)
+            if depth == 0:
+                return text[start:j + 1]
+        self.fail(f"unterminated block {header}")
+
+    def test_active_outputs_point_at_the_new_ct(self):
+        out = (self.TF / "outputs.tf").read_text()
+        for name, attr in (("registry_ip", "ip"), ("registry_vmid", "vm_id"), ("registry_hostname", "hostname"),
+                           ("registry_node", "node_name")):
+            self.assertIn(f"var.registry_lxc_n3.{attr}", self._block(out, f'output "{name}"'), name)
+        self.assertIn("var.registry_lxc.vm_id", self._block(out, 'output "registry_retired_vmid"'))
+        self.assertIn("var.registry_lxc.node_name", self._block(out, 'output "registry_retired_node"'))
+
+    def test_old_resource_keeps_its_binding_and_ignores_run_state(self):
+        main = (self.TF / "main.tf").read_text()
+        old = self._block(main, 'resource "proxmox_virtual_environment_container" "registry" ')
+        self.assertRegex(old, r"node_name\s*=\s*var\.registry_lxc\.node_name")
+        self.assertRegex(old, r"vm_id\s*=\s*var\.registry_lxc\.vm_id")
+        self.assertRegex(old, r"ignore_changes\s*=\s*\[started, start_on_boot\]")
+        self.assertRegex(old, r"prevent_destroy\s*=\s*true")
+        new = self._block(main, 'resource "proxmox_virtual_environment_container" "registry_n3" ')
+        self.assertRegex(new, r"ignore_changes\s*=\s*\[started\]")
+        self.assertRegex(new, r"start_on_boot\s*=\s*true")
+        self.assertRegex(new, r"prevent_destroy\s*=\s*true")
+
+
 if __name__ == "__main__":
     unittest.main()

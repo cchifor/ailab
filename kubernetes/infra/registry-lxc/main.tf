@@ -21,8 +21,10 @@ resource "proxmox_virtual_environment_container" "registry" {
   vm_id        = var.registry_lxc.vm_id
   tags         = ["lxc", "registry", "zot", "platform"]
   unprivileged = true # no host devices / bind mounts needed -> run unprivileged for safety
-  # RETIRED from service by the zot move (2026-11-21): stopped (net0 link_down=1 by hand), never started again by
-  # tofu; its volumes stay as the pre-cutover copy until the owner approves decommissioning (a separate PR).
+  # RETIRED from service by the zot move (2026-11-21): stopped, onboot 0, net0 link_down=1 and a 'backup' lock, all
+  # set by hand (pct); its volumes stay as the pre-cutover copy until the owner approves decommissioning (a separate
+  # PR). started/start_on_boot below document that state only: lifecycle.ignore_changes covers both, so tofu never
+  # acts on them.
   started       = false
   start_on_boot = false
 
@@ -118,8 +120,8 @@ resource "proxmox_virtual_environment_container" "registry_n3" {
   vm_id         = var.registry_lxc_n3.vm_id
   tags          = ["lxc", "registry", "zot", "platform"]
   unprivileged  = true # the default idmap: guest uid 999 (zot) = host 100999, as on CT 5004
-  started       = true # the live registry since the 2026-11-21 cutover
-  start_on_boot = true
+  started       = true # the live registry since the 2026-11-21 cutover; documentation only (ignore_changes)
+  start_on_boot = true # tofu applies this one
 
   features {
     nesting = true
