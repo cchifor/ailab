@@ -442,7 +442,7 @@ installs a nightly sweep that trims them:
 |---|---|---|
 | ai-node2 | 04:30-04:49 | 5002 (rootfs, `/models-local`) |
 | ai-node3 | 04:50-05:09 | 5003 (rootfs, `/models-local`) |
-| ai-node1 | 05:10-05:29 | nothing: 5004 is excluded, its weekly unit trims it ([registry-cache.md](registry-cache.md)) |
+| ai-node1 | 05:10-05:29 | nothing: 5004 is excluded (parked since the 2026-11-21 zot move; its weekly unit is disabled, [registry-cache.md](registry-cache.md)) |
 
 `scripts/tests/test_pve_lxc_fstrim_schedule.py` (run by script-tests) fails if a slot leaves 00:30-05:30,
 two hosts overlap (worst case: TimeoutStartSec plus TimeoutStopSec), the timeouts do not cover a chunk, or

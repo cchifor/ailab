@@ -12,7 +12,8 @@ change** and **no K8s imagePullSecrets**.
 ## Deployment: Proxmox LXC via IaC (the live path)
 
 The registry runs on a dedicated **unprivileged Proxmox LXC** (`registry.chifor.me` →
-`192.168.0.36`, vmid 5004 on ai-node1), provisioned + configured entirely from this repo:
+`192.168.0.36`, vmid 5005 on ai-node3 since the 2026-11-21 zot move; the old CT 5004 on ai-node1 is parked
+until the owner approves its decommission), provisioned + configured entirely from this repo:
 
 - **tofu** `kubernetes/infra/registry-lxc/` — creates the LXC (2 vCPU / 2 GiB, 16 GiB root + a
   **resizable 64 GiB `mp0` data disk** at `/var/lib/registry`). `just registry-plan` / `registry-apply`.
@@ -24,7 +25,7 @@ The registry runs on a dedicated **unprivileged Proxmox LXC** (`registry.chifor.
 - **DNS** `kubernetes/infra/cloudflare/registry-dns.tf` — `registry.chifor.me` A → `192.168.0.36`,
   **DNS-only** (grey-cloud) so the Talos nodes + CI resolve it on the LAN.
 
-Grow the image store later: `pct resize 5004 mp0 +NG` (online) or bump `data_gb` + `tofu apply`.
+Grow the image store later: `pct resize 5005 mp0 +NG` on ai-node3 (online) or bump `data_gb` + `tofu apply`.
 
 The `config.json` + `docker-compose.yml` below remain the **QNAP Container Station** alternative
 (Docker, 443→5000 port-map); the LXC role templates the same policy to bind :443 natively.

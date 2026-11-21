@@ -382,7 +382,9 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
       Sundays**.
     - ai-node2: ci-runner-2 00:00-01:45, ci-runner-5 01:50-03:35, ci-runner-10 03:40-05:25.
     - ai-node3: ci-runner-3 00:00-01:45, ci-runner-6 01:50-03:35.
-  - **Days, and the registry trim on ai-node1.** The node's weekly registry LXC trim
+  - **Days, and the registry trim on ai-node1.** (Since the 2026-11-21 zot move this unit is disabled: the
+    registry moved to ai-node3 and CT 5004 is parked. The text below explains `gitea_runner_fstrim_days`.)
+    The node's weekly registry LXC trim
     ([registry-cache.md](registry-cache.md), "Thin-volume trim") starts Sunday 03:30 plus up to 15 min
     (`RandomizedDelaySec`), then waits out IO pressure per chunk, so it can run for hours; its unit's
     `TimeoutStartSec` ends it by 23:36 Sunday, clear of Monday's 00:00 window. No time window can avoid
