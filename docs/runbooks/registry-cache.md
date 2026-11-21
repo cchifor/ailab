@@ -111,8 +111,10 @@ consulting `keepTags`. So, for every repo before it goes on the list:
 2. Note one kept tag's index digest and its platform manifests, and their `GET /v2/<repo>/referrers/<digest>`.
 3. Apply (a reload, no restart). After the next GC cycle (`gcInterval` 1h), the orphan count should drop. Step 2's
    referrers must be unchanged. Watch, per 1-min sample:
-   - the registry host's writes, `rate(node_disk_written_bytes_total{device="nvme0n1"}[1m])` (ai-node3 since the
-     2026-11-21 move; it was ai-node1 when this recipe was written);
+   - the registry host's writes, `rate(node_disk_written_bytes_total{device="nvme0n1"}[1m])` on that host (ai-node3
+     since the 2026-11-21 move; it was ai-node1 when this recipe was written). `nvme0n1` holds ai-node3's `pve` volume
+     group and the `local-lvm` thin pool with 5005's mp0 (`pvs`: `/dev/nvme0n1p3`; `vm-5005-disk-1` in pool `data`;
+     checked 2026-11-21). Re-check with `pvs` if the registry moves again;
    - the WAL fsync p99 of the control plane on that host (cp3 on ai-node3; cp1 before the move).
    **Abort when** the host's writes stay above 150 MiB/s for 3 consecutive samples, or that CP's fsync p99 is above
    1 s for 2 consecutive samples.
