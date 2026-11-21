@@ -4842,7 +4842,10 @@ cordis logger on this release buffers in memory only (llm-router #191), so the w
 to the Router's worker-budget Secret (witness, DSN or CA), the running Router keeps serving its start-time bytes, and the
 only in-process signal is the hourly warning, which this release does not write to stdout (llm-router #191). So:
 - **Roll the Router in the same step** as any change under `af/relay-budget/*` or to that Secret (the interim rule),
-  with the one-outage roll in "Worker-budget authority release" step 1, never `roll_deploy` on top of a Flux apply.
+  exactly once:
+  - **Secret-only change** (no image or manifest change in Git, so Flux applies nothing): `roll_router`
+    (relay-researcher-remaining-live-steps.md), one `roll_deploy` under the field manager Flux keeps (#1906).
+  - **Together with an image or manifest change:** the merge is the roll; do not also run `roll_router`.
 - **Prove the new value is live** (helpers in relay-researcher-remaining-live-steps.md): `rlinks_ok` shows links 1 on
   every file of the fresh Pod, and `wsha_router` shows the new witness hash. Links 0 on a running Pod means it still
   serves the old value.
