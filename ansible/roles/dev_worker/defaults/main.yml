@@ -491,9 +491,10 @@ dev_worker_disk_guard_image_days: 3
 dev_worker_disk_guard_deps_days: 3
 
 # Daily trim of /workspace and / (tasks/fstrim.yml, tag fstrim). Both disks are thin LVs on the host's
-# local-lvm, discard=on, on the QLC NVMe a Talos control plane's etcd shares. Ubuntu's weekly fstrim.timer
-# left a gap that rebuilt within days: ~194 GiB freed but still allocated across the four workers on
-# 2026-11-20, and a week's worth was then trimmed in one burst on the etcd drive. On: every night in this
+# local-lvm, discard=on, on the host's one QLC NVMe (shared with its CI runners, agent node and LXCs; the Talos
+# control planes' disks left it for qnap-nfs on 2026-11-20, ADR 0043). Ubuntu's weekly fstrim.timer left a gap
+# that rebuilt within days: ~194 GiB freed but still allocated across the four workers on 2026-11-20, and a
+# week's worth was then trimmed in one burst on that drive. On: every night in this
 # worker's slot, kubernetes/apps/node-fstrim/node-fstrim.sh (the Talos node trim's script, installed as
 # /usr/local/sbin/node-fstrim) trims the mounts in 4 GiB chunks, waiting while the VM's IO pressure is
 # high, with a deadline; the stock fstrim.timer is stopped and masked while this is on. Off again = the

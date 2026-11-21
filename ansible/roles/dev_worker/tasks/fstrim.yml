@@ -108,6 +108,41 @@
         group: root
         mode: "0644"
 
+    # A new slot (dev_worker_fstrim_start, or AccuracySec) must not start a trim. systemd keeps, in memory, when a
+    # loaded timer last fired (or was started, if it has not fired since) and plans the next run from that, at every
+    # daemon-reload and at every start, so also across a stop + start or a restart. A new slot between that time
+    # and now is already due, and the trim starts at once: 00:30 -> 00:42 converged at 06:35 trims at 06:35, in the
+    # working day. (The new slot itself does take effect at the reload.) A timer that systemd has UNLOADED keeps
+    # nothing and plans from now. So when the timer's file is about to change, the timer is stopped and disabled
+    # first: nothing holds the unit any more and systemd drops it. The last task here enables and starts it again,
+    # after the reload. A trim already running is left alone. Measured on Ubuntu 24.04 (systemd 255), for a timer
+    # that has fired and one that has not: a bare reload, stop + reload + start and restart all start the trim at
+    # once; this does not (tests/fstrim-converge/converge.sh, "a new slot").
+    - name: Look for the timer's unit file
+      ansible.builtin.stat:
+        path: /etc/systemd/system/dev-worker-fstrim.timer
+      register: dev_worker_fstrim_timer_file
+
+    - name: Would the timer's unit file change?
+      ansible.builtin.template:
+        src: dev-worker-fstrim.timer.j2
+        dest: /etc/systemd/system/dev-worker-fstrim.timer
+        owner: root
+        group: root
+        mode: "0644"
+      check_mode: true
+      diff: false
+      register: dev_worker_fstrim_timer_next
+
+    - name: Stop and disable the timer before its unit file changes (enabled and started again below)
+      ansible.builtin.systemd:
+        name: dev-worker-fstrim.timer
+        state: stopped
+        enabled: false
+      when:
+        - dev_worker_fstrim_timer_file.stat.exists
+        - dev_worker_fstrim_timer_next is changed
+
     - name: Install the trim's unit and timer
       ansible.builtin.template:
         src: "{{ item }}.j2"
@@ -129,6 +164,10 @@
         mode: "0755"
 
     # Written by the role, not the script: a worker whose timer never fires still says the trim should run.
+    # DevWorkerTrimNotSucceeding reads it with the script's node_fstrim_last_success_timestamp_seconds
+    # (kubernetes/apps/infrastructure/monitoring/thin-pool-rules.yaml, job dev-worker-node): no complete run for
+    # 50 h, counted from this file's mtime on a new install. That covers a timer that stopped firing and nights
+    # that keep ending partial (exit 9 after 7 days).
     - name: Mark the trim as enabled for the alerts
       ansible.builtin.copy:
         dest: "{{ dev_worker_fstrim_textfile_dir }}/dev_worker_fstrim_enabled.prom"
@@ -140,14 +179,21 @@
           # TYPE dev_worker_fstrim_enabled gauge
           dev_worker_fstrim_enabled 1
 
-    # The stock weekly timer would trim every mount at once (one burst on the etcd drive), on top of this one.
-    - name: Stop and mask the stock weekly fstrim.timer
+    # The stock weekly timer would trim every mount at once (one burst on the host's NVMe), on top of this one.
+    # Stopped before it is masked: the module masks first, and a running timer whose unit is masked loses what it
+    # triggers, so systemd fails it ("Unit to trigger vanished", result resources) and the worker is `degraded`.
+    - name: Stop and disable the stock weekly fstrim.timer
       ansible.builtin.systemd:
         name: fstrim.timer
         state: stopped
         enabled: false
+
+    - name: Mask the stock weekly fstrim.timer
+      ansible.builtin.systemd:
+        name: fstrim.timer
         masked: true
 
+    # Loaded afresh after the stop above, the timer plans from now: no catch-up of a slot already passed today.
     - name: Enable and start the daily trim timer
       ansible.builtin.systemd:
         name: dev-worker-fstrim.timer
@@ -201,6 +247,31 @@
             - /etc/systemd/system/dev-worker-fstrim.service
             - /usr/local/sbin/node-fstrim
             - /var/lib/node-fstrim
+
+        # Ubuntu's fstrim.timer is OnCalendar=weekly, Persistent=true, RandomizedDelaySec=100min. Started, it plans
+        # its next run from its stamp, the time it last fired. Masked for weeks, that stamp is over a week old and
+        # the run is overdue: systemd 255 schedules it at its own start (the boot) plus the random delay, already
+        # past on a worker up for over 100 min, so it runs AT ONCE. That is a full fstrim of every mount, at
+        # whatever time this converge runs (06:35 for the fleet converge), on the NVMe the host's CI runners and
+        # other guests share, maybe during a runner's trim: the burst the daily trim exists to avoid. With the stamp
+        # set to now, the next run is the next weekly boundary (Monday 00:00 local, plus up to 100 min). The daily
+        # trim kept the disks trimmed until now, so nothing is owed. converge.sh (the control at the top, and "the
+        # kill switch") shows the catch-up with an old stamp, and none after this.
+        - name: Make sure the timers' stamp directory exists
+          ansible.builtin.file:
+            path: /var/lib/systemd/timers
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: Set the stock timer's last run to now, so starting it does not catch up the masked weeks at once
+          ansible.builtin.file:
+            path: /var/lib/systemd/timers/stamp-fstrim.timer
+            state: touch
+            owner: root
+            group: root
+            mode: "0644"
 
         - name: Unmask and start the stock weekly fstrim.timer again
           ansible.builtin.systemd:

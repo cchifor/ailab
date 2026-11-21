@@ -94,7 +94,7 @@
 
 # Daily chunked trim of /workspace and / (needs workspace.yml's mount), and / without online discard. Both
 # opt-in per worker (host_vars). Own tag: --tags fstrim.
-- name: Daily trim of /workspace and / (thin LVs on the etcd NVMe)
+- name: Daily trim of /workspace and / (thin LVs on the host's NVMe)
   ansible.builtin.import_tasks: fstrim.yml
   tags: [fstrim]
 

@@ -10,6 +10,8 @@
   Talos node trim uses (one file).
 - The root fstab edit uses gitea_runner's three regexes verbatim; applied as ansible.builtin.replace applies
   them, they drop only a whole `discard` token and a second pass changes nothing.
+- Neither switch starts a trim: a new slot stops the timer before its file changes, and the kill switch dates the
+  stock timer's stamp before starting it (the behaviour itself: the Docker converge test).
 Fixture cases mutate the real settings to prove the slot check fails when it should.
 """
 
@@ -127,6 +129,25 @@ def fstab_items(tasks_file):
     raise AssertionError(f"no /etc/fstab replace task in {tasks_file}")
 
 
+def block(tasks, prefix):
+    for t in tasks:
+        if str(t.get("name", "")).startswith(prefix) and "block" in t:
+            return t["block"]
+    raise AssertionError(f"no block named {prefix!r}")
+
+
+def index(tasks, pred, what):
+    hits = [i for i, t in enumerate(tasks) if pred(t)]
+    if len(hits) != 1:
+        raise AssertionError(f"expected one task that {what}, found {len(hits)}")
+    return hits[0]
+
+
+def systemd(t, unit, state):
+    s = t.get("ansible.builtin.systemd") or {}
+    return s.get("name") == unit and s.get("state") == state
+
+
 def apply_replace(text, items):
     for it in items:  # ansible.builtin.replace: Python re, MULTILINE, \g<1> backreferences
         text = re.compile(it["regexp"], re.MULTILINE).sub(it["replace"], text)
@@ -193,6 +214,42 @@ class DevWorkerFstrim(unittest.TestCase):
             once = apply_replace(before, items)
             self.assertEqual(after, once, before)
             self.assertEqual(once, apply_replace(once, items), f"second pass changed {once!r}")
+
+    def test_a_new_slot_unloads_the_timer_before_its_file_changes(self):
+        # systemd plans a loaded timer from when it last fired or was started, at every reload and start, and fires
+        # it at once if the new slot is already due (converge.sh, "a new slot"). Stopped AND disabled before its file
+        # is written, the unit is dropped and comes back planning from now; a stop alone, or a restart, is not enough.
+        tasks = block(yaml.safe_load((ROLE / "tasks/fstrim.yml").read_text(encoding="utf-8")), "Enabled")
+        check = index(tasks, lambda t: (t.get("ansible.builtin.template") or {}).get("src") == "dev-worker-fstrim.timer.j2",
+                      "dry-renders the timer")
+        stop = index(tasks, lambda t: systemd(t, "dev-worker-fstrim.timer", "stopped"), "stops the timer")
+        write = index(tasks, lambda t: "dev-worker-fstrim.timer" in (t.get("loop") or []), "writes the timer")
+        start = index(tasks, lambda t: systemd(t, "dev-worker-fstrim.timer", "started"), "starts the timer")
+        self.assertTrue(check < stop < write < start, (check, stop, write, start))
+        self.assertIs(True, tasks[check].get("check_mode"))
+        self.assertIn(f"{tasks[check]['register']} is changed", tasks[stop]["when"])
+        self.assertIs(False, tasks[stop]["ansible.builtin.systemd"].get("enabled"))
+        self.assertIs(True, tasks[start]["ansible.builtin.systemd"].get("enabled"))
+        self.assertIs(True, tasks[start]["ansible.builtin.systemd"].get("daemon_reload"))
+        self.assertFalse(any(systemd(t, "dev-worker-fstrim.timer", "restarted") for t in tasks))
+
+    def test_the_stock_timer_is_stopped_before_it_is_masked(self):
+        # Masking a running timer makes systemd fail it ("Unit to trigger vanished"): the worker goes `degraded`.
+        tasks = block(yaml.safe_load((ROLE / "tasks/fstrim.yml").read_text(encoding="utf-8")), "Enabled")
+        stop = index(tasks, lambda t: systemd(t, "fstrim.timer", "stopped"), "stops the stock timer")
+        mask = index(tasks, lambda t: (t.get("ansible.builtin.systemd") or {}).get("masked") is True, "masks it")
+        self.assertLess(stop, mask)
+        self.assertNotIn("masked", tasks[stop]["ansible.builtin.systemd"])
+
+    def test_the_kill_switch_dates_the_stock_timer_before_starting_it(self):
+        # Persistent=true: started with its weeks-old stamp, the stock timer would catch up at once (converge.sh).
+        takedown = block(block(yaml.safe_load((ROLE / "tasks/fstrim.yml").read_text(encoding="utf-8")), "Disabled"),
+                         "Take down")
+        touch = index(takedown, lambda t: (t.get("ansible.builtin.file") or {}).get("path")
+                      == "/var/lib/systemd/timers/stamp-fstrim.timer", "touches the stamp")
+        self.assertEqual("touch", takedown[touch]["ansible.builtin.file"]["state"])
+        start = index(takedown, lambda t: systemd(t, "fstrim.timer", "started"), "starts the stock timer")
+        self.assertLess(touch, start)
 
     # ---- the checks bite --------------------------------------------------------------------------
     def mutated(self, host, **kv):

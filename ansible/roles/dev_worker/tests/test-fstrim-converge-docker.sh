@@ -4,8 +4,10 @@
 # the root entry's discard dropped from fstab, backed up; the remount skipped on a root without discard; the
 # unit, timer and settings; the stock weekly timer masked; no trim started); idempotence and --check after
 # apply; the unit run end to end against a real ext4 /workspace on a loop device (the freed space comes back
-# out of the sparse backing file; the beacon says done); refused settings; disable (the stock weekly timer back
-# on, fstab left nodiscard) and a second disable.
+# out of the sparse backing file; the beacon says done); a new slot (applied, next due tomorrow, and no trim
+# started by the change, next to a control timer that a bare reload does start); refused settings; disable (the
+# stock weekly timer back on WITHOUT catching up a stamp 30 days old, next to a control that shows it would;
+# fstab left nodiscard) and a second disable.
 #
 #   bash ansible/roles/dev_worker/tests/test-fstrim-converge-docker.sh
 #
