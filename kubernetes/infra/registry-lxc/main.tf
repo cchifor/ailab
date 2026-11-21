@@ -83,8 +83,13 @@ resource "proxmox_virtual_environment_container" "registry" {
   # The mp0 data volume holds the ONLY copy of the pushed/cached images (no backup/replication yet —
   # see docs/runbooks/registry-cache.md). Guard against an accidental `tofu destroy` (or a
   # replacement-forcing change) wiping it. Remove this block deliberately to rebuild the LXC.
+  # ignore_changes (the zot move, 2026-11-21): bpg refreshes `started` from the CT's live status and
+  # `start_on_boot` from its onboot flag. After the cutover CT 5004 is stopped with onboot 0 on purpose (it is the
+  # rollback copy, kept off 192.168.0.36), and an apply must never start it or re-arm it at boot. Run state and
+  # onboot of this CT are set by hand (pct) from here on.
   lifecycle {
     prevent_destroy = true
+    ignore_changes  = [started, start_on_boot]
   }
 }
 
@@ -92,8 +97,9 @@ resource "proxmox_virtual_environment_container" "registry" {
 # registry"). Created STOPPED and never started by tofu: the cutover copies CT 5004's rootfs and store into it
 # (host-to-host rsync from read-only views, then a cold final pass), accepts the copy, stops 5004 and starts this
 # one, which takes over 192.168.0.36. Same spec as `registry`; its own vmid and MAC.
-#   - started/start_on_boot false: tofu must never start it while 5004 owns .36. The move's follow-up PR flips them
-#     (and sets started/start_on_boot false on `registry`) only AFTER the cutover; until then no registry-lxc apply.
+#   - started/start_on_boot false: tofu must never start it while 5004 owns .36. `started` is honoured at create
+#     only (ignore_changes below): the cutover starts the CT by hand, and a later apply must not stop it again.
+#     The move's follow-up PR sets start_on_boot true only AFTER the cutover; until then no registry-lxc apply.
 #   - net0 gets link_down=1 and the CT a 'mounted' lock right after creation (b-newct-n3.sh): bpg cannot express
 #     link_down (its `enabled = false` DELETES the interface) and ignores the key, so neither shows as drift.
 #   - prevent_destroy: this volume becomes the only live copy of the registry at the cutover.
@@ -156,7 +162,10 @@ resource "proxmox_virtual_environment_container" "registry_n3" {
     }
   }
 
+  # ignore_changes: bpg refreshes `started` from the CT's live status, so once the cutover has started this CT a
+  # plan would otherwise stop it. A create still honours started = false.
   lifecycle {
     prevent_destroy = true
+    ignore_changes  = [started]
   }
 }
