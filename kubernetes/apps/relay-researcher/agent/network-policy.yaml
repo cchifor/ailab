@@ -50,6 +50,12 @@ spec:
     - ipBlock: {cidr: "172.67.138.98/32"}
     ports:
     - {protocol: TCP, port: 443}
+  # relay-candidate-run.py one-time candidate structure (reset removes it): the chart's journal
+  # rule, owner decision U9's values. Under Cilium it admits nothing: the third object below does.
+  - to:
+    - ipBlock: {cidr: "10.96.0.42/32"}
+    ports:
+    - {protocol: TCP, port: 8443}
 ---
 apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
