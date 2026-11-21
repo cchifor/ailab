@@ -94,27 +94,11 @@ spec:
             ephemeral-storage: 64Mi
         volumeMounts:
         - {name: config, mountPath: /etc/relay-agent, readOnly: true}
-        # relay-candidate-run.py one-time candidate structure (reset removes it): the run's control files.
-        - {name: candidate, mountPath: /run/relay/candidate-binding.json, subPath: binding.json, readOnly: true}
-        - {name: candidate, mountPath: /run/relay/candidate-trust.json, subPath: config.json, readOnly: true}
-        - {name: candidate, mountPath: /run/relay/candidate-ca.pem, subPath: ca.pem, readOnly: true}
-        - {name: candidate, mountPath: /run/relay/candidate-network-policy.json, subPath: network-policy.json, readOnly: true}
         - {name: kubernetes, mountPath: /run/relay/kubernetes, readOnly: true}
         - {name: installation-key, mountPath: /run/relay/installation, readOnly: true}
         - {name: hub-ca, mountPath: /run/relay/hub-ca, readOnly: true}
         - {name: tmp, mountPath: /tmp}
       volumes:
-      # relay-candidate-run.py one-time candidate structure (reset removes it): the run's control ConfigMap.
-      - name: candidate
-        configMap:
-          name: relay-candidate-control-ae0d079d7daf9154
-          defaultMode: 0444
-          optional: false
-          items:
-          - {key: binding.json, path: binding.json}
-          - {key: config.json, path: config.json}
-          - {key: ca.pem, path: ca.pem}
-          - {key: network-policy.json, path: network-policy.json}
       - name: config
         configMap:
           name: relay-infrastructure-agent-config
