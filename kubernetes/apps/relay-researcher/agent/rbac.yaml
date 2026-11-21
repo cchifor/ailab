@@ -82,9 +82,6 @@ rules:
   resources: ["namespaces"]
   resourceNames:
   - kube-system
-  # relay-candidate-run.py one-time candidate structure (reset removes it): the namespaces the run pins.
-  - relay-infra-control
-  - relay-researcher-1
   verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -116,15 +113,6 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: ["pods"]
-  verbs: ["get", "create", "delete"]
-# relay-candidate-run.py one-time candidate structure (reset removes it): the slot egress policy the run
-# measures, and the bootstrap Secrets (policy.bootstrapSecrets).
-- apiGroups: ["networking.k8s.io"]
-  resources: ["networkpolicies"]
-  resourceNames: ["relay-researcher-egress"]
-  verbs: ["get"]
-- apiGroups: [""]
-  resources: ["secrets"]
   verbs: ["get", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
