@@ -17,11 +17,14 @@ resource "proxmox_virtual_environment_download_file" "debian_tmpl" {
 }
 
 resource "proxmox_virtual_environment_container" "registry" {
-  node_name     = var.registry_lxc.node_name
-  vm_id         = var.registry_lxc.vm_id
-  tags          = ["lxc", "registry", "zot", "platform"]
-  unprivileged  = true # no host devices / bind mounts needed -> run unprivileged for safety
-  start_on_boot = true
+  node_name    = var.registry_lxc.node_name
+  vm_id        = var.registry_lxc.vm_id
+  tags         = ["lxc", "registry", "zot", "platform"]
+  unprivileged = true # no host devices / bind mounts needed -> run unprivileged for safety
+  # RETIRED from service by the zot move (2026-11-21): stopped (net0 link_down=1 by hand), never started again by
+  # tofu; its volumes stay as the pre-cutover copy until the owner approves decommissioning (a separate PR).
+  started       = false
+  start_on_boot = false
 
   features {
     nesting = true # systemd + the zot service inside the CT
@@ -115,8 +118,8 @@ resource "proxmox_virtual_environment_container" "registry_n3" {
   vm_id         = var.registry_lxc_n3.vm_id
   tags          = ["lxc", "registry", "zot", "platform"]
   unprivileged  = true # the default idmap: guest uid 999 (zot) = host 100999, as on CT 5004
-  started       = false
-  start_on_boot = false
+  started       = true # the live registry since the 2026-11-21 cutover
+  start_on_boot = true
 
   features {
     nesting = true

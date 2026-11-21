@@ -78,11 +78,15 @@ class LiveStateCodified(unittest.TestCase):
         self.assertEqual(g["registry_zot_strive_keep_recent"], 100000)
         self.assertEqual(g["registry_zot_strive_keep_within"], "87600h")
         self.assertIs(g["registry_zot_retention_dry_run"], True)
-        self.assertEqual(g["registry_zot_version"], "v2.1.18")
+        self.assertNotIn("registry_zot_version", g, "the v2.1.18 pin is removed after the cutover")
 
     def test_the_pin_is_invisible_to_renovate(self):
         # renovate's regex manager keys on the literal "renovate:" marker: none may appear anywhere in the file.
         self.assertNotIn("renovate:", GROUP_VARS.read_text())
+
+    def test_the_role_default_is_the_installed_v2_1_23(self):
+        d = yaml.safe_load((ROLE / "defaults" / "main.yml").read_text())
+        self.assertEqual(d["registry_zot_version"], "v2.1.23")
 
     def test_rendered_retention_holds_and_is_dry_run(self):
         ret = _render()["storage"]["retention"]
