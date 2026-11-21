@@ -189,10 +189,10 @@ checkout; the ceremony tools are checked against `c0fe50f0`'s own verifiers
    `providerTokenCap: 1000000`, `providerRequestCap: 8`, `allowedScenarios` = all 19,
    `egressPolicySha256` = `f6d3187c…282f`, `router.tokenPolicyDigests` = [File B digest], the Router CA
    = the researcher template's pin `3d109e83…c4c3` (the agent refuses any other), the hub image = the
-   running v0.10.4 digest.
+   running hub digest (v0.10.9 since hub-upgrade H8).
 6. **Configs** for every CLI and driver of the run, with only the run SHA-256 left to fill; the per-run
    PR branch (S-A); clock checks (§5.1); an operator ready on the session page (§5.3); a stopwatch log.
-7. **Once, before R1: `deployment.json` and `subject.json`.** After the v0.10.4 hub rollout, write
+7. **Once, before R1: `deployment.json` and `subject.json`.** After the v0.10.9 hub rollout (hub-upgrade H8), write
    `deployment.json` (a `MeasurementDeployment`, `main:packages/worker-runtime/measurement-subject.ts:84-96`)
    from readbacks, as the field table in `main:docs/qualification/candidate-ceremony-tools.md`
    ("`subject.json`") says: `tenantId`; `clusterUid` (namespace `kube-system`'s UID); `hub` origin, CA

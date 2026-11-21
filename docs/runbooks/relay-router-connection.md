@@ -342,8 +342,11 @@ key generation or inclusion. H2-H4a ran before the remaining budget proofs. The 
     `connections.json` equals the committed file; NetworkPolicy `relay-router-openbao-egress` exists;
     the admin `GET /api/router-credentials/connections` lists `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`
     with origin `https://router.chifor.me` (when the release enables the control plane). The
-    connection row and the `relay-researcher` binding are created by the first budgeted worker
-    issuance, never by hand; afterwards
+    connection row is created by Relay, never by hand: from Relay v0.10.9 (relay #569, hub-upgrade
+    H8) by the owner's first pool approval whose inference policy names this connection, else by the
+    first budgeted worker issuance. Relay inserts it from the mounted record (its `deploymentDigest`),
+    never updates or re-enables a row, and refuses the approval on a disabled or drifted row. The
+    `relay-researcher` binding and its key are still created only by budgeted issuance. Afterwards
     `SELECT id, origin, deployment_digest FROM router_connections;` (tenant-scoped) shows this digest.
 
 ## Rollback
