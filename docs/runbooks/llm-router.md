@@ -3869,7 +3869,8 @@ client (both arms are API mode), the seat, the egress IP or a timing race (a 1 s
 traffic is a lead, from one pair of windows; the mechanism is not known. So `codex` and `codex-control` `code-edit` can FAIL
 on uncached tokens some of the time: read such a FAIL against this note, and do not call it noise.
 
-2026-11-20, image `f923c13a` (release `router-0.1.0-20261120-budget-runtime-get`, ailab #1910): `code-edit` uncached
+2026-11-20, image `f923c13a` (release `router-0.1.0-20261120-budget-runtime-get`, ailab #1910): in the router-ab release
+gate, provider `codex` (the `codex` arm via the router against its direct control), `code-edit` uncached
 tokens read router 4,116 vs direct 10,287 (0.40x, 3 pairs, 20:10Z), then router 39,050 vs direct 20,642 (1.89x,
 6 pairs, 20:18Z) on the same image minutes apart, with Layer (a) identical (19,047 input tokens) and every other
 metric inside its margin. The FAIL was recorded and the release kept as a documented exception (#1910). A matched
