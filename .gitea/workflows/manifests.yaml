@@ -166,6 +166,18 @@ jobs:
           set -euo pipefail
           bash scripts/tests/test-talos-upgrade-node.sh
 
+      # kubernetes/apps/node-fstrim/node-fstrim.sh (the nightly Talos node trim, one CronJob per node) against
+      # stubbed mountpoint/stat/fstrim/sleep, a fake clock and a synthetic /proc/pressure/io: statfs chunks with
+      # the last one running to the real end, -m 64K, the rest after a chunk, the deadline (a partial run),
+      # IO pressure (wait, give up, unreadable), a failed fstrim, non-mount points, the lock, the stop file,
+      # bad settings and SIGTERM mid-trim. The manifests themselves are checked by
+      # scripts/tests/test_node_fstrim_manifests.py (script-tests). Pure bash, no docker.
+      - name: node-fstrim under stubs
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/tests/test-node-fstrim.sh
+
       # The openbao-devworker-provision script under the Job's OWN image (openbao 2.6.2's busybox sh,
       # `bao` shadowed by a stub): a retired slot's revocation is complete (secret-id accessors,
       # tokens by role, role/policy, the KV subtree recursively), converges on the second run,

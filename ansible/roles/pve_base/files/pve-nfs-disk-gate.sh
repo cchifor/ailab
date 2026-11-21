@@ -20,6 +20,11 @@
 # Every probe runs in the background, in a process group of its own. When it overruns, the whole group is
 # SIGKILLed and ABANDONED, never waited for: I/O on a hard NFS mount can block in D state past SIGKILL, and such a
 # process only goes once its I/O returns. Everything else the probe started dies with it.
+# Each probe gets its own limit (PROBE_S, ACTIVATE_S), but never more than the budget has left. A probe that the
+# budget cut short and that did not finish proves nothing about the storage: that check is inconclusive and never
+# replaces the outcome of a check that ran to its end. So the WARNING names the last real outcome: "failed", or
+# "timed out" for a probe that overran its whole limit. "timed out: the wait budget ran out first" appears only
+# when no check ran to its end.
 #
 # It never fails pve-guests. Exit 0 = ready, or nothing on this node to wait for. Exit 1 = the budget ran out,
 # or the settings name a storage it cannot gate; the drop-in's "-" prefix ignores the status, and the WARNING
@@ -108,12 +113,17 @@ write_probe() {  # $1 = the storage path
 read_probe() { dd if="$1" of=/dev/null bs=4096 count=1 status=none; }
 
 # probe LIMIT CMD...: run CMD in the background for at most LIMIT seconds, capped by the shared deadline.
-# 0 = it finished in time and succeeded. TIMED_OUT=1 when it was abandoned (or the budget was already spent).
+# 0 = it finished in time and succeeded. TIMED_OUT=1 when it did not finish (it was abandoned, or the budget was
+# already spent). CUT=1 when the deadline, not LIMIT, set how long it got.
 probe() {
   local limit=$1 pid i
   shift
   TIMED_OUT=""
-  [ "$((deadline - SECONDS))" -ge "$limit" ] || limit=$((deadline - SECONDS))
+  CUT=""
+  if [ "$((deadline - SECONDS))" -lt "$limit" ]; then
+    limit=$((deadline - SECONDS))
+    CUT=1
+  fi
   if [ "$limit" -le 0 ]; then TIMED_OUT=1; return 1; fi
   # Job control on for the fork only: the probe gets a process group of its own (PGID = its PID), so an overrun
   # can kill everything it started (dd; mkdir/sync/cat; pvesm's rpcinfo and mount.nfs), not only the subshell.
@@ -137,13 +147,15 @@ probe() {
   return 1
 }
 
-# check_storage ID PATH: WHY="" when the storage is ready, else what is missing.
+# check_storage ID PATH: 0 = ready (WHY=""). 1 = not ready, and WHY is what is missing. 2 = inconclusive: the
+# budget cut a probe short before it finished (WHY says which).
 check_storage() {
   local sid=$1 path=$2 fstype img
   fstype=$(mount_fstype "$path")
   if ! in_list "$fstype" $GATE_FSTYPES && [ -z "${activate_hung[$sid]:-}" ]; then
     probe "$ACTIVATE_S" "$PVESM" status --storage "$sid"
-    [ -z "$TIMED_OUT" ] || activate_hung[$sid]=1  # leave it to pvestatd from now on
+    # Silent for its whole ACTIVATE_S (not merely cut short): leave the mount to pvestatd from now on.
+    if [ -n "$TIMED_OUT" ] && [ -z "$CUT" ]; then activate_hung[$sid]=1; fi
     fstype=$(mount_fstype "$path")
   fi
   if ! in_list "$fstype" $GATE_FSTYPES; then
@@ -152,19 +164,32 @@ check_storage() {
   fi
   if ! probe "$PROBE_S" write_probe "$path"; then
     WHY="the write probe under $path/$PROBE_DIR $(outcome)"
+    cut_short && return 2
     return 1
   fi
   while IFS= read -r img; do
     [ -n "$img" ] || continue
     if ! probe "$PROBE_S" read_probe "$path/$img"; then
       WHY="reading $path/$img $(outcome)"
+      cut_short && return 2
       return 1
     fi
   done <<< "${imgs[$sid]:-}"
   WHY=""
 }
 
-outcome() { if [ -n "$TIMED_OUT" ]; then echo "timed out"; else echo failed; fi; }
+# The last probe did not finish, and only because the budget cut it short.
+cut_short() { [ -n "$TIMED_OUT" ] && [ -n "$CUT" ]; }
+
+outcome() {
+  if cut_short; then
+    echo "timed out: the wait budget ran out first"
+  elif [ -n "$TIMED_OUT" ]; then
+    echo "timed out"
+  else
+    echo failed
+  fi
+}
 
 # ---- What this node's onboot VMs need, fixed once, up front ----
 declare -A vms=() imgs=() activate_hung=()
@@ -212,17 +237,27 @@ for sid in $GATE_STORAGES; do
   spath=${spath:-/mnt/pve/$sid}
   left=$((deadline - SECONDS))
   log "waiting up to $((left < WAIT_S ? left : WAIT_S))s for $sid at $spath (VM ${vms[$sid]})"
-  # A check starts only with budget left, so WHY is always the outcome of a check that ran.
-  while ! check_storage "$sid" "$spath"; do
+  # A check starts only with budget left. Its outcome becomes the reason, unless the budget cut it short (2) and
+  # an earlier check ran to its end: a cut-off probe proves nothing, so it never replaces a real outcome.
+  ready=""
+  why=""
+  while :; do
+    check_storage "$sid" "$spath"
+    st=$?
+    if [ "$st" -eq 0 ]; then
+      ready=1
+      break
+    fi
+    if [ "$st" -ne 2 ] || [ -z "$why" ]; then why=$WHY; fi
     left=$((deadline - SECONDS))
     [ "$left" -gt 0 ] || break
     sleep "$((left < STEP_S ? left : STEP_S))"
     [ "$((deadline - SECONDS))" -gt 0 ] || break
   done
-  if [ -z "$WHY" ]; then
+  if [ -n "$ready" ]; then
     log "$sid ready after $((SECONDS - start))s: mounted, writable, serving the disks of VM ${vms[$sid]}"
   else
-    warn "$sid not ready after $((SECONDS - start))s: $WHY. Handing over to pve-guests anyway: PVE refuses" \
+    warn "$sid not ready after $((SECONDS - start))s: $why. Handing over to pve-guests anyway: PVE refuses" \
       "to start VM ${vms[$sid]} while $sid is offline. If one stays stopped, start it with 'qm start <vmid>'" \
       "once the share is back (docs/runbooks/node-maintenance.md, \"Boot-order guard\")."
     rc=1

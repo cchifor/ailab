@@ -1,0 +1,20 @@
+# The nightly trim of every Talos node's /var: one CronJob per node, one node at a time
+# (kubernetes/apps/node-fstrim/kustomization.yaml has the why and the slots; docs/runbooks/node-maintenance.md
+# "Talos node trim (nightly)"). Needs nothing else in the cluster: a namespace, a NetworkPolicy, a ConfigMap
+# and four CronJobs, one per node on local-lvm (the agent nodes and relay-worker-1; never a control plane, whose
+# disk is on qnap-nfs, ADR 0043). Kill switch: suspend the CronJobs (that file's header).
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: node-fstrim
+  namespace: flux-system
+spec:
+  interval: 10m
+  retryInterval: 1m
+  timeout: 5m
+  sourceRef:
+    kind: GitRepository
+    name: flux-system
+  path: ./kubernetes/apps/node-fstrim
+  prune: true
+  wait: true

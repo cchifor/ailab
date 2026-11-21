@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# relay-worker-1 on ai-node3: relay-worker pool (dedicated=relay-worker). Slot 03:42-03:54 UTC
+# (the slot table: ../../kustomization.yaml).
+resources:
+  - ../../base
+nameSuffix: -relay-worker-1
+labels:
+  - pairs:
+      app.kubernetes.io/instance: relay-worker-1
+    includeTemplates: true
+patches:
+  - target:
+      kind: CronJob
+    patch: |-
+      - op: replace
+        path: /spec/schedule
+        value: "42 3 * * *"
+      - op: replace
+        path: /spec/jobTemplate/spec/template/spec/nodeSelector/kubernetes.io~1hostname
+        value: relay-worker-1

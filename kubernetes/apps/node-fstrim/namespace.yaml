@@ -1,0 +1,15 @@
+# The nightly Talos node trim (kustomization.yaml has the why). One CronJob per node, nothing else.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: node-fstrim
+  labels:
+    app.kubernetes.io/part-of: node-fstrim
+    # `privileged` because every pod here needs CAP_SYS_ADMIN (FITRIM) and a hostPath of the node's /var,
+    # both above `baseline`. The pods still drop every other capability, run with RuntimeDefault seccomp,
+    # a read-only root, no service-account token and no network (networkpolicy.yaml), and mount /var
+    # read-only. warn/audit are privileged too: every pod here is above baseline by design, so a
+    # baseline warning would fire on each nightly pod and mean nothing.
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged

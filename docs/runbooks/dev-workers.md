@@ -1639,6 +1639,96 @@ again (build cache only; nothing running depends on it), then `docker volume pru
 label=com.docker.volume.anonymous` (unreferenced anonymous volumes; check
 `docker system df` → Local Volumes RECLAIMABLE first).
 
+## Daily trim (`dev_worker_fstrim`, tag `fstrim`)
+
+Both disks of a worker (`/` and `/workspace`) are thin LVs on its host's `local-lvm`, `discard=on`, on the
+host's one QLC NVMe, shared with its CI runners, agent node and LXCs (the Talos control planes' disks moved to
+`qnap-nfs` on 2026-11-20, ADR 0043). Ubuntu's weekly `fstrim.timer` left the freed space allocated for up to
+a week, about 194 GiB across the four workers on 2026-11-20, and then trimmed a week's worth in one burst on
+that drive. The role (`tasks/fstrim.yml`) replaces it with a daily, chunked trim:
+
+- `/usr/local/sbin/node-fstrim` is `kubernetes/apps/node-fstrim/node-fstrim.sh`, the Talos node trim's
+  script (one file for both). `dev-worker-fstrim.timer` runs it in the worker's slot on
+  `dev_worker_fstrim_mounts` (`/workspace` then `/`).
+  - It trims 4 GiB chunks with `-m 64K`. It waits while the VM's IO pressure is above 45 % (gives up
+    after 3 min: exit 3) and rests as long as each chunk took.
+  - No chunk starts after 5 min unless it can end by then, and a pressure wait ends there too. A cut-short
+    night is continued by the next one at the cursor in `/var/lib/node-fstrim` (the unit's `StateDirectory`).
+    A cut-short night fails with exit 9 once a mount has had no complete pass for 7 days.
+  - `touch /run/node-fstrim.stop` stops it before its next chunk.
+- The stock `fstrim.timer` is stopped and masked while this is on (stopped first: masking a running timer makes
+  systemd fail it, and the worker shows `degraded`).
+- `dev_worker_root_nodiscard` drops the online `discard` option from the root fstab entry and remounts `/`
+  `nodiscard`, live. The regexes are the CI runners' (`gitea_runner_root_nodiscard`), and the fstab is backed
+  up. Under `discard`, ext4 frees small, scattered extents online that cannot free whole 64 KiB thin
+  chunks, and it never clears a group's "trimmed" flag, so a later fstrim of `/` trims 0 bytes. A remount
+  does not clear flags already set; **the worker's next reboot does, once**. The regexes only know the cloud
+  image's `LABEL=cloudimg-rootfs` line, so the converge reads the root entry back and fails if it still has
+  `discard` (a `UUID=` entry, say), rather than let it come back at the next boot.
+- The beacon is `node_fstrim.prom` in node_exporter's textfile dir: the run's reason, per-mount bytes and
+  completion, and the last complete success. The role writes `dev_worker_fstrim_enabled 1` next to it.
+- **Alert:** `DevWorkerTrimNotSucceeding` (`kubernetes/apps/infrastructure/monitoring/thin-pool-rules.yaml`,
+  job `dev-worker-node`) fires on a worker with that marker when no run has completed for 50 h, counted from
+  the marker's mtime on a new install. That covers a timer that stopped firing, and nights that keep failing or
+  ending partial (they fail with exit 9 after 7 days). The first passes over a long-untrimmed disk can take
+  more than one night: if it fires in the first days, the beacon's `reason` says whether the slot ran out.
+- **Moving a slot** takes effect at the converge, and never starts a trim. systemd plans a loaded timer from
+  when it last fired (or was started), at every reload and every start, so a new slot that has already passed
+  today is due at once: 00:30 -> 00:42 converged at 06:35 would trim at 06:35. A bare reload, a stop + start and a
+  restart all do that (measured on systemd 255). So the role stops and disables the timer before it rewrites it:
+  systemd drops the unit, and when the role enables and starts it again it plans from now. Do not move a slot
+  by hand with `systemctl restart`.
+
+**Slots (UTC, daily), one worker at a time, 12 min each (unit worst case 11 min):**
+
+| Worker | Host | Slot |
+|---|---|---|
+| dev-worker-1 | ai-node1 | 00:30 |
+| dev-worker-2 | ai-node2 | 00:42 |
+| dev-worker-3 | ai-node1 | 01:15 |
+| dev-worker-4 | ai-node2 | 01:27 |
+
+The slots keep clear of the 00:00 runner-trim start and infra-pg dump, talos-backup at 01:00, and Velero at
+02:00. `scripts/tests/test_dev_worker_fstrim.py` (script-tests) checks the slots, the timeouts, the settings,
+and the fstab regexes, which must equal gitea_runner's.
+The CI runners' in-guest trims (ci-runners.md, "Thin-pool trim") run on the same hosts at these times. The
+pressure wait is a partial guard, not an interlock: the same residual risk as the runners' own.
+
+**Opt-in per worker.** The role default is off. The daily fleet converge applies the role from main to
+every worker at 06:35, so each worker's host_vars turns both switches on with its slot. Rollout, one
+worker at a time:
+
+```bash
+cd ansible && export ANSIBLE_CONFIG="$(pwd)/ansible.cfg"
+ansible-playbook dev-workers.yml -l dev-worker-2 -t fstrim --check --diff   # fstab diff, units, the stock timer masked
+ansible-playbook dev-workers.yml -l dev-worker-2 -t fstrim                  # then again: changed=0
+ssh c4@192.168.0.9 'systemctl list-timers dev-worker-fstrim.timer fstrim.timer; findmnt -no OPTIONS /'
+# after its first night:
+ssh c4@192.168.0.9 'journalctl -u dev-worker-fstrim --since -1d --no-pager | tail; cat /var/lib/prometheus/node-exporter/node_fstrim.prom'
+```
+
+Kill switch: set `dev_worker_fstrim_enabled: false` in the worker's host_vars and converge with `--tags fstrim`.
+This removes the unit, the script, the state and the metrics, unmasks and starts the stock weekly timer, and only
+then removes `/etc/default/dev-worker-fstrim`. That file marks the worker as having had the daily trim, so a
+takedown interrupted part-way is finished by the next converge.
+Before it starts the stock timer, the role sets that timer's stamp (`/var/lib/systemd/timers/stamp-fstrim.timer`)
+to now. The stock timer is `Persistent=true`: started with the stamp from before it was masked, weeks old, its
+run is overdue, and systemd schedules an overdue run at the boot plus its 100 min random delay. On a worker up
+for longer than that, it runs at once: a full trim of `/` and `/workspace` in one burst, at whatever time the
+converge runs. With the new stamp, its first run is the next weekly boundary (Monday 00:00, plus up to 100 min).
+Check with `systemctl list-timers fstrim.timer`.
+`dev_worker_root_nodiscard: false` leaves fstab as it is; it does not put `discard` back.
+
+Tests: `scripts/tests/test_dev_worker_fstrim.py`, the script's own suites (`scripts/tests/test-node-fstrim.sh`;
+the real-kernel `scripts/tests/test-node-fstrim-kernel-docker.sh`), and the manual Docker converge
+`bash ansible/roles/dev_worker/tests/test-fstrim-converge-docker.sh`. The converge runs on Ubuntu 24.04 with
+systemd. It covers `--check`, the fstab edit, idempotence, a real trim of a loop-backed ext4 `/workspace`, new
+slots (for a timer that has not fired yet and for one that has, and a slot ahead that then fires), refused
+settings and disable. Controls show the hazards are real on that systemd: a bare reload starts a scratch timer
+whose new slot has passed (in both cases), and the stock timer started with a 30-day-old stamp runs at once.
+The role's slot changes and kill switch start nothing. The alert's fixtures are in `thin-pool-rules.test.yaml`
+(`scripts/rules-lint.sh`).
+
 ## Verify
 
 - `/workspace` mounted: `mountpoint -q /workspace && echo ok`

@@ -8,9 +8,11 @@
 
 **Implementation state** (the one place to update as it changes):
 - tofu records the datastore: **merged** (#1898, `d93e3046`, 2026-11-20).
-- The boot-order guard: **merged (#1899, `2552796b`, 2026-11-20), NOT rolled out on any host yet.** Until it is rolled
-  out on a host, nothing holds that host's CP start for the NAS: after any host boot, check that the CP is running
-  (`qm status <vmid>`).
+- The boot-order guard: **live on all three hosts** (#1899, `2552796b`, 2026-11-20; the deadline fix #1913, script
+  sha256 `97590c24…`). The owner-gated reboot test **passed on ai-node3 on 2026-11-21**: the share mounted 5 s after
+  pve-guests began, the gate held the starts until it was ready ("ready after 5s"), and cp3 started with no hand
+  `qm start`. ai-node1 and ai-node2 have not booted with the guard yet: after their next boot, read the gate line and
+  check that the CP is running (`qm status <vmid>`).
 
 **Supersedes:** the README's "Talos OS + etcd: NOT on the NAS ... (etcd belongs on local disk)".
 

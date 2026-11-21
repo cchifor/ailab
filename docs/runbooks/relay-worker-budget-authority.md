@@ -386,6 +386,34 @@ run refuses. The line of `step7b.out` that begins `{"` is the stored policy as c
 JSON: `grep '^{"' step7b.out | tr -d '\n' | sha256sum` must print the generator's
 `readback-line-sha256`. Then run `file_b_check` below against the same `$ev/file-b.json`.
 
+**Reissuing File B (supersede).** The ledger has no update path, and the Router drops a row whose
+readings no longer match, so File B is reissued whenever the Router image changes (new
+`routerReleaseDigest`) or `providerGeneration` changes, or E approaches the planned worker
+deadlines. Take fresh readings from the final Router process as above, then generate into a
+**new** evidence directory (the old `file-b.json` is never overwritten), naming the committed
+digest and the previously reviewed table it belongs to:
+
+```sh
+python3 scripts/relay-worker-budget-file-b-generate.py --inputs "$ev2/file-b-inputs.json" --output-dir "$ev2" \
+  --supersede "$old_digest" --supersede-file "$ev/file-b.json"
+```
+
+It prints `superseded-digest`, the old file's SHA-256, the new `digest`, and the SHA-256 of the new
+`file-b.json` (the new complete table: the old one without the old row, plus the new row) and
+`ledger-step7b-supersede.sql`. The owner confirms **both** digests, old and new, before it runs.
+The SQL runs exactly like `ledger-step7b.sql` (`step7b-supersede.out`, exit 0 and a literal `COMMIT`).
+Under the same locks, plus `allocations`, `outbox`, `scope_runs` and `allocation_scopes`, it
+requires one authority row, File A's `clients`/`readers`, a `qualifications` table equal to the old
+file exactly (every row, whole-row and canonical text), E in the future and a changed digest. It
+refuses while any of those four tables mentions the old digest: the outbox is append-only
+authorization history (Relay `d1c77f87` `001-authority.sql:102,152`), and `inspect()` and renewals
+refuse an allocation whose policy row is gone (`001-authority.sql:126-131,168-171`); such a ledger
+needs an owner decision, not this script. It then deletes exactly the old row (`relay_budget_owner`
+owns the table, `001-authority.sql:7-9,32-37`; no FK, trigger, rule or RLS applies), inserts the new
+one, and asserts it like step 7B plus the whole table against the new file. A rerun refuses (the
+table no longer equals the old file). Afterwards `file_b_check` and then `file_b_router_check` must
+pass against the **new** `$ev2/file-b.json` before anything is signed.
+
 **Ledger half, zero-write (`file_b_check`), from this repository root.** It sends no
 Router request; the signing check is `file_b_router_check`
 ([Router half](#router-half-one-nonce-write-accepted-by-the-owner-on-2026-11-19)), which reuses this

@@ -226,7 +226,10 @@ minutes so far (H4a: about 1 minute of downtime, plus the pre-migration backup, 
 R0 rolls the hub eight times: the per-run PR's rollout, six drill rolls (A, B and C each install and
 restore) and the reset's rollout. Each is a Recreate outage of the hub with a pre-migration backup:
 dev-worker connectors and relay-bus keys pause for the roll. Announce the window. R0 does not roll the
-Router.
+Router. Each drill roll is exactly one outage: `roll_relay` restarts through the checklist's `roll_deploy`,
+whose field manager Flux does not take over, and it fails unless the revision rose by exactly 1 with one
+Pod of it. With kubectl's default field manager, Flux would revert each drill roll at its next
+reconcile, a second hub outage that could land inside an observation window (ailab #1897).
 
 Expected alerts: `RelayWorkerBudgetCheckFailed` fires whenever the gate stays withdrawn or a drill
 witness stays mounted for more than 2 min; `RelayWorkerBudgetStartupFailed` fires again after the reset
@@ -241,7 +244,8 @@ the generator summary (`issuedAt`, `expiresAt`, `abortBeforeGrantIfHubNotReadBac
 
 **The session.** Run the checklist's step 0 block (the helpers `cap`, `radmin`, `lsql`, `lwrite`,
 `wsha_*`, `plugins`), step 4's client Pod and `q`, and step 5's building blocks (`withdraw.sql`,
-`open-B.sql`, `plugin`, `force_sync`, `wait_hashes`, `rlog`, `roll_router`, `ledger_state`). They are
+`open-B.sql`, `plugin`, `force_sync`, `wait_hashes`, `rlog`, `rollstate`, `roll_deploy`, `roll_router`,
+`ledger_state`). They are
 unchanged. Step 5 deleted the client Pod, so create it again with step 4's manifest and `wait`. If this
 session's `$ev` has no `withdraw.sql`, `open-B.sql` or `witness-B.json`, write them again from step 5's
 blocks and the offline record; `sha256sum "$ev/witness-B.json"` must equal B's hash in the record.
@@ -307,12 +311,13 @@ hlog() {
   l="$(kubectl --context admin@ai -n relay logs deploy/relay -c relay)" || return 1
   printf '%s\n' "$l" | grep -E 'worker_(budget|candidate)_' || true
 }
-# roll_relay: keeps the outgoing hub's lines, then rolls it (Recreate, with its backup) and waits.
+# roll_relay: keeps the outgoing hub's lines, then rolls it once (Recreate, with its backup) and proves it.
+# roll_deploy (checklist step 5) restarts under field manager `relay-runbook`, so Flux does not revert it (#1897);
+# it keeps `relay-rollout` and `relay-roll` (revision, restartedAt owners, Pods). Never call it under `cap`.
 roll_relay() {
   cap relay-log-before-roll hlog || { echo "log capture failed: not rolling"; return 1; }
   cap relay-pod-before-roll hpod &&
-  kubectl --context admin@ai -n relay rollout restart deploy/relay &&
-  cap relay-rollout kubectl --context admin@ai -n relay rollout status deploy/relay --timeout=10m
+  roll_deploy relay relay app=relay relay
 }
 # The hub's worker rows: R0 must leave every count unchanged and its workerId absent.
 hub_counts() {
@@ -595,6 +600,13 @@ R0's per-run PR is reverted as a whole: the generator's `reset` for `run/` and t
 agent values and the one-time structure), the inclusion line and the activation-gate group. R1's per-run
 PR is then H7's inclusion PR again, and its `generate` writes the one-time structure again, as the
 generator runbook describes. All of this section is NEW, except where a line says otherwise.
+
+**Before the reset: one outage per drill roll.** At least 11 minutes after the last `roll_relay` (one `apps` interval
+of 10m) and before the reset PR merges: `cap relay-final rollstate relay relay app=relay`. The
+revision equals `${ROLLREV[relay/relay]}`, the one Pod has it, and `restartedAtOwners` is only
+`relay-runbook`/`Update`. Across R0's `relay-roll` captures the revision rises by exactly 1 per drill
+roll. A higher final revision means something else rolled the hub: record it in §11's evidence. The
+reset's rollout keeps the annotation (Flux does not own it) and is the one roll that step 2 expects.
 
 1. **The reset PR.** On a branch from `origin/main`:
 
