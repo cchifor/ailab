@@ -535,12 +535,17 @@ Why: the console derived an agent's state from defaults (a pane became Idle on c
 evidence. Relay #573, released as v0.10.10 (#574, `716c2ed8`, run 145785): a v0.10.10 connector sends
 each pane's terminal sample to a hub that advertises `activity`, and the hub shows Output observed,
 Quiet, No signal with its reason, or Offline, with source and age. The samples live in the hub's memory;
-nothing is stored. Hub only in this step (the connector pin is `docs/runbooks/relay-connectors.md`,
-converged first), no migrations (schema 79), same runtime, skill, tools and prerequisites as v0.10.9
+nothing is stored. Hub only in this step, no migrations (schema 79), same runtime, skill, tools and prerequisites as v0.10.9
 (the two deployment receipts agree), so re-pinning v0.10.9 (`1b0f2f72…7a39`) is a valid rollback.
 
+Before the merge (operator): the connector pin of ailab #1947 (`relay_connector_release` 0.10.10,
+`docs/runbooks/relay-connectors.md`) is merged and converged on dev-worker-1, -2, -3 and -4, one at a
+time, and on each `relay-connector status --json` reports version 0.10.10, fresh and connected. A
+worker left on an older connector still works; its agents show "No signal: update the connector".
+
 Change: this PR pins the v0.10.10 digest in `migrate` and `relay`, with the annotations. One Recreate
-roll by the merge itself (Flux), with the pre-migration backup; outside the QNAP windows.
+roll by the merge itself (Flux), with the pre-migration backup; outside the QNAP windows. H9 gates no
+other step: H7 and the steps after it need only H8.
 
 Readback after the roll (operator):
 
@@ -566,12 +571,12 @@ Readback after the roll (operator):
 | journal | the independent candidate journal ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) | per that runbook | its Service on exactly `10.96.0.42` (Q2's `pinned` check) |
 | File B | budget ledger step 7's `qualifications` row (ailab #1753 comment 124071) | the final Router rollout read back | the stored policy re-verified, its `tokenPolicyDigest` recorded for the signed runs |
 | H8 | hub image → v0.10.9 (pool approval materializes the Router connection) | the roll: H4a's state only (no new settings); its connection readback and the owner's pool approval: H6 (applied) | v0.10.9 digest running, schema still 79, connection listed, `router_connections` and pools still empty; then the owner approves the pool and exactly one connection row appears |
-| H9 | hub image → v0.10.10 (truthful agent state) | the connectors on v0.10.10 (`relay-connectors.md`); H8's state only (no new settings) | v0.10.10 digest running, schema still 79, agents show observed states |
 | H7 | candidate files: `relay-worker-candidate`, first included for R0 (never granted), reset, then included again for R1; each run's values generated (the canary file follows the approval; the qualification file is general activation, step 11) | H6, H8 with the owner-approved pool (one connection row), Q5's readback, the journal at `10.96.0.42`, File B, the run's session-key Secret | init container exit 0, the run's pin in the Pod, budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
 | scenarios | the nineteen qualification scenarios | H7's candidate files | the nineteen reports, independently accepted |
 | approval | a genuine `ReleaseApproval` | the nineteen reports and the other release gates accepted | its `workerTemplates` subject asserts the nine passed gates |
 | canary | H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
 | H4b | `RELAY_WORKER_PROFILES_FILE`/`_SHA256` (profile registry) | the genuine approval, the qualified `tokenPolicyDigests`, registry reviewed | file pin equal; no `profiles-unavailable`; budget still `started`. Before the bounded general lifecycle trial |
+| H9 | hub image → v0.10.10 (truthful agent state); gates no step above | every dev-worker connector on v0.10.10 (ailab #1947, read back per worker); H8's state only (no new settings) | v0.10.10 digest running, schema still 79, agents show observed states |
 
 ## Rollback: migrations are forward-only
 
