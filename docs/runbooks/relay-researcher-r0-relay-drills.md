@@ -262,8 +262,9 @@ Pod of it. With kubectl's default field manager, Flux would revert each drill ro
 reconcile, a second hub outage that could land inside an observation window (ailab #1897).
 
 Expected alerts: `RelayWorkerBudgetCheckFailed` fires whenever the gate stays withdrawn or a drill
-witness stays mounted for more than 2 min; `RelayWorkerBudgetStartupFailed` fires again after the reset
-until R1's H7 readback, as after H6.
+witness stays mounted for more than 2 min. After the reset, budget startup reads `start_failed` again until
+R1's H7 readback, as after H6; `RelayWorkerBudgetStartupFailed` stays quiet for it, because since 2026-11-22
+the rule fires only for a hub Pod that carries a candidate.
 
 Write `t_s`, `expiresAt`, `t_s + 60`, `t_s + 85` and `t_s + 105` into the stopwatch log at signing, from
 the generator summary (`issuedAt`, `expiresAt`, `abortBeforeGrantIfHubNotReadBackBy`).
@@ -675,8 +676,8 @@ reset's rollout keeps the annotation (Flux does not own it) and is the one roll 
 2. **Its rollout.** Flux rolls the hub without the candidate files. Readback:
    - `cap hub-reset hpod`: one Running Pod with no `candidateSha256`;
    - `cap relay-log-reset hlog`: no `worker_candidate_unavailable` (no candidate is configured);
-   - `cap relay-metrics-reset rcheck`: `authority_start_failed` 1 and `observer_started` 0, H6's state;
-     `RelayWorkerBudgetStartupFailed` fires again until R1's H7 readback;
+   - `cap relay-metrics-reset rcheck`: `authority_start_failed` 1 and `observer_started` 0, H6's state
+     (`RelayWorkerBudgetStartupFailed` stays quiet: the reset hub Pod has no candidate);
    - `cap mounted-relay-reset wsha_relay`: B.
 3. **The session-key Secret.** Once that rollout no longer mounts it (generator runbook, "After the
    campaign"): `kubectl --context admin@ai -n relay delete secret relay-worker-candidate-key-<d16>`.

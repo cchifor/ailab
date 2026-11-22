@@ -104,11 +104,15 @@ tests:
   - eval_time: 9m
     alertname: RelayWorkerOperationUnknown
     exp_alerts: []
-- name: RelayWorkerBudgetStartupFailed threshold and recovery
+- name: RelayWorkerBudgetStartupFailed threshold and recovery (hub Pod with a candidate)
   interval: 1m
   input_series:
-  - series: relay_control_worker_budget_authority_start_failed{job="relay-control-plane",instance="relay:80"}
+  - series: relay_control_worker_budget_authority_start_failed{job="relay-control-plane",instance="relay:80",namespace="relay",pod="relay-a"}
     values: 1+0x3 0+0x4
+  - series: kube_pod_init_container_info{job="kube-state-metrics",namespace="relay",pod="relay-a",container="candidate-session-key"}
+    values: 1+0x7
+  - series: kube_pod_init_container_info{job="kube-state-metrics",namespace="relay",pod="relay-a",container="migrate"}
+    values: 1+0x7
   alert_rule_test:
   - eval_time: 1m
     alertname: RelayWorkerBudgetStartupFailed
@@ -121,12 +125,63 @@ tests:
         service: relay
         job: relay-control-plane
         instance: relay:80
+        namespace: relay
+        pod: relay-a
       exp_annotations:
         summary: Relay independent budget authority did not start
-        description: Check configured profile, router deployment and ledger settings. This startup result is not a diagnosis
+        description: The hub Pod carries a candidate (init container candidate-session-key) but its budget authority did not
+          start. Check configured profile, router deployment and ledger settings. This startup result is not a diagnosis
           of database availability; monitoring must not grant or seed authority.
         runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
   - eval_time: 5m
+    alertname: RelayWorkerBudgetStartupFailed
+    exp_alerts: []
+- name: RelayWorkerBudgetAlertJoinBroken when the hub series joins no init container, quiet when it does
+  interval: 1m
+  input_series:
+  # pod relay-x has no kube-state-metrics init-container series at all (a broken join); relay-y has one.
+  - series: relay_control_worker_budget_authority_start_failed{job="relay-control-plane",instance="relay:80",namespace="relay",pod="relay-x"}
+    values: 1+0x20
+  - series: relay_control_worker_budget_authority_start_failed{job="relay-control-plane",instance="relay:81",namespace="relay",pod="relay-y"}
+    values: 1+0x20
+  - series: kube_pod_init_container_info{job="kube-state-metrics",namespace="relay",pod="relay-y",container="migrate"}
+    values: 1+0x20
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: RelayWorkerBudgetAlertJoinBroken
+    exp_alerts: []
+  - eval_time: 15m
+    alertname: RelayWorkerBudgetAlertJoinBroken
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+        namespace: relay
+        pod: relay-x
+      exp_annotations:
+        summary: Relay budget startup alert cannot see the hub Pod's init containers
+        description: The hub's budget series does not join any kube_pod_init_container_info on namespace and pod, so
+          RelayWorkerBudgetStartupFailed cannot fire. Check that ServiceMonitor relay-control-plane still yields namespace
+          and pod labels and that kube-state-metrics is scraped.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+- name: RelayWorkerBudgetStartupFailed stays silent for a hub Pod without a candidate
+  interval: 1m
+  input_series:
+  # start_failed for good, as after H6 or a reset: the Pod's init containers do not include candidate-session-key,
+  # and another Pod (the previous, candidate-bearing hub) is not this one.
+  - series: relay_control_worker_budget_authority_start_failed{job="relay-control-plane",instance="relay:80",namespace="relay",pod="relay-b"}
+    values: 1+0x9
+  - series: kube_pod_init_container_info{job="kube-state-metrics",namespace="relay",pod="relay-b",container="migrate"}
+    values: 1+0x9
+  - series: kube_pod_init_container_info{job="kube-state-metrics",namespace="relay",pod="relay-old",container="candidate-session-key"}
+    values: 1+0x9
+  alert_rule_test:
+  - eval_time: 3m
+    alertname: RelayWorkerBudgetStartupFailed
+    exp_alerts: []
+  - eval_time: 9m
     alertname: RelayWorkerBudgetStartupFailed
     exp_alerts: []
 - name: RelayWorkerBudgetCheckFailed threshold and recovery
