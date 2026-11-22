@@ -6,11 +6,15 @@
 #   1. first run: three policies (exact grants), two k8s-auth roles bound to their ServiceAccount@
 #      namespace, the token role, NO KV document under af/relay-router/ and NO token minted.
 #   2. second run: everything re-asserted; operator-written documents are never touched.
-#   3. the escrow writer, minted from the token role exactly as the runbook does, behaves as Relay's
-#      BaoEscrow needs (create with cas=0, read a version, CAS refusal of an overwrite, destroy) and is
-#      denied everything else: another tenant, a shallower or deeper path, delete, metadata, list, the
-#      connection documents, the ledger documents, lookup-self. Each ESO reader reads its own documents
-#      and nothing else.
+#   3. the escrow writer, minted from the token role, behaves as Relay's BaoEscrow needs (create with
+#      cas=0, read a version, CAS refusal of an overwrite, destroy) and is denied everything else:
+#      another tenant, a shallower or deeper path, delete, metadata, list, the connection documents, the
+#      ledger documents, lookup-self. Each ESO reader reads its own documents and nothing else.
+#   3b. Relay's ESO identity mints escrow tokens exactly as its VaultDynamicSecret generator does (POST
+#      auth/token/create/relay-router-escrow, ttl 168h): orphan, not renewable, escrow policy only,
+#      capped at 168 h even when asked for more, and usable as the escrow writer. It cannot mint any
+#      other way (plain create, create-orphan, another role) or touch the role, and
+#      sys/leases/revoke-prefix on the role path revokes every minted token at once.
 #   4. drift on the two k8s-auth roles and on the token role is cleared by the next run.
 #   5. a policy changed by hand: REFUSED before ANY policy or role is rewritten.
 # Requires docker. Exit non-zero on the first broken expectation.
@@ -61,7 +65,7 @@ check_token_role() {
   j="$(bao read -format=json $TROLE | tr -d '[:space:]')"
   for want in '"allowed_policies":\["relay-router-escrow"\]' '"allowed_policies_glob":\[\]' '"disallowed_policies":\[\]' \
               '"disallowed_policies_glob":\[\]' '"allowed_entity_aliases":\[\]' '"orphan":true' '"renewable":false' \
-              '"token_no_default_policy":true' '"token_explicit_max_ttl":2592000[,}]' '"token_period":0[,}]' \
+              '"token_no_default_policy":true' '"token_explicit_max_ttl":604800[,}]' '"token_period":0[,}]' \
               '"period":0[,}]' '"explicit_max_ttl":0[,}]' '"token_type":"service"'; do
     echo "$j" | grep -q "$want" || fail "token role: want $want in $j"
   done
@@ -72,9 +76,10 @@ check_policies() {
   bao policy read relay-router-escrow | grep -qF "path \"af/data/relay-router/escrow/$TENANT/+/+\" { capabilities = [\"create\", \"read\", \"update\"] }" || fail "escrow data grant"
   bao policy read relay-router-escrow | grep -qF "path \"af/destroy/relay-router/escrow/$TENANT/+/+\" { capabilities = [\"update\"] }" || fail "escrow destroy grant"
   [ "$(bao policy read af-app-relay-router | grep -c 'path ')" = 3 ] || fail "relay reader carries other than three paths"
-  for p in admin-signer reconciler-signer escrow-token; do
+  for p in admin-signer reconciler-signer; do
     bao policy read af-app-relay-router | grep -qF "path \"af/data/relay-router/relay/$p\" { capabilities = [\"read\"] }" || fail "relay reader grant on $p"
   done
+  bao policy read af-app-relay-router | grep -qF 'path "auth/token/create/relay-router-escrow" { capabilities = ["update"] }' || fail "relay reader mint grant"
   [ "$(bao policy read af-app-router-relay-keys | grep -c 'path ')" = 1 ] || fail "router reader carries other than one path"
   bao policy read af-app-router-relay-keys | grep -qF 'path "af/data/relay-router/router/trust" { capabilities = ["read"] }' || fail "router reader grant"
 }
@@ -104,17 +109,16 @@ echo "1: first run -> three policies, two k8s-auth roles, token role, no KV docu
 # 2. operator-written documents survive a run untouched
 printf '%s' "PRIVATE-ADMIN-PEM" | bao kv put -mount=af relay-router/relay/admin-signer private_key=- >/dev/null
 printf '%s' "PRIVATE-RECONCILER-PEM" | bao kv put -mount=af relay-router/relay/reconciler-signer private_key=- >/dev/null
-printf '%s' "escrow-token-value-0123456789" | bao kv put -mount=af relay-router/relay/escrow-token token=- >/dev/null
 bao kv put -mount=af relay-router/router/trust admin_public_key=PUBLIC-ADMIN reconciler_public_key=PUBLIC-RECONCILER >/dev/null
 printf '%s' "ledger" | bao kv put -mount=af relay-budget/witness witness=- >/dev/null
-snap() { for p in relay/admin-signer relay/reconciler-signer relay/escrow-token router/trust; do bao kv metadata get -mount=af -format=json relay-router/$p | grep -o '"current_version": [0-9]*'; done; }
+snap() { for p in relay/admin-signer relay/reconciler-signer router/trust; do bao kv metadata get -mount=af -format=json relay-router/$p | grep -o '"current_version": [0-9]*'; done; }
 before="$(snap)"
 run || { cat /tmp/run.$N >&2; fail "second run"; }
 expect $N "policy relay-router-escrow matches a reviewed form"
 expect $N "policy af-app-relay-router matches a reviewed form"
 expect $N "policy af-app-router-relay-keys matches a reviewed form"
 [ "$before" = "$(snap)" ] || fail "a run wrote an operator-owned document"
-if grep -q "PRIVATE-\|escrow-token-value" /tmp/run.$N; then fail "a secret appeared in the Job output"; fi
+if grep -q "PRIVATE-" /tmp/run.$N; then fail "a secret appeared in the Job output"; fi
 echo "2: re-run -> operator documents untouched, nothing secret in the log"
 
 # 3. least privilege. The escrow token is minted the way the runbook mints it.
@@ -145,16 +149,52 @@ denied "read the admin signer" env BAO_TOKEN="$W" bao read af/data/relay-router/
 denied "read the ledger witness" env BAO_TOKEN="$W" bao read af/data/relay-budget/witness
 denied "look itself up (default policy)" env BAO_TOKEN="$W" bao token lookup
 T="$(bao token create -policy=af-app-relay-router -field=token)"
-for p in admin-signer reconciler-signer escrow-token; do BAO_TOKEN="$T" bao kv get -mount=af relay-router/relay/$p >/dev/null || fail "relay reader cannot read $p"; done
+for p in admin-signer reconciler-signer; do BAO_TOKEN="$T" bao kv get -mount=af relay-router/relay/$p >/dev/null || fail "relay reader cannot read $p"; done
 if BAO_TOKEN="$T" bao kv get -mount=af relay-router/router/trust >/dev/null 2>&1; then fail "relay reader reads the trust document"; fi
 if BAO_TOKEN="$T" bao read "$ESC" >/dev/null 2>&1; then fail "relay reader reads the escrow"; fi
 if BAO_TOKEN="$T" bao kv metadata get -mount=af relay-router/relay/admin-signer >/dev/null 2>&1; then fail "relay reader reads metadata"; fi
 T="$(bao token create -policy=af-app-router-relay-keys -field=token)"
 BAO_TOKEN="$T" bao kv get -mount=af relay-router/router/trust >/dev/null || fail "router reader cannot read the trust document"
-for p in relay/admin-signer relay/reconciler-signer relay/escrow-token; do
+for p in relay/admin-signer relay/reconciler-signer; do
   if BAO_TOKEN="$T" bao kv get -mount=af relay-router/$p >/dev/null 2>&1; then fail "router reader reads $p"; fi
 done
+if BAO_TOKEN="$T" bao write -f auth/token/create/relay-router-escrow >/dev/null 2>&1; then fail "router reader mints an escrow token"; fi
 echo "3: escrow writer does exactly create/read/CAS/destroy on its tenant's escrow; each reader reads its own documents"
+
+# 3b. minting, as the generator does it, with Relay's ESO identity only
+R="$(bao token create -policy=af-app-relay-router -field=token)"
+mint() { # [ttl] -> the whitespace-free JSON response
+  BAO_TOKEN="$R" bao write -format=json auth/token/create/relay-router-escrow ttl="${1:-168h}" display_name=relay-router-escrow | tr -d '[:space:]'
+}
+J="$(mint)" || fail "Relay's ESO identity cannot mint an escrow token"
+for want in '"policies":\["relay-router-escrow"\]' '"orphan":true' '"renewable":false' '"lease_duration":604800[,}]'; do
+  echo "$J" | grep -q "$want" || fail "minted token: want $want in the auth section"
+done
+M="$(echo "$J" | sed -n 's/.*"client_token":"\([^"]*\)".*/\1/p')"
+[ -n "$M" ] || fail "no client_token in the mint response"
+J2="$(mint 720h)" || fail "a mint asking for 720h failed instead of being capped"
+echo "$J2" | grep -q '"lease_duration":604800[,}]' || fail "a mint asking for 720h was not capped at 168h"
+CRED2=1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f
+printf '%s' '{"options":{"cas":0},"data":{"token":"router-token-fedcba9876543210","router_key_id":"key_0123456789ab","operation_id":"op2"}}' \
+  | BAO_TOKEN="$M" bao write "af/data/relay-router/escrow/$TENANT/$HOST/$CRED2" - >/dev/null || fail "a minted token cannot write the escrow"
+if BAO_TOKEN="$M" bao read af/data/relay-router/relay/admin-signer >/dev/null 2>&1; then fail "a minted token reads the admin signer"; fi
+bao write auth/token/roles/other allowed_policies=default >/dev/null
+nomint() { # <description> <path> [args...]
+  d="$1"; shift
+  if BAO_TOKEN="$R" bao write -f "$@" >/dev/null 2>&1; then fail "Relay's ESO identity was allowed to $d"; fi
+}
+nomint "create a token without the role" auth/token/create policies=relay-router-escrow
+nomint "create an orphan token" auth/token/create-orphan policies=relay-router-escrow
+nomint "mint from another role" auth/token/create/other
+nomint "rewrite the token role" auth/token/roles/relay-router-escrow allowed_policies=default
+nomint "revoke by prefix" sys/leases/revoke-prefix/auth/token/create/relay-router-escrow
+bao delete auth/token/roles/other >/dev/null
+bao write -f sys/leases/revoke-prefix/auth/token/create/relay-router-escrow >/dev/null || fail "revoke-prefix on the role path"
+for t in "$W" "$M"; do
+  if bao token lookup "$t" >/dev/null 2>&1; then fail "a minted token survived revoke-prefix"; fi
+done
+bao token lookup "$R" >/dev/null || fail "revoke-prefix revoked the minting identity's own token"
+echo "3b: Relay's ESO identity mints capped, escrow-only orphan tokens through the role only; revoke-prefix revokes them all"
 
 # 4. drift on the k8s-auth roles and on the token role is cleared
 for r in af-app-relay-router af-app-router-relay-keys; do

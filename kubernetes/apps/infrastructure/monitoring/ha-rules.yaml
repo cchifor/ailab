@@ -200,6 +200,41 @@ spec:
               af-app-litellm k8s-auth role or policy missing (the openbao-chatgpt-provision Job owns
               both), the af/litellm/chatgpt document deleted (the template errors on a missing key),
               or the openbao-tls CA Secret in ns ai not yet issued.
+        # THE ESO HOP OF RELAY'S ROUTER ESCROW TOKEN (docs/runbooks/relay-router-connection.md, "Escrow
+        # token"). relay/relay-router-files' ExternalSecret MINTS a new 168 h escrow token on every 24 h
+        # refresh (a VaultDynamicSecret generator), so its Ready condition is the rotation's health signal:
+        # a failed mint keeps Relay on the last token, which still has about six days left. Same shape as
+        # LiteLLMChatGPTAuthNotReady (the False series equal to 1; the ES's namespace is in
+        # exported_namespace). The `absent` arm covers an ESO that stopped reporting the ES at all (no
+        # controller, no scrape), which nothing else in this repo alerts on. for: 30m: ESO retries a
+        # failed refresh with backoff, and a controller restart drops the series for under a minute.
+        - alert: RelayRouterFilesNotReady
+          expr: |-
+            max by (exported_namespace, name) (
+              externalsecret_status_condition{
+                exported_namespace="relay", name="relay-router-files",
+                condition="Ready", status="False"
+              }
+            ) == 1
+            or
+            absent(externalsecret_status_condition{
+              exported_namespace="relay", name="relay-router-files",
+              condition="Ready", status="True"
+            })
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "Relay's escrow-token rotation is stalled (relay/relay-router-files NotReady or unreported)"
+            description: >-
+              ExternalSecret relay-router-files has been Ready=False, or missing from ESO's metrics, for
+              30m. Each refresh of it mints Relay's Router escrow token, so rotation has stopped: Relay
+              keeps escrowing with the last token until it expires, 168 h after its mint, and then escrow,
+              delivery and cleanup fail closed. `kubectl -n relay describe externalsecret
+              relay-router-files`: the usual causes are the af-app-relay-router k8s-auth role or policy
+              (its mint grant on auth/token/create/relay-router-escrow) or the token role missing (the
+              openbao-relay-router-provision Job owns all three), a signer document deleted, OpenBao
+              sealed, or the external-secrets controller down. docs/runbooks/relay-router-connection.md,
+              "Escrow token".
     - name: application-ha-inventory
       rules:
         # Inventory of single-replica workloads NOT on the ADR 0016 Tier-B accepted list. The two

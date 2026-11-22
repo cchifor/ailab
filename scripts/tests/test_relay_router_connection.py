@@ -7,7 +7,8 @@ docs/runbooks/relay-router-connection.md is the contract. These checks pin what 
 the fixed connection record and its deployment digest (recomputed here exactly as Relay's
 deploymentDigest does), the Router trust mapping agreeing with the record, the record's files agreeing
 with the Relay component's mounts, the OpenBao policies agreeing with the record and with the
-ExternalSecrets, no secret material in git, the Relay component included only by the live Relay
+ExternalSecrets, the escrow token minted by an ESO generator through the token role (with a rotation
+margin), no secret material in git, the Relay component included only by the live Relay
 overlay (hub upgrade step H6) and the Router component never live with the token placeholder. Nothing
 here touches a cluster.
 """
@@ -55,17 +56,25 @@ UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 ROUTER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,127}$")  # relay-keys `id`, Relay `issuer`
 
 # OpenBao documents (KV-v2 mount `af`) -> (reader policy = k8s-auth role, ServiceAccount, namespace).
+# `mints`: the token-role create paths the reader may POST to (its ESO generator), nothing else.
 READERS = {
     "relay": {"role": "af-app-relay-router", "sa": "relay-router-eso", "secret": "relay-router-files",
               "refs": {"relay-router/relay/admin-signer": {"private_key"},
-                       "relay-router/relay/reconciler-signer": {"private_key"},
-                       "relay-router/relay/escrow-token": {"token"}},
+                       "relay-router/relay/reconciler-signer": {"private_key"}},
+              "mints": {"auth/token/create/relay-router-escrow"},
               "files": {"admin-key.pem", "reconciler-key.pem", "escrow-token"}},
     "llm-router": {"role": "af-app-router-relay-keys", "sa": "router-relay-keys-eso",
                    "secret": "llm-router-relay-trust",
                    "refs": {"relay-router/router/trust": {"admin_public_key", "reconciler_public_key"}},
+                   "mints": set(),
                    "files": {"trust.json"}},
 }
+
+
+def hours(duration):
+    """'168h' -> 168. Only whole hours: the manifests write every lifetime that way."""
+    assert re.fullmatch(r"\d+h", duration), duration
+    return int(duration[:-1])
 
 
 def docs(path):
@@ -367,6 +376,31 @@ class CredentialDelivery(unittest.TestCase):
             for key in refs:
                 self.assertFalse(key.startswith(record()["baoPrefix"] + "/"), key)
 
+    def test_escrow_token_is_minted_by_the_generator(self):
+        path = CREDENTIALS / "relay.yaml"
+        gen = one(path, "VaultDynamicSecret")
+        spec = gen["spec"]
+        es = one(path, "ExternalSecret")["spec"]
+        store = one(path, "SecretStore")["spec"]["provider"]["vault"]
+        self.assertEqual(gen["metadata"]["namespace"], "relay")
+        self.assertEqual((spec["method"], spec["path"], spec["resultType"]),
+                         ("POST", "auth/token/create/relay-router-escrow", "Auth"))
+        self.assertEqual({spec["path"]}, READERS["relay"]["mints"])
+        # The generator logs in exactly as the store does: same server, identity and CA.
+        for key in ("server", "auth", "caProvider"):
+            self.assertEqual(spec["provider"][key], store[key], key)
+        self.assertEqual([d["sourceRef"]["generatorRef"] for d in es["dataFrom"]],
+                         [{"apiVersion": gen["apiVersion"], "kind": "VaultDynamicSecret",
+                           "name": gen["metadata"]["name"]}])
+        self.assertEqual(es["target"]["template"]["data"]["escrow-token"], "{{ .client_token }}")
+        # Rotation margin: the requested TTL is the role's cap and covers at least four refreshes, so a
+        # generator that stops minting leaves Relay days on its last token. Replaced tokens are not
+        # revoked, so at most eight may be live at once (a faster refresh would multiply them).
+        role_max = re.search(r"token_explicit_max_ttl=(\d+h)", provision_script()).group(1)
+        self.assertEqual(hours(spec["parameters"]["ttl"]), hours(role_max))
+        self.assertGreaterEqual(hours(role_max), 4 * hours(es["refreshInterval"]))
+        self.assertLessEqual(hours(role_max), 8 * hours(es["refreshInterval"]))
+
 
 class OpenBaoProvision(unittest.TestCase):
     def setUp(self):
@@ -398,8 +432,12 @@ class OpenBaoProvision(unittest.TestCase):
                                          "ROUTER": ("llm-router", READERS["llm-router"])}.items():
             policy = self.heredocs[want["role"]]
             grants = re.findall(r'path "([^"]+)" \{ capabilities = \["read"\] \}', policy)
-            self.assertEqual(len(grants), len(policy.strip().splitlines()), policy)
+            mints = re.findall(r'path "([^"]+)" \{ capabilities = \["update"\] \}', policy)
+            self.assertEqual(len(grants) + len(mints), len(policy.strip().splitlines()), policy)
             self.assertEqual(set(grants), {f"af/data/{key}" for key in want["refs"]})
+            self.assertEqual(set(mints), want["mints"])
+            for path in mints:
+                self.assertRegex(path, r"^auth/token/create/[a-z0-9-]+$", "a mint grant names one token role")
             desired = re.search(rf"^\s*{label}_DESIRED='([^']*)'", self.script, re.M).group(1)
             self.assertEqual(normalise(policy), desired)
             self.assertIn(f"write_role {want['role']} {want['sa']} {namespace}", self.script)
@@ -407,7 +445,7 @@ class OpenBaoProvision(unittest.TestCase):
     def test_token_role_carries_only_the_escrow_policy(self):
         self.assertIn('allowed_policies="relay-router-escrow"', self.script)
         for field in ("orphan=true", "renewable=false", "token_no_default_policy=true",
-                      "token_explicit_max_ttl=720h", "token_period=0", 'allowed_policies_glob=""'):
+                      "token_explicit_max_ttl=168h", "token_period=0", 'allowed_policies_glob=""'):
             self.assertIn(field, self.script)
 
 

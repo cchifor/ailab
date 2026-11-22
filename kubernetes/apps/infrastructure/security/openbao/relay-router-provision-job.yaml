@@ -8,19 +8,22 @@
 #                                        grant is exactly <prefix>/<tenant>/<host-or-assistant>/<credential-id>.
 #                                        No list, no metadata, no delete, no other path.
 #   * policy `af-app-relay-router`       read on af/data/relay-router/relay/{admin-signer,
-#                                        reconciler-signer,escrow-token}, nothing else (Relay's ESO).
+#                                        reconciler-signer}, and update on
+#                                        auth/token/create/relay-router-escrow (Relay's ESO: it reads the
+#                                        two keys and MINTS the escrow token through its generator),
+#                                        nothing else.
 #   * policy `af-app-router-relay-keys`  read on af/data/relay-router/router/trust, nothing else (Router's
 #                                        ESO; public keys only).
 #   * k8s auth role `af-app-relay-router`       bound to ServiceAccount relay-router-eso in ns relay.
 #   * k8s auth role `af-app-router-relay-keys`  bound to ServiceAccount router-relay-keys-eso in ns llm-router.
-#   * token role `relay-router-escrow`   the ONLY way the operator mints the escrow token: an orphan
-#                                        service token carrying exactly policy relay-router-escrow (no
-#                                        `default`), not renewable, explicit max TTL 720h. Relay never
-#                                        renews it, so the operator rotates it (runbook).
+#   * token role `relay-router-escrow`   the ONLY way an escrow token is minted (by Relay's ESO
+#                                        generator, every 24 h): an orphan service token carrying exactly
+#                                        policy relay-router-escrow (no `default`), not renewable, explicit
+#                                        max TTL 168h. Relay never renews it; the next mint replaces it.
 #
 # IT CREATES NO KV DOCUMENT AND NO TOKEN. The signer keys and public keys are generated in the
-# operator's session, the escrow token is minted from the token role by the operator, and the escrow
-# documents are written by Relay itself. An absent document keeps the ExternalSecret not-Ready, which
+# operator's session, the escrow token is minted from the token role by ESO (relay-router-connection/
+# credentials/relay.yaml), and the escrow documents are written by Relay itself. An absent document keeps the ExternalSecret not-Ready, which
 # is the honest state until then.
 #
 # AUTH: the openbao-breakglass-token Secret, for the same reason the sibling provision Jobs need it --
@@ -66,7 +69,7 @@ data:
     ESCROW_BASELINE='path"af/data/relay-router/escrow/00000000-0000-4000-8000-000000000001/+/+"{capabilities=["create","read","update"]}path"af/destroy/relay-router/escrow/00000000-0000-4000-8000-000000000001/+/+"{capabilities=["update"]}'
     ESCROW_DESIRED='path"af/data/relay-router/escrow/00000000-0000-4000-8000-000000000001/+/+"{capabilities=["create","read","update"]}path"af/destroy/relay-router/escrow/00000000-0000-4000-8000-000000000001/+/+"{capabilities=["update"]}'
     RELAY_BASELINE='path"af/data/relay-router/relay/admin-signer"{capabilities=["read"]}path"af/data/relay-router/relay/reconciler-signer"{capabilities=["read"]}path"af/data/relay-router/relay/escrow-token"{capabilities=["read"]}'
-    RELAY_DESIRED='path"af/data/relay-router/relay/admin-signer"{capabilities=["read"]}path"af/data/relay-router/relay/reconciler-signer"{capabilities=["read"]}path"af/data/relay-router/relay/escrow-token"{capabilities=["read"]}'
+    RELAY_DESIRED='path"af/data/relay-router/relay/admin-signer"{capabilities=["read"]}path"af/data/relay-router/relay/reconciler-signer"{capabilities=["read"]}path"auth/token/create/relay-router-escrow"{capabilities=["update"]}'
     ROUTER_BASELINE='path"af/data/relay-router/router/trust"{capabilities=["read"]}'
     ROUTER_DESIRED='path"af/data/relay-router/router/trust"{capabilities=["read"]}'
 
@@ -114,10 +117,13 @@ data:
     EOF
     # The two ESO readers: `read` on the DATA endpoints only (ESO never enumerates or reads metadata).
     # Relay's reader cannot read the Router's document or the escrow; the Router's reads public keys.
+    # Relay's also MINTS the escrow token: `update` on the one token-role create path. The role caps
+    # what that token carries (step 4); this grant reaches no other role, no plain auth/token/create
+    # (which would let it pick policies) and no create-orphan.
     bao policy write af-app-relay-router - <<'EOF'
     path "af/data/relay-router/relay/admin-signer" { capabilities = ["read"] }
     path "af/data/relay-router/relay/reconciler-signer" { capabilities = ["read"] }
-    path "af/data/relay-router/relay/escrow-token" { capabilities = ["read"] }
+    path "auth/token/create/relay-router-escrow" { capabilities = ["update"] }
     EOF
     bao policy write af-app-router-relay-keys - <<'EOF'
     path "af/data/relay-router/router/trust" { capabilities = ["read"] }
@@ -186,9 +192,10 @@ data:
     # ---- 4. The token role for the escrow writer, WRITTEN and OWNED WHOLE -----------------------
     # Every field that decides what a minted token carries or how long it lives is written, empty ones
     # included, so a hand-widened role (another policy, a glob, a period, renewability, the default
-    # policy, a parent) is put back on the next run. Orphan: the token must not die with the
-    # operator's session token. Not renewable and no period: Relay never renews, so the lifetime is
-    # explicit and the runbook rotates it. No default policy: Relay needs nothing but the escrow.
+    # policy, a parent) is put back on the next run. Orphan: the token must not die with the minting
+    # ESO login token (1 h). Not renewable and no period: Relay never renews, so the lifetime is
+    # explicit, and ESO mints a replacement every 24 h. 168 h leaves six days on the last token if
+    # minting stops. No default policy: Relay needs nothing but the escrow.
     trole="auth/token/roles/relay-router-escrow"
     bao write "$trole" \
       allowed_policies="relay-router-escrow" \
@@ -200,7 +207,7 @@ data:
       renewable=false \
       path_suffix="" \
       token_bound_cidrs="" \
-      token_explicit_max_ttl=720h \
+      token_explicit_max_ttl=168h \
       token_no_default_policy=true \
       token_num_uses=0 \
       token_period=0 \
@@ -215,7 +222,7 @@ data:
     for want in '"allowed_policies":\["relay-router-escrow"\]' '"allowed_policies_glob":\[\]' \
                 '"disallowed_policies":\[\]' '"disallowed_policies_glob":\[\]' '"allowed_entity_aliases":\[\]' \
                 '"orphan":true' '"renewable":false' '"token_no_default_policy":true' \
-                '"token_explicit_max_ttl":2592000[,}]' '"token_period":0[,}]' '"period":0[,}]' \
+                '"token_explicit_max_ttl":604800[,}]' '"token_period":0[,}]' '"period":0[,}]' \
                 '"explicit_max_ttl":0[,}]' '"token_type":"service"' '"path_suffix":""'; do
       echo "$ROLE_JSON" | grep -q "$want" || {
         echo "$trole does not read back $want after writing; aborting" >&2
@@ -228,11 +235,12 @@ data:
         exit 1
       fi
     done
-    echo "$trole written: orphan, non-renewable, policy relay-router-escrow only, explicit max TTL 720h"
+    echo "$trole written: orphan, non-renewable, policy relay-router-escrow only, explicit max TTL 168h"
 
     # ---- 5. No KV document, no token ------------------------------------------------------------
     # Deliberately nothing here. af/relay-router/{relay,router}/* are written by the operator, the
-    # escrow token is minted by the operator from the role above, af/relay-router/escrow/* by Relay.
+    # escrow token is minted by Relay's ESO generator from the role above, af/relay-router/escrow/* by
+    # Relay.
     echo "no KV document and no token written: af/relay-router/* is operator- and Relay-owned"
 ---
 apiVersion: batch/v1
