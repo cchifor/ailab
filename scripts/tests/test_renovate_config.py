@@ -75,6 +75,36 @@ class RepoConfigTest(unittest.TestCase):
                                      'a rule disables the whole registry: %s' % name)
 
 
+    def test_campaign_freeze_holds_relay_paths(self):
+        # The Relay qualification campaign freeze (R1 to the canary): the last rule disables every
+        # Relay, Router, journal, ledger and researcher path, so no earlier rule re-enables them.
+        rule = self.config['packageRules'][-1]
+        # No other matcher may narrow it (matchManagers, matchDatasources, matchUpdateTypes, ...).
+        self.assertEqual(set(rule), {'description', 'matchFileNames', 'enabled'})
+        self.assertIs(rule['enabled'], False)
+        frozen = {'kubernetes/apps/apps/relay/**', 'kubernetes/apps/apps/llm-router/**',
+                  'kubernetes/apps/relay-*/**', 'kubernetes/components/relay-*/**',
+                  'kubernetes/components/llm-router-*/**', 'kubernetes/optional/relay-*/**'}
+        # The two OpenBao Jobs that provision the Relay budget and Router credentials: an image bump would
+        # re-run a provisioning Job inside the campaign.
+        jobs = {'kubernetes/apps/infrastructure/security/openbao/relay-budget-provision-job.yaml',
+                'kubernetes/apps/infrastructure/security/openbao/relay-router-provision-job.yaml'}
+        self.assertEqual(set(rule['matchFileNames']), frozen | jobs)
+        for path in sorted(jobs):
+            self.assertTrue((REPO / path).is_file(), path)
+        # Every pattern must match real manifests, so a typo or a rename cannot lift the freeze quietly.
+        for pattern in sorted(frozen):
+            # pathlib's trailing '**' yields directories only; '**/*' yields the files under them.
+            files = REPO.glob(pattern[:-2] + '**/*')
+            self.assertTrue(any(f.is_file() and f.suffix in ('.yaml', '.yml') for f in files),
+                            'no manifest matches %s' % pattern)
+        # The files Renovate #1932 changed (relay-postgres and backup-database) are inside the freeze.
+        for path in ('kubernetes/apps/apps/relay/postgres.yaml', 'kubernetes/apps/apps/relay/backup.yaml',
+                     'kubernetes/apps/apps/relay/relay.yaml'):
+            self.assertTrue((REPO / path).is_file(), path)
+            self.assertTrue(path.startswith('kubernetes/apps/apps/relay/'))
+
+
 class AnsibleRequirementsTest(unittest.TestCase):
     def test_no_trailing_comment_on_name_lines(self):
         # Renovate's ansible-galaxy manager takes the rest of the `name:` line as the collection name.

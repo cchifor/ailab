@@ -134,6 +134,20 @@
       "matchFileNames": ["kubernetes/apps/infrastructure/s2s-phase4-probe/job.yaml"],
       "matchPackageNames": ["mirror.gcr.io/library/python"],
       "enabled": false
+    },
+    {
+      "description": "Relay qualification campaign freeze (campaign runbook section 1; ailab #1753): no updates on the Relay, Router, journal, ledger and researcher paths from R1 until the canary. Revert when the canary is done. Pinned by scripts/tests/test_renovate_config.py (test_campaign_freeze_holds_relay_paths).",
+      "matchFileNames": [
+        "kubernetes/apps/apps/relay/**",
+        "kubernetes/apps/apps/llm-router/**",
+        "kubernetes/apps/relay-*/**",
+        "kubernetes/components/relay-*/**",
+        "kubernetes/components/llm-router-*/**",
+        "kubernetes/optional/relay-*/**",
+        "kubernetes/apps/infrastructure/security/openbao/relay-budget-provision-job.yaml",
+        "kubernetes/apps/infrastructure/security/openbao/relay-router-provision-job.yaml"
+      ],
+      "enabled": false
     }
   ]
 }
