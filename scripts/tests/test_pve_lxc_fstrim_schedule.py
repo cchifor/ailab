@@ -140,7 +140,8 @@ class PveLxcFstrimSchedule(unittest.TestCase):
 
     def test_hosts_and_registry_are_found(self):
         self.assertEqual(["ai-node1", "ai-node2", "ai-node3"], sorted(self.vars))
-        self.assertEqual({"ai-node1": [5004]}, self.registry)
+        # no hand-installed per-container trim unit since CT 5004's decommission (2026-11-22)
+        self.assertEqual({}, self.registry)
 
     def test_a_host_switched_off_is_not_a_failure(self):
         # The kill switch is pve_lxc_fstrim_enabled: false in one host's host_vars: no test may require it on.
@@ -186,8 +187,10 @@ class PveLxcFstrimSchedule(unittest.TestCase):
         # the timeouts follow chunk_gb in the template, so the span grows instead of the check failing
         self.assertTrue(any("overlap" in p for p in self.mutated("ai-node2", pve_lxc_fstrim_chunk_gb=16)))
 
-    def test_the_registry_must_stay_excluded(self):
-        self.assertTrue(any("5004" in p for p in self.mutated("ai-node1", pve_lxc_fstrim_exclude=[])))
+    def test_a_container_with_its_own_unit_must_be_excluded(self):
+        # a dedicated unit (like CT 5004's weekly trim was) on a host whose sweep does not exclude the container
+        self.assertTrue(any("5099" in p for p in problems(self.vars, {"ai-node1": [5099]})))
+        self.assertEqual([], problems(self.vars, {}))
 
     def test_an_unquoted_start_is_refused(self):
         self.assertTrue(any("quoted" in p for p in self.mutated("ai-node1", pve_lxc_fstrim_start=310)))

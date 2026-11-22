@@ -16,115 +16,20 @@ resource "proxmox_virtual_environment_download_file" "debian_tmpl" {
   overwrite    = false
 }
 
-resource "proxmox_virtual_environment_container" "registry" {
-  node_name    = var.registry_lxc.node_name
-  vm_id        = var.registry_lxc.vm_id
-  tags         = ["lxc", "registry", "zot", "platform"]
-  unprivileged = true # no host devices / bind mounts needed -> run unprivileged for safety
-  # RETIRED from service by the zot move (2026-11-21): stopped, onboot 0, net0 link_down=1 and a 'backup' lock, all
-  # set by hand (pct); its volumes stay as the pre-cutover copy until the owner approves decommissioning (a separate
-  # PR). started/start_on_boot below document that state only: lifecycle.ignore_changes covers both, so tofu never
-  # acts on them.
-  started       = false
-  start_on_boot = false
-
-  features {
-    nesting = true # systemd + the zot service inside the CT
-  }
-
-  memory {
-    dedicated = var.lxc_memory_mib
-    swap      = 0
-  }
-
-  cpu {
-    cores = var.lxc_cores
-  }
-
-  # Root filesystem (OS only; image data is on the mp0 data disk below).
-  disk {
-    datastore_id = var.lxc_rootfs_datastore
-    size         = var.lxc_rootfs_gb
-  }
-
-  # Allocated data volume for the OCI image store -> /var/lib/registry (mp0). NOT a bind mount,
-  # so it grows online later: `pct resize ${var.registry_lxc.vm_id} mp0 +NG` or bump data_gb +
-  # `tofu apply` (grow-only; needs free space on the datastore).
-  mount_point {
-    volume = var.data_datastore
-    size   = "${var.data_gb}G"
-    path   = "/var/lib/registry"
-  }
-
-  operating_system {
-    template_file_id = proxmox_virtual_environment_download_file.debian_tmpl.id
-    type             = "debian"
-  }
-
-  network_interface {
-    name   = "eth0"
-    bridge = var.bridge
-  }
-
-  initialization {
-    hostname = var.registry_lxc.hostname
-    ip_config {
-      ipv4 {
-        address = "${var.registry_lxc.ip}/${var.network_prefix}"
-        gateway = var.gateway
-      }
-    }
-    dns {
-      domain  = var.dns_domain
-      servers = var.nameservers
-    }
-    # Inject the Ansible SSH key into the CT root account (Proxmox writes it to
-    # /root/.ssh/authorized_keys); the debian-standard template ships+starts sshd.
-    user_account {
-      keys = [trimspace(var.ssh_public_key)]
-    }
-  }
-
-  # The mp0 data volume holds the ONLY copy of the pushed/cached images (no backup/replication yet —
-  # see docs/runbooks/registry-cache.md). Guard against an accidental `tofu destroy` (or a
-  # replacement-forcing change) wiping it. Remove this block deliberately to rebuild the LXC.
-  # ignore_changes (the zot move, 2026-11-21): bpg refreshes `started` from the CT's live status and
-  # `start_on_boot` from its onboot flag. After the cutover CT 5004 is stopped with onboot 0 on purpose (it is the
-  # rollback copy, kept off 192.168.0.36), and an apply must never start it or re-arm it at boot. Run state and
-  # onboot of this CT are set by hand (pct) from here on.
-  # network_interface (review #1927): its net0 carries link_down=1, set by hand, so this copy can never answer
-  # on .36 next to CT 5005. bpg 0.123.1 does not model link_down for containers (it reads `enabled` back as true),
-  # so any apply that rewrote net0 would drop link_down=1 and put a second .36 on the wire. Do NOT express it as
-  # `enabled = false` either: for a container that DELETES net0 (container.go: !ni.Enabled -> Delete). So tofu
-  # never touches this CT's NIC.
-  lifecycle {
-    prevent_destroy = true
-    ignore_changes  = [started, start_on_boot, network_interface]
-  }
-}
-
-# The registry's NEW home on ai-node3 (the zot move, 2026-11-21; docs/runbooks/registry-cache.md "Moving the
-# registry"). Created STOPPED and never started by tofu: the cutover copies CT 5004's rootfs and store into it
-# (host-to-host rsync from read-only views, then a cold final pass), accepts the copy, stops 5004 and starts this
-# one, which takes over 192.168.0.36. Same spec as `registry`; its own vmid and MAC.
-#   - started/start_on_boot false: tofu must never start it while 5004 owns .36. `started` is honoured at create
-#     only (ignore_changes below): the cutover starts the CT by hand, and a later apply must not stop it again.
-#     The move's follow-up PR sets start_on_boot true only AFTER the cutover; until then no registry-lxc apply.
-#   - net0 gets link_down=1 and the CT a 'backup' lock right after creation (b-newct-n3.sh): bpg cannot express
-#     link_down (its `enabled = false` DELETES the interface) and ignores both keys, so neither shows as drift.
-#     NOT a 'mounted' lock: PVE skips the lock check for 'mounted' when it starts a CT (API2/LXC/Status.pm and
-#     lxc-pve-prestart-hook), while any other lock makes `pct start` fail ("CT is locked").
+# The registry: CT 5005 on ai-node3 since the zot move (2026-11-21; docs/runbooks/registry-cache.md "Moving the
+# registry"). The old CT 5004 on ai-node1 was archived to qnap-nfs and destroyed on 2026-11-22 (registry-cache.md,
+# "The 5004 archive"); its resource is gone from this module.
+#   - started: documentation only (ignore_changes below): bpg refreshes `started` from the CT's live status, so a
+#     plan would otherwise stop it. start_on_boot is applied.
 #   - The template: debian_tmpl lives on the SHARED qnap-nfs datastore (var.template_datastore; storage.cfg
-#     `nfs: qnap-nfs`, content vztmpl, nodes ai-node1,ai-node2,ai-node3), so its id
-#     (qnap-nfs:vztmpl/registry-debian-13-standard_13.1-2_amd64.tar.zst) resolves on ai-node3 too, although
-#     template_download_node downloaded it on another node. The rootfs and mp0 datastores (local-lvm) exist on
-#     every node. The move's pre-create step checks `pveam list qnap-nfs` on ai-node3 for that file.
-#   - prevent_destroy: this volume becomes the only live copy of the registry at the cutover.
+#     `nfs: qnap-nfs`, content vztmpl, nodes ai-node1,ai-node2,ai-node3), so its id resolves on ai-node3 too,
+#     although template_download_node downloaded it on another node.
+#   - prevent_destroy: this volume is the only live copy of the registry.
 resource "proxmox_virtual_environment_container" "registry_n3" {
   node_name     = var.registry_lxc_n3.node_name
   vm_id         = var.registry_lxc_n3.vm_id
   tags          = ["lxc", "registry", "zot", "platform"]
-  unprivileged  = true # the default idmap: guest uid 999 (zot) = host 100999, as on CT 5004
+  unprivileged  = true # the default idmap: guest uid 999 (zot) = host 100999
   started       = true # the live registry since the 2026-11-21 cutover; documentation only (ignore_changes)
   start_on_boot = true # tofu applies this one
 

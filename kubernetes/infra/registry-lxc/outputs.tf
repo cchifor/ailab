@@ -1,5 +1,4 @@
-# The ACTIVE registry: CT 5005 on ai-node3 since the zot move (2026-11-21). The `registry_*` outputs follow the live
-# endpoint; the old resource keeps its binding to CT 5004 (no node_name or vm_id change on it), reported as retired.
+# The registry: CT 5005 on ai-node3 since the zot move (2026-11-21). The old CT 5004 was destroyed on 2026-11-22.
 output "registry_ip" {
   value = var.registry_lxc_n3.ip
 }
@@ -17,12 +16,4 @@ output "registry_n3_vmid" {
 }
 output "registry_n3_node" {
   value = var.registry_lxc_n3.node_name
-}
-# CT 5004 on ai-node1: stopped, onboot 0, net0 link_down=1 and locked by hand; kept as the pre-cutover copy until
-# the owner approves decommissioning it.
-output "registry_retired_vmid" {
-  value = var.registry_lxc.vm_id
-}
-output "registry_retired_node" {
-  value = var.registry_lxc.node_name
 }

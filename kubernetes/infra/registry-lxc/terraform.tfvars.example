@@ -12,4 +12,4 @@ ssh_public_key = "ssh-ed25519 AAAA... your-ansible-key"
 
 # Override only if needed, e.g.:
 # data_gb       = 96
-# registry_lxc  = { node_name = "ai-node2", vm_id = 5004, ip = "192.168.0.36", hostname = "registry" }
+# registry_lxc_n3 = { node_name = "ai-node3", vm_id = 5005, ip = "192.168.0.36", hostname = "registry" }
