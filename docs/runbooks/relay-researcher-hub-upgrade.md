@@ -531,6 +531,11 @@ After the owner approves the pool in their own session (owner rule, ailab #1799)
 
 ## Enablement order at a glance
 
+> **Campaign rows are historical.** The owner retired the researcher qualification campaign and its
+> candidate journal on 2026-11-22 ([ailab #1753 comment 136889](https://git.chifor.me/cchifor/ailab/issues/1753#issuecomment-136889)).
+> The `journal`, H7, `scenarios`, `approval` and `canary` rows, and H4b's dependence on the genuine approval,
+> are kept as the record and are not actionable; the rows before them describe the live hub, ledger and installation.
+
 | Step | Change | Must already hold | Readback that gates the next step |
 | --- | --- | --- | --- |
 | H1 | none (backup) | – | verified restore of a fresh generation |
@@ -541,14 +546,14 @@ After the owner approves the pool in their own session (owner rule, ailab #1799)
 | H6 | `RELAY_ROUTER_CONNECTIONS_FILE` + `RELAY_AGENT_CONTROL_PLANE` + monitoring; no environments, Gitea or notifications | ledger `ready=true`, plugin on | `agentControlPlane: true`, `environments: false`, connectors and bus keys working, connection listed. Budget startup `start_failed` is expected: no profile source until H7 |
 | I1-I10 | the researcher installation (enrollment-stage egress) | H3; worker sessions need H6 | installation `ready`, fence UID pinned |
 | Q1-Q6 | internal TLS terminators (`relay-internal-tls`), then the slot's qualification egress stage (Q6 is the drill configuration) | I10; the release's G3 binding and CA pins | Q5: both Certificates Ready and chaining to the pinned root, Services `10.96.0.40`/`.41`, live policy digest `f6d3187c…282f`. The third alias, the candidate journal's Service at `10.96.0.42`, is not created here: it comes with the journal itself ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) before H7's candidate files |
-| journal | the independent candidate journal ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) | per that runbook | its Service on exactly `10.96.0.42` (Q2's `pinned` check) |
+| journal | RETIRED 2026-11-22 (ailab #1753 comment 136889): the independent candidate journal ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) is no longer under Flux | none | none: no Service on `10.96.0.42`, which stays reserved |
 | File B | budget ledger step 7's `qualifications` row (ailab #1753 comment 124071) | the final Router rollout read back | the stored policy re-verified, its `tokenPolicyDigest` recorded for the signed runs |
 | H8 | hub image → v0.10.9 (pool approval materializes the Router connection) | the roll: H4a's state only (no new settings); its connection readback and the owner's pool approval: H6 (applied) | v0.10.9 digest running, schema still 79, connection listed, `router_connections` and pools still empty; then the owner approves the pool and exactly one connection row appears |
-| H7 | candidate files: `relay-worker-candidate`, first included for R0 (never granted), reset, then included again for R1; each run's values generated (the canary file follows the approval; the qualification file is general activation, step 11) | H6, H8 with the owner-approved pool (one connection row), Q5's readback, the journal at `10.96.0.42`, File B, the run's session-key Secret | init container exit 0, the run's pin in the Pod, budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
-| scenarios | the nineteen qualification scenarios | H7's candidate files | the nineteen reports, independently accepted |
-| approval | a genuine `ReleaseApproval` | the nineteen reports and the other release gates accepted | its `workerTemplates` subject asserts the nine passed gates |
-| canary | H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
-| H4b | `RELAY_WORKER_PROFILES_FILE`/`_SHA256` (profile registry) | the genuine approval, the qualified `tokenPolicyDigests`, registry reviewed | file pin equal; no `profiles-unavailable`; budget still `started`. Before the bounded general lifecycle trial |
+| H7 | HISTORICAL, campaign retired 2026-11-22 (ailab #1753 comment 136889): candidate files: `relay-worker-candidate`, first included for R0 (never granted), reset, then included again for R1; each run's values generated (the canary file follows the approval; the qualification file is general activation, step 11) | H6, H8 with the owner-approved pool (one connection row), Q5's readback, the journal at `10.96.0.42`, File B, the run's session-key Secret | init container exit 0, the run's pin in the Pod, budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
+| scenarios | HISTORICAL, campaign retired 2026-11-22: the nineteen qualification scenarios | H7's candidate files | the nineteen reports, independently accepted |
+| approval | HISTORICAL, campaign retired 2026-11-22: a genuine `ReleaseApproval` | the nineteen reports and the other release gates accepted | its `workerTemplates` subject asserts the nine passed gates |
+| canary | HISTORICAL, campaign retired 2026-11-22: H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
+| H4b | HISTORICAL while the campaign is retired (needs its genuine approval): `RELAY_WORKER_PROFILES_FILE`/`_SHA256` (profile registry) | the genuine approval, the qualified `tokenPolicyDigests`, registry reviewed | file pin equal; no `profiles-unavailable`; budget still `started`. Before the bounded general lifecycle trial |
 
 ## Rollback: migrations are forward-only
 
@@ -597,8 +602,8 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
    122095; Router connection runbook, "Router trust mapping").
 4. **Qualification egress (G3):** the internal TLS terminators and qualification egress are applied
    (Q1-Q5, starting state above); the pinned binding carries the hostAliases and CA pins. Recheck Q5
-   before a scenario. The candidate journal's Service at `10.96.0.42` is under Flux at zero database
-   replicas; its initialization and authority ceremony still precede H7.
+   before a scenario. The candidate journal was retired on 2026-11-22 (ailab #1753 comment 136889): no
+   Service holds `10.96.0.42`, which stays reserved in `docs/network-plan.md`.
 5. **Qualification 0/19, no canary:** the slot keeps zero Pods and the deny-all gate until the nineteen
    rows are accepted, the genuine release approval is issued, the canary passes, H4b's registry is in
    and the activation compiler's outputs (guards, gate replacement, one-Pod quota,
