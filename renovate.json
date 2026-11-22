@@ -134,6 +134,18 @@
       "matchFileNames": ["kubernetes/apps/infrastructure/s2s-phase4-probe/job.yaml"],
       "matchPackageNames": ["mirror.gcr.io/library/python"],
       "enabled": false
+    },
+    {
+      "description": "Relay researcher qualification campaign freeze: no Renovate updates to any image on the Relay hub, its database and backup tools, the Router, the candidate journal, the budget ledger or the researcher installation paths, from R1 until the canary (campaign runbook section 1, 'Freeze from R1 to the canary'). Renovate #1932 bumped the relay-postgres and backup-database digests on 2026-11-22 00:17Z, which rolled the hub (rev 66) and restarted relay-postgres; inside a run that would be an unplanned hub outage. Remove this rule when the canary is done (ailab #1753 records the freeze). Meanwhile every image change on these paths is a reviewed hand edit outside a run window. It is the last rule, so no earlier rule re-enables these paths. Pinned by scripts/tests/test_renovate_config.py (test_campaign_freeze_holds_relay_paths).",
+      "matchFileNames": [
+        "kubernetes/apps/apps/relay/**",
+        "kubernetes/apps/apps/llm-router/**",
+        "kubernetes/apps/relay-*/**",
+        "kubernetes/components/relay-*/**",
+        "kubernetes/components/llm-router-*/**",
+        "kubernetes/optional/relay-*/**"
+      ],
+      "enabled": false
     }
   ]
 }

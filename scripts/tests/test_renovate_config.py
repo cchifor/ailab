@@ -75,6 +75,18 @@ class RepoConfigTest(unittest.TestCase):
                                      'a rule disables the whole registry: %s' % name)
 
 
+    def test_campaign_freeze_holds_relay_paths(self):
+        # The Relay qualification campaign freeze (R1 to the canary): the last rule disables every
+        # Relay, Router, journal, ledger and researcher path, so no earlier rule re-enables them.
+        rule = self.config['packageRules'][-1]
+        self.assertIs(rule.get('enabled'), False)
+        self.assertFalse(rule.get('matchPackageNames'))
+        for path in ('kubernetes/apps/apps/relay/**', 'kubernetes/apps/apps/llm-router/**',
+                     'kubernetes/apps/relay-*/**', 'kubernetes/components/relay-*/**',
+                     'kubernetes/components/llm-router-*/**', 'kubernetes/optional/relay-*/**'):
+            self.assertIn(path, rule['matchFileNames'])
+
+
 class AnsibleRequirementsTest(unittest.TestCase):
     def test_no_trailing_comment_on_name_lines(self):
         # Renovate's ansible-galaxy manager takes the rest of the `name:` line as the collection name.
