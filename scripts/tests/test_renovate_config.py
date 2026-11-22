@@ -88,7 +88,9 @@ class RepoConfigTest(unittest.TestCase):
         self.assertEqual(set(rule['matchFileNames']), frozen)
         # Every pattern must match real manifests, so a typo or a rename cannot lift the freeze quietly.
         for pattern in sorted(frozen):
-            self.assertTrue(any(f.suffix in ('.yaml', '.yml') for f in REPO.glob(pattern) if f.is_file()),
+            # pathlib's trailing '**' yields directories only; '**/*' yields the files under them.
+            files = REPO.glob(pattern[:-2] + '**/*')
+            self.assertTrue(any(f.is_file() and f.suffix in ('.yaml', '.yml') for f in files),
                             'no manifest matches %s' % pattern)
         # The files Renovate #1932 changed (relay-postgres and backup-database) are inside the freeze.
         for path in ('kubernetes/apps/apps/relay/postgres.yaml', 'kubernetes/apps/apps/relay/backup.yaml',
