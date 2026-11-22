@@ -138,8 +138,11 @@ eq "governor: fan1 to 60 % on a sustained 88 C" 3 "$(cat $F/fan1/level)"
 eq "governor: fan2 to 60 % on a sustained 88 C" 3 "$(cat $F/fan2/level)"
 eq "governor: logged the step" 1 "$(journalctl -u ec-fan-governor --no-pager | grep -c 'fan1: level 2 -> 3 (average 88.000 C')"
 eq "governor: fan3 never written" "$FAN3_PRISTINE" "$(fan3_state)"
-for _ in $(seq 1 20); do [ -e /var/lib/prometheus/node-exporter/ec_fan_governor.prom ] && break; sleep 1; done
-eq "governor: metrics file" 1 "$(grep -c '^ec_fan_governor_steps_total{direction="up"} 2$' /var/lib/prometheus/node-exporter/ec_fan_governor.prom)"
+# written as it starts (steps 0), then every 15 ticks: wait for the write after the step
+GP=/var/lib/prometheus/node-exporter/ec_fan_governor.prom
+for _ in $(seq 1 25); do grep -q '^ec_fan_governor_steps_total{direction="up"} 2$' $GP 2> /dev/null && break; sleep 1; done
+eq "governor: metrics file" 1 "$(grep -c '^ec_fan_governor_steps_total{direction="up"} 2$' $GP)"
+eq "governor: metrics average" 1 "$(grep -c '^ec_fan_governor_average_celsius 88.000$' $GP)"
 echo 52 > $F/temp1/temp
 echo 1 > $F/fan1/level
 echo 1 > $F/fan2/level
