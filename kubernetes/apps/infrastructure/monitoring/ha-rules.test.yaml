@@ -442,8 +442,8 @@ tests:
             exp_annotations:
               summary: "Relay's escrow-token rotation is stalled (relay/relay-router-files NotReady or unreported)"
               description: >-
-                ExternalSecret relay-router-files has been Ready=False, or missing from ESO's metrics, for
-                30m. Each refresh of it mints Relay's Router escrow token, so rotation has stopped: Relay
+                ExternalSecret relay-router-files has been Ready=False for 30m, or missing from ESO's metrics
+                for 25h. Each refresh of it mints Relay's Router escrow token, so rotation has stopped: Relay
                 keeps escrowing with the last token until it expires, 168 h after its mint, and then escrow,
                 delivery and cleanup fail closed. `kubectl -n relay describe externalsecret
                 relay-router-files`: the usual causes are the af-app-relay-router k8s-auth role or policy
@@ -452,7 +452,7 @@ tests:
                 sealed, or the external-secrets controller down. docs/runbooks/relay-router-connection.md,
                 "Escrow token".
   - interval: 1m
-    name: relay-router-files missing from ESO's metrics alerts after 30m
+    name: relay-router-files never reported by ESO alerts after 30m
     input_series:
       - series: 'up{job="external-secrets-metrics"}'
         values: "0x45"
@@ -469,8 +469,49 @@ tests:
             exp_annotations:
               summary: "Relay's escrow-token rotation is stalled (relay/relay-router-files NotReady or unreported)"
               description: >-
-                ExternalSecret relay-router-files has been Ready=False, or missing from ESO's metrics, for
-                30m. Each refresh of it mints Relay's Router escrow token, so rotation has stopped: Relay
+                ExternalSecret relay-router-files has been Ready=False for 30m, or missing from ESO's metrics
+                for 25h. Each refresh of it mints Relay's Router escrow token, so rotation has stopped: Relay
+                keeps escrowing with the last token until it expires, 168 h after its mint, and then escrow,
+                delivery and cleanup fail closed. `kubectl -n relay describe externalsecret
+                relay-router-files`: the usual causes are the af-app-relay-router k8s-auth role or policy
+                (its mint grant on auth/token/create/relay-router-escrow) or the token role missing (the
+                openbao-relay-router-provision Job owns all three), a signer document deleted, OpenBao
+                sealed, or the external-secrets controller down. docs/runbooks/relay-router-connection.md,
+                "Escrow token".
+  - interval: 1m
+    name: a healthy ESO restart (no condition series until the next refresh) stays silent
+    input_series:
+      # Reported for 30 min, then absent for 23 h: ESO restarted and the next refresh is not due yet.
+      - series: 'externalsecret_status_condition{exported_namespace="relay",namespace="external-secrets",name="relay-router-files",condition="Ready",status="True"}'
+        values: "1x30 _x1380"
+    alert_rule_test:
+      - eval_time: 1400m
+        alertname: RelayRouterFilesNotReady
+        exp_alerts: []
+  - interval: 1m
+    name: relay-router-files unreported for 25h alerts
+    input_series:
+      # Last reported at 10 min, so absent over the 25h window from 1511 min, firing 30 min later.
+      - series: 'externalsecret_status_condition{exported_namespace="relay",namespace="external-secrets",name="relay-router-files",condition="Ready",status="True"}'
+        values: "1x10 _x1600"
+    alert_rule_test:
+      - eval_time: 1530m
+        alertname: RelayRouterFilesNotReady
+        exp_alerts: []
+      - eval_time: 1545m
+        alertname: RelayRouterFilesNotReady
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              exported_namespace: relay
+              name: relay-router-files
+              condition: Ready
+              status: "True"
+            exp_annotations:
+              summary: "Relay's escrow-token rotation is stalled (relay/relay-router-files NotReady or unreported)"
+              description: >-
+                ExternalSecret relay-router-files has been Ready=False for 30m, or missing from ESO's metrics
+                for 25h. Each refresh of it mints Relay's Router escrow token, so rotation has stopped: Relay
                 keeps escrowing with the last token until it expires, 168 h after its mint, and then escrow,
                 delivery and cleanup fail closed. `kubectl -n relay describe externalsecret
                 relay-router-files`: the usual causes are the af-app-relay-router k8s-auth role or policy

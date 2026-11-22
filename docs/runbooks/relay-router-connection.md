@@ -249,12 +249,27 @@ only, at most 168 h. The template writes the response's `client_token` into `esc
 swaps the directory-mounted file, and Relay rereads it on every escrow call. Relay never renews a token.
 
 - **Lifetimes.** A token lives 168 h and is replaced after 24 h. Replaced tokens are not revoked: each
-  expires on its own, so about seven are live at a time, all with the same escrow-only policy.
-- **Health.** `RelayRouterFilesNotReady` (`monitoring/ha-rules.yaml`) fires after 30 min of Ready=False
-  or of no ESO report for this ExternalSecret. Relay then still has about six days on the last token.
+  expires on its own, so in steady state about seven are live, all with the same escrow-only policy.
+  ESO runs the generator BEFORE it reads the signer documents, so a refresh that fails later (a signer
+  document unreadable) still mints, and every retry mints again: during such an outage undelivered
+  tokens pile up until they expire. They carry the escrow policy only; revoke them with revoke-prefix
+  below once the cause is fixed, then force a sync.
+- **Health.** `RelayRouterFilesNotReady` (`monitoring/ha-rules.yaml`) fires after 30 min of Ready=False,
+  or when ESO has not reported this ExternalSecret for 25 h (ESO does not re-export the condition after
+  a restart until the next refresh, so a shorter window would page on every restart). Relay then still
+  has about five days on the last token.
   `kubectl --context admin@ai -n relay describe externalsecret relay-router-files` names the error.
 - **Rotate now** (also mints one): `kubectl --context admin@ai -n relay annotate externalsecret relay-router-files force-sync="$(date +%s)" --overwrite`.
-- **The live tokens, without reading one** (admin token; accessors are not secret):
+- **The token Relay uses**, by accessor, without printing it (admin token): the delivered token goes to
+  OpenBao on stdin, never in argv.
+
+  ```sh
+  kubectl --context admin@ai -n relay get secret relay-router-files -o jsonpath='{.data.escrow-token}' | base64 -d |
+    bao write -format=json auth/token/lookup token=- | jq -r '.data | [.accessor, .creation_time, .expire_time] | @tsv'
+  ```
+
+  The newest minted token is not necessarily this one (a failed refresh can mint without delivering).
+  **Every live escrow token**, oldest first:
 
   ```sh
   bao list -format=json auth/token/accessors | jq -r '.[]' | while read -r a; do
@@ -262,8 +277,6 @@ swaps the directory-mounted file, and Relay rereads it on every escrow call. Rel
       jq -r 'select(.data.display_name == "token-relay-router-escrow") | [.data.creation_time, .data.accessor, .data.expire_time] | @tsv'
   done | sort -n
   ```
-
-  The last line is the token Relay uses, at most 24 h old.
 - **Revoke them all** (a leak, or abandoning the connection), with the admin token:
   `bao write -f sys/leases/revoke-prefix/auth/token/create/relay-router-escrow`. Escrow, delivery and
   cleanup then fail closed (`remote_unavailable`) until the next mint: force a sync right after, unless
@@ -272,13 +285,16 @@ swaps the directory-mounted file, and Relay rereads it on every escrow call. Rel
   mint one from the role by hand and write it into the Secret directly. ESO replaces it at its next
   successful refresh, which is what you want.
 
+  Each step runs only if the previous one succeeded, so a failed mint never replaces the still-valid
+  token with an empty one, and the token appears in no argv and no shell trace (`jq` builds the patch):
+
   ```sh
   umask 077; d="$(mktemp -d)"
-  bao token create -role=relay-router-escrow -display-name=relay-router-escrow -format=json > "$d/t.json"
-  printf '[{"op":"replace","path":"/data/escrow-token","value":"%s"}]' \
-    "$(jq -j .auth.client_token "$d/t.json" | base64 -w0)" > "$d/patch.json"
-  kubectl --context admin@ai -n relay patch secret relay-router-files --type=json --patch-file "$d/patch.json"
-  jq -r .auth.accessor "$d/t.json"     # record the accessor (not secret) in the operator evidence
+  bao token create -role=relay-router-escrow -display-name=relay-router-escrow -format=json > "$d/t.json" &&
+    jq -e '.auth.client_token | select(type == "string" and length > 0)
+           | [{op: "replace", path: "/data/escrow-token", value: @base64}]' "$d/t.json" > "$d/patch.json" &&
+    kubectl --context admin@ai -n relay patch secret relay-router-files --type=json --patch-file "$d/patch.json" &&
+    jq -r .auth.accessor "$d/t.json"   # record the accessor (not secret) in the operator evidence
   shred -u "$d"/*; rmdir "$d"
   ```
 
