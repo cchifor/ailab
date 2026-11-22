@@ -529,32 +529,40 @@ After the owner approves the pool in their own session (owner rule, ailab #1799)
 - credential, binding and issuance-operation counts unchanged by the approval. Pool approval does not
   establish worker readiness.
 
-### H9. v0.10.10: truthful agent state
+### H9. v0.10.11: truthful agent state and Claude Code's own state
 
 Why: the console derived an agent's state from defaults (a pane became Idle on connect), not from
-evidence. Relay #573, released as v0.10.10 (#574, `716c2ed8`, run 145785): a v0.10.10 connector sends
-each pane's terminal sample to a hub that advertises `activity`, and the hub shows Output observed,
-Quiet, No signal with its reason, or Offline, with source and age. The samples live in the hub's memory;
-nothing is stored. Hub only in this step, no migrations (schema 79), same runtime, skill, tools and prerequisites as v0.10.9
-(the two deployment receipts agree), so re-pinning v0.10.9 (`1b0f2f72…7a39`) is a valid rollback.
+evidence.
+- Relay #573, released as v0.10.10 (#574, `716c2ed8`, run 145785): a v0.10.10 connector sends each pane's
+  terminal sample to a hub that advertises `activity`, and the hub shows Output observed, Quiet, No signal
+  with its reason, or Offline, with source and age.
+- Relay #575 with #576 and #580, released as v0.10.11 (#579, `12ea8d52`, run 145909): a v0.10.11
+  connector adds Claude Code's own state, read from its session file, and the hub shows Working, Idle, or
+  Waiting for a decision or an answer.
 
-Before the merge (operator): the connector pin of ailab #1947 (`relay_connector_release` 0.10.10,
-`docs/runbooks/relay-connectors.md`) is merged and converged on dev-worker-1, -2, -3 and -4, one at a
-time, and on each `relay-connector status --json` reports version 0.10.10, fresh and connected. A
-worker left on an older connector still works; its agents show "No signal: update the connector".
+The samples live in the hub's memory; nothing is stored. Hub only in this step, no migrations (schema
+79), same runtime, skill, tools and prerequisites as v0.10.9 (the deployment receipts agree), so
+re-pinning v0.10.9 (`1b0f2f72…7a39`) is a valid rollback.
 
-Change: this PR pins the v0.10.10 digest in `migrate` and `relay`, with the annotations. One Recreate
+Before the merge (operator): the connector pins of ailab #1947 (0.10.10) and #1949 (0.10.11,
+`docs/runbooks/relay-connectors.md`) are merged and v0.10.11 is converged on dev-worker-1, -2, -3 and -4,
+one at a time, and on each `relay-connector status --json` reports 0.10.11, fresh and connected. Mixed
+versions are safe both ways: a worker still on 0.10.10 shows terminal evidence without Claude Code's
+state, and one older than 0.10.10 shows "No signal: update the connector".
+
+Change: this PR pins the v0.10.11 digest in `migrate` and `relay`, with the annotations. One Recreate
 roll by the merge itself (Flux), with the pre-migration backup; outside the QNAP windows. H9 gates no
 other step: H7 and the steps after it need only H8.
 
 Readback after the roll (operator):
 
-- one Running Pod; source `716c2ed8a8090cd5b38799adb39d99cf89550026`, release
-  `relay-0.10.10-release-145785`; the `relay` container's image ID ends in
-  `sha256:58edaf690e743db86d7c0bf090f5cd1554b3460fbc37984073764d244284d470`; the migrate init container
+- one Running Pod; source `12ea8d52cda75fe67519ffd700c5e43ea9116ef0`, release
+  `relay-0.10.11-release-145909`; the `relay` container's image ID ends in
+  `sha256:8d3127d48bf259ba631027237c7a1816dc387e2036550c273cf49ce7e823945c`; the migrate init container
   exited 0 and `schema_migrations` reads `79|79`; the env is unchanged from H8;
 - the console's Agents page shows each dev-worker agent with an observed state and its age (Output
-  observed or Quiet), not "No signal: update the connector", once its connector runs v0.10.10.
+  observed or Quiet), not "No signal: update the connector", and each Claude Code agent as Working, Idle
+  or waiting, with "Claude Code <version>".
 
 ## Enablement order at a glance
 
@@ -576,7 +584,7 @@ Readback after the roll (operator):
 | approval | a genuine `ReleaseApproval` | the nineteen reports and the other release gates accepted | its `workerTemplates` subject asserts the nine passed gates |
 | canary | H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
 | H4b | `RELAY_WORKER_PROFILES_FILE`/`_SHA256` (profile registry) | the genuine approval, the qualified `tokenPolicyDigests`, registry reviewed | file pin equal; no `profiles-unavailable`; budget still `started`. Before the bounded general lifecycle trial |
-| H9 | hub image → v0.10.10 (truthful agent state); gates no step above | every dev-worker connector on v0.10.10 (ailab #1947, read back per worker); H8's state only (no new settings) | v0.10.10 digest running, schema still 79, agents show observed states |
+| H9 | hub image → v0.10.11 (truthful agent state, Claude Code's own state); gates no step above | every dev-worker connector on v0.10.11 (ailab #1947, #1949, read back per worker); H8's state only (no new settings) | v0.10.11 digest running, schema still 79, agents show observed states and Claude Code's |
 
 ## Rollback: migrations are forward-only
 
