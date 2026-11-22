@@ -1,5 +1,11 @@
 # Relay researcher candidate runs: the per-run generator (S-A, plan, inactive)
 
+> **Obsolete (owner, 2026-11-22; ailab #1753 comments 136886 and 136889).** The Relay researcher
+> qualification campaign is obsolete. Do not run the generator for a candidate run. Of the campaign, only drill
+> runs R0 and R0b ran live (signed, never granted, and each reset on 2026-11-21). The researcher-workers program and its
+> live state stay, as do the staged candidate code and the Renovate freeze (#1941). The candidate journal stack is
+> being retired. This file stays as the record.
+
 Status: **staged, inactive. Nothing here is applied, and merging changes no cluster object.** Owner
 decision O6 ([relay#277 comment 125437](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-125437)):
 every signed candidate run of the researcher qualification campaign gets **one generated, mechanical

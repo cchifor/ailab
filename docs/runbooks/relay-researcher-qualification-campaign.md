@@ -1,5 +1,11 @@
 # Relay researcher qualification campaign: the per-run runbook (plan, inactive)
 
+> **Obsolete (owner, 2026-11-22; ailab #1753 comments 136886 and 136889).** The Relay researcher
+> qualification campaign is obsolete. Do not run E6, R1-R7 or the canary from this runbook. Of the campaign, only drill
+> runs R0 and R0b ran live (signed, never granted, and each reset on 2026-11-21). The researcher-workers program and its
+> live state stay, as do the staged candidate code and the Renovate freeze (#1941). The candidate journal stack is
+> being retired. This file stays as the record.
+
 Status: **plan only. Nothing here is applied, and merging changes no cluster object.** It is item E5
 of the campaign plan rev 2 ([relay#277 comment 124936](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-124936)):
 the nineteen researcher scenarios on the owner-approved signed candidate runs (plan U11). It sits after step
