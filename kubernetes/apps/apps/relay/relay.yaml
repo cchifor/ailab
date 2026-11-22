@@ -55,7 +55,7 @@ spec:
       # Recreate stops the old application before this snapshot. Migration is
       # unreachable unless the existing coordinated backup pipeline succeeds.
       - name: backup-database
-        image: docker.io/library/postgres:17.12-alpine@sha256:526f86d93c6ea08fd3f1fe5605650cacc781b2c6013169a0ad8f42c7d3d84f32
+        image: docker.io/library/postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
         command:
         - timeout
         - '1800'
