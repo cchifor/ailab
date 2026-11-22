@@ -1,5 +1,11 @@
 # Relay researcher drill run R0: Relay's half of witness drills A-C, before R1
 
+> **Obsolete (owner, 2026-11-22; ailab #1753 comments 136886 and 136889).** The Relay researcher
+> qualification campaign is obsolete. Do not run another drill run from this runbook. Of the campaign, only drill
+> runs R0 and R0b ran live (signed, never granted, and each reset on 2026-11-21). The researcher-workers program and its
+> live state stay, as do the staged candidate code and the Renovate freeze (#1941). The candidate journal stack is
+> being retired. This file stays as the record.
+
 Status: **procedure, 2026-11-17. Merging this file changes nothing live.** It is the exact procedure for
 drill run R0 that the owner asked for. Every step is an operator action on the cluster, OpenBao, the
 budget ledger, the Router admin API or git, run only with the owner's direct confirmation for R0.
