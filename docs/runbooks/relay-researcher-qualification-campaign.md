@@ -27,6 +27,41 @@ the delayed-start converter requires the driver's `bootstrapSecret` facts, which
 The ceremony tools, drivers, converters and qualification documents cited below are unchanged between
 `9e09962f` and `eb9b1f07`.
 
+**The campaign's pinned driver checkout is Relay `174b646062f3842a9a58a5455fb12879945f25ee`** (`174b64606`;
+decided 2026-11-22 under the owner's delegation, after a Codex and a Fable review that both chose it:
+ailab #1753 comment 136692). Every driver, ceremony tool and converter
+run of R1 through the canary uses it. The tools cited below as `main:` are unchanged from `eb9b1f07` to
+`174b64606`, with these exceptions:
+- `packages/worker-runtime/acceptance.ts` (Relay #562): the `real-supervisor-lease-publisher` observation of the
+  operator window (#3-#7) now reads the lease in both the harness and the supervisor container, and needs the
+  successor publication before the predecessor's expiry plus the skew bound. Acceptance rows #1 and #2 do not
+  run it. The operator window already admits the harness probe tuple, the frozen v0.10.3 holder needs no
+  change, and no new config field or kubectl verb is needed. Each lease sample is now two execs. Each exec has
+  kubectl's 10 s request timeout under the driver's 15 s watchdog
+  (`main:scripts/qualification/worker-runtime-acceptance.ts:206`, used through
+  `operator-measurement-window.ts:204`), so a sample can take up to 30 s within the observation's deadline.
+- `packages/worker-runtime/provenance-cleanup-resource-observer.ts` (#557): an injectable clock for tests;
+  its default reads the same clocks as before.
+- `scripts/qualification/repository-review-observation.ts` (#561): a new driver that no run uses.
+
+Three rules follow:
+- **Record and check the commit.** Before the first driver of each run, `git rev-parse HEAD` in the operator's
+  checkout must print `174b646062f3842a9a58a5455fb12879945f25ee` and `git status --porcelain` nothing;
+  otherwise no driver runs and no evidence is recorded until the checkout is fixed. The stopwatch log and the
+  run's evidence comment record both outputs. The recorded driver digest hashes only the CLI file, not its
+  imports (`main:scripts/qualification/operator-executable-sha256.ts`), so it cannot show which checkout ran.
+- **`D_window` = 300 s, an estimate, until a window is measured** (owner decision 2026-11-22, #1753 comment
+  136692). It is not an upper bound. Adding every timeout in the window code at `174b64606` gives about
+  1,000 s in the worst case (`main:packages/worker-runtime/acceptance.ts:622,727,835,877,933,1051`;
+  `operator-window.ts:168,192,205,304`), more than R1's 900 s lifetime, while each exec usually takes about
+  1 s. A window cannot be cut off safely, because it restores policy objects at its end. So R1's window starts by
+  `T − L − 300 s` or is skipped (its spares are in R3/R5). The owner accepted the overrun risk: if it runs
+  long, the steps after it are lost, namely P1 (communication attempt 1, with attempt 2 in R5) and possibly #8
+  (absolute expiry, which then uses its planned reserve). Until a run completes a window, every run keeps
+  300 s. From the run after the first completed window, `D_window` is that measured duration plus 50 %,
+  recorded in the run record.
+- **R0 and R0b are not converted.** They ran Relay `832623140` and created no Pod.
+
 ## 1. Campaign overview
 
 ### Run map (rev 2)
