@@ -184,9 +184,9 @@ no drift reported.
 
 ```sh
 docker run --rm -v "$PWD:/repo:ro" -w /repo <KUSTOMIZE_IMAGE of scripts/manifest-lint.sh> build kubernetes/apps/apps/relay \
-  | python3 -c 'import sys,yaml; print(yaml.safe_dump_all([d for d in yaml.safe_load_all(sys.stdin) if d and (d["kind"], d["metadata"]["name"]) in {("ConfigMap", "relay-worker-candidate-<d16>"), ("Deployment", "relay")}]))' \
+  | python3 -c 'import sys,yaml; d=[x for x in yaml.safe_load_all(sys.stdin) if x and (x["kind"], x["metadata"]["name"]) in {("ConfigMap", "relay-worker-candidate-<d16>"), ("Deployment", "relay")}]; [x["metadata"].setdefault("labels", {}).update({"kustomize.toolkit.fluxcd.io/name": "apps", "kustomize.toolkit.fluxcd.io/namespace": "flux-system"}) for x in d]; print(yaml.safe_dump_all(d))' \
   > /operator/<run>/hub-apply.yaml
-kubectl apply --server-side --field-manager=kustomize-controller -f /operator/<run>/hub-apply.yaml
+kubectl --context admin@ai apply --server-side --field-manager=kustomize-controller -f /operator/<run>/hub-apply.yaml
 ```
 
 ### 4c. The agent half, in place in either mode (campaign runbook §3.5)
@@ -201,10 +201,17 @@ flux --context admin@ai reconcile kustomization flux-system -n flux-system
 kubectl --context admin@ai -n flux-system get kustomization relay-researcher-agent -o jsonpath='{.spec.suspend}{"\n"}'   # true
 kubectl --context admin@ai -n relay-infra-control scale deploy/relay-infrastructure-agent --replicas=0
 docker run --rm -v "$PWD:/repo:ro" -w /repo <KUSTOMIZE_IMAGE of scripts/manifest-lint.sh> build kubernetes/apps/relay-researcher/agent \
-  | python3 -c 'import sys,yaml; d=[x for x in yaml.safe_load_all(sys.stdin) if x]; [x["spec"].update(replicas=0) for x in d if x["kind"] == "Deployment"]; print(yaml.safe_dump_all(d))' \
+  | python3 -c 'import sys,yaml; d=[x for x in yaml.safe_load_all(sys.stdin) if x]; [x["spec"].update(replicas=0) for x in d if x["kind"] == "Deployment"]; [x["metadata"].setdefault("labels", {}).update({"kustomize.toolkit.fluxcd.io/name": "relay-researcher-agent", "kustomize.toolkit.fluxcd.io/namespace": "flux-system"}) for x in d]; print(yaml.safe_dump_all(d))' \
   > /operator/<run>/agent-apply.yaml
-kubectl apply --server-side --field-manager=kustomize-controller -f /operator/<run>/agent-apply.yaml
+kubectl --context admin@ai apply --server-side --field-manager=kustomize-controller -f /operator/<run>/agent-apply.yaml
 ```
+
+Both in-place applies add the two labels Flux puts on every object it applies,
+`kustomize.toolkit.fluxcd.io/name` (`apps` for the hub, `relay-researcher-agent` for the agent) and
+`kustomize.toolkit.fluxcd.io/namespace` (`flux-system`). The kustomize build does not contain them,
+and a server-side apply under `kustomize-controller` without them would drop them from the live objects
+(read live on 2026-11-22: both Deployments carry them). Both applies name the context: the default context is
+another cluster.
 
 With the first run whose agent half is applied (R1: R0's never is), this apply also carries the
 one-time structure: the candidate RBAC and the journal rule land with the run's values.
