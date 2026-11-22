@@ -1,7 +1,8 @@
 ---
 # EC fan control on the Bosgame M5 Proxmox hosts (Sixunited AXB35-02 board, ITE IT5570E embedded
 # controller): the out-of-tree ec_su_axb35 driver, built by DKMS for every installed kernel that has its
-# headers and for every later one, a temperature curve for the two CPU fans (ec-fan-profile.service, applied at boot), and the
+# headers and for every later one, a temperature curve for the two CPU fans (ec-fan-profile.service, applied at boot), a
+# governor that decides their upper levels on the smoothed temperature (ec-fan-governor.service), and the
 # fan and temperature readings as node_exporter textfile metrics (ec-fan-textfile.timer, every 30 s).
 # Without the driver the EC runs the fans on its own firmware curve (AUTO).
 #
@@ -46,21 +47,65 @@ pve_ec_fan_packages:
 # fixed 100 %: that fan is unplugged or failed, a hardware fault unrelated to the driver.
 pve_ec_fan_fans: [1, 2]
 # Five EC temperatures (deg C, integers 0-100, strictly rising) for fan levels 1-5 (20/40/60/80/100 %; level
-# 0 is off). The driver moves one level per second: up from level N while temp >= rampup[N+1], down from
-# level N while temp <= rampdown[N]. Each rampdown value must sit below the rampup value of the same level,
-# or the fan oscillates between two levels.
-# This profile is the quiet one the owner asked for on 2026-11-19 ("reduce the fans rpm, they are too loud"),
-# set by hand on all three nodes that evening before it became the default: 20 % from 40 C, 40 % from 55,
-# 60 % from 80, 80 % from 90 and 100 % from 95, each 5 C of hysteresis, together with the APU in quiet mode
-# (pve_ec_fan_power_mode below). It trades a little heat for a lot less noise: level 4 (80 %, ~4200 rpm) only
-# engages from 90 C EC. Measured on node1/node2 that evening: from EC 85-92 C at level 4-5 (4150-4790 rpm, on
-# the earlier curve) to EC 67-69 C at level 2 (~2650 rpm) within a minute, with the NVMe drives at 43-56 C,
-# far below the ~78 C that went with the morning's stalls. The earlier profile (35,50,60,68,95 /
-# 30,45,55,63,90) reached 80 % from 68 C. 100 % still waits for 95 C: hwbusters' AXB35 testing found no
-# usable extra airflow above 80 %, and one fan dips at 100 %. Measured on node1: 20 % ~1540 rpm, 40 % ~2650
-# rpm, 80 % ~4200 rpm, 100 % ~4790 rpm.
-pve_ec_fan_rampup_curve: [40, 55, 80, 90, 95]
-pve_ec_fan_rampdown_curve: [35, 50, 75, 85, 90]
+# 0 is off). The driver moves one level per second on the INSTANTANEOUS EC temperature: up from level N while
+# temp >= rampup[N+1], down from level N while temp <= rampdown[N]. Each rampdown value must sit below the
+# rampup value of the same level, or the fan oscillates between two levels. Measured on node1: 20 % ~1540
+# rpm, 40 % ~2650, 60 % ~3490, 80 % ~4200, 100 % ~4790.
+#
+# The curve and ec-fan-governor (below) split the work. The curve keeps levels 1-2 (40 % from 55 C, the
+# floor whenever the hosts are loaded; they never cooled below 55 C in a day) and is the kernel's safety
+# net above that: an instant step to 60 / 80 / 100 % at 94 / 96 / 98 C, a short spike the governor's
+# average has not caught up with yet (Tctl is ~1 C above the EC reading; the APU throttles itself at
+# Tctl 100). Its rampdown values for levels 3-5 (60-62 C) are deliberately low, so the driver does not step
+# down from 60 %+ on its own while the governor is holding the level; the governor brings it down.
+#
+# History. 2026-11-19 (owner: "reduce the fans rpm, they are too loud"): 40,55,80,90,95 / 35,50,75,85,90
+# with the APU in quiet mode took node1/node2 from EC 85-92 C at 80-100 % to EC 67-69 C at 40 %. But under
+# CI it made the fans cycle between 40 and 60 % about every 35 s (owner, 2026-11-22: "the fans are speeding
+# up and down too often"; ~800 level changes a day on node1/node2). Two causes, both measured that day:
+#   1. The band was narrower than one level step. 40 -> 60 % lowers the EC temperature by ~6.3 C at the
+#      quiet 55 W cap (node1, fixed levels in alternating 3.5 min blocks at the same package power: 60 %
+#      72.0 / 72.8 C, 40 % 78.7 C; the step shrinks with the power). The band was 5 C (up 80, down 75), so a
+#      load that settles between 80 and ~81 C at 40 % HAS to cycle: too hot at 40 %, below the down threshold
+#      at 60 %. Held at a fixed 40 % for 10 min at the cap, node1 settled at EC 78-82 C (max 85), NVMe
+#      composite 57 C, controller 80 C: 40 % was enough, and the old curve left it every ~35 s for a 1-3 C
+#      wiggle over 80.
+#   2. Bursts. The EC temperature follows Tctl within seconds: a 30 s CI burst takes it from 80 to 92 C and
+#      back to 75 C (node2: 90 -> 92 -> 82 -> 75 C in 16 s). A curve with a wide band (tried live for 20 min:
+#      60 % from 88 C, back down at 76 C) still changed level 21-36 times an hour on node2/node3, each time
+#      for heat that was gone before the airflow changed. Only a time filter separates sustained heat
+#      from a burst, and the driver has none: ec-fan-governor.
+pve_ec_fan_rampup_curve: [40, 55, 94, 96, 98]
+pve_ec_fan_rampdown_curve: [35, 50, 60, 61, 62]
+
+# ---- ec-fan-governor: levels 3-5 on the smoothed EC temperature ----
+# A daemon next to the curve (ec-fan-governor.service, files/ec-fan-governor.sh has the full rules). It
+# averages the EC temperature (exponential moving average, time constant pve_ec_fan_governor_tau_s) and
+#   - steps up to level 3 / 4 / 5 when the AVERAGE reaches pve_ec_fan_governor_up (sustained heat);
+#   - steps down from level 3 / 4 / 5 when the average is at or below pve_ec_fan_governor_down, the last
+#     step up (its own or the curve's) was at least pve_ec_fan_governor_hold_s ago, and the instantaneous
+#     temperature is below the curve's rampup for that level. Once the hold is over it comes down level
+#     after level, without a hold at each.
+#   - does not step up for its first pve_ec_fan_governor_tau_s of readings after a start (every converge
+#     restarts it): the average starts at the first reading, and one on a burst must not seed a 60 % hold.
+# It only writes `level`, only on a fan in curve mode. The role (and the script) refuse a config where an up
+# value is not below the curve's rampup for its level (the curve is the instant step above it), or a down
+# value is not above the curve's rampdown for its level (the driver would step down before the hold).
+# If the daemon dies at 60 %+, the fans stay there (louder, never hotter) until systemd restarts it;
+# ProxmoxEcFanGovernorStale fires after 5 min, ProxmoxEcFanGovernorMissing if it never started.
+# Chosen 2026-11-22 by replaying 1 Hz traces of all three nodes (fixed 40 %, the old curve, the wide-band
+# curve) through the curve + governor, then a 28 min closed-loop trial on all three nodes under live CI:
+# no governor level change on any node, EC avg 74 / 77 / 70 C, NVMe controller max 82 / 83 / 77 C
+# (docs/runbooks/node-maintenance.md "EC fan curve"). 86 C up: node1's settled 40 % temperature at the cap
+# is 78-82 C, so a busy node stays at 40 %; a burst has to hold ~90 C for about a minute to reach it.
+# 78 C down: the 8 C band is wider than the ~6.3 C one step takes off at the cap (cause 1 above), so no
+# steady load can cycle between 40 and 60 %: one that needs 60 % at 86 C still reads ~80 C there, above the
+# 78 C it would take to come down. Keep up[0] - down[0] above that step. 180 s hold: a second burst within
+# 3 min does not get its own spin-down/spin-up.
+pve_ec_fan_governor_up: [86, 90, 94]
+pve_ec_fan_governor_down: [78, 84, 88]
+pve_ec_fan_governor_tau_s: 60
+pve_ec_fan_governor_hold_s: 180
 
 # ---- the APU power mode ----
 # The EC's APU power profile (apu/power_mode): quiet, balanced (the AXB35's factory EC default) or

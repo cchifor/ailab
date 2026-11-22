@@ -86,8 +86,8 @@ eq "modprobe resolves the DKMS build" /lib/modules/$K/updates/dkms/ec_su_axb35.k
 eq "checkout at the pin" "$PIN" "$(git -C /usr/src/ec_su_axb35-$V rev-parse HEAD)"
 eq "modules-load.d" ec_su_axb35 "$(grep -v '^#' /etc/modules-load.d/ec_su_axb35.conf)"
 for n in 1 2; do
-  eq "fan$n rampup" 40,55,80,90,95 "$(cat $F/fan$n/rampup_curve)"
-  eq "fan$n rampdown" 35,50,75,85,90 "$(cat $F/fan$n/rampdown_curve)"
+  eq "fan$n rampup" 40,55,94,96,98 "$(cat $F/fan$n/rampup_curve)"
+  eq "fan$n rampdown" 35,50,60,61,62 "$(cat $F/fan$n/rampdown_curve)"
   eq "fan$n mode" curve "$(cat $F/fan$n/mode)"
 done
 eq "fan3 never written" "$FAN3_PRISTINE" "$(fan3_state)"
@@ -97,8 +97,13 @@ eq "first apply: no auto in between" 0 "$(journalctl -u ec-fan-profile --no-page
 eq "profile active" active "$(systemctl is-active ec-fan-profile.service)"
 eq "profile enabled" enabled "$(systemctl is-enabled ec-fan-profile.service)"
 eq "timer active" active "$(systemctl is-active ec-fan-textfile.timer)"
+eq "governor active" active "$(systemctl is-active ec-fan-governor.service)"
+eq "governor enabled" enabled "$(systemctl is-enabled ec-fan-governor.service)"
 eq "units verify" ok "$(systemd-analyze verify /etc/systemd/system/ec-fan-profile.service \
+  /etc/systemd/system/ec-fan-governor.service \
   /etc/systemd/system/ec-fan-textfile.service /etc/systemd/system/ec-fan-textfile.timer > /tmp/verify.log 2>&1 && echo ok || cat /tmp/verify.log)"
+eq "governor config" "EC_FAN_GOV_UP=86,90,94 EC_FAN_GOV_DOWN=78,84,88 EC_FAN_GOV_TAU_S=60 EC_FAN_GOV_HOLD_S=180" \
+  "$(grep '^EC_FAN_GOV_' /etc/default/ec-fan-profile | tr '\n' ' ' | sed 's/ $//')"
 sleep 3
 eq "textfile fan1 rpm" 1 "$(grep -c '^ec_fan_rpm{fan="1"} 1540$' $P)"
 eq "textfile fan3 rpm" 1 "$(grep -c '^ec_fan_rpm{fan="3"} 0$' $P)"
@@ -115,6 +120,44 @@ curl -s 127.0.0.1:9199/metrics > /tmp/ne-metrics.txt
 kill $NE
 eq "node_exporter: no textfile scrape error" 1 "$(grep -c '^node_textfile_scrape_error 0$' /tmp/ne-metrics.txt)"
 eq "node_exporter: three ec_fan_rpm series" 3 "$(grep -c '^ec_fan_rpm{' /tmp/ne-metrics.txt)"
+
+# ---- the governor, live under systemd: sustained heat on a fan at 40 % takes it to 60 % ----
+# The fake has no kernel worker, so the level moves only by the governor. Its average starts at the first
+# reading after a restart, so restart it on the hot reading.
+# Test scaffolding: the unit's ProtectSystem=strict leaves /sys writable on a host (checked on ai-node3,
+# systemd 257) but makes this fake, a plain directory, read-only to the daemon. Not part of the role.
+mkdir -p /etc/systemd/system/ec-fan-governor.service.d
+printf '[Service]\nReadWritePaths=%s\n' "$F" > /etc/systemd/system/ec-fan-governor.service.d/fake-sysfs.conf
+systemctl daemon-reload
+echo 2 > $F/fan1/level
+echo 2 > $F/fan2/level
+echo 88 > $F/temp1/temp
+systemctl restart ec-fan-governor.service
+# a restart on a hot reading does not step up at once (the warm-up: one time constant, 60 s, of readings)
+sleep 5
+eq "governor: no step in the warm-up after a restart" "2 2" "$(cat $F/fan1/level) $(cat $F/fan2/level)"
+for _ in $(seq 1 75); do [ "$(cat $F/fan2/level)" = 3 ] && break; sleep 1; done
+eq "governor: fan1 to 60 % on a sustained 88 C" 3 "$(cat $F/fan1/level)"
+eq "governor: fan2 to 60 % on a sustained 88 C" 3 "$(cat $F/fan2/level)"
+eq "governor: logged the step" 1 "$(journalctl -u ec-fan-governor --no-pager | grep -c 'fan1: level 2 -> 3 (average 88.000 C')"
+eq "governor: fan3 never written" "$FAN3_PRISTINE" "$(fan3_state)"
+# written as it starts (steps 0), then every 15 ticks: wait for the write after the step
+GP=/var/lib/prometheus/node-exporter/ec_fan_governor.prom
+for _ in $(seq 1 25); do grep -q '^ec_fan_governor_steps_total{direction="up"} 2$' $GP 2> /dev/null && break; sleep 1; done
+eq "governor: metrics file" 1 "$(grep -c '^ec_fan_governor_steps_total{direction="up"} 2$' $GP)"
+eq "governor: metrics average" 1 "$(grep -c '^ec_fan_governor_average_celsius 88.000$' $GP)"
+echo 52 > $F/temp1/temp
+echo 1 > $F/fan1/level
+echo 1 > $F/fan2/level
+# restarting the profile restarts the governor (PartOf), and stopping it stops the governor first
+GPID=$(systemctl show -p MainPID --value ec-fan-governor.service)
+systemctl restart ec-fan-profile.service
+eq "governor: restarted with the profile" yes "$([ "$(systemctl show -p MainPID --value ec-fan-governor.service)" != "$GPID" ] && systemctl is-active -q ec-fan-governor.service && echo yes || echo no)"
+systemctl stop ec-fan-profile.service
+eq "governor: stopped with the profile" inactive "$(systemctl is-active ec-fan-governor.service)"
+systemctl start ec-fan-profile.service
+eq "governor: started with the profile (stop, then start by hand)" active "$(systemctl is-active ec-fan-governor.service)"
+eq "governor: wanted by the profile" yes "$([ -L /etc/systemd/system/ec-fan-profile.service.wants/ec-fan-governor.service ] && echo yes || echo no)"
 
 # ---- idempotence ----
 run apply-again -e pve_ec_fan_enabled=true || bad "second apply failed"
@@ -144,7 +187,7 @@ eq "offline: changed" 0 "$(changed)"
 # ---- a curve change is applied even when a build for ANOTHER kernel then fails ----
 # The handler flush comes before those builds, so the failure there cannot hold back the profile restart.
 BROKEN=9.9.9-ecfan-broken
-CURVE2='{"pve_ec_fan_rampup_curve": [42, 57, 82, 92, 96]}'
+CURVE2='{"pve_ec_fan_rampup_curve": [42, 57, 95, 97, 99]}'
 mkdir -p /lib/modules/$BROKEN/build
 printf 'modules:\n\tfalse\n' > /lib/modules/$BROKEN/build/Makefile
 touch /boot/vmlinuz-$BROKEN
@@ -152,8 +195,8 @@ if run broken-kernel -e pve_ec_fan_enabled=true -e "$CURVE2"; then bad "a failin
 eq "broken kernel: it failed at that build" "TASK [pve_ec_fan : Build and install the module for those kernels too]" \
   "$(grep -E '^TASK' /tmp/run-broken-kernel.log | tail -1 | sed 's/ \**$//')"
 if grep -q 'RUNNING HANDLER \[pve_ec_fan : Restart ec-fan-profile\]' /tmp/run-broken-kernel.log; then ok "broken kernel: the restart handler ran first"; else bad "broken kernel: the restart handler did not run"; fi
-eq "broken kernel: fan1 rampup" 42,57,82,92,96 "$(cat $F/fan1/rampup_curve)"
-eq "broken kernel: fan2 rampup" 42,57,82,92,96 "$(cat $F/fan2/rampup_curve)"
+eq "broken kernel: fan1 rampup" 42,57,95,97,99 "$(cat $F/fan1/rampup_curve)"
+eq "broken kernel: fan2 rampup" 42,57,95,97,99 "$(cat $F/fan2/rampup_curve)"
 eq "broken kernel: fan2 mode" curve "$(cat $F/fan2/mode)"
 rm -rf /lib/modules/$BROKEN /boot/vmlinuz-$BROKEN /var/lib/dkms/ec_su_axb35/$V/$BROKEN
 run broken-gone -e pve_ec_fan_enabled=true -e "$CURVE2" || { bad "converge after removing the broken kernel failed"; show broken-gone; }
@@ -170,7 +213,7 @@ run drop-fan2-again -e pve_ec_fan_enabled=true -e "$CURVE2" -e '{"pve_ec_fan_fan
 eq "drop fan2: next run changed" 0 "$(changed)"
 run fan2-back -e pve_ec_fan_enabled=true -e "$CURVE2" || { bad "adding fan2 back failed"; show fan2-back; }
 eq "fan2 back: fan2 mode" curve "$(cat $F/fan2/mode)"
-eq "fan2 back: fan2 rampup" 42,57,82,92,96 "$(cat $F/fan2/rampup_curve)"
+eq "fan2 back: fan2 rampup" 42,57,95,97,99 "$(cat $F/fan2/rampup_curve)"
 
 # ---- recovery: the module reloaded (rmmod; modprobe) under the still-active service ----
 # A container cannot load the module, so this makes the state a fresh load leaves: every fan on auto with
@@ -181,7 +224,7 @@ mkfake
 run recovery -e pve_ec_fan_enabled=true -e "$CURVE2" || { bad "recovery converge failed"; show recovery; }
 eq "recovery: fan1 mode" curve "$(cat $F/fan1/mode)"
 eq "recovery: fan2 mode" curve "$(cat $F/fan2/mode)"
-eq "recovery: fan1 rampup" 42,57,82,92,96 "$(cat $F/fan1/rampup_curve)"
+eq "recovery: fan1 rampup" 42,57,95,97,99 "$(cat $F/fan1/rampup_curve)"
 eq "recovery: power mode back to quiet" quiet "$(cat $F/apu/power_mode)"
 eq "recovery: fan3 never written" "$FAN3_PRISTINE" "$(fan3_state)"
 run recovery-again -e pve_ec_fan_enabled=true -e "$CURVE2" || bad "converge after recovery failed"
@@ -198,13 +241,17 @@ eq "textfile reports the power mode" 1 "$(grep -c '^ec_apu_power_mode_info{mode=
 
 # ---- a bad profile is refused before any change ----
 if run fan3 -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_fans": [1, 2, 3]}'; then bad "fans [1,2,3] accepted"; else ok "fans [1,2,3] refused"; fi
-if run hysteresis -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampdown_curve": [35, 50, 80, 85, 90]}'; then bad "rampdown = rampup accepted"; else ok "rampdown = rampup refused"; fi
+if run hysteresis -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampdown_curve": [35, 55, 60, 61, 62]}'; then bad "rampdown = rampup accepted"; else ok "rampdown = rampup refused"; fi
+if run gov-above-curve -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_governor_up": [86, 90, 98]}'; then bad "governor up at the curve's rampup accepted"; else ok "governor up at the curve's rampup refused"; fi
+eq "governor up at the curve's rampup: refused at the split check" yes "$(grep -q 'level 5: need curve rampdown 62 < governor down 88 < governor up 98 < curve rampup 98' /tmp/run-gov-above-curve.log && echo yes || echo no)"
+if run gov-below-rampdown -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampdown_curve": [35, 50, 80, 85, 90]}'; then bad "curve rampdown above the governor's down accepted"; else ok "curve rampdown above the governor's down refused"; fi
+if run gov-hold -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_governor_hold_s": "180"}'; then bad "string hold accepted"; else ok "string hold refused"; fi
 if run not-rising -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampup_curve": [35, 60, 50, 68, 95]}'; then bad "non-rising curve accepted"; else ok "non-rising curve refused"; fi
 if run strings -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampup_curve": ["35", "50", "60", "68", "95"]}'; then bad "string curve accepted"; else ok "string curve refused"; fi
 if run bad-power -e pve_ec_fan_enabled=true -e "$CURVE2" -e pve_ec_fan_power_mode=turbo; then bad "power mode turbo accepted"; else ok "power mode turbo refused"; fi
 eq "bad power mode: refused at the role's check" yes "$(grep -q 'pve_ec_fan_power_mode="turbo": need quiet, balanced or performance' /tmp/run-bad-power.log && echo yes || echo no)"
 eq "bad power mode: nothing changed" 0 "$(changed)"
-eq "refusals left the curve alone" 42,57,82,92,96 "$(cat $F/fan1/rampup_curve)"
+eq "refusals left the curve alone" 42,57,95,97,99 "$(cat $F/fan1/rampup_curve)"
 eq "refusals left the power mode alone" quiet "$(cat $F/apu/power_mode)"
 eq "fan3 still never written" "$FAN3_PRISTINE" "$(fan3_state)"
 
@@ -218,8 +265,11 @@ eq "disable: fan1 mode" auto "$(cat $F/fan1/mode)"
 eq "disable: fan2 mode" auto "$(cat $F/fan2/mode)"
 eq "disable: power mode back to balanced" balanced "$(cat $F/apu/power_mode)"
 eq "disable: fan3 still never written" "$FAN3_PRISTINE" "$(fan3_state)"
+eq "disable: governor stopped" inactive "$(systemctl is-active ec-fan-governor.service)"
 for p in /etc/systemd/system/ec-fan-profile.service /etc/systemd/system/ec-fan-textfile.timer \
   /etc/systemd/system/ec-fan-textfile.service /etc/default/ec-fan-profile /usr/local/sbin/ec-fan-profile \
+  /etc/systemd/system/ec-fan-governor.service /usr/local/sbin/ec-fan-governor \
+  /var/lib/prometheus/node-exporter/ec_fan_governor.prom \
   /usr/local/sbin/ec-fan-textfile /etc/modules-load.d/ec_su_axb35.conf $P; do
   eq "disable removed $p" absent "$(exists $p)"
 done
@@ -230,6 +280,16 @@ eq "second disable changed" 0 "$(changed)"
 run reenable -e pve_ec_fan_enabled=true || { bad "re-enable failed"; show reenable; }
 if grep -A2 'TASK \[pve_ec_fan : Build the module' /tmp/run-reenable.log | grep -q skipping; then ok "re-enable did not rebuild"; else bad "re-enable rebuilt"; fi
 eq "re-enable: fan1 mode" curve "$(cat $F/fan1/mode)"
+eq "re-enable: governor active" active "$(systemctl is-active ec-fan-governor.service)"
+
+# ---- a governor change reaches the running daemon ----
+run gov-hold-120 -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_governor_hold_s": 120}' || { bad "governor hold change failed"; show gov-hold-120; }
+eq "governor hold change: config" EC_FAN_GOV_HOLD_S=120 "$(grep '^EC_FAN_GOV_HOLD_S=' /etc/default/ec-fan-profile)"
+eq "governor hold change: the running daemon has it" 1 \
+  "$(journalctl -u ec-fan-governor --no-pager -n 5 | grep -c 'from 120 s after a step up')"
+run gov-hold-back -e pve_ec_fan_enabled=true || { bad "governor hold back failed"; show gov-hold-back; }
+eq "governor hold back: the running daemon has 180 s" 1 \
+  "$(journalctl -u ec-fan-governor --no-pager -n 5 | grep -c 'from 180 s after a step up')"
 
 # ---- a new pin is a new DKMS version; the old one leaves DKMS and /usr/src ----
 run repin -e pve_ec_fan_enabled=true -e "pve_ec_fan_commit=$OLDPIN" || { bad "re-pin failed"; show repin; }

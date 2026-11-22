@@ -43,6 +43,47 @@
     quiet: true
   loop: "{{ range(5) | list }}"
 
+- name: Check the governor thresholds (three integers 0-100, strictly rising) and its times
+  ansible.builtin.assert:
+    that:
+      - pve_ec_fan_governor_up | length == 3
+      - pve_ec_fan_governor_up | select('integer') | list | length == 3
+      - pve_ec_fan_governor_up == (pve_ec_fan_governor_up | unique | sort)
+      - pve_ec_fan_governor_up | min >= 0
+      - pve_ec_fan_governor_up | max <= 100
+      - pve_ec_fan_governor_down | length == 3
+      - pve_ec_fan_governor_down | select('integer') | list | length == 3
+      - pve_ec_fan_governor_down == (pve_ec_fan_governor_down | unique | sort)
+      - pve_ec_fan_governor_down | min >= 0
+      - pve_ec_fan_governor_down | max <= 100
+      - pve_ec_fan_governor_tau_s is integer
+      - pve_ec_fan_governor_tau_s >= 1
+      - pve_ec_fan_governor_hold_s is integer
+      - pve_ec_fan_governor_hold_s >= 0
+    fail_msg: >-
+      pve_ec_fan_governor_up={{ pve_ec_fan_governor_up | to_json }},
+      pve_ec_fan_governor_down={{ pve_ec_fan_governor_down | to_json }}: need three integers 0-100 each,
+      strictly rising; pve_ec_fan_governor_tau_s={{ pve_ec_fan_governor_tau_s | to_json }} (whole seconds, 1 or
+      more), pve_ec_fan_governor_hold_s={{ pve_ec_fan_governor_hold_s | to_json }} (whole seconds, 0 or more)
+    quiet: true
+
+# The same three rules ec-fan-governor `check` enforces, so a bad combination fails here, before any change.
+# Level L (3-5) is index L-3 in the governor lists and L-1 in the curves.
+- name: Check the governor and the curve split levels 3-5 between them
+  ansible.builtin.assert:
+    that:
+      - pve_ec_fan_governor_down[item] < pve_ec_fan_governor_up[item]
+      - pve_ec_fan_governor_up[item] < pve_ec_fan_rampup_curve[item + 2]
+      - pve_ec_fan_governor_down[item] > pve_ec_fan_rampdown_curve[item + 2]
+    fail_msg: >-
+      level {{ item + 3 }}: need curve rampdown {{ pve_ec_fan_rampdown_curve[item + 2] }} < governor down
+      {{ pve_ec_fan_governor_down[item] }} < governor up {{ pve_ec_fan_governor_up[item] }} < curve rampup
+      {{ pve_ec_fan_rampup_curve[item + 2] }}. The governor's down must be below its up (or it oscillates); its
+      up below the curve's rampup (the curve is the instant safety step above it); its down above the curve's
+      rampdown (or the driver steps down on its own before the governor's hold)
+    quiet: true
+  loop: "{{ range(3) | list }}"
+
 # Ubuntu-based Proxmox kernels lock down when Secure Boot is on (CONFIG_LOCK_DOWN_IN_SECURE_BOOT), and
 # lockdown refuses unsigned modules; sig_enforce=Y refuses them too. All three are read, so the play fails
 # HERE, before the packages and the build, rather than leaving a built module that cannot load.
@@ -365,6 +406,16 @@
   register: pve_ec_fan_profile_script
   notify: Restart ec-fan-profile
 
+- name: Install the governor script
+  ansible.builtin.copy:
+    src: ec-fan-governor.sh
+    dest: /usr/local/sbin/ec-fan-governor
+    owner: root
+    group: root
+    mode: "0755"
+  register: pve_ec_fan_governor_script
+  notify: Restart ec-fan-governor
+
 - name: Install the textfile script
   ansible.builtin.copy:
     src: ec-fan-textfile.sh
@@ -391,6 +442,16 @@
     mode: "0644"
   register: pve_ec_fan_profile_unit
   notify: Restart ec-fan-profile
+
+- name: Install the governor unit
+  ansible.builtin.template:
+    src: ec-fan-governor.service.j2
+    dest: /etc/systemd/system/ec-fan-governor.service
+    owner: root
+    group: root
+    mode: "0644"
+  register: pve_ec_fan_governor_unit
+  notify: Restart ec-fan-governor
 
 # node_exporter's role creates it; the unit's ReadWritePaths= fails the run outright if it is missing.
 - name: Ensure node_exporter's textfile directory exists
@@ -443,8 +504,9 @@
 - name: Apply a pending profile restart now
   ansible.builtin.meta: flush_handlers
 
-# A unit file that --check did not write cannot be enabled in check mode either.
-- name: Enable and start the curve and the textfile timer
+# A unit file that --check did not write cannot be enabled in check mode either. The governor after the
+# profile: it acts only on a fan in curve mode.
+- name: Enable and start the curve, the governor and the textfile timer
   ansible.builtin.systemd:
     name: "{{ item }}"
     enabled: true
@@ -452,11 +514,13 @@
     daemon_reload: true
   loop:
     - ec-fan-profile.service
+    - ec-fan-governor.service
     - ec-fan-textfile.timer
   when: >-
     not (ansible_check_mode
          and (pve_ec_fan_profile_unit is changed or pve_ec_fan_textfile_units is changed
-              or pve_ec_fan_profile_script is changed))
+              or pve_ec_fan_profile_script is changed or pve_ec_fan_governor_unit is changed
+              or pve_ec_fan_governor_script is changed))
 
 # ---- 6. the other installed kernels ----
 # A kernel installed AFTER this version was added gets the module from its postinst hook (DKMS

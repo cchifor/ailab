@@ -18,8 +18,14 @@ real templates with the real role defaults. Pinned here:
   * ec-fan-textfile reports all three fans, the EC temperature, the power mode and which CPU fans the
     profile manages, counts a value it cannot read instead of publishing it, says driver_loaded 0 without
     the module, and replaces the file in one rename;
+  * ec-fan-governor `simulate` (the curve and the governor on a replayed trace): a recorded CI burst and a
+    busy node's settled temperature leave the fan at 40 %; sustained heat steps up once, and down only
+    after the hold (counted from the last step UP) and once the average is under the down threshold, level
+    after level; the curve's instant step is held; it never fights the curve's rampup or holds the floor.
+    `run` on a fake sysfs writes only `level`, only on a listed fan in curve mode, never fan3, logs each
+    step and writes its metrics file; `check` (and `run`) refuse a config outside the curve/governor split;
   * the rendered config is one the profile script accepts, the units say what the scripts expect, and
-    ai-node1 and ai-node2 turn the role on, ai-node3 does not.
+    all three ai-nodes turn the role on with the default curve and governor.
 
 The Docker converge (ansible/roles/pve_ec_fan/tests/test-converge-docker.sh: DKMS against the Proxmox
 headers, systemd, idempotence, --check, recovery, disable) needs the network and is not run here.
@@ -42,11 +48,17 @@ ROOT = Path(__file__).resolve().parents[2]
 ROLE = ROOT / 'ansible/roles/pve_ec_fan'
 PROFILE = ROLE / 'files/ec-fan-profile.sh'
 TEXTFILE = ROLE / 'files/ec-fan-textfile.sh'
+GOVERNOR = ROLE / 'files/ec-fan-governor.sh'
 BASH = shutil.which('bash')
 
-# The role's default curve (the 2026-11-19 quiet one).
-UP = '40,55,80,90,95'
-DOWN = '35,50,75,85,90'
+# The role's default curve (2026-11-22: the floor and the instant safety steps; ec-fan-governor decides 3-5).
+UP = '40,55,94,96,98'
+DOWN = '35,50,60,61,62'
+# The role's default governor (pve_ec_fan_governor_*).
+GOV_UP = '86,90,94'
+GOV_DOWN = '78,84,88'
+GOV_TAU = '60'
+GOV_HOLD = '180'
 # The driver's own defaults (src/ec_su_axb35.c at the pin): what a freshly loaded module shows.
 DRIVER_UP = {1: '60,70,83,95,97', 2: '60,70,83,95,97', 3: '20,60,83,95,97'}
 DRIVER_DOWN = {1: '40,50,80,94,96', 2: '40,50,80,94,96', 3: '0,50,80,94,96'}
@@ -177,8 +189,8 @@ class ProfileTests(unittest.TestCase):
             'negative': (UP, '-1,45,55,63,90'),
             'spaces': ('40, 55, 80, 90, 95', DOWN),
             'empty': ('', DOWN),
-            'rampdown equal to rampup': (UP, '35,50,80,85,90'),
-            'rampdown above rampup': (UP, '35,50,75,92,94'),
+            'rampdown equal to rampup': (UP, '35,55,60,61,62'),
+            'rampdown above rampup': (UP, '35,50,60,97,98'),
         }
         for name, (up, down) in bad.items():
             with self.subTest(name):
@@ -464,6 +476,290 @@ class TextfileTests(unittest.TestCase):
         self.assertNotEqual(run.returncode, 0)
 
 
+# ai-node2, 2026-11-22, 1 Hz EC temperatures (wide-band curve trial): a CI burst that took the EC from 80 to
+# 92 C and back to 73 C inside 30 s. The old curve went 2 -> 3 -> 4 -> 3 -> 2 on it.
+NODE2_BURST = [86, 85, 84, 82, 81, 81, 80, 80, 80, 81, 82, 83, 85, 86, 87, 88, 90, 91, 92, 92, 92, 92, 91, 90,
+               89, 88, 86, 84, 82, 81, 79, 77, 75, 74, 73, 73, 73, 73, 73, 73, 73, 73, 73, 73, 73, 74, 73,
+               73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 83, 83, 82]
+
+
+@unittest.skipUnless(BASH, 'bash is required')
+class GovernorTests(unittest.TestCase):
+    """ec-fan-governor: `simulate` replays temperatures through the curve and the governor (the decision
+    rules), `run` drives a fake sysfs (what it writes and when), `check` refuses a config that breaks the
+    split between the curve and the governor."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.sysfs = FakeSysfs(self.tmp / 'ec_su_axb35')
+        self.dir = self.tmp / 'textfile'
+        self.dir.mkdir()
+
+    def env(self, **over):
+        env = dict(os.environ, EC_FAN_SYSFS=self.sysfs.root.as_posix(), EC_FAN_TEXTFILE_DIR=self.dir.as_posix(),
+                   EC_FAN_FANS='1 2', EC_FAN_RAMPUP_CURVE=UP, EC_FAN_RAMPDOWN_CURVE=DOWN, EC_FAN_GOV_UP=GOV_UP,
+                   EC_FAN_GOV_DOWN=GOV_DOWN, EC_FAN_GOV_TAU_S=GOV_TAU, EC_FAN_GOV_HOLD_S=GOV_HOLD,
+                   EC_FAN_GOV_SLEEP_S='0', EC_FAN_NOW='1763550000')
+        env.update({k: str(v) for k, v in over.items()})
+        return env
+
+    def governor(self, action, stdin=None, **over):
+        return subprocess.run([BASH, GOVERNOR.as_posix(), action], env=self.env(**over), input=stdin,
+                              capture_output=True, text=True, timeout=60)
+
+    def simulate(self, temps, level=2, **over):
+        """The level after each tick."""
+        run = self.governor('simulate', '\n'.join(map(str, temps)) + '\n', EC_FAN_GOV_SIM_LEVEL=level, **over)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        rows = [line.split() for line in run.stdout.splitlines()]
+        self.assertEqual(len(rows), len(temps))
+        return [int(r[3]) for r in rows]
+
+    @staticmethod
+    def changes(levels):
+        """(index of the tick with the new level, old, new) for each change."""
+        return [(i + 1, a, b) for i, (a, b) in enumerate(zip(levels, levels[1:])) if a != b]
+
+    # ---- the decision rules (simulate) ----
+    def test_a_recorded_ci_burst_does_not_move_the_fan(self):
+        # after two minutes settled at a busy node's 80 C (the average starts at the first reading)
+        self.assertEqual(set(self.simulate([80] * 120 + NODE2_BURST)), {2})
+        # nor a 30 s burst to 92 C
+        self.assertEqual(set(self.simulate([80] * 300 + [92] * 30 + [80] * 300)), {2})
+
+    def test_a_busy_node_at_its_settled_temperature_stays_at_40_percent(self):
+        # node1 held at a fixed 40 % at the 54 W cap settled at EC 78-82 C (max 85)
+        self.assertEqual(set(self.simulate(([80, 82, 85, 81, 78] * 120))), {2})
+
+    def test_sustained_heat_steps_up_then_comes_down_only_after_the_hold(self):
+        levels = self.simulate([80] * 60 + [88] * 300 + [72] * 400)
+        ups = [c for c in self.changes(levels) if c[2] > c[1]]
+        downs = [c for c in self.changes(levels) if c[2] < c[1]]
+        self.assertEqual([(a, b) for _, a, b in ups], [(2, 3)])
+        self.assertEqual([(a, b) for _, a, b in downs], [(3, 2)])
+        # up only once the average reaches 86 C: about a minute into the 88 C, not at its first second
+        self.assertGreater(ups[0][0], 60 + 60)
+        # down no sooner than the hold after the step up, and only once the 72 C has pulled the average under 78
+        self.assertGreaterEqual(downs[0][0] - ups[0][0], 180)
+        self.assertGreater(downs[0][0], 360)
+        self.assertNotIn(4, levels)
+
+    def test_a_spike_past_the_curve_steps_up_at_once_and_is_held(self):
+        # the curve's 94 C rampup is the instant step; the governor then holds 60 % for the hold
+        levels = self.simulate([80] * 30 + [94] + [72] * 400)
+        self.assertEqual(levels[29], 2)
+        self.assertEqual(levels[30], 3)
+        self.assertEqual(self.changes(levels), [(30, 2, 3), (210, 3, 2)])
+
+    def test_it_comes_down_level_after_level_once_the_hold_is_over(self):
+        levels = self.simulate([70] * 300, level=4)
+        self.assertEqual(self.changes(levels), [(180, 4, 3), (181, 3, 2)])
+
+    def test_a_driver_step_down_does_not_restart_the_hold(self):
+        # 61 C: the curve's rampdown for level 4 takes it to 3 on its own (the 101st tick, index 100); the
+        # governor's step to 2 still comes 180 s after the start (the first look counts as a step up)
+        levels = self.simulate([70] * 100 + [61] + [70] * 200, level=4)
+        self.assertEqual(levels[100], 3)
+        self.assertEqual(self.changes(levels), [(100, 4, 3), (180, 3, 2)])
+
+    def test_it_never_holds_the_floor_the_curve_owns_levels_0_to_2(self):
+        # an idle EC under the curve's rampdown: the driver steps down to 1, the governor leaves it there
+        self.assertEqual(self.simulate([45] * 10, level=3), [2] + [1] * 9)
+
+    def test_it_does_not_step_down_into_the_curves_rampup(self):
+        # slow average, no hold: the average is still low when the EC itself is at the curve's 94 C
+        levels = self.simulate([70] * 60 + [94] * 3 + [93], level=2, EC_FAN_GOV_TAU_S=600, EC_FAN_GOV_HOLD_S=0)
+        self.assertEqual(levels[60:63], [3, 3, 3])
+        self.assertEqual(levels[63], 2)
+
+    def test_a_bad_trace_line_is_refused(self):
+        run = self.governor('simulate', '80\nhot\n')
+        self.assertEqual(run.returncode, 1)
+        self.assertIn("'hot' is not a temperature", run.stderr)
+
+    def test_a_leading_zero_is_decimal_not_octal(self):
+        run = self.governor('simulate', '080\n098\n0100\n')
+        self.assertEqual(run.returncode, 1)  # 0100 is four digits: not an EC temperature
+        run = self.governor('simulate', '080\n098\n')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual([ln.split()[1] for ln in run.stdout.splitlines()], ['80', '98'])
+
+    def test_the_average_reaches_a_steady_temperature_exactly(self):
+        # rounding alone would stall the average at 85.971 under a steady 86 and never reach the 86 C threshold
+        run = self.governor('simulate', '\n'.join(['80'] * 5 + ['86'] * 1200) + '\n')
+        rows = [ln.split() for ln in run.stdout.splitlines()]
+        self.assertEqual(rows[-1][2], '86.000')
+        self.assertEqual(rows[-1][3], '3')
+
+    def test_a_restart_on_a_burst_sample_does_not_step_up(self):
+        # every converge restarts the governor; one landing on a burst must not seed a 60 % hold
+        self.assertEqual(set(self.simulate([90] * 20 + [80] * 300)), {2})
+        # nor weigh on the average after the warm-up: a 92 C first reading, then node2's settled 83 C (an
+        # exponential average seeded from that reading would still hold ~37 % of it at tick 60: 86.3 C)
+        self.assertEqual(set(self.simulate([92] + [83] * 300)), {2})
+        # a sustained 88 C does step up, once the average has a time constant of readings
+        levels = self.simulate([88] * 120)
+        self.assertEqual(self.changes(levels), [(59, 2, 3)])
+        # the curve's instant step still applies during the warm-up
+        self.assertEqual(self.simulate([95] * 3)[0], 3)
+
+    # ---- the daemon on a fake sysfs (run) ----
+    def run_governor(self, ticks, **over):
+        # A 1 s average unless a test says otherwise: no warm-up, the average is the reading, so a few
+        # ticks show a decision. The warm-up itself: test_run_does_not_step_up_during_the_warm_up.
+        over.setdefault('EC_FAN_GOV_TAU_S', 1)
+        return self.governor('run', EC_FAN_GOV_MAX_TICKS=ticks, **over)
+
+    def test_run_does_not_step_up_during_the_warm_up(self):
+        self.sysfs.create(mode='curve', level=(2, 2, 0), temp=93)
+        run = self.run_governor(5, EC_FAN_GOV_TAU_S=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.sysfs.get('fan1/level'), self.sysfs.get('fan2/level')), ('2', '2'))
+        run = self.run_governor(61, EC_FAN_GOV_TAU_S=60)
+        self.assertEqual((self.sysfs.get('fan1/level'), self.sysfs.get('fan2/level')), ('4', '4'))
+
+    def test_run_steps_both_cpu_fans_up_on_sustained_heat_and_never_touches_fan3(self):
+        self.sysfs.create(mode='curve', level=(2, 2, 3), temp=88)
+        before3 = self.sysfs.fan3_snapshot()
+        run = self.run_governor(3)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.sysfs.get('fan1/level'), self.sysfs.get('fan2/level')), ('3', '3'))
+        self.assertEqual(self.sysfs.fan3_snapshot(), before3)
+        self.assertIn('fan1: level 2 -> 3 (average 88.000 C, EC 88 C', run.stdout)
+        self.assertEqual(run.stdout.count('-> 3'), 2)  # once each, not again on the next ticks
+        # it never writes the mode, the curves or the power mode
+        for n in (1, 2):
+            self.assertEqual(self.sysfs.get(f'fan{n}/mode'), 'curve')
+            self.assertEqual(self.sysfs.get(f'fan{n}/rampup_curve'), DRIVER_UP[n])
+        self.assertEqual(self.sysfs.get('apu/power_mode'), 'balanced')
+
+    def test_run_leaves_a_fan_off_the_curve_and_an_unlisted_fan_alone(self):
+        for mode in ('auto', 'fixed'):
+            with self.subTest(mode):
+                self.sysfs.create(mode=mode, level=(2, 2, 0), temp=93)
+                run = self.run_governor(3)
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual((self.sysfs.get('fan1/level'), self.sysfs.get('fan2/level')), ('2', '2'))
+        self.sysfs.create(mode='curve', level=(2, 2, 0), temp=88)
+        self.assertEqual(self.run_governor(3, EC_FAN_FANS='2').returncode, 0)
+        self.assertEqual((self.sysfs.get('fan1/level'), self.sysfs.get('fan2/level')), ('2', '3'))
+
+    def test_run_steps_down_only_after_the_hold(self):
+        self.sysfs.create(mode='curve', level=(3, 3, 0), temp=70)
+        self.assertEqual(self.run_governor(3, EC_FAN_GOV_HOLD_S=5).returncode, 0)
+        self.assertEqual(self.sysfs.get('fan1/level'), '3')
+        run = self.run_governor(8, EC_FAN_GOV_HOLD_S=5)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.sysfs.get('fan1/level'), self.sysfs.get('fan2/level')), ('2', '2'))
+        self.assertIn('fan1: level 3 -> 2 (average 70.000 C, EC 70 C, 5 s since a step up)', run.stdout)
+
+    def test_run_writes_its_metrics_file(self):
+        self.sysfs.create(mode='curve', level=(2, 2, 0), temp=88)
+        (self.dir / 'other.prom').write_text('other 1\n')
+        run = self.run_governor(2, EC_FAN_GOV_METRICS_EVERY=1)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        prom = (self.dir / 'ec_fan_governor.prom').read_text()
+        samples = [ln for ln in prom.splitlines() if not ln.startswith('#')]
+        self.assertEqual(samples, ['ec_fan_governor_average_celsius 88.000',
+                                   'ec_fan_governor_steps_total{direction="up"} 2',
+                                   'ec_fan_governor_steps_total{direction="down"} 0',
+                                   'ec_fan_governor_heartbeat_timestamp_seconds 1763550000'])
+        self.assertIn('# TYPE ec_fan_governor_steps_total counter', prom)
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ['ec_fan_governor.prom', 'other.prom'])
+
+    def test_run_without_the_temperature_writes_no_level_and_lets_the_heartbeat_go_stale(self):
+        self.sysfs.create(mode='curve', level=(3, 3, 0), temp=70)
+        (self.sysfs.root / 'temp1/temp').unlink()
+        run = self.run_governor(5, EC_FAN_GOV_HOLD_S=0, EC_FAN_GOV_METRICS_EVERY=1)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.sysfs.get('fan1/level'), '3')
+        self.assertEqual(run.stdout.count('cannot read the EC temperature'), 1)
+        # only the file written at start (no average yet): no failing tick refreshed the heartbeat
+        prom = (self.dir / 'ec_fan_governor.prom').read_text()
+        self.assertIn('ec_fan_governor_heartbeat_timestamp_seconds', prom)
+        self.assertNotRegex(prom, r'(?m)^ec_fan_governor_average_celsius ')
+
+    def test_an_unreadable_fan_state_is_failing_but_a_fan_on_auto_is_not(self):
+        # fan1's level unreadable (malformed): fan2 is still governed, the tick is failing, so no heartbeat
+        self.sysfs.create(mode='curve', level=(2, 2, 0), temp=88)
+        self.sysfs.put('fan1/level', 'x')
+        run = self.run_governor(3, EC_FAN_GOV_METRICS_EVERY=1)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.sysfs.get('fan2/level'), '3')
+        self.assertEqual(self.sysfs.get('fan1/level'), 'x')
+        self.assertEqual(run.stdout.count('fan1: cannot read its mode or level'), 1)  # once, not per tick
+        self.assertNotRegex((self.dir / 'ec_fan_governor.prom').read_text(), r'(?m)^ec_fan_governor_average_celsius ')
+        # an unreadable mode is the same
+        self.sysfs.create(mode='curve', level=(2, 2, 0), temp=88)
+        (self.sysfs.root / 'fan1/mode').unlink()
+        self.assertEqual(self.run_governor(2, EC_FAN_GOV_METRICS_EVERY=1).returncode, 0)
+        self.assertNotRegex((self.dir / 'ec_fan_governor.prom').read_text(), r'(?m)^ec_fan_governor_average_celsius ')
+        # a valid auto (or fixed) mode is a deliberate hand-off, not a failure: the heartbeat is refreshed
+        for mode in ('auto', 'fixed'):
+            with self.subTest(mode):
+                self.sysfs.create(mode=mode, level=(2, 2, 0), temp=88)
+                (self.dir / 'ec_fan_governor.prom').unlink()
+                self.assertEqual(self.run_governor(2, EC_FAN_GOV_METRICS_EVERY=1).returncode, 0)
+                self.assertRegex((self.dir / 'ec_fan_governor.prom').read_text(),
+                                 r'(?m)^ec_fan_governor_average_celsius 88\.000$')
+
+    def test_the_file_is_written_as_the_daemon_starts(self):
+        self.sysfs.create(mode='curve', level=(2, 2, 0), temp=70)
+        self.assertEqual(self.run_governor(1, EC_FAN_GOV_METRICS_EVERY=1000).returncode, 0)
+        self.assertTrue((self.dir / 'ec_fan_governor.prom').exists())
+
+    def test_a_refused_level_write_is_logged_and_the_daemon_goes_on(self):
+        self.sysfs.create(mode='curve', level=(2, 2, 0), temp=88)
+        (self.sysfs.root / 'fan1/level').chmod(0o444)
+        self.addCleanup((self.sysfs.root / 'fan1/level').chmod, 0o644)  # before the rmtree (cleanups run LIFO)
+        if os.access(self.sysfs.root / 'fan1/level', os.W_OK):
+            self.skipTest('running as root (or on a filesystem without modes): the file stays writable')
+        run = self.run_governor(2, EC_FAN_GOV_METRICS_EVERY=1)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn('fan1: writing level 3 failed', run.stdout)
+        self.assertEqual(self.sysfs.get('fan2/level'), '3')
+        # a tick with a failed write does not refresh the heartbeat: only the file written at start is there
+        self.assertNotRegex((self.dir / 'ec_fan_governor.prom').read_text(), r'(?m)^ec_fan_governor_average_celsius ')
+
+    # ---- the config (check) ----
+    def test_the_role_defaults_pass_check_and_check_writes_nothing(self):
+        self.sysfs.create(mode='curve', level=(2, 2, 0), temp=93)
+        run = self.governor('check')
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.sysfs.get('fan1/level'), '2')
+        self.assertEqual(list(self.dir.iterdir()), [])
+
+    def test_a_config_that_breaks_the_split_is_refused(self):
+        bad = {
+            'fan3': dict(EC_FAN_FANS='1 3'),
+            'no fans': dict(EC_FAN_FANS=''),
+            'two up values': dict(EC_FAN_GOV_UP='86,90'),
+            'up not rising': dict(EC_FAN_GOV_UP='86,86,94'),
+            'down not below up': dict(EC_FAN_GOV_DOWN='78,90,92'),
+            'up not below the curve rampup': dict(EC_FAN_GOV_UP='86,90,98'),
+            'down not above the curve rampdown': dict(EC_FAN_GOV_DOWN='60,84,88'),
+            'zero time constant': dict(EC_FAN_GOV_TAU_S='0'),
+            'fractional hold': dict(EC_FAN_GOV_HOLD_S='1.5'),
+            'zero tick': dict(EC_FAN_GOV_INTERVAL_S='0'),
+            'bad curve': dict(EC_FAN_RAMPUP_CURVE='40,55,94,96'),
+        }
+        for name, over in bad.items():
+            with self.subTest(name):
+                for action in ('check', 'run'):
+                    self.sysfs.create(mode='curve', level=(2, 2, 0), temp=93)
+                    run = self.governor(action, EC_FAN_GOV_MAX_TICKS=2, **over)
+                    # 78, EX_CONFIG: the unit's RestartPreventExitStatus, so systemd does not retry it
+                    self.assertEqual(run.returncode, 78, run.stdout + run.stderr)
+                    self.assertEqual(self.sysfs.get('fan1/level'), '2')
+                    self.assertEqual(list(self.dir.iterdir()), [])  # refused before its first metrics write
+        self.assertIn("governor up 98 must be below the curve's rampup 98",
+                      self.governor('check', EC_FAN_GOV_UP='86,90,98').stderr)
+
+    def test_unknown_action(self):
+        self.assertEqual(self.governor('status').returncode, 1)
+
+
 def role_context(extra=None):
     """The role defaults with their own templates resolved, as Ansible would for these simple values."""
     ctx = yaml.safe_load((ROLE / 'defaults/main.yml').read_text())
@@ -497,12 +793,27 @@ class RoleRenderTests(unittest.TestCase):
         self.assertEqual(ctx['pve_ec_fan_src_dir'], '/usr/src/ec_su_axb35-' + ctx['pve_ec_fan_dkms_version'])
         self.assertEqual(ctx['pve_ec_fan_fans'], [1, 2])
         up, down = ctx['pve_ec_fan_rampup_curve'], ctx['pve_ec_fan_rampdown_curve']
-        self.assertEqual(up, [40, 55, 80, 90, 95])
-        self.assertEqual(down, [35, 50, 75, 85, 90])
+        self.assertEqual(up, [40, 55, 94, 96, 98])
+        self.assertEqual(down, [35, 50, 60, 61, 62])
         self.assertEqual(ctx['pve_ec_fan_power_mode'], 'quiet')
         for curve in (up, down):
             self.assertEqual(curve, sorted(set(curve)))
         self.assertTrue(all(d < u for d, u in zip(down, up)))
+        gup, gdown = ctx['pve_ec_fan_governor_up'], ctx['pve_ec_fan_governor_down']
+        self.assertEqual((gup, gdown), ([86, 90, 94], [78, 84, 88]))
+        self.assertEqual((ctx['pve_ec_fan_governor_tau_s'], ctx['pve_ec_fan_governor_hold_s']), (60, 180))
+        # the split of levels 3-5: curve rampdown < governor down < governor up < curve rampup
+        for i in range(3):
+            self.assertLess(down[i + 2], gdown[i])
+            self.assertLess(gdown[i], gup[i])
+            self.assertLess(gup[i], up[i + 2])
+        # The 40 <-> 60 % band is wider than the step 40 -> 60 % takes off the EC temperature at the same load:
+        # 6.3 C at the quiet 55 W cap (node1, 2026-11-22, alternating fixed-level blocks), less at lower power.
+        # So no steady load under the cap can cycle between the two; the 5 C band before did, every ~35 s.
+        step_at_cap = 6.3
+        self.assertGreater(gup[0] - gdown[0], step_at_cap + 1)
+        # 40 % holds a busy node: node1 at a fixed 40 % at the quiet cap settled at EC 78-82 C
+        self.assertGreater(gup[0], 82)
         self.assertIn('proxmox-headers-7.0.2-6-pve', ctx['pve_ec_fan_packages'])
         self.assertIn('proxmox-default-headers', ctx['pve_ec_fan_packages'])
 
@@ -516,6 +827,9 @@ class RoleRenderTests(unittest.TestCase):
         self.assertIn(f'EC_FAN_RAMPUP_CURVE={UP}\n', config)
         self.assertIn(f'EC_FAN_RAMPDOWN_CURVE={DOWN}\n', config)
         self.assertIn('EC_FAN_POWER_MODE=quiet\n', config)
+        for line in (f'EC_FAN_GOV_UP={GOV_UP}', f'EC_FAN_GOV_DOWN={GOV_DOWN}', f'EC_FAN_GOV_TAU_S={GOV_TAU}',
+                     f'EC_FAN_GOV_HOLD_S={GOV_HOLD}'):
+            self.assertIn(line + '\n', config)
         if not BASH:
             self.skipTest('bash is required')
         with tempfile.TemporaryDirectory() as tmp:
@@ -531,6 +845,27 @@ class RoleRenderTests(unittest.TestCase):
             self.assertEqual(sysfs.get('fan1/mode'), 'curve')
             self.assertEqual(sysfs.get('fan2/rampdown_curve'), DOWN)
             self.assertEqual(sysfs.get('apu/power_mode'), 'quiet')
+            # and one the governor accepts (its check is the role's split assert, in the script)
+            run = subprocess.run([BASH, '-c', 'set -a; . "$1"; set +a; exec bash "$2" check', '_',
+                                  env_file.as_posix(), GOVERNOR.as_posix()],
+                                 capture_output=True, text=True, timeout=30)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_the_governor_unit_runs_next_to_the_profile_and_restarts(self):
+        lines = unit_lines(render('ec-fan-governor.service.j2'))
+        for expected in ('After=ec-fan-profile.service', 'Wants=ec-fan-profile.service',
+                         'PartOf=ec-fan-profile.service', 'Type=simple',
+                         'EnvironmentFile=/etc/default/ec-fan-profile',
+                         'Environment=EC_FAN_TEXTFILE_DIR=/var/lib/prometheus/node-exporter',
+                         'ExecStart=/usr/local/sbin/ec-fan-governor run', 'Restart=always', 'RestartSec=5',
+                         # a refused config (EX_CONFIG) is not retried every 5 s
+                         'RestartPreventExitStatus=78',
+                         'ProtectSystem=strict', 'ReadWritePaths=/var/lib/prometheus/node-exporter',
+                         # starting the profile (boot, converge, or stop-then-start by hand) starts it
+                         'WantedBy=ec-fan-profile.service'):
+            self.assertIn(expected, lines)
+        # /sys must stay writable (the level): ProtectKernelTunables would make it read-only
+        self.assertFalse([ln for ln in lines if ln.startswith('ProtectKernelTunables')])
 
     def test_the_profile_unit_applies_after_the_module_loads_and_resets_on_stop(self):
         lines = unit_lines(render('ec-fan-profile.service.j2'))

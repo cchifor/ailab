@@ -21,6 +21,19 @@
 # auto by design and is not alerted on; fan3 is not managed by the role. 15m rides out a converge's restart and
 # a short hand test.
 #
+# ProxmoxEcFanGovernorStale: ec-fan-governor (the daemon that decides the CPU fans' levels 3-5 on the smoothed
+# EC temperature) has not refreshed the heartbeat in its own file, ec_fan_governor.prom, for 5m: the daemon is
+# dead, stopped or stuck, or it keeps failing (it skips the heartbeat on a tick that could not read the EC
+# temperature or a governed fan's mode or level, or write a level). The driver's curve still keeps the floor and the instant steps up at
+# 94/96/98 C, so the APU is safe, but a fan the governor raised to 60 %+ stays there (the curve's rampdown
+# for those levels is low) and a sustained-heat step up waits for 94 C. Turning the role off removes the
+# file, so this cannot fire on a host without it. It also fires when ec-fan-profile is stopped by hand for
+# 5m (the governor is PartOf it).
+#
+# ProxmoxEcFanGovernorMissing: the driver is loaded (fresh textfile) but there is no governor file at all for
+# 10m: the governor never started (a config its `check` refuses, a missing script), or the file was deleted.
+# The stale rule above cannot see a series that does not exist. The governor writes the file as it starts.
+#
 # ProxmoxEcFanDriverNotLoaded: the file is fresh but says the module is not loaded, for 10m: typically a new
 # kernel booted without the module (no headers for it, so DKMS could not build it), or Secure Boot came back on.
 # The fans run on the firmware curve (safe), the CPU-fan curve is off, and the rpm series, and with them the
@@ -54,6 +67,23 @@ spec:
           annotations:
             summary: "Proxmox host {{ $labels.instance }}: EC fan metrics not updated for {{ $value | humanizeDuration }}"
             description: "ec-fan-textfile has not rewritten ec_fan.prom on {{ $labels.instance }} for over 5m, so the fan and temperature series are the last values node_exporter read and the CPU-fan stall alert is judging old numbers. Check `systemctl status ec-fan-textfile.timer ec-fan-textfile.service` and `journalctl -u ec-fan-textfile`. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+        - alert: ProxmoxEcFanGovernorStale
+          expr: time() - ec_fan_governor_heartbeat_timestamp_seconds{job="proxmox-node"} > 300
+          labels:
+            severity: warning
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: ec-fan-governor silent for {{ $value | humanizeDuration }}"
+            description: "ec-fan-governor has not rewritten ec_fan_governor.prom on {{ $labels.instance }} for over 5m, so the CPU fans' levels 3-5 are not being decided on the smoothed temperature. The driver's curve still keeps the floor and steps up at 94/96/98 C (the APU is safe), but a fan the governor raised to 60 %+ stays there and a sustained-heat step up waits for 94 C. Check `systemctl status ec-fan-governor ec-fan-profile` and `journalctl -u ec-fan-governor`, then `systemctl restart ec-fan-profile` (it restarts the governor too) or converge `just ec-fan --limit <host>`. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+        - alert: ProxmoxEcFanGovernorMissing
+          expr: |
+            ec_fan_driver_loaded{job="proxmox-node"} == 1
+              unless on (job, instance) ec_fan_governor_heartbeat_timestamp_seconds{job="proxmox-node"}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Proxmox host {{ $labels.instance }}: the EC fan driver is loaded but ec-fan-governor has never reported"
+            description: "On {{ $labels.instance }} the ec_su_axb35 driver has been loaded for 10m but there is no ec_fan_governor.prom, so the CPU fans' levels 3-5 are not decided on the smoothed temperature (the curve's floor and its instant steps up at 94/96/98 C still work). The governor writes that file as it starts: it has not started, or its config is refused. Check `systemctl status ec-fan-governor` and `journalctl -u ec-fan-governor` (a refused config names the rule it breaks), then converge `just ec-fan --limit <host>`. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
         - alert: ProxmoxCpuFanNotOnCurve
           expr: |
             ec_fan_mode_info{job="proxmox-node", fan=~"1|2", mode!="curve"} == 1
