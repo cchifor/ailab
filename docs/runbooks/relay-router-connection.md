@@ -409,7 +409,9 @@ key generation or inclusion. H2-H4a ran before the remaining budget proofs. The 
   rendered Secrets (`deletionPolicy: Retain`), so `relay/relay-router-files` would keep the private
   keys. In order: revert both inclusions; remove `clusters/ai/relay-router-credentials.yaml` in a
   reviewed PR, so Flux prunes the two ExternalSecrets and the generator (nothing mints any more) and
-  Kubernetes garbage-collects the Secrets they own (`creationPolicy: Owner`); revoke every minted
+  Kubernetes garbage-collects the Secrets they own (`creationPolicy: Owner`). The same PR removes
+  `RelayRouterFilesNotReady` from `monitoring/ha-rules.yaml` (and its fixtures): without the
+  ExternalSecret its series is gone, and the rule would fire about 25 h later and stay firing. Revoke every minted
   escrow token (`bao write -f sys/leases/revoke-prefix/auth/token/create/relay-router-escrow`); confirm with
   `kubectl --context admin@ai -n relay get secret relay-router-files` and
   `-n llm-router get secret llm-router-relay-trust` (both NotFound; delete them explicitly if not);

@@ -23,8 +23,8 @@
 #
 # IT CREATES NO KV DOCUMENT AND NO TOKEN. The signer keys and public keys are generated in the
 # operator's session, the escrow token is minted from the token role by ESO (relay-router-connection/
-# credentials/relay.yaml), and the escrow documents are written by Relay itself. An absent document keeps the ExternalSecret not-Ready, which
-# is the honest state until then.
+# credentials/relay.yaml), and the escrow documents are written by Relay itself. An absent document
+# keeps the ExternalSecret not-Ready, which is the honest state until then.
 #
 # AUTH: the openbao-breakglass-token Secret, for the same reason the sibling provision Jobs need it --
 # the scoped provisioner token cannot write policies, auth roles or token roles. `optional: false`.
