@@ -515,7 +515,10 @@ that curve for the two CPU fans and sets the APU power mode:
   levels 3-5 on the SMOOTHED EC temperature (moving average, 60 s time constant). It steps up to 60 / 80 /
   100 % when the average reaches 86 / 90 / 94 C (sustained heat, not a CI burst), and back down when the
   average is at or below 78 / 84 / 88 C, the last step up was at least 180 s ago, and the instantaneous
-  temperature is below the curve's step for that level. It writes only `level`, only on a fan in curve
+  temperature is below the curve's step for that level. For its first 60 s after a start (every converge
+  restarts it) it does not step up: the average starts at the first reading, and one landing on a CI
+  burst must not seed a 60 % hold; the curve's instant steps still apply. A config it refuses exits 78
+  and is not restarted (`RestartPreventExitStatus=78`). It writes only `level`, only on a fan in curve
   mode, and never fan3; it reads the fan's mode and level again right before each write, so a fan put in
   fixed or auto, or stepped up by the driver, in between is left alone. It is `PartOf` the profile and
   `WantedBy` it: starting, restarting or stopping `ec-fan-profile` starts, restarts or stops it too. If it

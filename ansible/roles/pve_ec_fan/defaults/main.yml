@@ -86,6 +86,8 @@ pve_ec_fan_rampdown_curve: [35, 50, 60, 61, 62]
 #     step up (its own or the curve's) was at least pve_ec_fan_governor_hold_s ago, and the instantaneous
 #     temperature is below the curve's rampup for that level. Once the hold is over it comes down level
 #     after level, without a hold at each.
+#   - does not step up for its first pve_ec_fan_governor_tau_s of readings after a start (every converge
+#     restarts it): the average starts at the first reading, and one on a burst must not seed a 60 % hold.
 # It only writes `level`, only on a fan in curve mode. The role (and the script) refuse a config where an up
 # value is not below the curve's rampup for its level (the curve is the instant step above it), or a down
 # value is not above the curve's rampdown for its level (the driver would step down before the hold).

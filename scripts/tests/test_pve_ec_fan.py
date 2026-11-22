@@ -592,9 +592,29 @@ class GovernorTests(unittest.TestCase):
         self.assertEqual(rows[-1][2], '86.000')
         self.assertEqual(rows[-1][3], '3')
 
+    def test_a_restart_on_a_burst_sample_does_not_step_up(self):
+        # every converge restarts the governor; one landing on a burst must not seed a 60 % hold
+        self.assertEqual(set(self.simulate([90] * 20 + [80] * 300)), {2})
+        # a sustained 88 C does step up, once the average has a time constant of readings
+        levels = self.simulate([88] * 120)
+        self.assertEqual(self.changes(levels), [(59, 2, 3)])
+        # the curve's instant step still applies during the warm-up
+        self.assertEqual(self.simulate([95] * 3)[0], 3)
+
     # ---- the daemon on a fake sysfs (run) ----
     def run_governor(self, ticks, **over):
+        # A 1 s average unless a test says otherwise: no warm-up, the average is the reading, so a few
+        # ticks show a decision. The warm-up itself: test_run_does_not_step_up_during_the_warm_up.
+        over.setdefault('EC_FAN_GOV_TAU_S', 1)
         return self.governor('run', EC_FAN_GOV_MAX_TICKS=ticks, **over)
+
+    def test_run_does_not_step_up_during_the_warm_up(self):
+        self.sysfs.create(mode='curve', level=(2, 2, 0), temp=93)
+        run = self.run_governor(5, EC_FAN_GOV_TAU_S=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual((self.sysfs.get('fan1/level'), self.sysfs.get('fan2/level')), ('2', '2'))
+        run = self.run_governor(61, EC_FAN_GOV_TAU_S=60)
+        self.assertEqual((self.sysfs.get('fan1/level'), self.sysfs.get('fan2/level')), ('4', '4'))
 
     def test_run_steps_both_cpu_fans_up_on_sustained_heat_and_never_touches_fan3(self):
         self.sysfs.create(mode='curve', level=(2, 2, 3), temp=88)
@@ -726,8 +746,10 @@ class GovernorTests(unittest.TestCase):
                 for action in ('check', 'run'):
                     self.sysfs.create(mode='curve', level=(2, 2, 0), temp=93)
                     run = self.governor(action, EC_FAN_GOV_MAX_TICKS=2, **over)
-                    self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+                    # 78, EX_CONFIG: the unit's RestartPreventExitStatus, so systemd does not retry it
+                    self.assertEqual(run.returncode, 78, run.stdout + run.stderr)
                     self.assertEqual(self.sysfs.get('fan1/level'), '2')
+                    self.assertEqual(list(self.dir.iterdir()), [])  # refused before its first metrics write
         self.assertIn("governor up 98 must be below the curve's rampup 98",
                       self.governor('check', EC_FAN_GOV_UP='86,90,98').stderr)
 
@@ -833,6 +855,8 @@ class RoleRenderTests(unittest.TestCase):
                          'EnvironmentFile=/etc/default/ec-fan-profile',
                          'Environment=EC_FAN_TEXTFILE_DIR=/var/lib/prometheus/node-exporter',
                          'ExecStart=/usr/local/sbin/ec-fan-governor run', 'Restart=always', 'RestartSec=5',
+                         # a refused config (EX_CONFIG) is not retried every 5 s
+                         'RestartPreventExitStatus=78',
                          'ProtectSystem=strict', 'ReadWritePaths=/var/lib/prometheus/node-exporter',
                          # starting the profile (boot, converge, or stop-then-start by hand) starts it
                          'WantedBy=ec-fan-profile.service'):

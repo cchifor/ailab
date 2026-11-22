@@ -35,7 +35,13 @@
 #             through the driver's curve AND the governor, without sysfs, and print "tick temp average
 #             level" per line. For the tests, and to try a config against a recorded trace. The fan starts
 #             at EC_FAN_GOV_SIM_LEVEL (default 2).
-#   check     validate the config, write nothing: exit 0 when it is good, 1 (and why) when not.
+#   check     validate the config, write nothing: exit 0 when it is good, 78 (EX_CONFIG, and why) when not.
+#             `run` and `simulate` refuse a bad config with 78 too, before anything else; the unit's
+#             RestartPreventExitStatus=78 keeps systemd from restarting a refused config every 5 s.
+#
+# Warm-up: the average starts at the first reading, so for its first EC_FAN_GOV_TAU_S of readings it does not
+# step up (a restart, which every converge does, landing on a burst sample would otherwise go to 60 % at
+# once and hold it). The curve's instant steps up still apply then; steps down wait for the hold anyway.
 #
 # Environment (ec-fan-governor.service reads /etc/default/ec-fan-profile, rendered from the role vars):
 #   EC_FAN_FANS, EC_FAN_RAMPUP_CURVE, EC_FAN_RAMPDOWN_CURVE  as for ec-fan-profile (the curve it works with)
@@ -67,9 +73,10 @@ METRICS_EVERY="${EC_FAN_GOV_METRICS_EVERY:-15}"
 OUT="$DIR/ec_fan_governor.prom"
 
 log() { echo "ec-fan-governor: $*"; }
+DIE_RC=1 # load_config sets 78 (EX_CONFIG) while it checks
 die() {
   echo "ec-fan-governor: $*" >&2
-  exit 1
+  exit "$DIE_RC"
 }
 
 # ---- config ----
@@ -96,6 +103,7 @@ seconds() { # $1 name, $2 value, $3 least allowed
 load_config() {
   local i L
   local -a a
+  DIE_RC=78
   [ -n "${FANS// /}" ] || die "EC_FAN_FANS is empty"
   for i in $FANS; do
     case "$i" in
@@ -127,15 +135,19 @@ load_config() {
     ((DNT[L] > RD[L])) ||
       die "level $L: governor down ${DNT[L]} must be above the curve's rampdown ${RD[L]} (or the driver steps down before the hold)"
   done
+  WARMUP=$(((TAU + TICK - 1) / TICK)) # readings the average needs before it may step up
+  DIE_RC=1
 }
 
 # ---- the decision ----
 # One tick for one fan. Globals in: LEVEL (0-5), AVG (milli-degrees), TEMP (degrees), SINCE_UP (ticks since
-# the fan last stepped up, or since the first look at it). Out: NEXT, the level the governor wants (LEVEL
-# when it leaves the fan alone).
+# the fan last stepped up, or since the first look at it), SAMPLES (readings in the average). Out: NEXT, the
+# level the governor wants (LEVEL when it leaves the fan alone).
+WARMUP=0
+SAMPLES=0
 decide() {
   NEXT=$LEVEL
-  if ((LEVEL >= 2 && LEVEL < 5 && AVG >= UPT[LEVEL + 1] * 1000)); then
+  if ((SAMPLES >= WARMUP && LEVEL >= 2 && LEVEL < 5 && AVG >= UPT[LEVEL + 1] * 1000)); then
     NEXT=$((LEVEL + 1))
   elif ((LEVEL >= 3 && SINCE_UP * TICK >= HOLD && AVG <= DNT[LEVEL] * 1000 && TEMP < RU[LEVEL])); then
     NEXT=$((LEVEL - 1))
@@ -148,6 +160,7 @@ decide() {
 AVG=-1
 average() { # $1 instantaneous temperature, whole degrees (base 10)
   local d s
+  SAMPLES=$((SAMPLES + 1))
   if ((AVG < 0)); then
     AVG=$(($1 * 1000))
     return

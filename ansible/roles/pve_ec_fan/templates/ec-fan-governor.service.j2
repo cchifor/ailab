@@ -17,9 +17,12 @@ Type=simple
 EnvironmentFile={{ pve_ec_fan_config }}
 Environment=EC_FAN_TEXTFILE_DIR={{ pve_ec_fan_textfile_dir }}
 ExecStart=/usr/local/sbin/ec-fan-governor run
-# A crash at 60 %+ leaves the fans there (the curve's rampdown for those levels is low): restart soon.
+# A crash at 60 %+ leaves the fans there (the curve's rampdown for those levels is low): restart soon. Not
+# a refused config (exit 78, EX_CONFIG): retrying it changes nothing, so the unit stays failed and
+# ProxmoxEcFanGovernorMissing (or Stale) says so, instead of a restart every 5 s.
 Restart=always
 RestartSec=5
+RestartPreventExitStatus=78
 # Writes the driver's sysfs (level) and its metrics file, nothing else. /sys stays writable under
 # ProtectSystem=strict (ProtectKernelTunables would take it away).
 ProtectSystem=strict

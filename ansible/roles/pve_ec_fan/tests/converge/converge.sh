@@ -133,7 +133,10 @@ echo 2 > $F/fan1/level
 echo 2 > $F/fan2/level
 echo 88 > $F/temp1/temp
 systemctl restart ec-fan-governor.service
-for _ in $(seq 1 10); do [ "$(cat $F/fan2/level)" = 3 ] && break; sleep 1; done
+# a restart on a hot reading does not step up at once (the warm-up: one time constant, 60 s, of readings)
+sleep 5
+eq "governor: no step in the warm-up after a restart" "2 2" "$(cat $F/fan1/level) $(cat $F/fan2/level)"
+for _ in $(seq 1 75); do [ "$(cat $F/fan2/level)" = 3 ] && break; sleep 1; done
 eq "governor: fan1 to 60 % on a sustained 88 C" 3 "$(cat $F/fan1/level)"
 eq "governor: fan2 to 60 % on a sustained 88 C" 3 "$(cat $F/fan2/level)"
 eq "governor: logged the step" 1 "$(journalctl -u ec-fan-governor --no-pager | grep -c 'fan1: level 2 -> 3 (average 88.000 C')"
