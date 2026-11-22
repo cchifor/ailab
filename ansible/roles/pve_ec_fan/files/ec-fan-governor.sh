@@ -39,9 +39,10 @@
 #             `run` and `simulate` refuse a bad config with 78 too, before anything else; the unit's
 #             RestartPreventExitStatus=78 keeps systemd from restarting a refused config every 5 s.
 #
-# Warm-up: the average starts at the first reading, so for its first EC_FAN_GOV_TAU_S of readings it does not
-# step up (a restart, which every converge does, landing on a burst sample would otherwise go to 60 % at
-# once and hold it). The curve's instant steps up still apply then; steps down wait for the hold anyway.
+# Warm-up: for its first EC_FAN_GOV_TAU_S of readings after a start (every converge restarts it) the average
+# is their plain running mean and it does not step up, so a restart landing on a burst sample neither steps
+# to 60 % at once nor leaves that one reading weighing on the average afterwards. The curve's instant steps
+# up still apply then; steps down wait for the hold anyway.
 #
 # Environment (ec-fan-governor.service reads /etc/default/ec-fan-profile, rendered from the role vars):
 #   EC_FAN_FANS, EC_FAN_RAMPUP_CURVE, EC_FAN_RAMPDOWN_CURVE  as for ec-fan-profile (the curve it works with)
@@ -158,11 +159,15 @@ decide() {
 # At least one milli-degree toward the reading per tick: plain rounding would stall up to TAU/2 milli-degrees
 # short of a steady temperature (85.971 under a steady 86), and never reach a threshold at exactly that value.
 AVG=-1
+# For the first WARMUP readings it is their plain running mean, so no single reading (a restart landing on
+# a burst sample) keeps more weight than the rest; the exponential update takes over from there.
+WARM_SUM=0
 average() { # $1 instantaneous temperature, whole degrees (base 10)
   local d s
   SAMPLES=$((SAMPLES + 1))
-  if ((AVG < 0)); then
-    AVG=$(($1 * 1000))
+  if ((SAMPLES <= WARMUP || AVG < 0)); then
+    WARM_SUM=$((WARM_SUM + $1 * 1000))
+    AVG=$(((WARM_SUM + SAMPLES / 2) / SAMPLES))
     return
   fi
   d=$((($1 * 1000 - AVG) * TICK))

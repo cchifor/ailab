@@ -569,9 +569,9 @@ class GovernorTests(unittest.TestCase):
 
     def test_it_does_not_step_down_into_the_curves_rampup(self):
         # slow average, no hold: the average is still low when the EC itself is at the curve's 94 C
-        levels = self.simulate([70] * 5 + [94] * 3 + [93], level=2, EC_FAN_GOV_TAU_S=600, EC_FAN_GOV_HOLD_S=0)
-        self.assertEqual(levels[5:8], [3, 3, 3])
-        self.assertEqual(levels[8], 2)
+        levels = self.simulate([70] * 60 + [94] * 3 + [93], level=2, EC_FAN_GOV_TAU_S=600, EC_FAN_GOV_HOLD_S=0)
+        self.assertEqual(levels[60:63], [3, 3, 3])
+        self.assertEqual(levels[63], 2)
 
     def test_a_bad_trace_line_is_refused(self):
         run = self.governor('simulate', '80\nhot\n')
@@ -595,6 +595,9 @@ class GovernorTests(unittest.TestCase):
     def test_a_restart_on_a_burst_sample_does_not_step_up(self):
         # every converge restarts the governor; one landing on a burst must not seed a 60 % hold
         self.assertEqual(set(self.simulate([90] * 20 + [80] * 300)), {2})
+        # nor weigh on the average after the warm-up: a 92 C first reading, then node2's settled 83 C (an
+        # exponential average seeded from that reading would still hold ~37 % of it at tick 60: 86.3 C)
+        self.assertEqual(set(self.simulate([92] + [83] * 300)), {2})
         # a sustained 88 C does step up, once the average has a time constant of readings
         levels = self.simulate([88] * 120)
         self.assertEqual(self.changes(levels), [(59, 2, 3)])
