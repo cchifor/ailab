@@ -143,7 +143,9 @@
         "kubernetes/apps/relay-*/**",
         "kubernetes/components/relay-*/**",
         "kubernetes/components/llm-router-*/**",
-        "kubernetes/optional/relay-*/**"
+        "kubernetes/optional/relay-*/**",
+        "kubernetes/apps/infrastructure/security/openbao/relay-budget-provision-job.yaml",
+        "kubernetes/apps/infrastructure/security/openbao/relay-router-provision-job.yaml"
       ],
       "enabled": false
     }

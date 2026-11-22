@@ -85,7 +85,13 @@ class RepoConfigTest(unittest.TestCase):
         frozen = {'kubernetes/apps/apps/relay/**', 'kubernetes/apps/apps/llm-router/**',
                   'kubernetes/apps/relay-*/**', 'kubernetes/components/relay-*/**',
                   'kubernetes/components/llm-router-*/**', 'kubernetes/optional/relay-*/**'}
-        self.assertEqual(set(rule['matchFileNames']), frozen)
+        # The two OpenBao Jobs that provision the Relay budget and Router credentials: an image bump would
+        # re-run a provisioning Job inside the campaign.
+        jobs = {'kubernetes/apps/infrastructure/security/openbao/relay-budget-provision-job.yaml',
+                'kubernetes/apps/infrastructure/security/openbao/relay-router-provision-job.yaml'}
+        self.assertEqual(set(rule['matchFileNames']), frozen | jobs)
+        for path in sorted(jobs):
+            self.assertTrue((REPO / path).is_file(), path)
         # Every pattern must match real manifests, so a typo or a rename cannot lift the freeze quietly.
         for pattern in sorted(frozen):
             # pathlib's trailing '**' yields directories only; '**/*' yields the files under them.
