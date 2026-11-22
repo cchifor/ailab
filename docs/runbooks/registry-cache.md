@@ -445,19 +445,23 @@ The old registry CT 5004 (ai-node1, zot v2.1.18, the pre-cutover copy since the 
 QNAP before it was destroyed (owner approval 2026-11-22). The archive is the registry as it stood at the cutover: it
 holds no push made to CT 5005 afterwards.
 
-- Archive: `qnap-nfs:backup/{ARCHIVE_NAME}` (`/mnt/pve/qnap-nfs/dump/`), {ARCHIVE_SIZE}, sha256 `{ARCHIVE_SHA}`,
+- Archive: `qnap-nfs:backup/vzdump-lxc-5004-2026_11_22-22_00_59.tar.zst` (`/mnt/pve/qnap-nfs/dump/`),
+  225,611,923,565 bytes (210.12 GB), sha256 `7e8c2739592d47dcb9aef1c57eecdc86258b18be628f58d24ec831e6cd2d52da`,
   PVE `protected` (no prune removes it).
-- Made with `vzdump 5004 --storage qnap-nfs --mode stop --compress zstd --bwlimit 30720 --protected 1`, with mp0
+- Made 2026-11-22 20:00-22:04Z (217 GiB at 31 MiB/s) with
+  `vzdump 5004 --storage qnap-nfs --mode stop --compress zstd --zstd 2 --bwlimit 30720 --protected 1`, with mp0
   switched to `backup=1` first (a volume mount point is excluded from vzdump unless it is), under a fail-closed etcd
-  guard (the CP disks share the QNAP).
+  guard (the CP disks share the QNAP). Three earlier attempts that day were stopped by that guard and left nothing.
 - Verified without a restore: one throttled read hashed every regular file in the archive. Every content-addressed
-  blob's sha256 equals its name ({BLOBS_OK} blobs), every hard-link member points at a verified file, every non-blob
-  file's sha256 equals the source's, and the file list and sizes match the source manifest ({SRC_ENTRIES} entries).
-  The archived `pct.conf` carries mp0 `backup=1`, net0 `link_down=1` and onboot 0.
+  blob's sha256 equals its name (56,952 blobs), every hard-link member points at a verified file, every non-blob
+  file's sha256 equals the source's, and the file list and sizes match the source manifest (81,955 entries: 76,376
+  regular files hashed, 2,314 hard-link members, 3,267 symlinks).
+  The archived `pct.conf` carries mp0 `backup=1`, net0 `link_down=1` and onboot 0. Besides it, vzdump adds only
+  `etc/vzdump/pct.fw`.
 
 **Restore** (never tested in place; it needs ~215 GiB free in the target thin pool):
 ```bash
-pct restore <new-vmid> qnap-nfs:backup/{ARCHIVE_NAME} --storage local-lvm
+pct restore <new-vmid> qnap-nfs:backup/vzdump-lxc-5004-2026_11_22-22_00_59.tar.zst --storage local-lvm
 pct config <new-vmid>   # net0 keeps ip=192.168.0.36 and link_down=1, onboot 0: .36 belongs to CT 5005
 ```
 Before starting the restored CT on the LAN, give its net0 another address (or keep `link_down=1`). `pct restore` sets
