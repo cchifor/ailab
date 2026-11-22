@@ -27,27 +27,35 @@ the delayed-start converter requires the driver's `bootstrapSecret` facts, which
 The ceremony tools, drivers, converters and qualification documents cited below are unchanged between
 `9e09962f` and `eb9b1f07`.
 
-**The campaign's pinned driver checkout is Relay `174b64606`** (decided 2026-11-22 under the owner's
-delegation, after a Codex and a Fable review that both chose it). Every driver, ceremony tool and converter
+**The campaign's pinned driver checkout is Relay `174b646062f3842a9a58a5455fb12879945f25ee`** (`174b64606`;
+decided 2026-11-22 under the owner's delegation, after a Codex and a Fable review that both chose it:
+ailab #1753 comment 136692). Every driver, ceremony tool and converter
 run of R1 through the canary uses it. The tools cited below as `main:` are unchanged from `eb9b1f07` to
 `174b64606`, with these exceptions:
 - `packages/worker-runtime/acceptance.ts` (Relay #562): the `real-supervisor-lease-publisher` observation of the
   operator window (#3-#7) now reads the lease in both the harness and the supervisor container, and needs the
   successor publication before the predecessor's expiry plus the skew bound. Acceptance rows #1 and #2 do not
   run it. The operator window already admits the harness probe tuple, the frozen v0.10.3 holder needs no
-  change, and no new config field or kubectl verb is needed. Each lease sample is now two execs (10 s timeout
-  each), so `D_window` needs a margin for that until R1 measures it.
+  change, and no new config field or kubectl verb is needed. Each lease sample is now two execs. Each exec has
+  kubectl's 10 s request timeout under the driver's 15 s watchdog
+  (`main:scripts/qualification/worker-runtime-acceptance.ts:206`, used through
+  `operator-measurement-window.ts:204`), so a sample can take up to 30 s within the observation's deadline.
 - `packages/worker-runtime/provenance-cleanup-resource-observer.ts` (#557): an injectable clock for tests;
   its default reads the same clocks as before.
 - `scripts/qualification/repository-review-observation.ts` (#561): a new driver that no run uses.
 
 Three rules follow:
-- **Record the commit.** Each run's stopwatch log and evidence comment name `174b64606` and the operator's
-  `git rev-parse HEAD` of the checkout. The recorded driver digest hashes only the CLI file, not its imports
-  (`main:scripts/qualification/operator-executable-sha256.ts`), so it cannot show which checkout ran.
-- **A cautious `D_window`.** Until R1 measures it, R1's window latest start uses a stated conservative
-  `D_window` (`T − L − D_window`), and the window is skipped if its start has passed.
-- **R0 and R0b are not converted.** They ran other checkouts and created no Pod.
+- **Record and check the commit.** Before the first driver of each run, `git rev-parse HEAD` in the operator's
+  checkout must print `174b646062f3842a9a58a5455fb12879945f25ee` and `git status --porcelain` nothing;
+  otherwise no driver runs and no evidence is recorded until the checkout is fixed. The stopwatch log and the
+  run's evidence comment record both outputs. The recorded driver digest hashes only the CLI file, not its
+  imports (`main:scripts/qualification/operator-executable-sha256.ts`), so it cannot show which checkout ran.
+- **`D_window` = 300 s until R1 measures it.** That is the lease observation's 60 s wait cap, plus four
+  30 s two-exec samples, plus 120 s for the other four probes and the window's preparation and restore. It
+  is chosen to be generous: too large a bound only skips the window. R1's window starts by `T − L − 300 s`
+  or is skipped (its spares are in R3/R5). From R2 on, `D_window` is R1's measured duration plus a 50 %
+  margin, recorded in the run record.
+- **R0 and R0b are not converted.** They ran Relay `832623140` and created no Pod.
 
 ## 1. Campaign overview
 
