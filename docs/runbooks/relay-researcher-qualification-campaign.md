@@ -65,7 +65,7 @@ Each is read back; a missing one stops the campaign before any signing.
 | Hub with the fraction-safe loader: the `c0fe50f0` candidate loader refuses every real binding | §8 G0; fixed by #525, released as v0.10.4 (ailab #1789); since hub-upgrade H8 (ailab #1915) the hub is v0.10.9, which keeps the fix | **live** since 2026-11-21 03:47:52Z: v0.10.9 `…@sha256:1b0f2f72…7a39`, source `04a897f2`, schema 79 (H8: ailab #1915 merged 03:45:46Z as `fdc7a7a5`, readback #1915 comment 134561; a candidate document loaded on it in R0b, #1753 comment 135956). v0.10.4 `d1482bc1…57a7` ran from 2026-11-16 10:08Z until H8 |
 | Ceremony tools and driver fixes (G1-G5): signer, `commandSha256`, `subject.json`, `submittedPod`, the matrix's installed-bundle check, fraction-safe parsing | §8; Relay #523, #528, #529, #530 | merged; `submittedPod` by reconstruction needs O7 |
 | `deployment.json` and `subject.json` composed and frozen (§3.0 step 7) | this runbook | after the v0.10.9 rollout (H8); `hub.image` is `1b0f2f72…7a39` |
-| E6 rehearsal passed (§4) | this runbook | not run |
+| E6 rehearsal passed (§4), with the owner's 2026-11-22 waiver of its launch-dependent items (§4, "Owner waiver") | this runbook | not run |
 | Dedicated researcher channel, admin browser state, operator kube identity (VAP write, `pods/exec`, NetworkPolicy CAS, SA impersonation incl. a foreign-slot SA, `pods/log` in `relay-internal-tls`) | plan §8 | operator readback |
 | Probe images (egress; storage with `dd` and `sleep`) and reviewed allow/deny targets | plan R5, R4 | not in git |
 | Owner decisions O1-O8, S3, I4, N1, N2 | §7 | decided; S2's create path is verified, queued-create survival and timing/readbacks remain in E6 |
@@ -184,7 +184,15 @@ checkout; the ceremony tools are checked against `c0fe50f0`'s own verifiers
    `validitySeconds: 7200`, `cleanupSeconds: 86400` and the whole payload except its four times
    (`main:docs/qualification/candidate-ceremony-tools.md`, "Signing a run"). From the previous run's,
    change only `runId`, the worker/launch IDs, `promptSha256`, `commandSha256`, `leaseSeconds`,
-   `sessionPermitPublicKey` and `owner`; a diff in any other field breaks the freeze. Common values:
+   `sessionPermitPublicKey` and `owner`, and, on the first run after an O3 reissue of File B,
+   `router.tokenPolicyDigests` (owner decision 2026-11-22, #1753 comment 136654). The frozen measurement
+   subject (the binding and `deployment.json`) does not contain it, so a reissue keeps the subject, and the
+   rows already measured stay valid. Each row is still bound to its own run: `candidateDigest` hashes the whole
+   unsigned run (`main:packages/worker-runtime/candidate-signatures.ts:144`) and both converters keep it as
+   `authority.runDigest`, so R1's rows carry R1's File B digest and R2's carry the new one. After a reissue,
+   the new digest goes into the next signing input's `router.tokenPolicyDigests` and into
+   `file_b_router_check`'s File B; no runbook line pins the old digest. A diff in any other field breaks
+   the freeze. Common values:
    one worker, `maxActiveWorkers: 1`, `maxGenerations: 1`, `maxLifetimeSeconds: 900`,
    `providerTokenCap: 1000000`, `providerRequestCap: 8`, `allowedScenarios` = all 19,
    `egressPolicySha256` = `f6d3187c…282f`, `router.tokenPolicyDigests` = [File B digest], the Router CA
@@ -311,8 +319,10 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
 
 ### 3.5 Agent candidate values, agent held disabled
 
-1. `flux suspend kustomization relay-researcher-agent -n flux-system`, then
-   `kubectl -n relay-infra-control scale deploy/relay-infrastructure-agent --replicas=0`
+1. Suspend the agent's Kustomization under field manager `relay-runbook` (the "Suspending a Kustomization" note
+   in §5.2): `kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-agent --type=merge -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook`,
+   then `flux --context admin@ai reconcile kustomization flux-system -n flux-system` and read `spec.suspend` back
+   (`true`). Then `kubectl --context admin@ai -n relay-infra-control scale deploy/relay-infrastructure-agent --replicas=0`
    and wait until every Pod of that Deployment is gone before §3.6. **Verified:** the running daemon
    polls and executes offers (`rel:packages/infrastructure-agent/daemon.ts:713-719`); with no agent
    process it cannot claim the create. The hub checks the stored installation is `ready` at the current
@@ -384,8 +394,8 @@ curl -sS --fail -b "$COOKIES" -H 'Origin: https://relay.chifor.me' -H 'Content-T
 
 ### 3.7 Per-launch admission bundle (after `t0`, inside the lifetime)
 
-`flux suspend kustomization relay-researcher-installation -n flux-system`, then
-(`rel:docs/infrastructure-candidate-policy.md`):
+Suspend the installation's Kustomization the same way (§5.2): `kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-installation --type=merge -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook`,
+then the `flux-system` reconcile and the `spec.suspend` readback (`rel:docs/infrastructure-candidate-policy.md`):
 
 1. Read the persisted intent:
    `SELECT id, environment_id, generation, kind, state, digest, request FROM agent_environment_operations WHERE id='<signed operationId>';`
@@ -490,14 +500,16 @@ never from `t0` estimates:
    (`rel:packages/infrastructure-agent/candidate-policy-preparation.ts:224-240,327-337`); delete the
    old ConfigMaps only after the new guards and bindings are read back in §3.7 step 4 (§8 U4).
 8. Slot back to git: confirm every driver's `outstandingRecovery` is empty and no Pod remains, then
-   `flux resume kustomization relay-researcher-installation -n flux-system`. **Verified:** git declares
+   `kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-installation --type=merge -p '{"spec":{"suspend":false}}' --field-manager=relay-runbook`. **Verified:** git declares
    the deny-all gate and 0-Pod quota (`ailab:kubernetes/apps/relay-researcher/installation/admission-deny.yaml:35-38`;
    `ailab:kubernetes/apps/relay-researcher/installation/containment.yaml:71-90`). Wait for successful
    reconciliation at the intended revision and read back both objects; resume alone is not that
    readback. Extra candidate guards remain (`prune: false`,
    `ailab:kubernetes/apps/clusters/ai/relay-researcher-installation.yaml:25-33`); their scope is described in
-   §8 U5. Then `flux resume kustomization relay-researcher-agent -n flux-system` once
-   the per-run PR has merged and git equals the live agent (replicas included).
+   §8 U5. Then, once the per-run PR has merged and git equals the live agent (replicas included),
+   `kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-agent --type=merge -p '{"spec":{"suspend":false}}' --field-manager=relay-runbook`,
+   with §5.2's readback: `spec.suspend` is `false`, the agent's Kustomization reconciles at the merged
+   revision, and the live Deployment, replicas included, still equals git.
 
 ### 3.11 Before the next run
 
@@ -556,38 +568,61 @@ Target: create by `t_s + 55 min`, done by about `t_s + 85 min`; 35 min of slack,
 **E6 rehearsal checklist.** Time each step; record the measured value next to the target; nothing is
 signed on the live hub.
 
-- [ ] Sign, `verify`, budget `verify` and the journal render with throwaway keys (offline).
-- [ ] Journal service restart on a disposable namespace or the rehearsal journal: apply, scale, Ready.
-- [ ] Per-run PR: open → CI green → merge → Flux apply → hub rollout, on a no-op branch; and the
+**Owner waiver (2026-11-22, #1753 comment 136654).** Five items below (numbered E6-1 to E6-13) need a running candidate launch, which
+E6 cannot have: it signs nothing on the live hub, and no disposable hub, agent and journal stack exists. They
+are measured first in R1, under R1's stop rules and the hard limits above:
+
+- E6-7 (create → Pod Running): its queued-create half and the summed create → Running path;
+- E6-8 (each driver's real duration);
+- E6-10 (ceremony tools on a rehearsal launch): its launch half, the holder's `commandSha256` and the session
+  files against the drivers' pins;
+- E6-11 (R2's disruption), decided again before R2 from R1's timings;
+- E6-13 (U9, exactly one agent → journal connection).
+
+Every other item, and every part of an item that needs no launch, runs and is posted before R1 is signed,
+including the two preconditions: the R7 audit policy live on all three control planes (O7;
+[relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md): "Apply before the E6 rehearsal")
+and the runtime image cached on `relay-worker-1`. Two gates follow from the waiver:
+
+- **Sum before signing.** The measured per-launch bundle time (E6-5), warm Pod start under `relay-gvisor`
+  (E6-6) and agent restart (E6-7's restart half) sum to 3 min at most. Otherwise R1 is not signed.
+- **U9 before the grant.** After §3.2, the journal Pod is Ready on 8443 and the live
+  `relay-infrastructure-agent-journal-egress` policy equals git. Otherwise abort before the grant.
+
+An R1 lost on a waived item uses one reserve (O1).
+
+- [ ] **E6-1.** Sign, `verify`, budget `verify` and the journal render with throwaway keys (offline).
+- [ ] **E6-2.** Journal service restart on a disposable namespace or the rehearsal journal: apply, scale, Ready.
+- [ ] **E6-3.** Per-run PR: open → CI green → merge → Flux apply → hub rollout, on a no-op branch; and the
       in-place agent apply at 0 replicas. Keep UTC timestamps for each transition and the §3.4
       readback; compare signing → readback with the 60 min abort limit (§8 U3).
-- [ ] Hub rollout duration, from the last H-step rollouts' init-container timings (`backup-database`
+- [ ] **E6-4.** Hub rollout duration, from the last H-step rollouts' init-container timings (`backup-database`
       dominates). Record each init attempt's start, finish, exit status and restart count, plus Pod
       Ready and §3.4 readback times; a timeout per attempt does not bound the whole rollout (§8 U3).
-- [ ] `prepare-candidate-policy.ts` + prebuilt verifier + transition steps on Relay's disposable
+- [ ] **E6-5.** `prepare-candidate-policy.ts` + prebuilt verifier + transition steps on Relay's disposable
       Kubernetes 1.35 fixture (`rel:docs/infrastructure-candidate-policy.md`, "Disposable local API-server evidence").
-- [ ] Runtime image cached on `relay-worker-1`; Pod start under `relay-gvisor` measured outside the slot.
-- [ ] **create → Pod Running well under 5 min** (bundle + enable + scheduling + start), summed.
+- [ ] **E6-6.** Runtime image cached on `relay-worker-1`; Pod start under `relay-gvisor` measured outside the slot.
+- [ ] **E6-7.** **create → Pod Running well under 5 min** (bundle + enable + scheduling + start), summed.
       Rehearse §3.5's scale-to-zero and wait for no agent Pods before create; confirm the hub stores
       the intent while the slot stays empty. Read back the stored installation state and create
       operation through the hold: `ready`, `pending`, no claim or offer, with the same intent retained;
       record any expiry or state change. Then measure restart through the §3.8 readbacks (§8 U2).
-- [ ] Each driver's real duration (window, storage staging, admission matrix, egress, replay) to fill
+- [ ] **E6-8.** Each driver's real duration (window, storage staging, admission matrix, egress, replay) to fill
       the latest-start formulas in §6.
-- [ ] P1/P3/P4 call counts on the provider-qualification harness (paid; within O5's six-call cap)
+- [ ] **E6-9.** P1/P3/P4 call counts on the provider-qualification harness (paid; within O5's six-call cap)
       and native approval prompts; record per-prompt tool and approval counts and response delays
       as in §5.3 (§8 U7).
-- [ ] The ceremony tools end to end on a rehearsal launch: `commandSha256` accepted by the holder,
+- [ ] **E6-10.** The ceremony tools end to end on a rehearsal launch: `commandSha256` accepted by the holder,
       session files passing the drivers' pins (U1), `submittedPod` reconstructed, and `subject.json`
       accepted by both converters.
-- [ ] R2's disruption on a rehearsal worker: arm, cut, hold 55 s, exact restore, recovery
+- [ ] **E6-11.** R2's disruption on a rehearsal worker: arm, cut, hold 55 s, exact restore, recovery
       (`main:docs/qualification/session-replay-hub-disruption.md`).
-- [ ] R7's hold and release on a rehearsal Pod outside the candidate slot (E1's procedure): the held
+- [ ] **E6-12.** R7's hold and release on a rehearsal Pod outside the candidate slot (E1's procedure): the held
       Pod survives past `T`, release-to-exit latency, the audit event's shape (O7: the probe and the
       extraction rehearsal in [relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md)),
       exact-UID cleanup, and the agent at zero keeping the bootstrap Secret past its expiry `E`
       (Relay #536).
-- [ ] U9: exactly one agent -> journal connection on TCP 8443, admitted by
+- [ ] **E6-13.** U9: exactly one agent -> journal connection on TCP 8443, admitted by
       `relay-infrastructure-agent-journal-egress` (the chart's `10.96.0.42/32` rule admits nothing under
       Cilium), and no agent egress to the journal on any other port.
 
@@ -616,6 +651,33 @@ and egress policy in place, and Flux would silently undo them, as it would the p
 Driver procedures that suspend and resume Flux around their own in-place change (R2's disruption) run
 inside this window: confirm it is suspended instead, and never resume before §3.10 step 8. Never
 resume over an unreverted live change. Q4 must never run inside a window.
+
+**Suspending a Kustomization** (2026-11-21, R0; #1753 comment 135072). `relay-researcher-agent`,
+`relay-researcher-installation` and `apps` are themselves applied by `flux-system`
+(`kubernetes/apps/clusters/ai/*.yaml`). A `flux suspend` sets `spec.suspend` under a manager that
+kustomize-controller takes over at the next `flux-system` apply. That apply then drops the field, and the
+Kustomization resumes with no one noticing: R0's agent suspension was undone that way. So every suspend and resume in this
+campaign is a patch under field manager `relay-runbook`, the manager kustomize-controller leaves alone (as for
+`roll_deploy`, #1897):
+
+```sh
+kubectl --context admin@ai -n flux-system patch kustomization <name> --type=merge -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook
+flux --context admin@ai reconcile kustomization flux-system -n flux-system
+kubectl --context admin@ai -n flux-system get kustomization <name> -o jsonpath='{.spec.suspend}{"\n"}'   # true, after the reconcile
+```
+
+Resume with the same patch and `"suspend":false`, the same reconcile and a `spec.suspend` readback (`false`), then wait
+for the Kustomization to reconcile at the intended revision; resume alone is never that readback. R0b ran this form
+for the agent all night without a takeover (#1753 comment 135956).
+
+It holds only under two conditions:
+- **The manager's name.** kustomize-controller's managed-field cleanup matches managers whose names start with
+  `kubectl` or `flux`, so a plain `kubectl patch` (manager `kubectl-patch`) is reverted as `flux suspend` was.
+  Keep `relay-runbook`.
+- **The git manifest.** It must not declare `spec.suspend` at all, not even `false`: otherwise the
+  `flux-system` apply owns the field and flips it back. Precheck before each suspend, from the frozen commit:
+  `grep -n suspend kubernetes/apps/clusters/ai/<name>.yaml` prints nothing. On 2026-11-22 it prints nothing for
+  all three Kustomizations.
 
 ### 5.3 Native tool approvals
 
@@ -897,9 +959,10 @@ and restart within the timing budget (§8 U12).
    every agent Pod to disappear, keeps Flux suspended and retains the closed gate/0-Pod quota until
    §3.7. **UNVERIFIED:** survival of the queued create until restart. These paths do not establish
    whether hub-side intent/offer expiry or pre-claim transitions to `failed`/`unknown` can intervene,
-   or whether a background heartbeat check moves the installation off `ready`. E6 must read back
-   the installation's `ready` state and the same `pending`, unclaimed create throughout the hold,
-   then confirm it is offered and executed on restart (§4); shutdown/restart timing remains U12.
+   or whether a background heartbeat check moves the installation off `ready`. The installation's `ready`
+   state and the same `pending`, unclaimed create throughout the hold, then the offer and execution on
+   restart, are first read back in R1 (§4, owner waiver: E6-7's queued-create half); E6 still measures
+   the agent's shutdown and restart. Shutdown/restart timing remains U12.
    Every run also reads back `state` `ready` immediately before its grant, and stops if it is not
    (§3.6), so a state change found in E6 cannot first surface as a spent signed run.
 3. U3 — **UNVERIFIED:** measure E6's S-A rehearsal from PR open through CI green, merge, Flux apply,
@@ -956,8 +1019,9 @@ and restart within the timing budget (§8 U12).
 9. U9: decided 2026-11-17. The chart values are `networkPolicy.candidateJournalCidrs: ["10.96.0.42/32"]`,
    port 8443 (inert under Cilium, required by the chart), and ailab's selector policy
    `relay-infrastructure-agent-journal-egress` admits agent -> journal on TCP 8443
-   ([relay-candidate-run-generator.md](relay-candidate-run-generator.md)). E6 must show exactly one
-   agent -> journal connection on 8443 (the rehearsal list in §4).
+   ([relay-candidate-run-generator.md](relay-candidate-run-generator.md)). Exactly one agent -> journal
+   connection on 8443 is first shown in R1 (§4, owner waiver: E6-13), after the pre-grant check that the
+   journal Pod is Ready on 8443 and the live policy equals git.
 10. U10 — **Verified:** R6's own §3.4 dump meets the required ordering: backup completes before hub
     startup and the fresh §3.6 create (`ailab:kubernetes/apps/apps/relay/relay.yaml:54-63,174-178`), whereas
     the drill needs an older snapshot missing a live managed environment
@@ -980,5 +1044,6 @@ and restart within the timing budget (§8 U12).
     record for that record's full duration, about 16 s at 15/10/2 and 32 s at 30/20/2 (installation
     runbook, "Lease timing (T1, 30/20/2)"), so a restart measured at one timing does not stand for the
     other. Fill each `D_x` in §6 from the measured
-    elapsed duration with an explicit operator-chosen margin; verify the latest-start formulas and
-    create → Pod Running < 5 min before R1. Repeat timings in each run's stopwatch log (§5.5).
+    elapsed duration with an explicit operator-chosen margin. Under the owner's waiver (§4), the driver
+    durations (E6-8) and create → Pod Running (E6-7) are first measured in R1: until then, R1's latest-start
+    rules skip a step whose start has passed, and §4's 5-minute limit stays an abort. Repeat timings in each run's stopwatch log (§5.5).

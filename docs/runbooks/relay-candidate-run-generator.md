@@ -166,11 +166,21 @@ The operator merges once CI, the §3.2-§3.3 readbacks and that check pass. Flux
 
 ### 4b. S-B: in place, then commit the same bytes
 
-Under `flux suspend kustomization apps -n flux-system` (as in hub step H3), render the hub overlay
-from the per-run branch with the pinned kustomize of `scripts/manifest-lint.sh` (the CI render), keep
-only the run's ConfigMap and the `relay` Deployment (the overlay also renders SOPS-encrypted Secrets,
-which only Flux can apply), and apply them server-side; then commit the same generated files and resume
-once git equals the live objects:
+Suspend `apps` as the campaign runbook's §5.2 says ("Suspending a Kustomization"):
+
+```sh
+kubectl --context admin@ai -n flux-system patch kustomization apps --type=merge \
+  -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook
+flux --context admin@ai reconcile kustomization flux-system -n flux-system
+kubectl --context admin@ai -n flux-system get kustomization apps -o jsonpath='{.spec.suspend}{"\n"}'   # true
+```
+
+Then render the hub overlay from the per-run branch with the pinned kustomize of `scripts/manifest-lint.sh`
+(the CI render), keep only the run's ConfigMap and the `relay` Deployment (the overlay also renders
+SOPS-encrypted Secrets, which only Flux can apply), and apply them server-side. Commit the same generated
+files. Once git equals the live objects, resume with the same patch and `"suspend":false`, the `flux-system`
+reconcile, and the readbacks: `spec.suspend` is `false`, and `apps` reconciles at the intended revision with
+no drift reported.
 
 ```sh
 docker run --rm -v "$PWD:/repo:ro" -w /repo <KUSTOMIZE_IMAGE of scripts/manifest-lint.sh> build kubernetes/apps/apps/relay \
@@ -185,8 +195,11 @@ The agent must not claim the create before the per-launch bundle is installed, s
 applied in place at 0 replicas, from the same branch, before the grant:
 
 ```sh
-flux suspend kustomization relay-researcher-agent -n flux-system
-kubectl -n relay-infra-control scale deploy/relay-infrastructure-agent --replicas=0
+kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-agent --type=merge \
+  -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook
+flux --context admin@ai reconcile kustomization flux-system -n flux-system
+kubectl --context admin@ai -n flux-system get kustomization relay-researcher-agent -o jsonpath='{.spec.suspend}{"\n"}'   # true
+kubectl --context admin@ai -n relay-infra-control scale deploy/relay-infrastructure-agent --replicas=0
 docker run --rm -v "$PWD:/repo:ro" -w /repo <KUSTOMIZE_IMAGE of scripts/manifest-lint.sh> build kubernetes/apps/relay-researcher/agent \
   | python3 -c 'import sys,yaml; d=[x for x in yaml.safe_load_all(sys.stdin) if x]; [x["spec"].update(replicas=0) for x in d if x["kind"] == "Deployment"]; print(yaml.safe_dump_all(d))' \
   > /operator/<run>/agent-apply.yaml
@@ -200,7 +213,7 @@ Readback: the Deployment has `replicas: 0` and its `candidate` volume names
 `relay-candidate-control-<d16>`; the `config.json` of the ConfigMap its `config` volume names has the
 SHA-256 of the branch's `kubernetes/apps/relay-researcher/agent/config.json`; the three run
 ConfigMaps of step 3 exist. Scale the agent to 1 only after the per-launch bundle (§3.7-§3.8), and
-resume `relay-researcher-agent` only once the per-run PR has merged and git equals the live agent
+resume `relay-researcher-agent` (the patch form, `"suspend":false`) only once the per-run PR has merged and git equals the live agent
 (§3.10 step 8).
 
 ### 5. Readback (H7's), by `t_s + 60 min`
