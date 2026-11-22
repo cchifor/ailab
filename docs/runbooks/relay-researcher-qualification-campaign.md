@@ -62,9 +62,9 @@ Each is read back; a missing one stops the campaign before any signing.
 | Agent one-time candidate values: candidate mounts and volume, `policy.bootstrapSecrets: true`, the candidate RBAC, journal egress | installation runbook, "Beyond enrollment" item 3; the generator's "One-time prerequisites" | staged in `scripts/relay-candidate-run.py`: `generate` writes them with the first run (R0's PR, R1's again after R0's reset), `reset` removes them |
 | E2 window + storage converters (#523), E3 lease → two rows (#527), E4 replay disruption (#524), defaultCommunication observer (#519) | Relay `main` | merged |
 | E1 delayed start: pre-session observer, converter branch, hold procedure | Relay #532; bootstrap-Secret hold #536 | merged (`1ea5ecc9`, `eb6033fd`); R7 also needs O7's audit policy and O8's reconciliation |
-| Hub v0.10.4: the `c0fe50f0` candidate loader refuses every real binding | §8 G0; fixed by #525, released as v0.10.4, pinned by ailab #1789 | **live** since 2026-11-16 10:08Z (`…@sha256:d1482bc1…57a7`, schema 79; ailab #1789 comment 125493) |
+| Hub with the fraction-safe loader: the `c0fe50f0` candidate loader refuses every real binding | §8 G0; fixed by #525, released as v0.10.4 (ailab #1789); since hub-upgrade H8 (ailab #1915) the hub is v0.10.9, which keeps the fix | **live** since 2026-11-21 03:47:52Z: v0.10.9 `…@sha256:1b0f2f72…7a39`, source `04a897f2`, schema 79 (H8: ailab #1915 merged 03:45:46Z as `fdc7a7a5`, readback #1915 comment 134561; a candidate document loaded on it in R0b, #1753 comment 135956). v0.10.4 `d1482bc1…57a7` ran from 2026-11-16 10:08Z until H8 |
 | Ceremony tools and driver fixes (G1-G5): signer, `commandSha256`, `subject.json`, `submittedPod`, the matrix's installed-bundle check, fraction-safe parsing | §8; Relay #523, #528, #529, #530 | merged; `submittedPod` by reconstruction needs O7 |
-| `deployment.json` and `subject.json` composed and frozen (§3.0 step 7) | this runbook | after the v0.10.4 rollout |
+| `deployment.json` and `subject.json` composed and frozen (§3.0 step 7) | this runbook | after the v0.10.9 rollout (H8); `hub.image` is `1b0f2f72…7a39` |
 | E6 rehearsal passed (§4) | this runbook | not run |
 | Dedicated researcher channel, admin browser state, operator kube identity (VAP write, `pods/exec`, NetworkPolicy CAS, SA impersonation incl. a foreign-slot SA, `pods/log` in `relay-internal-tls`) | plan §8 | operator readback |
 | Probe images (egress; storage with `dd` and `sleep`) and reviewed allow/deny targets | plan R5, R4 | not in git |
@@ -287,8 +287,8 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
    `RELAY_WORKER_CANDIDATE_SHA256` is the generator summary's `document.sha256`, budget startup `started`, `RelayWorkerBudgetStartupFailed` clear, no
    `worker_budget_authority_unavailable` and **no `worker_candidate_unavailable`**: a file that does not
    verify (expired, not yet valid, wrong key) only logs that warning and the hub starts without
-   candidate authority (`rel:server/main.ts:288-305`). **This readback needs the v0.10.4 hub
-   (`rel4:server/workers/candidate/load.ts:40`): `c0fe50f0`'s loader refuses every document with a real
+   candidate authority (`rel:server/main.ts:288-305`). **This readback needs a hub at v0.10.4 or later
+   (`rel4:server/workers/candidate/load.ts:40`; the same line at v0.10.9 `04a897f2`, live): `c0fe50f0`'s loader refuses every document with a real
    binding (§8 G0).** **Never create while it is logged:** an
    unrecognized worker takes ordinary admission, and the lifetime can freeze before the refusal
    (`rel:server/workers/service.ts:1543-1570`). Connectors and relay-bus keys answer again.
@@ -833,7 +833,7 @@ rehearsal calls) still goes to the owner, through the operator, before it happen
 | O6 | S-A: one generated, mechanical ailab PR per run, aborting before the grant if the hub is not read back by `t_s + 60 min`; S-B (in place under Flux suspension, then the same bytes committed) as the fallback; the canary always uses S-B (§2) |
 | O7 | `submittedPod` by offline reconstruction (§3.8) for R1-R6, plus an API server audit policy for R7 only, as its own owner-held PR |
 | O8 | a reviewed hub database reconciliation between R7 and R6, its SQL drafted and reviewed in advance (§6 R7) |
-| S3 | v0.10.4, the hub-only loader fix, including the hub rollout |
+| S3 | v0.10.4, the hub-only loader fix, including the hub rollout (done; superseded by v0.10.9, hub-upgrade H8, which keeps the fix) |
 | I4 | the frozen binding, ailab #1782 |
 | N1, N2 | `notifications` under a written owner exception; two release approvals (A1 for the canary, A2 for H4b) |
 
@@ -855,9 +855,13 @@ and restart within the timing budget (§8 U12).
     unsigned document; signed run and session documents stay integer-only.
   - **The release.** Released as v0.10.4 (`rel4:`), hub-only: the worker images, the binding and the I4
     pins stay v0.10.3.
-  - **Rolled out.** ailab #1789 (`bda5b3fd`) has run it since 2026-11-16 10:08Z: image
+  - **Rolled out.** ailab #1789 (`bda5b3fd`) ran it from 2026-11-16 10:08Z until hub-upgrade H8: image
     `registry.chifor.me/relay/control-plane@sha256:d1482bc101ecf13667a75bfc1892f78b37bed7cf2fed8f9ce42f8c4513d057a7`,
-    schema 79. This is `deployment.json`'s `hub.image`, frozen from R1 to the canary.
+    schema 79. Hub-upgrade H8 (ailab #1915, live since 2026-11-21 03:47:52Z, readback #1915 comment 134561)
+    then moved the hub to v0.10.9
+    (`registry.chifor.me/relay/control-plane@sha256:1b0f2f729f78d4b166d9f6e6d36402df924ae2fe1481dbb5c486e9bb0ab37a39`,
+    source `04a897f2`, schema 79), which keeps the loader fix. v0.10.9 is `deployment.json`'s `hub.image`,
+    frozen from R1 to the canary.
 - **G1, #15 matrix.** Closed by Relay #529. The driver now regenerates the installed bundle at its own
   `generatedAt`, requires the pinned bytes, and takes `installedReport`. The per-launch policy pins the
   seconds left when the bundle was generated (`rel:packages/infrastructure-agent/pod-renderer.ts:248-255`).
