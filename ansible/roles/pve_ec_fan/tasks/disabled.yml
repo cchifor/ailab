@@ -24,6 +24,8 @@
       loop:
         - { name: ec-fan-textfile.timer, enabled: false }
         - { name: ec-fan-textfile.service }
+        # before the profile, so nothing writes a level once the fans are back on auto
+        - { name: ec-fan-governor.service, enabled: false }
         - { name: ec-fan-profile.service, enabled: false }
       loop_control:
         label: "{{ item.name }}"
@@ -49,12 +51,15 @@
         state: absent
       loop:
         - "{{ pve_ec_fan_textfile_dir }}/ec_fan.prom"
+        - "{{ pve_ec_fan_textfile_dir }}/ec_fan_governor.prom"
         - /etc/modules-load.d/ec_su_axb35.conf
         - "{{ pve_ec_fan_config }}"
         - /usr/local/sbin/ec-fan-textfile
+        - /usr/local/sbin/ec-fan-governor
         - /usr/local/sbin/ec-fan-profile
         - /etc/systemd/system/ec-fan-textfile.timer
         - /etc/systemd/system/ec-fan-textfile.service
+        - /etc/systemd/system/ec-fan-governor.service
         - /etc/systemd/system/ec-fan-profile.service
 
     - name: Reload systemd after removing the units

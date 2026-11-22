@@ -1,0 +1,34 @@
+# Managed by ansible (role: pve_ec_fan). Decides the CPU fans' levels 3-5 (60-100 %) on the smoothed EC
+# temperature, next to the curve ec-fan-profile.service sets; the driver's curve keeps levels 0-2 and the
+# instant steps up (/usr/local/sbin/ec-fan-governor has the rules). PartOf: stopping or restarting the
+# profile stops or restarts this too, so a new config reaches both; WantedBy (Install): starting the profile
+# starts this; After: it starts after the profile and stops BEFORE the profile hands the fans back to auto.
+# Wants, not Requires: a profile that failed at boot
+# does not keep this from running (it acts only on a fan in curve mode, so it waits harmlessly until the
+# converge restarts the profile). It writes only `level`.
+[Unit]
+Description=EC fan governor for the CPU fans' upper levels (ec_su_axb35)
+After=ec-fan-profile.service
+Wants=ec-fan-profile.service
+PartOf=ec-fan-profile.service
+
+[Service]
+Type=simple
+EnvironmentFile={{ pve_ec_fan_config }}
+Environment=EC_FAN_TEXTFILE_DIR={{ pve_ec_fan_textfile_dir }}
+ExecStart=/usr/local/sbin/ec-fan-governor run
+# A crash at 60 %+ leaves the fans there (the curve's rampdown for those levels is low): restart soon.
+Restart=always
+RestartSec=5
+# Writes the driver's sysfs (level) and its metrics file, nothing else. /sys stays writable under
+# ProtectSystem=strict (ProtectKernelTunables would take it away).
+ProtectSystem=strict
+ReadWritePaths={{ pve_ec_fan_textfile_dir }}
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+# Started with the profile, wherever that is started from (boot, a converge, or `systemctl stop` then
+# `start` by hand); PartOf above covers stop and restart.
+WantedBy=ec-fan-profile.service

@@ -506,11 +506,44 @@ that curve for the two CPU fans and sets the APU power mode:
 - **Curve:** `ec-fan-profile.service` (oneshot, after `systemd-modules-load`) writes the rampup and
   rampdown curves of each fan in `pve_ec_fan_fans` (fan1 and fan2), then sets it to `curve`. A CPU fan
   dropped from that list goes back to `auto`. From then on the driver re-reads the EC temperature every
-  second and moves one level at a time. Stopping the service sets both CPU fans back to `auto`. The
-  default is the quiet curve the owner asked for on 2026-11-19 (the fans were too loud): 20 % from 40 C,
-  40 % from 55, 60 % from 80, 80 % from 90, and 100 % from 95, with 5 C of hysteresis. Level 4 only
-  engages from 90 C EC. With it and the quiet power mode, node1/node2 went from EC 85-92 C at level 4-5
-  (4150-4790 rpm) to EC 67-69 C at level 2 (~2650 rpm), NVMe drives at 43-56 C.
+  second and moves one level at a time. Stopping the service sets both CPU fans back to `auto`. Since
+  2026-11-22 the curve keeps only the floor and the safety net: 20 % from 40 C, 40 % from 55 C (the level
+  a loaded host runs at), and an instant step to 60 / 80 / 100 % at 94 / 96 / 98 C on the instantaneous
+  temperature. Its rampdown values for levels 3-5 (60-62 C) are deliberately low, so the driver does not
+  step down from 60 %+ on its own: the governor does.
+- **Governor:** `ec-fan-governor.service` (a small bash daemon, `/usr/local/sbin/ec-fan-governor`) decides
+  levels 3-5 on the SMOOTHED EC temperature (moving average, 60 s time constant). It steps up to 60 / 80 /
+  100 % when the average reaches 86 / 90 / 94 C (sustained heat, not a CI burst), and back down when the
+  average is at or below 78 / 84 / 88 C, the last step up was at least 180 s ago, and the instantaneous
+  temperature is below the curve's step for that level. It writes only `level`, only on a fan in curve
+  mode, and never fan3; it reads the fan's mode and level again right before each write, so a fan put in
+  fixed or auto, or stepped up by the driver, in between is left alone. It is `PartOf` the profile and
+  `WantedBy` it: starting, restarting or stopping `ec-fan-profile` starts, restarts or stops it too. If it
+  dies at 60 %+, the fans stay there (louder, never hotter) until systemd restarts it (5 s). Its heartbeat
+  is refreshed only by a tick that read the temperature and wrote every level it meant to, so
+  `ProxmoxEcFanGovernorStale` fires after 5 min of a dead, stuck or failing governor, and
+  `ProxmoxEcFanGovernorMissing` after 10 min on a host whose driver is loaded but whose governor never
+  wrote its file (it writes it as it starts). The role refuses a governor config that does not sit inside
+  the curve: curve rampdown < governor down < governor up < curve rampup, per level 3-5.
+- **Why the governor (2026-11-22, owner: "the fans are speeding up and down too often"):** the
+  2026-11-19 quiet curve (60 % from 80 C, back at 75 C) made node1/node2's fans change level ~800 times a
+  day, every ~35 s under CI. Two causes, measured on the hosts at 1 Hz:
+  1. one level step (40 -> 60 %) lowers the EC temperature ~6.3 C at the quiet 55 W cap (node1, fixed
+     levels in alternating 3.5 min blocks at the same package power: 60 % 72.0 / 72.8 C, 40 % 78.7 C), less
+     at lower power, and the band was 5 C, so a load that settles just above 80 C at 40 % has to cycle.
+     Held at a fixed 40 % for 10 min at the cap, node1 settled at EC 78-82 C (max 85), NVMe composite 57 C,
+     controller 80 C: 40 % was enough;
+  2. the EC temperature follows the APU within seconds: a 30 s CI burst takes it from 80 to 92 C and back
+     to 75 C. A wide-band curve (60 % from 88 C, down at 76 C), tried for 20 min, cut node1 to 6
+     changes/h but still made 21-36/h on node2/node3, each for heat that was gone before the airflow
+     changed. The driver has no time filter; the governor is one. Its 8 C band (86 up, 78 down) is wider
+     than the 6.3 C step, so no steady load under the cap can cycle; keep it so.
+
+  | Under live CI, node1 / node2 / node3 | CPU-fan level changes | EC avg, max | NVMe composite avg, controller max |
+  |---|---|---|---|
+  | old curve (80/75 C): 24 h at 30 s, and 1 Hz spot checks | ~800/day on node1/node2; ~120/h at 1 Hz | median 76 / 76 / 69 C, max 93 / 96 / 97 C | median 53 / 53 / 45 C, max 84 / 85 / 84 C |
+  | wide-band curve (88/76 C), 20 min at 1 Hz | 6 / 36 / 21 per h | 79.5 / 80.4 / 70.5 C, max 89 / 94 / 90 C | 56 / 54 / 44 C, max 83 / 81 / 74 C |
+  | **curve + governor**, 28 min at 1 Hz | **0 / 0 / 0** (node1: one scheduled step down from where the old curve had it) | 73.9 / 76.6 / 69.5 C, max 89 / 92 / 90 C | 54.6 / 56.0 / 45.6 C, max 82 / 83 / 77 C |
 - **APU power mode:** the service writes `pve_ec_fan_power_mode` (default `quiet`; also `balanced`, the
   AXB35's factory EC default, or `performance`) to `apu/power_mode` on start, and sets `balanced` on stop
   (it does not restore a mode that was set before the role). Measured on ai-node1 under CI load
@@ -530,9 +563,14 @@ that curve for the two CPU fans and sets the APU power mode:
 - **Metrics:** `ec-fan-textfile.timer` writes
   `/var/lib/prometheus/node-exporter/ec_fan.prom` every 30 s. It reports `ec_fan_rpm`, `ec_fan_level` and
   `ec_fan_mode_info` per fan, `ec_fan_managed` per CPU fan, plus `ec_temp_celsius`,
-  `ec_apu_power_mode_info` and `ec_fan_driver_loaded`. The alerts are in `kubernetes/apps/infrastructure/monitoring/pve-ec-fan-rules.yaml`:
-  a CPU fan under 1000 rpm above 70 C, a managed CPU fan not in curve mode for 15 min, the file going stale,
-  and the driver not loaded.
+  `ec_apu_power_mode_info` and `ec_fan_driver_loaded`. The governor writes its own
+  `ec_fan_governor.prom` every 15 s: `ec_fan_governor_average_celsius` (the smoothed temperature it decides
+  on), `ec_fan_governor_steps_total{direction}` and a heartbeat. The alerts are in `kubernetes/apps/infrastructure/monitoring/pve-ec-fan-rules.yaml`:
+  a CPU fan under 1000 rpm above 70 C, a managed CPU fan not in curve mode for 15 min, either file going
+  stale (the governor's means it is not governing), the governor's file missing while the driver is loaded,
+  and the driver not loaded. How often the fans
+  change level: `changes(ec_fan_level{fan="1"}[1h])` (the 30 s samples miss the fastest flips; the governor's
+  `ec_fan_governor_steps_total` counts its own exactly).
 
 **Secure Boot must be off.** The module is unsigned. With Secure Boot on, the Proxmox kernel locks down
 (integrity mode) and refuses it. All three nodes have had Secure Boot off (lockdown `none`) since
@@ -581,8 +619,12 @@ python scripts/node-ssh.py <host-ip> "cat /var/lib/prometheus/node-exporter/ec_f
 fan3 on the EC's own curve, ~970 rpm on node2, always 0 on node1 because of its failed fan),
 `cat /sys/class/ec_su_axb35/fan{1,2}/{mode,level}`, `cat /sys/class/ec_su_axb35/temp1/temp` and
 `cat /sys/class/ec_su_axb35/apu/power_mode`.
-`journalctl -u ec-fan-profile` shows each write. In Grafana or Prometheus, query `ec_fan_rpm` and
-`ec_temp_celsius` with `job="proxmox-node"`.
+`journalctl -u ec-fan-profile` shows each write, and `journalctl -u ec-fan-governor` each level the
+governor set, with the average and the instantaneous temperature at that moment. In Grafana or Prometheus,
+query `ec_fan_rpm`, `ec_temp_celsius` and `ec_fan_governor_average_celsius` with `job="proxmox-node"`.
+To see what a config would do with a recorded trace, without touching the fans: one EC temperature per line
+(1 Hz) into `ec-fan-governor simulate` with the config's variables set (it replays the curve and the
+governor and prints `tick temp average level`).
 
 **Changing the curve:** set `pve_ec_fan_rampup_curve` / `pve_ec_fan_rampdown_curve` (five integers
 0-100, strictly rising, each rampdown value below the rampup value of its level). Put them in that
@@ -590,9 +632,18 @@ host's host_vars for one host, or in the role defaults for all. Then run `just e
 The role refuses a curve that breaks those rules, and any fan list other than 1 and 2. A changed config
 restarts `ec-fan-profile`, so the fans are on auto for a moment and then on the new curve. Dropping a fan
 from `pve_ec_fan_fans` puts it back on auto. The APU power mode is `pve_ec_fan_power_mode` (quiet, balanced
-or performance; the role refuses anything else) and changes the same way. To try a curve by hand first, write it to
+or performance; the role refuses anything else) and changes the same way. The governor is
+`pve_ec_fan_governor_up` / `_down` (three integers each, levels 3-5), `_tau_s` and `_hold_s`; a change
+restarts the profile and with it the governor. Keep the split: for each level 3-5, curve rampdown <
+governor down < governor up < curve rampup (the role refuses anything else), and keep the governor's
+40 <-> 60 % band (up[0] - down[0]) wider than the ~6.3 C one step takes off at the cap, or a steady load
+cycles again.
+To try a curve by hand first, write it to
 `/sys/class/ec_su_axb35/fan{1,2}/rampup_curve` (and `rampdown_curve`) on the host. The next converge
-(which sees the fans off the profile) or the next reboot puts the role's curve back.
+(which sees the fans off the profile) or the next reboot puts the role's curve back. Write the curves
+rarely: the driver at the pin leaks its parse buffer on every curve write (`fan_curve_store` frees the
+advanced `strsep` pointer, which is NULL, so the allocation is never freed): a few bytes, harmless once per
+boot, not something to loop on.
 
 **Rollback:** set `pve_ec_fan_enabled: false` (or delete the line) in host_vars and run
 `just ec-fan --limit <host>`. The role stops `ec-fan-profile` (its stop sets fan1/fan2 to auto and the APU
@@ -627,8 +678,8 @@ mode, refusals, disable (also after an apply that stopped part-way), re-pin, ano
 installed, a new pin that does not build (the installed module stays), and the lockdown refusal.
 
 **Caveat:** the curve runs in the driver, not in the EC. If the host kernel hangs, the EC keeps the last
-level it was given. A clean shutdown or reboot stops `ec-fan-profile` first, so the fans are back on auto
-before the kernel goes down.
+level it was given. A clean shutdown or reboot stops `ec-fan-profile` first (and the governor before it),
+so the fans are back on auto before the kernel goes down.
 
 ## Talos node trim (nightly; `kubernetes/apps/node-fstrim`, the agent nodes and relay-worker-1)
 
