@@ -209,8 +209,9 @@ All in the KV-v2 mount `af`. The provision Job creates none of them.
 | `relay-router/relay/admin-signer` | `private_key` | Ed25519 private key, PKCS#8 PEM (kid `relay-admin-2026-11`) | operator, step 3 | `af-app-relay-router` (SA `relay/relay-router-eso`) |
 | `relay-router/relay/reconciler-signer` | `private_key` | Ed25519 private key, PKCS#8 PEM (kid `relay-reconciler-2026-11`) | operator, step 3 | `af-app-relay-router` |
 | `relay-router/router/trust` | `admin_public_key`, `reconciler_public_key` | the two SPKI public keys, PEM | operator, step 3 | `af-app-router-relay-keys` (SA `llm-router/router-relay-keys-eso`) |
-| `relay-router/relay/escrow-token` | `token` | a token minted from token role `relay-router-escrow` | operator, step 9 | `af-app-relay-router` |
 | `relay-router/escrow/<tenant>/<host-or-assistant>/<credential-id>` | `token`, `router_key_id`, `operation_id` | escrowed Router credential | **Relay only** (`relay-router-escrow`), never by hand | Relay (`relay-router-escrow`) |
+
+The escrow token Relay writes with is not a document: ESO mints it (section "Escrow token" below).
 
 The escrow writer policy is, exactly:
 
@@ -237,22 +238,72 @@ bao kv put -mount=af relay-router/router/trust admin_public_key=@"$d/admin.pub" 
 shred -u "$d"/*; rmdir "$d"
 ```
 
-Escrow token, minted only at step 9 (it starts its 720 h lifetime at once):
+### Escrow token (minted by ESO, rotated every 24 h)
 
-```sh
-umask 077; d="$(mktemp -d)"
-bao token create -role=relay-router-escrow -display-name=relay-router-escrow -format=json > "$d/t.json"
-jq -r .auth.client_token "$d/t.json" | bao kv put -mount=af relay-router/relay/escrow-token token=-
-jq -r .auth.accessor "$d/t.json"     # record the accessor (not secret) in the operator evidence
-shred -u "$d/t.json"; rmdir "$d"
-```
+Since 2026-11-22 nobody mints the escrow token by hand. The VaultDynamicSecret
+`relay/relay-router-escrow-token` (`credentials/relay.yaml`) POSTs `auth/token/create/relay-router-escrow`
+with `ttl=168h` on every refresh of the ExternalSecret `relay-router-files`, every 24 h. It logs in as the
+SecretStore does (SA `relay-router-eso`, k8s-auth role `af-app-relay-router`, whose policy may `update`
+that one path). The token role caps what comes back: orphan, not renewable, policy `relay-router-escrow`
+only, at most 168 h. The template writes the response's `client_token` into `escrow-token`; the kubelet
+swaps the directory-mounted file, and Relay rereads it on every escrow call. Relay never renews a token.
 
-**Rotation.** Relay never renews the token. Before 75 % of its 720 h (day 22), mint a new one the same
-way (a new KV version), force the ExternalSecret to sync
-(`kubectl --context admin@ai -n relay annotate externalsecret relay-router-files force-sync="$(date +%s)" --overwrite`),
-confirm the Secret changed and wait two minutes for the kubelet to swap the file, then
-`bao token revoke -accessor <old accessor>`. An expired token makes escrow, delivery and cleanup fail
-closed (`remote_unavailable`) until a valid token is in place.
+- **Lifetimes.** A token lives 168 h and is replaced after 24 h. Replaced tokens are not revoked: each
+  expires on its own, so in steady state about seven are live, all with the same escrow-only policy.
+  ESO runs the generator BEFORE it reads the signer documents, so a refresh that fails later (a signer
+  document unreadable) still mints, and every retry mints again: during such an outage undelivered
+  tokens pile up until they expire. They carry the escrow policy only; revoke them with revoke-prefix
+  below once the cause is fixed, then force a sync.
+- **Health.** `RelayRouterFilesNotReady` (`monitoring/ha-rules.yaml`) fires after 30 min of Ready=False,
+  or when ESO has not reported this ExternalSecret for 25 h (ESO does not re-export the condition after
+  a restart until the next refresh, so a shorter window would page on every restart). Relay then still
+  has about five days on the last token.
+  `kubectl --context admin@ai -n relay describe externalsecret relay-router-files` names the error.
+- **Rotate now** (also mints one): `kubectl --context admin@ai -n relay annotate externalsecret relay-router-files force-sync="$(date +%s)" --overwrite`.
+- **The token Relay uses**, by accessor, without printing it (admin token): the delivered token goes to
+  OpenBao on stdin, never in argv.
+
+  ```sh
+  kubectl --context admin@ai -n relay get secret relay-router-files -o jsonpath='{.data.escrow-token}' | base64 -d |
+    bao write -format=json auth/token/lookup token=- | jq -r '.data | [.accessor, .creation_time, .expire_time] | @tsv'
+  ```
+
+  The newest minted token is not necessarily this one (a failed refresh can mint without delivering).
+  **Every live escrow token**, oldest first:
+
+  ```sh
+  bao list -format=json auth/token/accessors | jq -r '.[]' | while read -r a; do
+    bao token lookup -format=json -accessor "$a" |
+      jq -r 'select(.data.display_name == "token-relay-router-escrow") | [.data.creation_time, .data.accessor, .data.expire_time] | @tsv'
+  done | sort -n
+  ```
+- **Revoke them all** (a leak, or abandoning the connection), with the admin token:
+  `bao write -f sys/leases/revoke-prefix/auth/token/create/relay-router-escrow`. Escrow, delivery and
+  cleanup then fail closed (`remote_unavailable`) until the next mint: force a sync right after, unless
+  you are abandoning the connection (Rollback).
+- **Fallback, if the generator cannot mint** and the last token would expire before the cause is fixed:
+  mint one from the role by hand and write it into the Secret directly. ESO replaces it at its next
+  successful refresh, which is what you want.
+
+  Each step runs only if the previous one succeeded, so a failed mint never replaces the still-valid
+  token with an empty one, and the token appears in no argv and no shell trace (`jq` builds the patch):
+
+  ```sh
+  umask 077; d="$(mktemp -d)"
+  bao token create -role=relay-router-escrow -display-name=relay-router-escrow -format=json > "$d/t.json" &&
+    jq -e '.auth.client_token | select(type == "string" and length > 0)
+           | [{op: "replace", path: "/data/escrow-token", value: @base64}]' "$d/t.json" > "$d/patch.json" &&
+    kubectl --context admin@ai -n relay patch secret relay-router-files --type=json --patch-file "$d/patch.json" &&
+    jq -r .auth.accessor "$d/t.json"   # record the accessor (not secret) in the operator evidence
+  shred -u "$d"/*; rmdir "$d"
+  ```
+
+- **The one-time cutover from the hand-minted token** (2026-11, this change): after the provision Job
+  has run with the mint grant and `relay-router-files` is Ready with a `refreshTime` after the merge,
+  confirm the Secret's `escrow-token` changed (compare `sha256sum` of the old and new values; print
+  neither), wait two minutes for the kubelet, then revoke the hand-minted token with
+  `bao token revoke -accessor <accessor from the step 9 evidence>` and delete its retired document:
+  `bao kv metadata delete -mount=af relay-router/relay/escrow-token`.
 
 ## Order, with the operator's readback for each step
 
@@ -267,7 +318,8 @@ key generation or inclusion. H2-H4a ran before the remaining budget proofs. The 
 1. **Record fixed (this PR merged).** Readback: the `openbao-relay-router-provision` Job log ends with
    `no KV document and no token written`; `bao policy read relay-router-escrow` is exactly the HCL
    above; `bao read auth/token/roles/relay-router-escrow` shows `allowed_policies [relay-router-escrow]`,
-   `orphan true`, `renewable false`, `token_no_default_policy true`, `token_explicit_max_ttl 720h`;
+   `orphan true`, `renewable false`, `token_no_default_policy true`, `token_explicit_max_ttl 720h`
+   (168h since the 2026-11-22 automatic rotation);
    `kubectl --context admin@ai get externalsecret -n relay relay-router-files` and
    `-n llm-router llm-router-relay-trust` exist and are not Ready (missing document); no Pod changed.
 2. **Digest.** Recompute it from the merged `connections.json` with both commands above and compare
@@ -355,14 +407,16 @@ key generation or inclusion. H2-H4a ran before the remaining budget proofs. The 
   issues nothing.
 - To abandon the connection, deleting the OpenBao documents is not enough: ESO keeps the last
   rendered Secrets (`deletionPolicy: Retain`), so `relay/relay-router-files` would keep the private
-  keys. In order: revert both inclusions; revoke every minted escrow token by accessor
-  (`bao token revoke -accessor <accessor>`); remove `clusters/ai/relay-router-credentials.yaml` in a
-  reviewed PR, so Flux prunes the two ExternalSecrets and Kubernetes garbage-collects the Secrets
-  they own (`creationPolicy: Owner`); confirm with
+  keys. In order: revert both inclusions; remove `clusters/ai/relay-router-credentials.yaml` in a
+  reviewed PR, so Flux prunes the two ExternalSecrets and the generator (nothing mints any more) and
+  Kubernetes garbage-collects the Secrets they own (`creationPolicy: Owner`). The same PR removes
+  `RelayRouterFilesNotReady` from `monitoring/ha-rules.yaml` (and its fixtures): without the
+  ExternalSecret its series is gone, and the rule would fire about 25 h later and stay firing. Revoke every minted
+  escrow token (`bao write -f sys/leases/revoke-prefix/auth/token/create/relay-router-escrow`); confirm with
   `kubectl --context admin@ai -n relay get secret relay-router-files` and
   `-n llm-router get secret llm-router-relay-trust` (both NotFound; delete them explicitly if not);
   then delete the documents (`bao kv metadata delete -mount=af relay-router/relay/admin-signer`, and
-  `reconciler-signer`, `escrow-token`, `relay-router/router/trust`).
+  `reconciler-signer`, `relay-router/router/trust`).
 - After any issuance, revoke the credentials through Relay first and confirm the Router rejects them:
   removing the components does not revoke issued keys, and Relay needs the connection files to finish
   revocation and escrow cleanup. Keep them until no pending job remains.
