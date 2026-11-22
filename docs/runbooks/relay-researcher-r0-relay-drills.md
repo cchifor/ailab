@@ -275,9 +275,10 @@ the generator summary (`issuedAt`, `expiresAt`, `abortBeforeGrantIfHubNotReadBac
 
 **The session.** Run the checklist's step 0 block (the helpers `cap`, `radmin`, `lsql`, `lwrite`,
 `wsha_*`, `plugins`), step 4's client Pod and `q`, and step 5's building blocks (`withdraw.sql`,
-`open-B.sql`, `plugin`, `force_sync`, `wait_hashes`, `rlog`, `rollstate`, `roll_deploy`, `roll_router`,
-`ledger_state`). They are
-unchanged. Step 5 deleted the client Pod, so create it again with step 4's manifest and `wait`. If this
+`open-B.sql`, `plugin`, `force_sync`, `es_ann`, `es_ok`, `wait_hashes`, `rlog`, `rreader`, `lerrors`, `rident`,
+`rollstate`, `roll_deploy`, `roll_router`, `ledger_state`). They are
+unchanged; every `force_sync*` runs under field manager `relay-runbook` (checklist step 5, R0b's B1).
+Step 5 deleted the client Pod, so create it again with step 4's manifest and `wait`. If this
 session's `$ev` has no `withdraw.sql`, `open-B.sql` or `witness-B.json`, write them again from step 5's
 blocks and the offline record; `sha256sum "$ev/witness-B.json"` must equal B's hash in the record.
 
@@ -350,6 +351,22 @@ roll_relay() {
   cap relay-pod-before-roll hpod &&
   roll_deploy relay relay app=relay relay
 }
+# router_ctl <label> <since: date -u +%FT%TZ>: the in-window Router control. Until llm-router #191, the Router
+# cannot print `Worker budget authority available` (checklist step 5, the note above rreader), so rlog is
+# empty. This is the owner's substitute (#1753 comment 133524; checklist "Observing the Router"): two rreader
+# captures 12 s apart on one connection (same pid and backend_start, later query_start, query
+# runtime_snapshot), and no ledger error with CONTEXT runtime_snapshot since <since>. In Relay drills, lerrors
+# lines with CONTEXT current_epoch are expected (Relay's observer and the operator controls) and do not count.
+# Call it directly, never under cap or $(...): cap's counter must stay in this shell. (NEW, R0b.)
+router_ctl() {
+  cap "$1-reader" rreader || return 1
+  sleep 12
+  cap "$1-reader-after-10s" rreader || return 1
+  cap "$1-errors" lerrors "$2" || return 1
+  cap "$1-rident" rident || return 1
+  echo "CHECK BY EYE: one row each, same pid+backend_start, later query_start, query runtime_snapshot;"
+  echo "no '$1-errors' line with CONTEXT runtime_snapshot (current_epoch lines are Relay's observer or the controls)."
+}
 # The hub's worker rows: R0 must leave every count unchanged and its workerId absent.
 hub_counts() {
   kubectl --context admin@ai -n relay exec -i relay-postgres-0 -c postgres -- \
@@ -407,12 +424,17 @@ SQL
   R1's input later differs from R0's only in the fields §3.0 step 5 lists.
 - **The agent stays out.** Campaign §3.5 step 1, without its scale to zero (R0's agent values never
   reach the cluster, so the running agent keeps its current configuration). The default context is a
-  different cluster (checklist, "Rules for every step"), so every `flux` command here names the context
-  (NEW form): `flux --context admin@ai suspend kustomization relay-researcher-agent -n flux-system`.
-  Then (NEW):
+  different cluster (checklist, "Rules for every step"), so every command here names the context. The
+  suspension is a patch under field manager `relay-runbook` (NEW form, 2026-11-21): R0's
+  `flux suspend` was undone by the next `flux-system` apply (#1753 comment 135072), which takes over a
+  `kubectl*`/`flux` field as roll_deploy's note says (#1897). Record `WE_SUSPENDED=1` only if `spec.suspend`
+  was false before. Then force one `flux-system` apply and read the field back after it:
 
   ```sh
-  kubectl --context admin@ai -n flux-system get kustomization relay-researcher-agent -o jsonpath='{.spec.suspend}{"\n"}'   # true
+  kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-agent --type=merge \
+    -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook
+  flux --context admin@ai reconcile kustomization flux-system -n flux-system
+  kubectl --context admin@ai -n flux-system get kustomization relay-researcher-agent -o jsonpath='{.spec.suspend}{"\n"}'   # true, after the reconcile
   cap agent-before kubectl --context admin@ai -n relay-infra-control get deploy relay-infrastructure-agent \
     -o jsonpath='{.metadata.generation} {.status.readyReplicas}{"\n"}'
   ```
@@ -498,23 +520,25 @@ are NEW.
      - `cap control-allocator q relay_budget_allocator "<the same statement>"` returns `<B recoveryEpoch>`.
        This is Relay's own login and `clients` row. It rules out the other cause of a 42501: a login
        without a `clients` mapping (Relay `rel:deploy/worker-budget-ledger/001-authority.sql:68-75`).
-     - `since=$(date -u +%s.%N)`.
+     - `since=$(date -u +%s.%N)`; `t0=$(date -u +%FT%TZ)` (NEW: `router_ctl`'s start, after the gate opened).
   3. **Observe Relay.** `relay_check 0 "$since"` returns 0: two successive observer checks after the
      gate was proven open, both failing, with the authority and the observer started. For drill A,
      also `cap refusal-allocator q relay_budget_allocator "SELECT worker_budget.current_epoch('<A instanceId>', '<A recoveryEpoch>', '<A witnessDigest>')"`
      fails with `42501: Worker budget authority unavailable`: the statement the observer runs with
      Relay's mounted file.
-  4. **The in-window Router control.** `cap router-log rlog` shows `Worker budget authority available`:
-     the Router, on B, is served by the same ledger in the same window.
+  4. **The in-window Router control.** `router_ctl router-X "$t0"` passes: the Router, on B, is served by the same ledger in the same window. Also
+     `cap router-log rlog`; it shows `Worker budget authority available` only once llm-router #191 has shipped.
   5. `cap control-again …` and `cap control-allocator-again …`: both still return `<B recoveryEpoch>`.
      `cap alerts ralerts`.
   6. Withdraw: `lwrite withdraw`, then `plugin false`.
 - **R_R, restore B in Relay and prove it.** "Restoring B", after a drill whose readback passed.
   1. W_R with step 4 = `bao kv put -mount=af relay-budget/witness witness=- < "$ev/witness-B.json"` and
      B's sha256 expected.
-  2. `lwrite open-B`, `plugin true` (`HTTP 200`, `active`), then `since=$(date -u +%s.%N)`.
+  2. `lwrite open-B`, `plugin true` (`HTTP 200`, `active`), then `since=$(date -u +%s.%N)` and
+     `t0=$(date -u +%FT%TZ)`.
   3. `relay_check 1 "$since"` returns 0: Relay's positive control on B after the drill.
-     `cap router-log rlog` shows `available`, and `cap control-allocator …` returns `<B recoveryEpoch>`.
+     `router_ctl router-R-X "$t0"` passes (and `cap router-log rlog`, as step 4), and `cap control-allocator …`
+     returns `<B recoveryEpoch>`.
   4. Withdraw: `lwrite withdraw`, then `plugin false`.
   5. `cap router-es-after-X router_es_refresh` equals `router-es-before-X` (no ESO reconcile of the Router's
      ExternalSecret ran during the drill), and `cap router-links-after-X rlinks_ok` passes. Otherwise F_R
@@ -602,9 +626,9 @@ R_R ends withdrawn. Any other difference is F_R step 3: stop and escalate.
 **Production re-open (the owner confirms it after C3's readback).** First (NEW, 2026-11-21): the last
 drill's R_R step 5 passed (`router_es_refresh` unchanged, `rlinks_ok`), and `cap router-links-reopen rlinks_ok`
 passes again now; otherwise `roll_router` (checklist step 5's R) before the re-open. Commands as checklist steps 7 and 8:
-`lwrite open-B`, then `plugin true`. Readback:
+`lwrite open-B`, then `plugin true`, then `t0=$(date -u +%FT%TZ)`. Readback:
 
-- `cap plugins-end plugins` (`active`), and `cap router-log-end rlog` (`available`);
+- `cap plugins-end plugins` (`active`), `router_ctl router-end "$t0"`, and `cap router-log-end rlog`;
 - `since=$(date -u +%s.%N); relay_check 1 "$since"` returns 0;
 - `cap final ledger_state`: B's IDs, `ready = t`, every history count 0;
 - `cap hub-counts-end hub_counts`: equal to §6.1's, R0's `workerId` absent;
@@ -663,6 +687,8 @@ reset's rollout keeps the annotation (Flux does not own it) and is the one roll 
 
    ```sh
    git revert --no-edit <R0's squash-merge commit on main>
+   # or, if the per-run PR landed as a merge commit (R0's #1920 and R0b's #1928 did):
+   git revert -m 1 --no-edit <its merge commit on main>
    python3 scripts/relay-candidate-run.py reset   # placeholder run/; "oneTimeStructure": "absent" (reverted)
    git status --porcelain                         # empty: the revert already restored those bytes
    python3 scripts/relay-candidate-run.py check   # exit 0, "state": "placeholder", "oneTimeStructure": "absent"
@@ -670,6 +696,8 @@ reset's rollout keeps the annotation (Flux does not own it) and is the one roll 
      kubernetes/apps/apps/relay/kustomization.yaml scripts/tests/test_relay_v060_activation_gate.py \
      kubernetes/apps/relay-researcher/agent        # empty, unless another merged PR touched these paths
    ```
+
+   After a merge-commit revert, the diff's base is `<merge commit>^1` instead of `<squash>^`.
 
    A conflict, or a non-empty diff caused by a later change, is reviewed by hand. Run the repository's
    tests, and open the PR. It is merged once CI is green, the same day as R0.
@@ -681,8 +709,9 @@ reset's rollout keeps the annotation (Flux does not own it) and is the one roll 
    - `cap mounted-relay-reset wsha_relay`: B.
 3. **The session-key Secret.** Once that rollout no longer mounts it (generator runbook, "After the
    campaign"): `kubectl --context admin@ai -n relay delete secret relay-worker-candidate-key-<d16>`.
-4. **The agent.** Campaign §3.10 step 8, with the context named (NEW form):
-   `flux --context admin@ai resume kustomization relay-researcher-agent -n flux-system`. Then `cap agent-after …` with
+4. **The agent.** Campaign §3.10 step 8, only if §6.1 recorded `WE_SUSPENDED=1`, under the same field manager
+   (NEW form): `kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-agent --type=merge
+   -p '{"spec":{"suspend":false}}' --field-manager=relay-runbook`. Then `cap agent-after …` with
    §6.1's command: the same generation as `agent-before`, and Ready. The agent never ran R0's values.
 5. **The client Pod.** `kubectl --context admin@ai -n relay-budget-authority delete pod relay-budget-operator-client`
    (checklist step 5). Stop the port-forward: `kill "$r0_prom_pid"`.
