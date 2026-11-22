@@ -816,15 +816,32 @@ plugin() {
   case "$1:$state" in true:active|false:disabled) ;; *) echo "plugin $1: state $state"; return 1;; esac
 }
 # The form of "Changing the witness" step 4, in relay and in llm-router.
-force_sync() {
-  kubectl --context admin@ai -n relay annotate externalsecret relay-worker-budget force-sync="$(date +%s)" --overwrite &&
-  kubectl --context admin@ai -n llm-router annotate externalsecret llm-router-worker-budget force-sync="$(date +%s)" --overwrite
-}
 # force_sync_relay / force_sync_router: one ExternalSecret each. R0 (Relay's half) syncs only Relay's, so the
 # Router's Secret, and the files its Pod bound at start, stay B (relay-researcher-r0-relay-drills.md, "The Router's
 # mounted files"). force_sync_router is used only through router_presync, while OpenBao holds B.
-force_sync_relay() { kubectl --context admin@ai -n relay annotate externalsecret relay-worker-budget force-sync="$(date +%s)" --overwrite; }
-force_sync_router() { kubectl --context admin@ai -n llm-router annotate externalsecret llm-router-worker-budget force-sync="$(date +%s)" --overwrite; }
+# Every annotate runs under field manager `relay-runbook` (2026-11-21, R0b blocker B1; #1753). Under the default
+# manager (`kubectl-annotate`), Flux's kustomize-controller (v1.8.5) takes the field over at the next apply of
+# `relay-budget-credentials` (10 m) and deletes the annotation. ESO refreshes on ANY annotation change (its
+# syncedResourceVersion hashes the annotations), so that deletion is a second, off-schedule refresh: with a drill
+# witness in OpenBao it would rewrite the Router's Secret. The same rule as roll_deploy's restart (#1897).
+# The value is in nanoseconds, so two calls within one second still change it.
+force_sync_relay()  { kubectl --context admin@ai -n relay annotate externalsecret relay-worker-budget force-sync="$(date +%s%N)" --overwrite --field-manager=relay-runbook; }
+force_sync_router() { kubectl --context admin@ai -n llm-router annotate externalsecret llm-router-worker-budget force-sync="$(date +%s%N)" --overwrite --field-manager=relay-runbook; }
+force_sync()        { force_sync_relay && force_sync_router; }
+# es_ann <ns> <name>: the force-sync annotation, the managers that own it, the object's uid and ESO's
+# acknowledgement (syncedResourceVersion), last refresh and Ready status, as one JSON line.
+es_ann() { kubectl --context admin@ai -n "$1" get externalsecret "$2" --show-managed-fields -o json \
+  | jq -c '{uid: .metadata.uid, generation: .metadata.generation, forceSync: .metadata.annotations["force-sync"],
+            owners: [.metadata.managedFields[] | select(.fieldsV1["f:metadata"]["f:annotations"]["f:force-sync"] != null) | {manager, operation, time}],
+            synced: .status.syncedResourceVersion, refreshTime: .status.refreshTime,
+            ready: ([.status.conditions[]? | select(.type=="Ready") | .status][0])}'; }
+# es_ok <before> <after>: two es_ann lines show nothing moved: the same uid, annotation value, syncedResourceVersion
+# and refreshTime, the annotation's sole owner `relay-runbook`/`Update`, and Ready True. Use it across a forced
+# `flux reconcile kustomization relay-budget-credentials` to prove Flux kept the annotation (R0b's pre-signing proof).
+es_ok() {
+  jq -en --argjson a "$1" --argjson b "$2" '$a.uid==$b.uid and $a.forceSync==$b.forceSync and $a.synced==$b.synced
+    and $a.refreshTime==$b.refreshTime and ($b.owners|length)==1 and $b.owners[0].manager=="relay-runbook"
+    and $b.owners[0].operation=="Update" and $b.ready=="True"' >/dev/null; }
 # router_es_refresh: the Router ExternalSecret's last refresh as epoch seconds and its Ready status ("<epoch> <True|False>").
 router_es_refresh() {
   local t r
@@ -879,13 +896,6 @@ rlinks() {
   done
 }
 rlinks_ok() { local out; out="$(rlinks)" || return 1; printf '%s\n' "$out"; [ "$(printf '%s\n' "$out" | awk '$1!=1' | wc -l)" -eq 0 ]; }
-# rreader: the Router's ledger reader session and its last statement time. Two captures at least 10 s apart with a
-# later query_start show the Router reading the ledger now (it polls every 5 s); an old `available` log line does not.
-rreader() {
-  lsql <<'SQL'
-SELECT clock_timestamp(), pid, state, query_start FROM pg_stat_activity WHERE application_name = 'router-worker-budget-reader';
-SQL
-}
 # wait_hashes_relay <drill sha256> <B sha256>: bounded wait (2 minutes) until OpenBao and Relay's Secret carry the
 # drill's sha256, while the Router's Secret still carries B. It fails at once if the Router's Secret changes.
 wait_hashes_relay() {
@@ -927,7 +937,9 @@ rlog() {
 # At llm-router 5a5181b7, rlog is always empty: the plugin logs through cordis's ctx.logger, whose only
 # exporter is an in-memory buffer (llm-router #191). The two helpers below are the ledger-side
 # observation the owner accepted on 2026-11-20 (#1753). Keep capturing rlog: it shows the gap.
-# rreader: the Router plugin's reader session (it refreshes every 5 s over one pooled connection).
+# rreader: the Router plugin's reader session (it refreshes every 5 s over one pooled connection). Two captures at
+# least 10 s apart, with the same pid and backend_start and a later query_start, show the Router reading the ledger
+# now; an old `available` log line does not.
 rreader() {
   lsql <<'SQL'
 SELECT pid, backend_start, application_name, usename, state, query_start, left(query, 60) AS query
