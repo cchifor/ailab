@@ -79,12 +79,22 @@ class RepoConfigTest(unittest.TestCase):
         # The Relay qualification campaign freeze (R1 to the canary): the last rule disables every
         # Relay, Router, journal, ledger and researcher path, so no earlier rule re-enables them.
         rule = self.config['packageRules'][-1]
-        self.assertIs(rule.get('enabled'), False)
-        self.assertFalse(rule.get('matchPackageNames'))
-        for path in ('kubernetes/apps/apps/relay/**', 'kubernetes/apps/apps/llm-router/**',
-                     'kubernetes/apps/relay-*/**', 'kubernetes/components/relay-*/**',
-                     'kubernetes/components/llm-router-*/**', 'kubernetes/optional/relay-*/**'):
-            self.assertIn(path, rule['matchFileNames'])
+        # No other matcher may narrow it (matchManagers, matchDatasources, matchUpdateTypes, ...).
+        self.assertEqual(set(rule), {'description', 'matchFileNames', 'enabled'})
+        self.assertIs(rule['enabled'], False)
+        frozen = {'kubernetes/apps/apps/relay/**', 'kubernetes/apps/apps/llm-router/**',
+                  'kubernetes/apps/relay-*/**', 'kubernetes/components/relay-*/**',
+                  'kubernetes/components/llm-router-*/**', 'kubernetes/optional/relay-*/**'}
+        self.assertEqual(set(rule['matchFileNames']), frozen)
+        # Every pattern must match real manifests, so a typo or a rename cannot lift the freeze quietly.
+        for pattern in sorted(frozen):
+            self.assertTrue(any(f.suffix in ('.yaml', '.yml') for f in REPO.glob(pattern) if f.is_file()),
+                            'no manifest matches %s' % pattern)
+        # The files Renovate #1932 changed (relay-postgres and backup-database) are inside the freeze.
+        for path in ('kubernetes/apps/apps/relay/postgres.yaml', 'kubernetes/apps/apps/relay/backup.yaml',
+                     'kubernetes/apps/apps/relay/relay.yaml'):
+            self.assertTrue((REPO / path).is_file(), path)
+            self.assertTrue(path.startswith('kubernetes/apps/apps/relay/'))
 
 
 class AnsibleRequirementsTest(unittest.TestCase):
