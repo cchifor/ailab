@@ -365,7 +365,7 @@ disk as above, or `skopeo delete` old `agentforge/**` tags by hand (see "Refresh
 tag" above for the delete pattern) — `ansible-playbook ansible/registry.yml` then converges the
 new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs within ~3h.
 
-## Thin-volume trim
+## Thin-volume trim (weekly, ai-node1)
 
 > **The live registry, CT 5005 on ai-node3, is trimmed by ai-node3's nightly `pve-lxc-fstrim` sweep** (since
 > 2026-11-22; [node-maintenance.md](node-maintenance.md), "LXC volume trim (nightly)"), like every other container.
@@ -389,8 +389,9 @@ new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs withi
 >
 > The rest of this section describes CT 5004 on ai-node1, parked (stopped, net0 `link_down=1`, `backup` lock) until
 > its decommission: its `registry-lxc-fstrim.timer` is **disabled**, and ai-node1's sweep still excludes 5004. The
-> weekly unit block below stays until that decommission PR, because `ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh`
-> parses it.
+> weekly unit block below and this section's heading stay until that decommission PR: two tests parse them
+> (`ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh` reads the unit block, `scripts/tests/test_pve_lxc_fstrim_schedule.py`
+> reads the heading to find the host with a dedicated unit).
 
 Zot's GC frees blobs inside the container, but the host's `fstrim.timer` never reaches LXC mount
 points, so freed space stays allocated in ai-node1's `local-lvm` thin pool. By 2026-10-06 mp0 held
