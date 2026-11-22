@@ -9,8 +9,33 @@ inventory, logout/reboot and fresh hub heartbeat checks pass.
 
 ## Release and inventory
 
+**Relay v0.10.11** (release workflow run 145909, 2026-11-22, source
+`12ea8d52cda75fe67519ffd700c5e43ea9116ef0`) is the default connector release:
+
+| Field | Pin |
+|---|---|
+| Source | `12ea8d52cda75fe67519ffd700c5e43ea9116ef0` |
+| Linux amd64 SHA-256 | `a2a0b34104440a421781b43affbadee91db0a514c500fac429282b1269870a48` |
+| Linux arm64 SHA-256 | `13e9e4da9b4e5f6ea713d8933ad97d134b7c9b41c9ec078b8a7bc401bfa70d55` |
+
+The pins were checked on 2026-11-23 against the release's `manifest.json`, `SHA256SUMS` and the downloaded
+binaries; the amd64 binary reports `relay-connector 0.10.11`, the arm64 one was checked by hash only (no worker runs
+arm64). The relay-bus skill and the unit are unchanged since v0.10.10.
+
+**What v0.10.11 changes** (Relay #575, #576, #580, "Claude Code state"): for a pane running Claude Code, the
+connector reads Claude Code's session file (`<config>/sessions/<pid>.json`, internal, checked against 2.1.330) and
+sends its state with the pane's terminal sample: Working, Idle, or waiting for a decision (a permission question)
+or an answer. It finds the Claude process among the pane's foreground processes and reads the file only as a regular
+file of its own account, at most 64 KiB, never following a link, within 1 s per pass. A missing, unreadable or
+ambiguous session sends no state, and the console falls back to the terminal evidence of v0.10.10. No migration.
+
+**Roll out as for v0.10.10** (below): the connector first, one worker at a time, with the v0.10.11 binary at
+`~/.ailab-converge/artifacts/relay-connector/v0.10.11/relay-connector-linux-amd64` as `relay_connector_source`; then
+the hub pin. Mixed versions are safe both ways: a v0.10.10 hub ignores the Claude Code state, and a v0.10.10
+connector sends none. **Roll back** by repinning v0.10.10 (below) and converging.
+
 **Relay v0.10.10** (release workflow run 145785, 2026-11-22, source
-`716c2ed8a8090cd5b38799adb39d99cf89550026`) is the default connector release:
+`716c2ed8a8090cd5b38799adb39d99cf89550026`), the previous connector release and the rollback target:
 
 | Field | Pin |
 |---|---|
