@@ -149,10 +149,10 @@ class BinaryGuard(unittest.TestCase):
         self.assertTrue(self._passes("v2.1.23", None), "first install")
 
 
-class NewCtTrimExclusion(unittest.TestCase):
-    """ai-node3's nightly LXC sweep must leave the new registry CT 5005 alone (the pve_base role consumes the var)."""
+class NewCtTrimInclusion(unittest.TestCase):
+    """ai-node3's nightly LXC sweep trims the registry CT 5005 since 2026-11-22 (the pve_base role consumes the var)."""
 
-    def test_node3_env_excludes_5005(self):
+    def test_node3_env_includes_5005(self):
         base = REPO / "ansible" / "roles" / "pve_base"
         ctx = yaml.safe_load((base / "defaults" / "main.yml").read_text())
         ctx.update(yaml.safe_load((REPO / "ansible" / "host_vars" / "ai-node3.yml").read_text()))
@@ -160,7 +160,7 @@ class NewCtTrimExclusion(unittest.TestCase):
         env.filters["int"] = lambda v: int(v)
         rendered = env.from_string((base / "templates" / "pve-lxc-fstrim.env.j2").read_text()).render(**ctx)
         line = next(l for l in rendered.splitlines() if l.startswith("PVE_LXC_FSTRIM_EXCLUDE="))
-        self.assertIn("5005", line.split("=", 1)[1].strip('"').split())
+        self.assertNotIn("5005", line.split("=", 1)[1].strip('"').split())
 
     def test_the_sweep_script_honours_the_exclude_list(self):
         script = (REPO / "ansible" / "roles" / "pve_base" / "files" / "pve-lxc-fstrim.sh").read_text()

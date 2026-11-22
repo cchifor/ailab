@@ -367,12 +367,22 @@ new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs withi
 
 ## Thin-volume trim (weekly, ai-node1)
 
-> **Status since the 2026-11-21 zot move.** This section describes CT 5004 on ai-node1, which is now parked
-> (stopped, net0 `link_down=1`, `backup` lock) until the owner approves its decommission. Its
-> `registry-lxc-fstrim.timer` on ai-node1 is **disabled** (owner decision for the move), and ai-node1's
-> `pve-lxc-fstrim` sweep still excludes 5004. The live registry, CT 5005 on ai-node3, is excluded from ai-node3's
-> sweep (`ansible/host_vars/ai-node3.yml`), and **its trim is not set up yet**: that is decided with the move's
-> follow-up. Until then, freed blobs on 5005's mp0 stay allocated in ai-node3's `local-lvm` thin pool.
+> **The live registry, CT 5005 on ai-node3, is trimmed by ai-node3's nightly `pve-lxc-fstrim` sweep** (since
+> 2026-11-22; [node-maintenance.md](node-maintenance.md), "LXC volume trim (nightly)"), like every other container.
+> No separate unit: 5004's weekly unit below existed because its discard bursts hit the NVMe that carried cp1's etcd
+> WAL, and the CP disks are on the QNAP since 2026-11-20 (ADR 0043). The sweep trims 4 GiB chunks with the IO-pressure
+> guard in a 13-min slot, and its per-volume cursor continues a pass the next night.
+> - **The first pass runs supervised** (the sweep started by hand on ai-node3, `systemctl start pve-lxc-fstrim`, repeated
+>   until both 5005 volumes record a complete pass in its state dir), so a multi-night first pass could neither keep 5003's volumes
+>   waiting (never-completed volumes go first) nor trip `ProxmoxLxcTrimNotSucceeding` (50 h). On 2026-11-22 mp0 held
+>   ~234 GiB allocated for 227 GiB in use.
+> - **When the strive retention hold lifts** (bulk GC), run the same supervised passes the day after the first big
+>   GC cycle, before the nightly sweep meets the backlog; expect node3 IO pressure and a thin-pool drop (`lvs
+>   pve/vm-5005-disk-1 pve/data`). ai-node3 keeps thin-pool zeroing on, so a trimmed chunk that is written again
+>   costs a zeroing write (node-maintenance.md "Thin-pool zeroing").
+>
+> The rest of this section describes CT 5004 on ai-node1, parked (stopped, net0 `link_down=1`, `backup` lock) until
+> its decommission: its `registry-lxc-fstrim.timer` is **disabled**, and ai-node1's sweep still excludes 5004.
 
 Zot's GC frees blobs inside the container, but the host's `fstrim.timer` never reaches LXC mount
 points, so freed space stays allocated in ai-node1's `local-lvm` thin pool. By 2026-10-06 mp0 held
