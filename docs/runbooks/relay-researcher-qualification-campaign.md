@@ -65,7 +65,7 @@ Each is read back; a missing one stops the campaign before any signing.
 | Hub with the fraction-safe loader: the `c0fe50f0` candidate loader refuses every real binding | §8 G0; fixed by #525, released as v0.10.4 (ailab #1789); since hub-upgrade H8 (ailab #1915) the hub is v0.10.9, which keeps the fix | **live** since 2026-11-21 03:47:52Z: v0.10.9 `…@sha256:1b0f2f72…7a39`, source `04a897f2`, schema 79 (H8: ailab #1915 merged 03:45:46Z as `fdc7a7a5`, readback #1915 comment 134561; a candidate document loaded on it in R0b, #1753 comment 135956). v0.10.4 `d1482bc1…57a7` ran from 2026-11-16 10:08Z until H8 |
 | Ceremony tools and driver fixes (G1-G5): signer, `commandSha256`, `subject.json`, `submittedPod`, the matrix's installed-bundle check, fraction-safe parsing | §8; Relay #523, #528, #529, #530 | merged; `submittedPod` by reconstruction needs O7 |
 | `deployment.json` and `subject.json` composed and frozen (§3.0 step 7) | this runbook | after the v0.10.9 rollout (H8); `hub.image` is `1b0f2f72…7a39` |
-| E6 rehearsal passed (§4) | this runbook | not run |
+| E6 rehearsal passed (§4), with the owner's 2026-11-22 waiver of its launch-dependent items (§4, "Owner waiver") | this runbook | not run |
 | Dedicated researcher channel, admin browser state, operator kube identity (VAP write, `pods/exec`, NetworkPolicy CAS, SA impersonation incl. a foreign-slot SA, `pods/log` in `relay-internal-tls`) | plan §8 | operator readback |
 | Probe images (egress; storage with `dd` and `sleep`) and reviewed allow/deny targets | plan R5, R4 | not in git |
 | Owner decisions O1-O8, S3, I4, N1, N2 | §7 | decided; S2's create path is verified, queued-create survival and timing/readbacks remain in E6 |
@@ -184,7 +184,10 @@ checkout; the ceremony tools are checked against `c0fe50f0`'s own verifiers
    `validitySeconds: 7200`, `cleanupSeconds: 86400` and the whole payload except its four times
    (`main:docs/qualification/candidate-ceremony-tools.md`, "Signing a run"). From the previous run's,
    change only `runId`, the worker/launch IDs, `promptSha256`, `commandSha256`, `leaseSeconds`,
-   `sessionPermitPublicKey` and `owner`; a diff in any other field breaks the freeze. Common values:
+   `sessionPermitPublicKey` and `owner`, and, on the first run after an O3 reissue of File B,
+   `router.tokenPolicyDigests` (owner decision 2026-11-22, #1753 comment 136654: measured rows bind to the
+   measurement subject, the binding and `deployment.json`, which does not contain it); a diff in any other
+   field breaks the freeze. Common values:
    one worker, `maxActiveWorkers: 1`, `maxGenerations: 1`, `maxLifetimeSeconds: 900`,
    `providerTokenCap: 1000000`, `providerRequestCap: 8`, `allowedScenarios` = all 19,
    `egressPolicySha256` = `f6d3187c…282f`, `router.tokenPolicyDigests` = [File B digest], the Router CA
@@ -311,8 +314,10 @@ fresh `workerId` guarantees it. There is no withdraw verb: the scope stops admit
 
 ### 3.5 Agent candidate values, agent held disabled
 
-1. `flux suspend kustomization relay-researcher-agent -n flux-system`, then
-   `kubectl -n relay-infra-control scale deploy/relay-infrastructure-agent --replicas=0`
+1. Suspend the agent's Kustomization under field manager `relay-runbook` (the "Suspending a Kustomization" note
+   in §5.2): `kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-agent --type=merge -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook`,
+   then `flux --context admin@ai reconcile kustomization flux-system -n flux-system` and read `spec.suspend` back
+   (`true`). Then `kubectl --context admin@ai -n relay-infra-control scale deploy/relay-infrastructure-agent --replicas=0`
    and wait until every Pod of that Deployment is gone before §3.6. **Verified:** the running daemon
    polls and executes offers (`rel:packages/infrastructure-agent/daemon.ts:713-719`); with no agent
    process it cannot claim the create. The hub checks the stored installation is `ready` at the current
@@ -384,8 +389,8 @@ curl -sS --fail -b "$COOKIES" -H 'Origin: https://relay.chifor.me' -H 'Content-T
 
 ### 3.7 Per-launch admission bundle (after `t0`, inside the lifetime)
 
-`flux suspend kustomization relay-researcher-installation -n flux-system`, then
-(`rel:docs/infrastructure-candidate-policy.md`):
+Suspend the installation's Kustomization the same way (§5.2): `kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-installation --type=merge -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook`,
+then the `flux-system` reconcile and the `spec.suspend` readback (`rel:docs/infrastructure-candidate-policy.md`):
 
 1. Read the persisted intent:
    `SELECT id, environment_id, generation, kind, state, digest, request FROM agent_environment_operations WHERE id='<signed operationId>';`
@@ -490,13 +495,13 @@ never from `t0` estimates:
    (`rel:packages/infrastructure-agent/candidate-policy-preparation.ts:224-240,327-337`); delete the
    old ConfigMaps only after the new guards and bindings are read back in §3.7 step 4 (§8 U4).
 8. Slot back to git: confirm every driver's `outstandingRecovery` is empty and no Pod remains, then
-   `flux resume kustomization relay-researcher-installation -n flux-system`. **Verified:** git declares
+   `kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-installation --type=merge -p '{"spec":{"suspend":false}}' --field-manager=relay-runbook`. **Verified:** git declares
    the deny-all gate and 0-Pod quota (`ailab:kubernetes/apps/relay-researcher/installation/admission-deny.yaml:35-38`;
    `ailab:kubernetes/apps/relay-researcher/installation/containment.yaml:71-90`). Wait for successful
    reconciliation at the intended revision and read back both objects; resume alone is not that
    readback. Extra candidate guards remain (`prune: false`,
    `ailab:kubernetes/apps/clusters/ai/relay-researcher-installation.yaml:25-33`); their scope is described in
-   §8 U5. Then `flux resume kustomization relay-researcher-agent -n flux-system` once
+   §8 U5. Then `kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-agent --type=merge -p '{"spec":{"suspend":false}}' --field-manager=relay-runbook` once
    the per-run PR has merged and git equals the live agent (replicas included).
 
 ### 3.11 Before the next run
@@ -555,6 +560,28 @@ Target: create by `t_s + 55 min`, done by about `t_s + 85 min`; 35 min of slack,
 
 **E6 rehearsal checklist.** Time each step; record the measured value next to the target; nothing is
 signed on the live hub.
+
+**Owner waiver (2026-11-22, #1753 comment 136654).** Five items below need a running candidate launch, which
+E6 cannot have: it signs nothing on the live hub, and no disposable hub, agent and journal stack exists. They
+are measured first in R1, under R1's stop rules and the hard limits above:
+
+- item 7's queued-create half and the summed create → Running path;
+- item 8, each driver's real duration;
+- item 10's launch half (the holder's `commandSha256`, the session files against the drivers' pins);
+- item 11, R2's disruption, decided again before R2 from R1's timings;
+- item 13, U9's one agent → journal connection.
+
+Every other item, and every part of an item that needs no launch, runs and is posted before R1 is signed,
+including the two preconditions: the R7 audit policy live on all three control planes (O7;
+[relay-researcher-r7-audit-policy.md](relay-researcher-r7-audit-policy.md): "Apply before the E6 rehearsal")
+and the runtime image cached on `relay-worker-1`. Two gates follow from the waiver:
+
+- **Sum before signing.** The measured per-launch bundle time (item 5), warm Pod start under `relay-gvisor`
+  (item 6) and agent restart (item 7's restart half) sum to 3 min at most. Otherwise R1 is not signed.
+- **U9 before the grant.** After §3.2, the journal Pod is Ready on 8443 and the live
+  `relay-infrastructure-agent-journal-egress` policy equals git. Otherwise abort before the grant.
+
+An R1 lost on a waived item uses one reserve (O1).
 
 - [ ] Sign, `verify`, budget `verify` and the journal render with throwaway keys (offline).
 - [ ] Journal service restart on a disposable namespace or the rehearsal journal: apply, scale, Ready.
@@ -616,6 +643,23 @@ and egress policy in place, and Flux would silently undo them, as it would the p
 Driver procedures that suspend and resume Flux around their own in-place change (R2's disruption) run
 inside this window: confirm it is suspended instead, and never resume before §3.10 step 8. Never
 resume over an unreverted live change. Q4 must never run inside a window.
+
+**Suspending a Kustomization** (2026-11-21, R0; #1753 comment 135072). `relay-researcher-agent`,
+`relay-researcher-installation` and `apps` are themselves applied by `flux-system`
+(`kubernetes/apps/clusters/ai/*.yaml`). A `flux suspend` sets `spec.suspend` under a manager that
+kustomize-controller takes over at the next `flux-system` apply. That apply then drops the field, and the
+Kustomization resumes with no one noticing: R0's agent suspension was undone that way. So every suspend and resume in this
+campaign is a patch under field manager `relay-runbook`, the manager kustomize-controller leaves alone (as for
+`roll_deploy`, #1897):
+
+```sh
+kubectl --context admin@ai -n flux-system patch kustomization <name> --type=merge -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook
+flux --context admin@ai reconcile kustomization flux-system -n flux-system
+kubectl --context admin@ai -n flux-system get kustomization <name> -o jsonpath='{.spec.suspend}{"\n"}'   # true, after the reconcile
+```
+
+Resume with the same patch and `"suspend":false`. R0b ran this form for the agent all night without a takeover
+(#1753 comment 135956).
 
 ### 5.3 Native tool approvals
 
