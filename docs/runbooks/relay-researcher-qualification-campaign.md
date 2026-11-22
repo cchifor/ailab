@@ -27,6 +27,28 @@ the delayed-start converter requires the driver's `bootstrapSecret` facts, which
 The ceremony tools, drivers, converters and qualification documents cited below are unchanged between
 `9e09962f` and `eb9b1f07`.
 
+**The campaign's pinned driver checkout is Relay `174b64606`** (decided 2026-11-22 under the owner's
+delegation, after a Codex and a Fable review that both chose it). Every driver, ceremony tool and converter
+run of R1 through the canary uses it. The tools cited below as `main:` are unchanged from `eb9b1f07` to
+`174b64606`, with these exceptions:
+- `packages/worker-runtime/acceptance.ts` (Relay #562): the `real-supervisor-lease-publisher` observation of the
+  operator window (#3-#7) now reads the lease in both the harness and the supervisor container, and needs the
+  successor publication before the predecessor's expiry plus the skew bound. Acceptance rows #1 and #2 do not
+  run it. The operator window already admits the harness probe tuple, the frozen v0.10.3 holder needs no
+  change, and no new config field or kubectl verb is needed. Each lease sample is now two execs (10 s timeout
+  each), so `D_window` needs a margin for that until R1 measures it.
+- `packages/worker-runtime/provenance-cleanup-resource-observer.ts` (#557): an injectable clock for tests;
+  its default reads the same clocks as before.
+- `scripts/qualification/repository-review-observation.ts` (#561): a new driver that no run uses.
+
+Three rules follow:
+- **Record the commit.** Each run's stopwatch log and evidence comment name `174b64606` and the operator's
+  `git rev-parse HEAD` of the checkout. The recorded driver digest hashes only the CLI file, not its imports
+  (`main:scripts/qualification/operator-executable-sha256.ts`), so it cannot show which checkout ran.
+- **A cautious `D_window`.** Until R1 measures it, R1's window latest start uses a stated conservative
+  `D_window` (`T − L − D_window`), and the window is skipped if its start has passed.
+- **R0 and R0b are not converted.** They ran other checkouts and created no Pod.
+
 ## 1. Campaign overview
 
 ### Run map (rev 2)
