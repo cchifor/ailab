@@ -85,7 +85,8 @@ R0 comes before R1: signed, its hub half live, never granted or created, so it d
 
 ### Preconditions before R1
 
-Each is read back; a missing one stops the campaign before any signing.
+Each is read back; a missing one stops the campaign before any signing, except a row that names a later run:
+that one stops the campaign before that run is signed.
 
 | Precondition | Where | In git on 2026-11-16 |
 | --- | --- | --- |
@@ -102,7 +103,7 @@ Each is read back; a missing one stops the campaign before any signing.
 | `deployment.json` and `subject.json` composed and frozen (§3.0 step 7) | this runbook | after the v0.10.9 rollout (H8); `hub.image` is `1b0f2f72…7a39` |
 | E6 rehearsal passed (§4), with the owner's 2026-11-22 waiver of its launch-dependent items (§4, "Owner waiver") | this runbook | not run |
 | Dedicated researcher channel, admin browser state, operator kube identity (VAP write, `pods/exec`, NetworkPolicy CAS, SA impersonation incl. a foreign-slot SA, `pods/log` in `relay-internal-tls`) | plan §8 | operator readback |
-| Probe images (egress; storage with `dd` and `sleep`) and reviewed allow/deny targets | plan R5, R4 | not in git |
+| Probe images (egress; storage with `dd` and `sleep`) and reviewed allow/deny targets. **Before R5 is signed, not before R1** (owner decision 2026-11-22, #1753 comment 136729): only the egress driver (#16, R5) and the storage drivers (#17, R3) use them, and R5 is the first of those in the order | the campaign plan's R5 and R4 sections (the runs here are R5 and R3) | not in git |
 | Owner decisions O1-O8, S3, I4, N1, N2 | §7 | decided; S2's create path is verified, queued-create survival and timing/readbacks remain in E6 |
 
 **Freeze from R1 to the canary:** hub, Router, agent and runtime images and database identities;
