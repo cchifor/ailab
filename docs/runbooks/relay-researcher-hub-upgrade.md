@@ -529,6 +529,28 @@ After the owner approves the pool in their own session (owner rule, ailab #1799)
 - credential, binding and issuance-operation counts unchanged by the approval. Pool approval does not
   establish worker readiness.
 
+### H9. v0.10.10: truthful agent state
+
+Why: the console derived an agent's state from defaults (a pane became Idle on connect), not from
+evidence. Relay #573, released as v0.10.10 (#574, `716c2ed8`, run 145785): a v0.10.10 connector sends
+each pane's terminal sample to a hub that advertises `activity`, and the hub shows Output observed,
+Quiet, No signal with its reason, or Offline, with source and age. The samples live in the hub's memory;
+nothing is stored. Hub only in this step (the connector pin is `docs/runbooks/relay-connectors.md`,
+converged first), no migrations (schema 79), same runtime, skill, tools and prerequisites as v0.10.9
+(the two deployment receipts agree), so re-pinning v0.10.9 (`1b0f2f72…7a39`) is a valid rollback.
+
+Change: this PR pins the v0.10.10 digest in `migrate` and `relay`, with the annotations. One Recreate
+roll by the merge itself (Flux), with the pre-migration backup; outside the QNAP windows.
+
+Readback after the roll (operator):
+
+- one Running Pod; source `716c2ed8a8090cd5b38799adb39d99cf89550026`, release
+  `relay-0.10.10-release-145785`; the `relay` container's image ID ends in
+  `sha256:58edaf690e743db86d7c0bf090f5cd1554b3460fbc37984073764d244284d470`; the migrate init container
+  exited 0 and `schema_migrations` reads `79|79`; the env is unchanged from H8;
+- the console's Agents page shows each dev-worker agent with an observed state and its age (Output
+  observed or Quiet), not "No signal: update the connector", once its connector runs v0.10.10.
+
 ## Enablement order at a glance
 
 | Step | Change | Must already hold | Readback that gates the next step |
@@ -544,6 +566,7 @@ After the owner approves the pool in their own session (owner rule, ailab #1799)
 | journal | the independent candidate journal ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)) | per that runbook | its Service on exactly `10.96.0.42` (Q2's `pinned` check) |
 | File B | budget ledger step 7's `qualifications` row (ailab #1753 comment 124071) | the final Router rollout read back | the stored policy re-verified, its `tokenPolicyDigest` recorded for the signed runs |
 | H8 | hub image → v0.10.9 (pool approval materializes the Router connection) | the roll: H4a's state only (no new settings); its connection readback and the owner's pool approval: H6 (applied) | v0.10.9 digest running, schema still 79, connection listed, `router_connections` and pools still empty; then the owner approves the pool and exactly one connection row appears |
+| H9 | hub image → v0.10.10 (truthful agent state) | the connectors on v0.10.10 (`relay-connectors.md`); H8's state only (no new settings) | v0.10.10 digest running, schema still 79, agents show observed states |
 | H7 | candidate files: `relay-worker-candidate`, first included for R0 (never granted), reset, then included again for R1; each run's values generated (the canary file follows the approval; the qualification file is general activation, step 11) | H6, H8 with the owner-approved pool (one connection row), Q5's readback, the journal at `10.96.0.42`, File B, the run's session-key Secret | init container exit 0, the run's pin in the Pod, budget startup `started`, `RelayWorkerBudgetStartupFailed` cleared, no `worker_budget_authority_unavailable` or `worker_candidate_unavailable` |
 | scenarios | the nineteen qualification scenarios | H7's candidate files | the nineteen reports, independently accepted |
 | approval | a genuine `ReleaseApproval` | the nineteen reports and the other release gates accepted | its `workerTemplates` subject asserts the nine passed gates |
