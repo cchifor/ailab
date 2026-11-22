@@ -50,11 +50,16 @@ Three rules follow:
   otherwise no driver runs and no evidence is recorded until the checkout is fixed. The stopwatch log and the
   run's evidence comment record both outputs. The recorded driver digest hashes only the CLI file, not its
   imports (`main:scripts/qualification/operator-executable-sha256.ts`), so it cannot show which checkout ran.
-- **`D_window` = 300 s until R1 measures it.** That is the lease observation's 60 s wait cap, plus four
-  30 s two-exec samples, plus 120 s for the other four probes and the window's preparation and restore. It
-  is chosen to be generous: too large a bound only skips the window. R1's window starts by `T − L − 300 s`
-  or is skipped (its spares are in R3/R5). From R2 on, `D_window` is R1's measured duration plus a 50 %
-  margin, recorded in the run record.
+- **`D_window` = 300 s, an estimate, until a window is measured** (owner decision 2026-11-22, #1753 comment
+  136692). It is not an upper bound. Adding every timeout in the window code at `174b64606` gives about
+  1,000 s in the worst case (`main:packages/worker-runtime/acceptance.ts:622,727,835,877,933,1051`;
+  `operator-window.ts:168,192,205,304`), more than R1's 900 s lifetime, while each exec usually takes about
+  1 s. A window cannot be cut off safely, because it restores policy objects at its end. So R1's window starts by
+  `T − L − 300 s` or is skipped (its spares are in R3/R5). The owner accepted the overrun risk: if it runs
+  long, the steps after it are lost, namely P1 (communication attempt 1, with attempt 2 in R5) and possibly #8
+  (absolute expiry, which then uses its planned reserve). Until a run completes a window, every run keeps
+  300 s. From the run after the first completed window, `D_window` is that measured duration plus 50 %,
+  recorded in the run record.
 - **R0 and R0b are not converted.** They ran Relay `832623140` and created no Pod.
 
 ## 1. Campaign overview
