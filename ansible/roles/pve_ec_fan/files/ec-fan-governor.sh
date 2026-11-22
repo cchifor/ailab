@@ -226,19 +226,33 @@ write_metrics() {
   fi
 }
 
-# The fan is still where this tick read it: in curve mode, at LEVEL. Read again right before a write, so a
-# fan someone put in fixed or auto, or the driver's instant step up, since the first read is not overwritten
-# with a decision made on the old state (the window is then one sysfs read wide, not a whole decision).
-unchanged() { # $1 fan
-  read_value "$SYSFS/fan$1/mode" '^curve$' && read_value "$SYSFS/fan$1/level" '^[0-5]$' && ((VALUE == LEVEL))
+# Read a fan's state into FAN_STATE: `curve` (in curve mode, its level in FAN_LEVEL), `other` (a valid auto
+# or fixed mode: ec-fan-profile stopped or restarting, a hand test, not ours to touch) or `unreadable` (the
+# mode or the level could not be read or parsed: the governor cannot control that fan, and the tick counts
+# as failing, so the heartbeat goes stale instead of reporting a governor that is not governing).
+FAN_STATE=""
+FAN_LEVEL=-1
+fan_state() { # $1 fan
+  FAN_LEVEL=-1
+  if ! read_value "$SYSFS/fan$1/mode" '^(auto|fixed|curve)$'; then
+    FAN_STATE=unreadable
+  elif [ "$VALUE" != curve ]; then
+    FAN_STATE=other
+  elif read_value "$SYSFS/fan$1/level" '^[0-5]$'; then
+    FAN_STATE=curve
+    FAN_LEVEL=$VALUE
+  else
+    FAN_STATE=unreadable
+  fi
 }
 
 run() {
   local f tick=0 temp_bad=0 failing
-  local -A prev since_up
+  local -A prev since_up fan_bad
   for f in $FANS; do
     prev[$f]=-1
     since_up[$f]=0
+    fan_bad[$f]=0
   done
   trap 'exit 0' TERM INT
   log "governing fan(s) $FANS: up at average ${GOV_UP} C (levels 3,4,5), down at ${GOV_DOWN} C from ${HOLD} s after a step up, average over ${TAU} s"
@@ -254,12 +268,20 @@ run() {
       temp_bad=0
       average "$TEMP"
       for f in $FANS; do
-        # Not on the curve (ec-fan-profile stopped or restarting, a hand test): not ours to touch.
-        if ! read_value "$SYSFS/fan$f/mode" '^curve$' || ! read_value "$SYSFS/fan$f/level" '^[0-5]$'; then
+        fan_state "$f"
+        if [ "$FAN_STATE" = unreadable ]; then
+          ((fan_bad[$f])) || log "fan$f: cannot read its mode or level ($SYSFS/fan$f): not governing it"
+          fan_bad[$f]=1
+          failing=1
+        elif ((fan_bad[$f])); then
+          log "fan$f: mode and level readable again"
+          fan_bad[$f]=0
+        fi
+        if [ "$FAN_STATE" != curve ]; then
           prev[$f]=-1
           continue
         fi
-        LEVEL=$VALUE
+        LEVEL=$FAN_LEVEL
         # Up since the last tick (the driver's instant step) or a first look: the hold starts again. A step
         # down by the driver does not restart it.
         if ((prev[$f] < 0 || LEVEL > prev[$f])); then
@@ -268,7 +290,19 @@ run() {
         prev[$f]=$LEVEL
         SINCE_UP=${since_up[$f]}
         decide
-        if ((NEXT != LEVEL)) && unchanged "$f"; then
+        if ((NEXT != LEVEL)); then
+          # Read again right before the write, so a fan put in fixed or auto, or stepped up by the driver,
+          # since the first read is not overwritten with a decision made on the old state (the window is
+          # then one sysfs read wide, not a whole decision).
+          fan_state "$f"
+          if [ "$FAN_STATE" = unreadable ]; then
+            failing=1
+            NEXT=$LEVEL
+          elif [ "$FAN_STATE" != curve ] || ((FAN_LEVEL != LEVEL)); then
+            NEXT=$LEVEL # moved under us: decide again on the next tick
+          fi
+        fi
+        if ((NEXT != LEVEL)); then
           if printf '%s' "$NEXT" > "$SYSFS/fan$f/level"; then
             milli "$AVG"
             log "fan$f: level $LEVEL -> $NEXT (average $MILLI C, EC $TEMP C, $((SINCE_UP * TICK)) s since a step up)"

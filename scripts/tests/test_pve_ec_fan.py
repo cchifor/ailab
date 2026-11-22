@@ -657,6 +657,30 @@ class GovernorTests(unittest.TestCase):
         self.assertIn('ec_fan_governor_heartbeat_timestamp_seconds', prom)
         self.assertNotRegex(prom, r'(?m)^ec_fan_governor_average_celsius ')
 
+    def test_an_unreadable_fan_state_is_failing_but_a_fan_on_auto_is_not(self):
+        # fan1's level unreadable (malformed): fan2 is still governed, the tick is failing, so no heartbeat
+        self.sysfs.create(mode='curve', level=(2, 2, 0), temp=88)
+        self.sysfs.put('fan1/level', 'x')
+        run = self.run_governor(3, EC_FAN_GOV_METRICS_EVERY=1)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(self.sysfs.get('fan2/level'), '3')
+        self.assertEqual(self.sysfs.get('fan1/level'), 'x')
+        self.assertEqual(run.stdout.count('fan1: cannot read its mode or level'), 1)  # once, not per tick
+        self.assertNotRegex((self.dir / 'ec_fan_governor.prom').read_text(), r'(?m)^ec_fan_governor_average_celsius ')
+        # an unreadable mode is the same
+        self.sysfs.create(mode='curve', level=(2, 2, 0), temp=88)
+        (self.sysfs.root / 'fan1/mode').unlink()
+        self.assertEqual(self.run_governor(2, EC_FAN_GOV_METRICS_EVERY=1).returncode, 0)
+        self.assertNotRegex((self.dir / 'ec_fan_governor.prom').read_text(), r'(?m)^ec_fan_governor_average_celsius ')
+        # a valid auto (or fixed) mode is a deliberate hand-off, not a failure: the heartbeat is refreshed
+        for mode in ('auto', 'fixed'):
+            with self.subTest(mode):
+                self.sysfs.create(mode=mode, level=(2, 2, 0), temp=88)
+                (self.dir / 'ec_fan_governor.prom').unlink()
+                self.assertEqual(self.run_governor(2, EC_FAN_GOV_METRICS_EVERY=1).returncode, 0)
+                self.assertRegex((self.dir / 'ec_fan_governor.prom').read_text(),
+                                 r'(?m)^ec_fan_governor_average_celsius 88\.000$')
+
     def test_the_file_is_written_as_the_daemon_starts(self):
         self.sysfs.create(mode='curve', level=(2, 2, 0), temp=70)
         self.assertEqual(self.run_governor(1, EC_FAN_GOV_METRICS_EVERY=1000).returncode, 0)

@@ -520,7 +520,8 @@ that curve for the two CPU fans and sets the APU power mode:
   fixed or auto, or stepped up by the driver, in between is left alone. It is `PartOf` the profile and
   `WantedBy` it: starting, restarting or stopping `ec-fan-profile` starts, restarts or stops it too. If it
   dies at 60 %+, the fans stay there (louder, never hotter) until systemd restarts it (5 s). Its heartbeat
-  is refreshed only by a tick that read the temperature and wrote every level it meant to, so
+  is refreshed only by a tick that read the temperature and every governed fan's mode and level, and wrote
+  every level it meant to (a fan on auto or fixed is a deliberate hand-off, not a failure), so
   `ProxmoxEcFanGovernorStale` fires after 5 min of a dead, stuck or failing governor, and
   `ProxmoxEcFanGovernorMissing` after 10 min on a host whose driver is loaded but whose governor never
   wrote its file (it writes it as it starts). The role refuses a governor config that does not sit inside

@@ -24,7 +24,7 @@
 # ProxmoxEcFanGovernorStale: ec-fan-governor (the daemon that decides the CPU fans' levels 3-5 on the smoothed
 # EC temperature) has not refreshed the heartbeat in its own file, ec_fan_governor.prom, for 5m: the daemon is
 # dead, stopped or stuck, or it keeps failing (it skips the heartbeat on a tick that could not read the EC
-# temperature or write a level). The driver's curve still keeps the floor and the instant steps up at
+# temperature or a governed fan's mode or level, or write a level). The driver's curve still keeps the floor and the instant steps up at
 # 94/96/98 C, so the APU is safe, but a fan the governor raised to 60 %+ stays there (the curve's rampdown
 # for those levels is low) and a sustained-heat step up waits for 94 C. Turning the role off removes the
 # file, so this cannot fire on a host without it. It also fires when ec-fan-profile is stopped by hand for
