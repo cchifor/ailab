@@ -5,6 +5,7 @@ kind: Component
 # collector they read. Budget startup reads start_failed while the authority has no profile source (H6 until
 # H7, and after each run's reset; relay-researcher-hub-upgrade.md, H6). RelayWorkerBudgetStartupFailed fires
 # only for a hub Pod that carries a candidate (its candidate-session-key init container, from kube-state-metrics),
-# so that expected state is quiet (owner decision 2026-11-22).
+# so that expected state is quiet (owner decision 2026-11-22); RelayWorkerBudgetAlertJoinBroken fires if that
+# namespace/pod join ever breaks (docs/runbooks/relay-worker-monitoring.md, "Budget startup").
 resources:
 - relay-worker-rules.yaml

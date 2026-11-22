@@ -39,6 +39,22 @@ authentication refusal, recovery-lock contention or connectivity failure. It
 cannot diagnose a database outage. An entirely unconfigured authority does not
 fire the check-failed rule; a partially configured/failed startup does.
 
+**Budget startup (owner decision 2026-11-22).** `RelayWorkerBudgetStartupFailed` fires only for a
+hub Pod that carries a candidate: its `start_failed` series is joined on `namespace` and `pod`
+with kube-state-metrics' `kube_pod_init_container_info{container="candidate-session-key"}`, an init
+container only the candidate run component adds. Without a candidate (H6 until H7, and after each
+run's reset) `start_failed` is the expected state and stays quiet. When it fires, the candidate hub
+Pod's authority did not start: check the configured profile, router deployment and ledger settings.
+
+`RelayWorkerBudgetAlertJoinBroken` guards that join. Every hub Pod has init containers (`migrate`,
+`metrics-files`, ...), so a hub budget series that joins no `kube_pod_init_container_info` at all
+for 15 min means the startup alert could not fire. Check, in order:
+- the relay series still carry `namespace` and `pod`: prometheus-operator adds them as target
+  labels of ServiceMonitor `relay-control-plane` (`kubernetes/components/relay-control-monitoring/collector.yaml`);
+  a relabeling or `honorLabels` change there can drop them;
+- kube-state-metrics is up and scraped (`up{job="kube-state-metrics"}`), and reports the hub Pod
+  (`kube_pod_init_container_info{namespace="relay"}`).
+
 The operator must budget two additional app-role connections (collector/admin)
 and one independent budget-role connection. Check role and connection-proxy
 limits. All use existing scoped credentials; no new login or SQL grant is needed.

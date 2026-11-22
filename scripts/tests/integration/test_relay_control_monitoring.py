@@ -208,7 +208,8 @@ class Monitoring(unittest.TestCase):
         self.run_setup(False)
 
     def test_worker_rules_ride_with_the_collector_candidate_rules_stay_opt_in_and_no_journal_target(self):
-        self.assertEqual(len(named(self.docs, 'PrometheusRule', 'relay-worker-operations')['spec']['groups'][0]['rules']), 7)
+        # 8 since 2026-11-22: RelayWorkerBudgetAlertJoinBroken guards the startup alert's kube-state-metrics join.
+        self.assertEqual(len(named(self.docs, 'PrometheusRule', 'relay-worker-operations')['spec']['groups'][0]['rules']), 8)
         self.assertEqual(len(named(self.docs, 'PrometheusRule', 'relay-candidate-journal')['spec']['groups'][0]['rules']), 3)
         self.assertEqual([d['metadata']['name'] for d in self.docs if d['kind'] == 'ServiceMonitor'], ['relay-control-plane'])
         # Hub upgrade step H6 includes the worker rules in the live Relay overlay, once, with the collector
