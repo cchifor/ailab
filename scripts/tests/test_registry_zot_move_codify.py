@@ -160,7 +160,8 @@ class NewCtTrimInclusion(unittest.TestCase):
         env.filters["int"] = lambda v: int(v)
         rendered = env.from_string((base / "templates" / "pve-lxc-fstrim.env.j2").read_text()).render(**ctx)
         line = next(l for l in rendered.splitlines() if l.startswith("PVE_LXC_FSTRIM_EXCLUDE="))
-        self.assertNotIn("5005", line.split("=", 1)[1].strip('"').split())
+        # Exactly empty, so a template that rendered a literal "[]" or "None" (a bogus id) fails too.
+        self.assertEqual(line.split("=", 1)[1].strip('"').split(), [])
 
     def test_the_sweep_script_honours_the_exclude_list(self):
         script = (REPO / "ansible" / "roles" / "pve_base" / "files" / "pve-lxc-fstrim.sh").read_text()

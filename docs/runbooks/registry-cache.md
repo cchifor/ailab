@@ -365,15 +365,21 @@ disk as above, or `skopeo delete` old `agentforge/**` tags by hand (see "Refresh
 tag" above for the delete pattern) — `ansible-playbook ansible/registry.yml` then converges the
 new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs within ~3h.
 
-## Thin-volume trim (weekly, ai-node1)
+## Thin-volume trim
 
 > **The live registry, CT 5005 on ai-node3, is trimmed by ai-node3's nightly `pve-lxc-fstrim` sweep** (since
 > 2026-11-22; [node-maintenance.md](node-maintenance.md), "LXC volume trim (nightly)"), like every other container.
 > No separate unit: 5004's weekly unit below existed because its discard bursts hit the NVMe that carried cp1's etcd
 > WAL, and the CP disks are on the QNAP since 2026-11-20 (ADR 0043). The sweep trims 4 GiB chunks with the IO-pressure
-> guard in a 13-min slot, and its per-volume cursor continues a pass the next night.
-> - **The first pass runs supervised** (the sweep started by hand on ai-node3, `systemctl start pve-lxc-fstrim`, repeated
->   until both 5005 volumes record a complete pass in its state dir), so a multi-night first pass could neither keep 5003's volumes
+> guard: 13 min of work (`pve_lxc_fstrim_run_max_min`) inside ai-node3's 20-min slot (04:50-05:09, the rest is
+> the unit's stop allowance), and its per-volume cursor continues a pass the next night.
+> - **The first pass runs supervised**: start the sweep by hand on ai-node3 (`systemctl start pve-lxc-fstrim`; root,
+>   via `scripts/node-ssh.py 192.168.0.4`). Its deadline counts from its own start, so each manual run does at most
+>   13 min of work and exits; repeat it until both 5005 volumes have a complete pass:
+>   `ls -l /var/lib/pve-lxc-fstrim/5005-rootfs.complete /var/lib/pve-lxc-fstrim/5005-mp0.complete` (the time of the
+>   last complete pass; a `.cursor` file there means a pass is still in progress), and the beacon
+>   `/var/lib/prometheus/node-exporter/pve_lxc_fstrim.prom` shows each volume's exit code (0). Read the result in
+>   `journalctl -u pve-lxc-fstrim` and `lvs pve/vm-5005-disk-1 pve/data`. Supervised, so a multi-night first pass could neither keep 5003's volumes
 >   waiting (never-completed volumes go first) nor trip `ProxmoxLxcTrimNotSucceeding` (50 h). On 2026-11-22 mp0 held
 >   ~234 GiB allocated for 227 GiB in use.
 > - **When the strive retention hold lifts** (bulk GC), run the same supervised passes the day after the first big
@@ -382,7 +388,9 @@ new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs withi
 >   costs a zeroing write (node-maintenance.md "Thin-pool zeroing").
 >
 > The rest of this section describes CT 5004 on ai-node1, parked (stopped, net0 `link_down=1`, `backup` lock) until
-> its decommission: its `registry-lxc-fstrim.timer` is **disabled**, and ai-node1's sweep still excludes 5004.
+> its decommission: its `registry-lxc-fstrim.timer` is **disabled**, and ai-node1's sweep still excludes 5004. The
+> weekly unit block below stays until that decommission PR, because `ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh`
+> parses it.
 
 Zot's GC frees blobs inside the container, but the host's `fstrim.timer` never reaches LXC mount
 points, so freed space stays allocated in ai-node1's `local-lvm` thin pool. By 2026-10-06 mp0 held
