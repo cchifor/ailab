@@ -69,7 +69,7 @@ Free static space: **none** (statics end at `.52`; the router DHCP pool starts a
 | Relay-worker pool: Talos worker `relay-worker-1` on ai-node3, label `ailab.io/relay-worker-pool`, taint `dedicated=relay-worker`, gVisor schematic, RuntimeClass `relay-gvisor` (`infra/agent-nodes/relay-workers.tf`; `docs/runbooks/relay-worker-capacity.md`; KubeVirt spike `docs/runbooks/relay-worker-kubevirt-feasibility.md`) | .52 | 4304 |
 | Reviewer VMs (out-of-band, not in tofu) | .24 / .25 | 4501–4502 |
 | AI LLM LXCs (node2/node3) | .45 / .46 | 5002–5003 |
-| registry LXC (node3 since the 2026-11-21 zot move; CT 5004 on node1 is parked: stopped, net0 `link_down=1`, `backup` lock, until the owner approves its decommission) | .36 | 5005 |
+| registry LXC (node3; the old CT 5004 on node1 was archived and destroyed 2026-11-22) | .36 | 5005 |
 | Edge ingress VIP (MetalLB pool `edge`, Caddy `edge-proxy`; WAN 443 forwarded here; `docs/standards/edge-ingress.md`) | .51 | — |
 | Cloud CI runner VMs (`cloud-ci-1..15` on **cloudlab** cloud1 ×5 / cloud2 ×3 / cloud3 ×7, all in service, `cloud-ci-6` included; opportunistic, offline at night by design; `../cloudlab/kubernetes/infra/ci-runners`, ailab `just cloud-runners`, ADR 0032) | .32 / .33 / .29 / .37 / .39 (cloud1) · .13 / .44 / .50 (cloud2) · .34 / .35 / .30 / .5 / .6 / .7 / .12 (cloud3) | 6101–6115 |
 | Cloud Windows 11 Pro VM `constantin-win-01` (**cloudlab** cloud3; RDP as `c4` with the `af/estate/cloudlab-win11` password, key-only SSH `ssh c4@192.168.0.38`; `../cloudlab/kubernetes/infra/windows-vm`) | .38 | 6201 |

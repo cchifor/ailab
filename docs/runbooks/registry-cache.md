@@ -365,7 +365,7 @@ disk as above, or `skopeo delete` old `agentforge/**` tags by hand (see "Refresh
 tag" above for the delete pattern) — `ansible-playbook ansible/registry.yml` then converges the
 new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs within ~3h.
 
-## Thin-volume trim (weekly, ai-node1)
+## Thin-volume trim
 
 > **The live registry, CT 5005 on ai-node3, is trimmed by ai-node3's nightly `pve-lxc-fstrim` sweep** (since
 > 2026-11-22; [node-maintenance.md](node-maintenance.md), "LXC volume trim (nightly)"), like every other container.
@@ -386,17 +386,11 @@ new policy and GC (`gcInterval` 1h, `gcDelay` 2h) reclaims the freed blobs withi
 >   GC cycle, before the nightly sweep meets the backlog; expect node3 IO pressure and a thin-pool drop (`lvs
 >   pve/vm-5005-disk-1 pve/data`). ai-node3 keeps thin-pool zeroing on, so a trimmed chunk that is written again
 >   costs a zeroing write (node-maintenance.md "Thin-pool zeroing").
->
-> The rest of this section describes CT 5004 on ai-node1, parked (stopped, net0 `link_down=1`, `backup` lock) until
-> its decommission: its `registry-lxc-fstrim.timer` is **disabled**, and ai-node1's sweep still excludes 5004. The
-> weekly unit block below and this section's heading stay until that decommission PR: two tests parse them
-> (`ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh` reads the unit block, `scripts/tests/test_pve_lxc_fstrim_schedule.py`
-> reads the heading to find the host with a dedicated unit).
 
 Zot's GC frees blobs inside the container, but the host's `fstrim.timer` never reaches LXC mount
-points, so freed space stays allocated in ai-node1's `local-lvm` thin pool. By 2026-10-06 mp0 held
-377 GB allocated for 170 GB in use. That thin-pool fill measurably slowed the shared consumer QLC
-NVMe that also carries cp1's etcd WAL (plans/2026-10-07-etcd-leader-churn-plan.md).
+points, so freed space stays allocated in the host's `local-lvm` thin pool. On the old CT 5004 (ai-node1), by
+2026-10-06 mp0 held 377 GB allocated for 170 GB in use, and that fill slowed the consumer QLC NVMe that then also
+carried cp1's etcd WAL (plans/2026-10-07-etcd-leader-churn-plan.md).
 The pool's zeroing setting, which multiplies writes when trimmed chunks are reused, is a separate
 knob: node-maintenance.md "Thin-pool zeroing".
 
@@ -415,90 +409,68 @@ pressure is unreadable, and pauses 15 s between chunks. `touch /run/lxc-fstrim-c
 including during a pressure wait.
 
 Exit codes: 0 done or stopped, 1 volume, geometry or mount problem, 2 bad settings, 3 pressure never
-dropped, 4 pressure unreadable, 5 an fstrim failed, 143 stopped by `systemctl stop` (after the in-flight chunk, mount released), 6 the host-side mount could not be released (`findmnt | grep lxc-fstrim`, then `umount` it by hand), 7 another run holds `/run/lxc-fstrim-chunked.lock`. Install on ai-node1 (root, via
-`scripts/node-ssh.py`):
+dropped, 4 pressure unreadable, 5 an fstrim failed, 143 stopped by `systemctl stop` (after the in-flight chunk, mount released), 6 the host-side mount could not be released (`findmnt | grep lxc-fstrim`, then `umount` it by hand), 7 another run holds `/run/lxc-fstrim-chunked.lock`.
 
-```bash
-install -m 0755 lxc-fstrim-chunked.sh /usr/local/sbin/lxc-fstrim-chunked.sh
-cat > /etc/systemd/system/registry-lxc-fstrim.service <<'UNIT'
-[Unit]
-Description=Chunked, IO-pressure-guarded fstrim of the registry LXC data volume (ct 5004 mp0)
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/lxc-fstrim-chunked.sh 5004 mp0
-Nice=10
-# The overall deadline. A oneshot is "activating" for its whole run, so RuntimeMaxSec= does nothing
-# here (checked on systemd 255): TimeoutStartSec= is the limit. Latest start 03:46 Sunday (03:30 +
-# 15 min RandomizedDelaySec + 1 min AccuracySec); SIGTERM by 23:31, done by 23:36 with the stop time
-# below, so a run that keeps waiting out IO pressure never reaches Monday's ai-node1 runner windows.
-TimeoutStartSec=19h45min
-# On stop the script waits for the in-flight FITRIM (8 GiB at up to ~23 s/GiB is ~3 min), then
-# unmounts (exit 143); leave it time to, and record that deliberate stop as clean rather than a
-# failed unit. (A stop at the deadline above still shows as failed, Result=timeout: by design.)
-TimeoutStopSec=300
-SuccessExitStatus=143 130
-UNIT
-cat > /etc/systemd/system/registry-lxc-fstrim.timer <<'UNIT'
-[Unit]
-Description=Weekly registry LXC trim, CI-quiet hours (after the 00:00Z infra-pg dump and 02:00Z Velero)
-[Timer]
-OnCalendar=Sun *-*-* 03:30:00 UTC
-RandomizedDelaySec=15min
-[Install]
-WantedBy=timers.target
-UNIT
-systemctl daemon-reload && systemctl enable --now registry-lxc-fstrim.timer
-```
+**History: CT 5004's weekly unit (2026-10-06 to 2026-11-22).** On ai-node1 the registry had a hand-installed
+`registry-lxc-fstrim.{service,timer}` (Sunday 03:30 UTC, an overall deadline of 19h45min, coordinated with
+ai-node1's runner trims), because its discard bursts hit the NVMe that carried cp1's etcd WAL. It was disabled at
+the zot move and removed with 5004 on 2026-11-22. Its unit block is kept as a test fixture
+(`ansible/roles/gitea_runner/tests/fixtures/registry-weekly-unit.md`), where it proves the runner test's collision
+check.
 
-**The script is under the role now (2026-11-20).** `pve_base` (tag `lxc_fstrim`, on for ai-node1) installs
-`/usr/local/sbin/lxc-fstrim-chunked.sh` from the repo with the nightly LXC sweep
-([node-maintenance.md](node-maintenance.md), "LXC volume trim (nightly)"), so the `install` line above is
-for a host without it. The weekly unit above is still hand-installed; it runs the role's copy, whose
-defaults are unchanged (no deadline, the same chunk and pauses). The sweep excludes 5004 on ai-node1 and
-shares this script's lock and stop file, so the two never trim at once.
-
-**The Sunday deadline (2026-11-19, #1858).** The script's pressure-wait budget (`PSI_WAIT_MAX_S`) is
-per chunk, so on this 384 GiB volume a run can wait for many hours. `TimeoutStartSec=19h45min` (with
-`TimeoutStopSec=300` for the in-flight chunk) ends it by 23:36 Sunday at the latest, whatever the
-pressure: systemd SIGTERMs it, and the script stops at once, even mid-wait, releases the mount and exits
-143. A run cut off there shows as failed (`Result=timeout`). The next week starts again from chunk 1.
-**The live unit on ai-node1 predates this:** after merge, re-run the `cat > …registry-lxc-fstrim.service`
-block above on the node (root, via `scripts/node-ssh.py`), then `systemctl daemon-reload`, and check
-`systemctl show -p TimeoutStartUSec,TimeoutStopUSec registry-lxc-fstrim.service`.
-
-ai-node1's CI runners trim their own disks nightly and stay off this trim's span: from 15 min before it
-can start to 15 min after that deadline ([ci-runners.md](ci-runners.md), "Thin-pool trim"). ci-runner-1
-and -4 end by 03:15 UTC, ci-runner-9 (04:15) skips Sundays (`gitea_runner_fstrim_days`), and the deadline
-keeps the trim out of Monday's 00:00 window. Moving this timer, or raising the deadline, means moving their
-windows or days too: `ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh` reads `OnCalendar`,
-`RandomizedDelaySec`, `TimeoutStartSec` and `TimeoutStopSec` above and fails if they collide, Sunday
-into Monday included.
-
-**Verify a run, including that it did not hurt etcd.** A trim is a discard burst on the same drive as
-cp1's etcd WAL.
-- `journalctl -u registry-lxc-fstrim`: one line per chunk, then `end: trimmed_total=<bytes> pool=<%>`.
-  `lvs pve/vm-5004-disk-1 pve/data` should show the drop.
+**Verify a pass.** A trim is a discard burst on ai-node3's NVMe. The etcd disks are on the QNAP since
+2026-11-20, so it no longer shares a drive with etcd, but host IO pressure can still delay the CP VM on that host.
+- `journalctl -u pve-lxc-fstrim` on ai-node3: one line per chunk, then the sweep's total.
+  `lvs pve/vm-5005-disk-1 pve/data` should show the drop.
 - Over the run's window, compare with the same-length window before it, per member (Prometheus):
   - `histogram_quantile(0.5|0.99, sum by (instance, le)(increase(etcd_disk_wal_fsync_duration_seconds_bucket[<window>])))`;
   - fsyncs over 1.024 s;
   - `increase(etcd_server_leader_changes_seen_total[<window>])`;
   - the leader at the time (`etcd_server_is_leader`).
-- **Stop criteria** (touch the stop file):
-  - cp1's WAL fsync p99 above 1 s for 2 consecutive minutes during the run;
-  - any leader change while cp1 leads;
+- **Stop criteria** (touch the stop file `/run/lxc-fstrim-chunked.stop`):
+  - the WAL fsync p99 of the CP on that host (cp3 on ai-node3) above 1 s for 2 consecutive minutes;
+  - any leader change while that CP leads;
   - a `ControlPlaneRestartWave`.
-- Recorded supervised run, 2026-10-06 19:24-19:44Z (the same chunk/pressure logic, an earlier
-  version of the script):
+- Recorded supervised run on the old CT 5004 (ai-node1), 2026-10-06 19:24-19:44Z (the same chunk/pressure logic,
+  an earlier version of the script):
   - 212 GB trimmed; pool 71.6 -> 59.8%; host IO PSI about 33 -> 15%.
   - cp1 fsync p50 83 -> 10 ms and p99 846 -> 734 ms vs the preceding 12 minutes, while node1 runner
     writes doubled.
   - One leader change at about 19:40Z, while cp2 (node2) led. The trim was on node1, so cp1 was only
     a follower; the trim is not a plausible cause.
 
+## The 5004 archive (2026-11-22)
+
+The old registry CT 5004 (ai-node1, zot v2.1.18, the pre-cutover copy since the 2026-11-21 move) was archived to the
+QNAP before it was destroyed (owner approval 2026-11-22). The archive is the registry as it stood at the cutover: it
+holds no push made to CT 5005 afterwards.
+
+- Archive: `qnap-nfs:backup/vzdump-lxc-5004-2026_11_22-22_00_59.tar.zst` (`/mnt/pve/qnap-nfs/dump/`),
+  225,611,923,565 bytes (210.12 GB), sha256 `7e8c2739592d47dcb9aef1c57eecdc86258b18be628f58d24ec831e6cd2d52da`,
+  PVE `protected` (no prune removes it).
+- Made 2026-11-22 20:00-22:04Z (217 GiB at 31 MiB/s) with
+  `vzdump 5004 --storage qnap-nfs --mode stop --compress zstd --zstd 2 --bwlimit 30720 --protected 1`, with mp0
+  switched to `backup=1` first (a volume mount point is excluded from vzdump unless it is), under a fail-closed etcd
+  guard (the CP disks share the QNAP). Three earlier attempts that day were stopped by that guard and left nothing.
+- Verified without a restore: one throttled read hashed every regular file in the archive. Every content-addressed
+  blob's sha256 equals its name (56,952 blobs), every hard-link member points at a verified file, every non-blob
+  file's sha256 equals the source's, and the file list and sizes match the source manifest (81,955 entries: 76,376
+  regular files hashed, 2,314 hard-link members, 3,267 symlinks).
+  The archived `pct.conf` carries mp0 `backup=1`, net0 `link_down=1` and onboot 0. Besides it, vzdump adds only
+  `etc/vzdump/pct.fw`.
+
+**Restore** (never tested in place; it needs ~215 GiB free in the target thin pool):
+```bash
+pct restore <new-vmid> qnap-nfs:backup/vzdump-lxc-5004-2026_11_22-22_00_59.tar.zst --storage local-lvm
+pct config <new-vmid>   # net0 keeps ip=192.168.0.36 and link_down=1, onboot 0: .36 belongs to CT 5005
+```
+Before starting the restored CT on the LAN, give its net0 another address (or keep `link_down=1`). `pct restore` sets
+no lock.
+
 ## Capacity recovery, 2026-09-13
 
 Platform main build 32171 repeatedly failed image uploads with `blob upload unknown to registry`.
-Read-only checks found registry LXC 5004's 256 GiB mp0 filesystem at 100%, with less than 1 GiB
+Read-only checks found registry LXC 5004's (then the registry, on ai-node1) 256 GiB mp0 filesystem at 100%, with less than 1 GiB
 available. Node1's local-lvm pool had approximately 771 GiB free (56.07% data use; 2.29% metadata
 use). The capacity target is 384 GiB. This preserves retained image tags and their rollback
 history; no retention change or image deletion is part of this recovery.

@@ -23,9 +23,9 @@
 # (<ctid>-<key>.cursor, CURSOR_FILE), so a volume the deadline cuts is continued at that chunk the next night
 # and every pass reaches its tail, and the time its last pass completed (<ctid>-<key>.complete). Volumes go
 # least recently completed first, so one that keeps running out of time cannot starve the others.
-# The inner script's lock (/run/lxc-fstrim-chunked.lock) is shared with the registry LXC's weekly trim on
-# ai-node1 (registry-lxc-fstrim.service, docs/runbooks/registry-cache.md), so the two never trim at once:
-# a volume whose trim finds the lock held exits 7 and is skipped for the night. Its stop file
+# The inner script's lock (/run/lxc-fstrim-chunked.lock) is shared with any other run of it on the host (a
+# supervised pass by hand, docs/runbooks/registry-cache.md), so two never trim at once: a volume whose trim
+# finds the lock held exits 7 and is skipped for the night. Its stop file
 # (/run/lxc-fstrim-chunked.stop) stops this sweep too; one already there when the sweep starts is a leftover
 # and makes it fail (exit 3) rather than quietly skip every night.
 #

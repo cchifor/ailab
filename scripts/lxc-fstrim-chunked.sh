@@ -2,7 +2,7 @@
 # Pressure-guarded, chunked fstrim of one LXC volume (plans/2026-10-07-etcd-leader-churn-plan.md step E).
 #
 #   lxc-fstrim-chunked.sh <ctid> <rootfs|mpN>
-#   e.g. lxc-fstrim-chunked.sh 5004 mp0     (the Zot registry LXC's data volume on ai-node1, weekly)
+#   e.g. lxc-fstrim-chunked.sh 5005 mp0     (the Zot registry LXC's data volume on ai-node3, by hand)
 #   The nightly sweep of every running container (role pve_base, files/pve-lxc-fstrim.sh) calls it once
 #   per local-lvm volume, with a DEADLINE.
 #
@@ -58,7 +58,7 @@ PAUSE_S="${PAUSE_S:-15}"
 PSI_MAX="${PSI_MAX:-45}"                 # host IO "some avg10" percent above which we wait
 PSI_WAIT_MAX_S="${PSI_WAIT_MAX_S:-1800}" # give up (exit 3) after waiting this long for one chunk
 PAUSE_IDLE_S="${PAUSE_IDLE_S:-$PAUSE_S}" # pause after a chunk that trimmed 0 bytes
-DEADLINE="${DEADLINE:-}"                 # Unix seconds; empty = none (the registry's weekly unit)
+DEADLINE="${DEADLINE:-}"                 # Unix seconds; empty = none (a supervised run by hand)
 SEC_PER_GB="${SEC_PER_GB:-30}"           # a chunk's worst case for DEADLINE (measured 17-23 s per GiB)
 CURSOR_FILE="${CURSOR_FILE:-}"           # empty = every run starts at chunk 1
 PSI_FILE="${PSI_FILE:-/proc/pressure/io}"
