@@ -61,6 +61,10 @@ spec:
     # the expected state (H6 until H7, and again after each run's reset). The candidate run component adds
     # the init container candidate-session-key to the hub Pod, and kube-state-metrics reports it per Pod, so
     # the rule fires only for the running Pod that has a candidate. Owner decision 2026-11-22.
+    # The join needs `namespace` and `pod` on the relay series: prometheus-operator's default target labels of
+    # ServiceMonitor relay-control-plane (../relay-control-monitoring/collector.yaml). If a scrape change ever
+    # dropped them, or kube-state-metrics were not scraped, this rule would go quiet:
+    # RelayWorkerBudgetAlertJoinBroken below makes that visible.
     - alert: RelayWorkerBudgetStartupFailed
       expr: relay_control_worker_budget_authority_start_failed{job="relay-control-plane"} == 1 and on(namespace, pod)
         kube_pod_init_container_info{namespace="relay",container="candidate-session-key"}
@@ -73,6 +77,22 @@ spec:
         description: The hub Pod carries a candidate (init container candidate-session-key) but its budget authority did not
           start. Check configured profile, router deployment and ledger settings. This startup result is not a diagnosis
           of database availability; monitoring must not grant or seed authority.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+    # The guard for the join above: every hub Pod has init containers (migrate, metrics-files, ...), so a hub
+    # series that joins NO kube_pod_init_container_info at all means the labels or the kube-state-metrics scrape
+    # broke, and RelayWorkerBudgetStartupFailed could not fire.
+    - alert: RelayWorkerBudgetAlertJoinBroken
+      expr: relay_control_worker_budget_authority_start_failed{job="relay-control-plane"} unless on(namespace, pod)
+        kube_pod_init_container_info{namespace="relay"}
+      for: 15m
+      labels:
+        severity: warning
+        service: relay
+      annotations:
+        summary: Relay budget startup alert cannot see the hub Pod's init containers
+        description: The hub's budget series does not join any kube_pod_init_container_info on namespace and pod, so
+          RelayWorkerBudgetStartupFailed cannot fire. Check that ServiceMonitor relay-control-plane still yields namespace
+          and pod labels and that kube-state-metrics is scraped.
         runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
     - alert: RelayWorkerBudgetCheckFailed
       expr: relay_control_worker_budget_authority_started{job="relay-control-plane"} == 1 and (relay_control_worker_budget_observer_started{job="relay-control-plane"}

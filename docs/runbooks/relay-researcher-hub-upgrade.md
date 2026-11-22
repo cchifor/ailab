@@ -381,8 +381,8 @@ nothing and Relay never starts the authority (Relay `server/main.ts:337`). The l
 configured, so the startup metric reads `start_failed`, not `started` (`server/main.ts:420`). That is
 expected here and stays until H7. `RelayWorkerBudgetStartupFailed` (`relay-worker-monitoring`, `for: 2m`)
 does not fire for it: since 2026-11-22 the rule fires only for a hub Pod that carries a candidate (its
-`candidate-session-key` init container, read from kube-state-metrics). Both must clear at H7, where the budget-started readback
-is.
+`candidate-session-key` init container, read from kube-state-metrics). The metric must read `started` at
+H7, where the budget-started readback is.
 
 The installation itself can be approved any time after H3 (installation runbook I1-I10); a worker
 session on it needs H6 and H7's candidate files. The first sessions are the qualification scenarios,

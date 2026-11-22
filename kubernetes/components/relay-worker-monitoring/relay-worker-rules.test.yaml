@@ -136,6 +136,36 @@ tests:
   - eval_time: 5m
     alertname: RelayWorkerBudgetStartupFailed
     exp_alerts: []
+- name: RelayWorkerBudgetAlertJoinBroken when the hub series joins no init container, quiet when it does
+  interval: 1m
+  input_series:
+  # pod relay-x has no kube-state-metrics init-container series at all (a broken join); relay-y has one.
+  - series: relay_control_worker_budget_authority_start_failed{job="relay-control-plane",instance="relay:80",namespace="relay",pod="relay-x"}
+    values: 1+0x20
+  - series: relay_control_worker_budget_authority_start_failed{job="relay-control-plane",instance="relay:81",namespace="relay",pod="relay-y"}
+    values: 1+0x20
+  - series: kube_pod_init_container_info{job="kube-state-metrics",namespace="relay",pod="relay-y",container="migrate"}
+    values: 1+0x20
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: RelayWorkerBudgetAlertJoinBroken
+    exp_alerts: []
+  - eval_time: 15m
+    alertname: RelayWorkerBudgetAlertJoinBroken
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+        namespace: relay
+        pod: relay-x
+      exp_annotations:
+        summary: Relay budget startup alert cannot see the hub Pod's init containers
+        description: The hub's budget series does not join any kube_pod_init_container_info on namespace and pod, so
+          RelayWorkerBudgetStartupFailed cannot fire. Check that ServiceMonitor relay-control-plane still yields namespace
+          and pod labels and that kube-state-metrics is scraped.
+        runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
 - name: RelayWorkerBudgetStartupFailed stays silent for a hub Pod without a candidate
   interval: 1m
   input_series:
