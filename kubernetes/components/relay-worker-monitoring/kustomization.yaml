@@ -2,7 +2,9 @@ apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 # The hub's worker and budget alerts (docs/runbooks/relay-worker-monitoring.md), rules only. INCLUDED by
 # kubernetes/apps/apps/relay since hub upgrade step H6, alongside ../relay-control-monitoring, whose
-# collector they read. RelayWorkerBudgetStartupFailed fires from H6 until H7: budget startup reads
-# start_failed while the authority has no profile source (relay-researcher-hub-upgrade.md, H6).
+# collector they read. Budget startup reads start_failed while the authority has no profile source (H6 until
+# H7, and after each run's reset; relay-researcher-hub-upgrade.md, H6). RelayWorkerBudgetStartupFailed fires
+# only for a hub Pod that carries a candidate (its candidate-session-key init container, from kube-state-metrics),
+# so that expected state is quiet (owner decision 2026-11-22).
 resources:
 - relay-worker-rules.yaml

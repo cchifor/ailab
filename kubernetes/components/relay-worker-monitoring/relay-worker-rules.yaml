@@ -57,15 +57,21 @@ spec:
         description: Reconcile stop, destroy, credential revocation or expired bootstrap Secret attempts through the authorized
           operator path. Intentionally retained storage and active Secrets are not cleanup failures.
         runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
+    # Only a hub Pod that carries a candidate can start the budget authority: without one, start_failed is
+    # the expected state (H6 until H7, and again after each run's reset). The candidate run component adds
+    # the init container candidate-session-key to the hub Pod, and kube-state-metrics reports it per Pod, so
+    # the rule fires only for the running Pod that has a candidate. Owner decision 2026-11-22.
     - alert: RelayWorkerBudgetStartupFailed
-      expr: relay_control_worker_budget_authority_start_failed{job="relay-control-plane"} == 1
+      expr: relay_control_worker_budget_authority_start_failed{job="relay-control-plane"} == 1 and on(namespace, pod)
+        kube_pod_init_container_info{namespace="relay",container="candidate-session-key"}
       for: 2m
       labels:
         severity: warning
         service: relay
       annotations:
         summary: Relay independent budget authority did not start
-        description: Check configured profile, router deployment and ledger settings. This startup result is not a diagnosis
+        description: The hub Pod carries a candidate (init container candidate-session-key) but its budget authority did not
+          start. Check configured profile, router deployment and ledger settings. This startup result is not a diagnosis
           of database availability; monitoring must not grant or seed authority.
         runbook_url: https://git.chifor.me/cchifor/ailab/src/branch/main/docs/runbooks/relay-worker-monitoring.md
     - alert: RelayWorkerBudgetCheckFailed

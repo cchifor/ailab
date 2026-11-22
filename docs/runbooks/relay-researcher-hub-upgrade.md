@@ -378,10 +378,10 @@ Readback, as Router connection runbook step 10, plus:
 The budget authority is expected **not** to start at H6. Until H7 it has no profile source: no
 candidate or canary file before H7 and no registry before H4b, so `loadWorkerRuntimeProfiles` returns
 nothing and Relay never starts the authority (Relay `server/main.ts:337`). The ledger files of H4a are
-configured, so the startup metric reads `start_failed`, not `started` (`server/main.ts:420`), and
-`RelayWorkerBudgetStartupFailed` (`relay-worker-monitoring`, `for: 2m`) fires once the metric is
-scraped. Both are expected here and stay until H7 (whether to silence that one alert until then is the
-operator's call; the rule does not change). Both must clear at H7, where the budget-started readback
+configured, so the startup metric reads `start_failed`, not `started` (`server/main.ts:420`). That is
+expected here and stays until H7. `RelayWorkerBudgetStartupFailed` (`relay-worker-monitoring`, `for: 2m`)
+does not fire for it: since 2026-11-22 the rule fires only for a hub Pod that carries a candidate (its
+`candidate-session-key` init container, read from kube-state-metrics). Both must clear at H7, where the budget-started readback
 is.
 
 The installation itself can be approved any time after H3 (installation runbook I1-I10); a worker

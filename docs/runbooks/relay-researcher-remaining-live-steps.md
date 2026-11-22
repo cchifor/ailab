@@ -1675,7 +1675,8 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
 1. **H6.** The owner lifts #1811's hold. Read back as in hub H6 and Router connection step 10. Also:
    - Relay's mounted `witness.json` (`wsha_relay`) equals the record's latest entry, B. The drills
      rotated the witness after H4a's roll, and H6's Recreate rollout is what mounts B.
-   - Budget startup `start_failed` and `RelayWorkerBudgetStartupFailed` are expected until H7.
+   - Budget startup `start_failed` is expected until H7. `RelayWorkerBudgetStartupFailed` stays quiet for it
+     (since 2026-11-22 it fires only for a hub Pod that carries a candidate).
 2. **The candidate journal** on `10.96.0.42`. It is under Flux at zero replicas since ailab #1813,
    and its activation is its own held PRs
    ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md), "Activation under Flux").
