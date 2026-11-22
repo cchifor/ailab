@@ -351,21 +351,32 @@ roll_relay() {
   cap relay-pod-before-roll hpod &&
   roll_deploy relay relay app=relay relay
 }
-# router_ctl <label> <since: date -u +%FT%TZ>: the in-window Router control. Until llm-router #191, the Router
-# cannot print `Worker budget authority available` (checklist step 5, the note above rreader), so rlog is
-# empty. This is the owner's substitute (#1753 comment 133524; checklist "Observing the Router"): two rreader
-# captures 12 s apart on one connection (same pid and backend_start, later query_start, query
-# runtime_snapshot), and no ledger error with CONTEXT runtime_snapshot since <since>. In Relay drills, lerrors
-# lines with CONTEXT current_epoch are expected (Relay's observer and the operator controls) and do not count.
+# router_ctl <label> <since: date -u +%FT%TZ> [drill]: the in-window Router control. Until llm-router #191, the
+# Router cannot print `Worker budget authority available` (checklist step 5, the note above rreader), so rlog is
+# empty. This is the owner's substitute, checklist "Observing the Router", Available (#1753 comment 133524):
+# two rreader captures 12 s apart on one connection (same pid and backend_start, later query_start, user
+# relay_budget_router, query runtime_snapshot); lerrors from <since> taken no earlier than <since> + 20 s; rident.
+# lerrors must show NO ERROR, FATAL or PANIC line, of any kind. The one exemption is a drill window (third
+# argument `drill`, §7 step 4 only): there a line with CONTEXT current_epoch is Relay's observer or an operator
+# control on the drill witness and is not counted; every other line still fails it.
+# Its exit status covers only the captures: the control holds only when the CHECK BY EYE it prints holds too.
 # Call it directly, never under cap or $(...): cap's counter must stay in this shell. (NEW, R0b.)
 router_ctl() {
+  local w
   cap "$1-reader" rreader || return 1
   sleep 12
-  cap "$1-reader-after-10s" rreader || return 1
+  cap "$1-reader-after-12s" rreader || return 1
+  w=$(( $(date -u -d "$2" +%s) + 20 - $(date -u +%s) )) || return 1
+  [ "$w" -le 0 ] || sleep "$w"
   cap "$1-errors" lerrors "$2" || return 1
   cap "$1-rident" rident || return 1
-  echo "CHECK BY EYE: one row each, same pid+backend_start, later query_start, query runtime_snapshot;"
-  echo "no '$1-errors' line with CONTEXT runtime_snapshot (current_epoch lines are Relay's observer or the controls)."
+  echo "CHECK BY EYE: one reader row each, same pid+backend_start, later query_start, relay_budget_router, runtime_snapshot;"
+  echo "rident: digest = router_digest, instance_id = the mounted witness's instanceId;"
+  if [ "${3:-}" = drill ]; then
+    echo "'$1-errors': no ERROR/FATAL/PANIC line except those with CONTEXT current_epoch (drill window)."
+  else
+    echo "'$1-errors': no ERROR/FATAL/PANIC line at all."
+  fi
 }
 # The hub's worker rows: R0 must leave every count unchanged and its workerId absent.
 hub_counts() {
@@ -427,10 +438,14 @@ SQL
   different cluster (checklist, "Rules for every step"), so every command here names the context. The
   suspension is a patch under field manager `relay-runbook` (NEW form, 2026-11-21): R0's
   `flux suspend` was undone by the next `flux-system` apply (#1753 comment 135072), which takes over a
-  `kubectl*`/`flux` field as roll_deploy's note says (#1897). Record `WE_SUSPENDED=1` only if `spec.suspend`
-  was false before. Then force one `flux-system` apply and read the field back after it:
+  `kubectl*`/`flux` field as roll_deploy's note says (#1897). Read `spec.suspend` first: `WE_SUSPENDED=1`
+  only when it was not already true, so §10 never resumes an agent that git or the owner had suspended.
+  Then patch, force one `flux-system` apply and read the field back after it:
 
   ```sh
+  agent_suspend_before="$(kubectl --context admin@ai -n flux-system get kustomization relay-researcher-agent -o jsonpath='{.spec.suspend}')"
+  WE_SUSPENDED=0; [ "$agent_suspend_before" = true ] || WE_SUSPENDED=1
+  cap agent-suspend-before echo "spec.suspend=${agent_suspend_before:-unset} WE_SUSPENDED=$WE_SUSPENDED"
   kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-agent --type=merge \
     -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook
   flux --context admin@ai reconcile kustomization flux-system -n flux-system
@@ -526,7 +541,8 @@ are NEW.
      also `cap refusal-allocator q relay_budget_allocator "SELECT worker_budget.current_epoch('<A instanceId>', '<A recoveryEpoch>', '<A witnessDigest>')"`
      fails with `42501: Worker budget authority unavailable`: the statement the observer runs with
      Relay's mounted file.
-  4. **The in-window Router control.** `router_ctl router-X "$t0"` passes: the Router, on B, is served by the same ledger in the same window. Also
+  4. **The in-window Router control.** `router_ctl router-X "$t0" drill` returns 0 and its CHECK BY EYE
+     conditions hold: the Router, on B, is served by the same ledger in the same window. Also
      `cap router-log rlog`; it shows `Worker budget authority available` only once llm-router #191 has shipped.
   5. `cap control-again …` and `cap control-allocator-again …`: both still return `<B recoveryEpoch>`.
      `cap alerts ralerts`.
@@ -537,7 +553,8 @@ are NEW.
   2. `lwrite open-B`, `plugin true` (`HTTP 200`, `active`), then `since=$(date -u +%s.%N)` and
      `t0=$(date -u +%FT%TZ)`.
   3. `relay_check 1 "$since"` returns 0: Relay's positive control on B after the drill.
-     `router_ctl router-R-X "$t0"` passes (and `cap router-log rlog`, as step 4), and `cap control-allocator …`
+     `router_ctl router-R-X "$t0"` returns 0 with its CHECK BY EYE conditions holding (and
+     `cap router-log rlog`, as step 4), and `cap control-allocator …`
      returns `<B recoveryEpoch>`.
   4. Withdraw: `lwrite withdraw`, then `plugin false`.
   5. `cap router-es-after-X router_es_refresh` equals `router-es-before-X` (no ESO reconcile of the Router's
@@ -628,7 +645,8 @@ drill's R_R step 5 passed (`router_es_refresh` unchanged, `rlinks_ok`), and `cap
 passes again now; otherwise `roll_router` (checklist step 5's R) before the re-open. Commands as checklist steps 7 and 8:
 `lwrite open-B`, then `plugin true`, then `t0=$(date -u +%FT%TZ)`. Readback:
 
-- `cap plugins-end plugins` (`active`), `router_ctl router-end "$t0"`, and `cap router-log-end rlog`;
+- `cap plugins-end plugins` (`active`), `router_ctl router-end "$t0"` (0, CHECK BY EYE holds), and
+  `cap router-log-end rlog`;
 - `since=$(date -u +%s.%N); relay_check 1 "$since"` returns 0;
 - `cap final ledger_state`: B's IDs, `ready = t`, every history count 0;
 - `cap hub-counts-end hub_counts`: equal to §6.1's, R0's `workerId` absent;
@@ -710,7 +728,8 @@ reset's rollout keeps the annotation (Flux does not own it) and is the one roll 
 3. **The session-key Secret.** Once that rollout no longer mounts it (generator runbook, "After the
    campaign"): `kubectl --context admin@ai -n relay delete secret relay-worker-candidate-key-<d16>`.
 4. **The agent.** Campaign §3.10 step 8, only if §6.1 recorded `WE_SUSPENDED=1`, under the same field manager
-   (NEW form): `kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-agent --type=merge
+   (NEW form; `cap agent-suspend-before` holds the value):
+   `kubectl --context admin@ai -n flux-system patch kustomization relay-researcher-agent --type=merge
    -p '{"spec":{"suspend":false}}' --field-manager=relay-runbook`. Then `cap agent-after …` with
    §6.1's command: the same generation as `agent-before`, and Ready. The agent never ran R0's values.
 5. **The client Pod.** `kubectl --context admin@ai -n relay-budget-authority delete pod relay-budget-operator-client`
