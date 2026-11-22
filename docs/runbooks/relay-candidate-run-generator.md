@@ -166,12 +166,21 @@ The operator merges once CI, the §3.2-§3.3 readbacks and that check pass. Flux
 
 ### 4b. S-B: in place, then commit the same bytes
 
-With `apps` suspended under field manager `relay-runbook` (campaign runbook §5.2, "Suspending a Kustomization":
-`kubectl --context admin@ai -n flux-system patch kustomization apps --type=merge -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook`, then the `flux-system` reconcile and the `spec.suspend` readback), render the hub overlay
-from the per-run branch with the pinned kustomize of `scripts/manifest-lint.sh` (the CI render), keep
-only the run's ConfigMap and the `relay` Deployment (the overlay also renders SOPS-encrypted Secrets,
-which only Flux can apply), and apply them server-side; then commit the same generated files and resume
-(the same patch with `"suspend":false`) once git equals the live objects:
+Suspend `apps` as the campaign runbook's §5.2 says ("Suspending a Kustomization"):
+
+```sh
+kubectl --context admin@ai -n flux-system patch kustomization apps --type=merge \
+  -p '{"spec":{"suspend":true}}' --field-manager=relay-runbook
+flux --context admin@ai reconcile kustomization flux-system -n flux-system
+kubectl --context admin@ai -n flux-system get kustomization apps -o jsonpath='{.spec.suspend}{"\n"}'   # true
+```
+
+Then render the hub overlay from the per-run branch with the pinned kustomize of `scripts/manifest-lint.sh`
+(the CI render), keep only the run's ConfigMap and the `relay` Deployment (the overlay also renders
+SOPS-encrypted Secrets, which only Flux can apply), and apply them server-side. Commit the same generated
+files. Once git equals the live objects, resume with the same patch and `"suspend":false`, the `flux-system`
+reconcile, and the readbacks: `spec.suspend` is `false`, and `apps` reconciles at the intended revision with
+no drift reported.
 
 ```sh
 docker run --rm -v "$PWD:/repo:ro" -w /repo <KUSTOMIZE_IMAGE of scripts/manifest-lint.sh> build kubernetes/apps/apps/relay \
