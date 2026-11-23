@@ -1141,6 +1141,13 @@ fi
 #    >> the 3h job timeout and a job freshens its checkout at start, so a live/recent workspace always
 #    trips the -newermt probe (which short-circuits on the first fresh entry). Path-guarded like the
 #    actcache trim. Reached only from an idle sweep, or from the critical last-resort path above.
+#    work/tool_cache is NOT a workspace: it is the runner's RUNNER_TOOL_CACHE, which setup-node,
+#    setup-python, ... extract a version into once and every later job only READS. No job freshens it, so
+#    the age probe always calls it stale, and the "a live job trips -newermt" argument above does not hold
+#    for it. 2026-11-23 00:53Z, ci-runner-3: an idle-decided pressure sweep began 1 s after a job was picked
+#    up and pruned tool_cache 2 s after that job's setup-node had put Node 22 from it on PATH; the job's
+#    next `node` resolved to the host's /usr/bin/node v20 and the step failed (relay run 146057). It is
+#    never pruned here: setup-* re-download a version they miss, and the cache holds a few versions.
 ws_pruned=0; ws_count=0
 if is_num "$WS_PRUNE_AGE_H" && [ "$WS_PRUNE_AGE_H" -gt 0 ] && [ -d "$WORKDIR_PARENT" ]; then
   case "$WORKDIR_PARENT" in
@@ -1149,6 +1156,7 @@ if is_num "$WS_PRUNE_AGE_H" && [ "$WS_PRUNE_AGE_H" -gt 0 ] && [ -d "$WORKDIR_PAR
       for ws in "$WORKDIR_PARENT"/*/; do
         ws="${ws%/}"
         [ -d "$ws" ] || continue
+        [ "${ws##*/}" = tool_cache ] && continue   # the shared tool cache, not a workspace (see above)
         ws_count=$(( ws_count + 1 ))
         if [ -z "$(find "$ws" -newermt "@$cutoff" -print -quit 2>/dev/null)" ]; then
           log "prune stale workspace $ws (no activity in ${WS_PRUNE_AGE_H}h)"
