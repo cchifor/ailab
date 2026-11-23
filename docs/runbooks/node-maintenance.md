@@ -568,12 +568,12 @@ that curve for the two CPU fans and sets the APU power mode:
 - **node3 runs hotter at the same power and the same load (hardware follow-up, cause not confirmed):** on
   package power alone node3 looked ~9 C hotter than node1 (median Tctl at 52-56 W, the 2026-11-22/23
   night: node1 75, node2 80, node3 84 C), with the same CPU-fan rpm on all three (~2630 at 40 %, ~3460 at
-  60 %). Part of that is the load mix: at the same power Tctl (the hottest spot) depends a lot on the kind
+  60 %). The load mix may be part of it: at the same power Tctl (the hottest spot) depends a lot on the kind
   of load (node1 reads 68 C when 60 %+ of the CPU is busy and 78-80 C when 10-40 % is, a few cores boosting
   hard), and node3, with two CI runners instead of three plus the reviewer VMs, relay-worker-1, the registry
-  and the LLM container, never ran 40 %+ busy at that power. Matched on both (2026-11-23, a later 24 h at
-  30 s samples; the power window widened to 50-57 W for enough samples per band, so do not subtract these
-  from the night's medians above), median Tctl (samples):
+  and the LLM container, never ran 40 %+ busy at that power. Matched on both (the 24 h to 2026-11-23
+  10:28 UTC, which includes that night, at 30 s samples; the power window widened to 50-57 W for enough
+  samples per band, so these are not comparable with the night's medians above), median Tctl (samples):
 
   | CPU busy (1 min average) | node1 | node2 | node3 |
   |---|---|---|---|
@@ -583,12 +583,14 @@ that curve for the two CPU fans and sets the APU power mode:
   | 40-60 % | 74 C (978) | 76 C (526) | none |
   | 60-100 % | 68 C (369) | 72 C (57) | none |
 
-  So the load mix explains only ~3-4 C of the gap: node3 is still +5-6 C at 10-30 % busy, where 941 of its 1062
-  samples in the table are, and level only in the 30-40 % band (121 samples); node2 is ~+2 C. A 1 min busy average can
+  So matching the load does not close the gap: node3 is still +5-6 C at 10-30 % busy, where 941 of its 1062
+  samples in the table are, and level only in the 30-40 % band (121 samples); node2 is ~+2 C. How much of
+  the night's ~9 C the load mix accounts for is not measured (the windows differ). A 1 min busy average can
   still hide a different per-core boost pattern, so this does not prove a cooling problem either. Dust in
-  the heatsink fins, dried thermal paste or the airflow where node3 stands remain open. The next step is the
-  same synthetic load at the same fixed fan level, one node at a time; that test and a cleaning take load
-  off a node that is processing data, so plan them with the owner.
+  the heatsink fins, dried thermal paste or the airflow where node3 stands remain open. Owner, 2026-11-23:
+  no more node3 tests for now. To settle it later, run the same synthetic load at the same fixed fan level,
+  one node at a time; that test and a cleaning take load off a node that is processing data, so plan them
+  with the owner.
 - **The 95 C+ readings look like boost transients:** in the same 24 h they were 0.1 / 0.9 / 0.9 % of the
   samples on node1 / node2 / node3, each 1 min or shorter. At them the CPU was 13-31 % busy (1 min average)
   with the GPU idle and 15-22 cores above 4.5 GHz (fastest 4.75-4.9 GHz), consistent with the start of a
