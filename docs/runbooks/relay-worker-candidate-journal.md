@@ -1,5 +1,12 @@
 # Independent Relay candidate journal on ailab
 
+> **RETIRED 2026-11-22.** The owner retired the candidate journal with the obsolete Relay researcher
+> qualification campaign ([ailab #1753 comment 136889](https://git.chifor.me/cchifor/ailab/issues/1753#issuecomment-136889)).
+> Its Flux Kustomization `relay-candidate-journal` and the overlay `kubernetes/apps/relay-candidate-journal`
+> are removed; the staged base, `render.py`, `initialize/` and their tests are kept as code. The live
+> teardown (Namespaces, the Retain PV and its NAS volume) is an operator action outside this repo.
+> Everything below describes the bundle as staged, not a live service.
+
 This optional bundle supplies the retained launch journal required by finite
 candidate worker runs. It is separate from Relay, the router, their restore sets,
 and the independent inference-budget database. It creates no candidate authority,
@@ -66,7 +73,11 @@ silently alter those policies.
 
 ## Activation under Flux
 
-The base goes live through one Flux Kustomization, `relay-candidate-journal`
+**Retired 2026-11-22:** the Flux file and the overlay named here no longer exist. The text is
+kept as the record of how the staged base was activated (ailab #1813) and as the shape a
+re-activation would take; a re-activation is a new owner decision and a new reviewed PR.
+
+The base went live through one Flux Kustomization, `relay-candidate-journal`
 (`kubernetes/apps/clusters/ai/relay-candidate-journal.yaml`), over the overlay
 `kubernetes/apps/relay-candidate-journal`. The overlay uses the reviewed base
 unchanged and adds two files:
@@ -326,7 +337,8 @@ any other address fails closed.
 shows another address (a Service created from an earlier render), Flux's apply
 is rejected rather than moving it. Then, with the journal
 Deployment at zero replicas and no run in flight, delete that Service, let Flux
-create it again from `kubernetes/apps/relay-candidate-journal/service.yaml`
+create it again from `kubernetes/apps/relay-candidate-journal/service.yaml` (deleted at the
+retirement on 2026-11-22; a re-activation PR brings it back)
 (`flux --context admin@ai reconcile kustomization relay-candidate-journal -n flux-system`), and read back
 `10.96.0.42`. No Relay binding can have used
 the old address: the alias is only ever `10.96.0.42`, so a binding naming
@@ -501,7 +513,6 @@ Run renderer contract tests without Kubernetes:
 ```sh
 python3 -B -m unittest discover -s scripts/tests -p test_relay_candidate_journal.py
 kubectl kustomize kubernetes/optional/relay-candidate-journal
-kubectl kustomize kubernetes/apps/relay-candidate-journal
 ```
 
 The explicit isolated PostgreSQL smoke uses an already-local pinned PG17 image,

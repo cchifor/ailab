@@ -18,6 +18,7 @@ Run: python3 -m unittest discover -s scripts/tests -p "test_*.py" -v
 import importlib.util
 import json
 import pathlib
+import re
 import unittest
 
 import jinja2
@@ -192,7 +193,7 @@ class WriterFence(unittest.TestCase):
 
 
 class ActiveRegistryAfterCutover(unittest.TestCase):
-    """After the cutover the registry_* outputs follow CT 5005; the old resource stays bound to CT 5004."""
+    """The registry_* outputs follow CT 5005; the old CT 5004 is decommissioned (resource, var and outputs gone)."""
 
     TF = REPO / "kubernetes" / "infra" / "registry-lxc"
 
@@ -243,19 +244,13 @@ class ActiveRegistryAfterCutover(unittest.TestCase):
         for name, attr in (("registry_ip", "ip"), ("registry_vmid", "vm_id"), ("registry_hostname", "hostname"),
                            ("registry_node", "node_name")):
             self.assertIn(f"var.registry_lxc_n3.{attr}", self._block(out, f'output "{name}"'), name)
-        self.assertIn("var.registry_lxc.vm_id", self._block(out, 'output "registry_retired_vmid"'))
-        self.assertIn("var.registry_lxc.node_name", self._block(out, 'output "registry_retired_node"'))
+        self.assertNotIn("registry_retired", out)
+        self.assertNotRegex(out, r"var\.registry_lxc\.")
 
-    def test_old_resource_keeps_its_binding_and_ignores_run_state(self):
+    def test_the_old_ct_is_gone_and_5005_keeps_its_safeguards(self):
         main = (self.TF / "main.tf").read_text()
-        old = self._block(main, 'resource "proxmox_virtual_environment_container" "registry" ')
-        self.assertRegex(old, r"node_name\s*=\s*var\.registry_lxc\.node_name")
-        self.assertRegex(old, r"vm_id\s*=\s*var\.registry_lxc\.vm_id")
-        # the hand-set link_down=1 on net0 must survive any apply: tofu never touches the retired CT's NIC
-        self.assertRegex(old, r"ignore_changes\s*=\s*\[started, start_on_boot, network_interface\]")
-        # and never as enabled = false, which deletes a container's net0 in bpg 0.123.1
-        self.assertNotRegex(old, r"(?m)^\s*enabled\s*=\s*false")
-        self.assertRegex(old, r"prevent_destroy\s*=\s*true")
+        self.assertNotIn('resource "proxmox_virtual_environment_container" "registry" ', main)
+        self.assertIsNone(re.search(r'variable "registry_lxc"\s*\{', (self.TF / "variables.tf").read_text()))
         new = self._block(main, 'resource "proxmox_virtual_environment_container" "registry_n3" ')
         self.assertRegex(new, r"ignore_changes\s*=\s*\[started\]")
         self.assertRegex(new, r"start_on_boot\s*=\s*true")

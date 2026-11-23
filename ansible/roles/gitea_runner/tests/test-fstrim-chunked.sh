@@ -17,9 +17,10 @@
 # - the lock, the stop file (also one that appears during the idle confirmation), bad settings and a
 #   non-ext4 fs stop it before any trim;
 # - the beacon carries the run's numbers and why it ended;
-# - the per-host schedule: windows end by 05:25, never overlap on a node, fit the cap, and none on the
-#   registry LXC's node overlaps that trim's deadline-bound span (Sunday into Monday included); fixture
-#   copies of the registry runbook prove each kind of collision is caught.
+# - the per-host schedule: windows end by 05:25, never overlap on a node, fit the cap, and none on the node of a
+#   hand-installed registry trim overlaps that trim's deadline-bound span (Sunday into Monday included). The
+#   runbook has no such unit since CT 5004's decommission (2026-11-22); fixtures/registry-weekly-unit.md keeps
+#   5004's unit, and edited copies of it prove each kind of collision is caught.
 #
 # Run: bash ansible/roles/gitea_runner/tests/test-fstrim-chunked.sh   (Linux; needs python3 with PyYAML and
 # Jinja2, both of which cloud-init pulls in on the runners)
@@ -700,7 +701,10 @@ def span(v, default=None):  # a systemd time span in seconds; None = unset, 0 or
 sec = re.search(r"^## Thin-volume trim \(weekly, (ai-node\d+)\)$", reg, re.M)
 svc, tmr = unit("registry-lxc-fstrim.service"), unit("registry-lxc-fstrim.timer")
 cal = re.search(r"^OnCalendar=(?:(\w+) )?\*-\*-\* (\d\d):(\d\d)(?::\d\d)? UTC$", tmr, re.M)
-print(("ok " if sec and svc and cal else "BAD ") + "the registry trim's node, service and OnCalendar are read from registry-cache.md")
+if not (sec or svc or tmr):
+    print("ok no hand-installed registry trim unit in this runbook (the registry is in its host's nightly sweep)")
+else:
+    print(("ok " if sec and svc and cal else "BAD ") + "the registry trim's node, service and OnCalendar are read from the runbook")
 if sec and svc and cal:
     rnode, rday = sec.group(1), (daynum(cal.group(1)[:3]) if cal.group(1) else None)
     delay, accuracy = span(key(tmr, "RandomizedDelaySec"), 0), span(key(tmr, "AccuracySec"), 60)
@@ -740,9 +744,9 @@ while IFS= read -r l; do
   case "$l" in "ok "*) ok "windows: ${l#ok }" ;; *) bad "windows: ${l#BAD }" ;; esac
 done <<< "$out"
 
-echo "== the schedule check catches a registry trim that would collide (fixture copies of registry-cache.md) =="
-fixture() { # <sed program applied inside the registry unit heredocs> -> path of an edited copy
-  sed "/registry-lxc-fstrim\\.[a-z]* <<'UNIT'/,/^UNIT\$/{$1;}" "$REPO/docs/runbooks/registry-cache.md" > "$ROOT/registry.fixture.md"
+echo "== the schedule check catches a registry trim that would collide (edited copies of CT 5004's unit) =="
+fixture() { # <sed program applied inside the registry unit heredocs> -> path of an edited copy of 5004's unit
+  sed "/registry-lxc-fstrim\\.[a-z]* <<'UNIT'/,/^UNIT\$/{$1;}" "$REPO/ansible/roles/gitea_runner/tests/fixtures/registry-weekly-unit.md" > "$ROOT/registry.fixture.md"
   echo "$ROOT/registry.fixture.md"
 }
 expect_bad() { # <label> <sed program> <text a BAD line must contain>

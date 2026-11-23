@@ -493,10 +493,37 @@ mkdir -p "$WSP/oldrepo/hostexecutor/sub" "$WSP/freshrepo/hostexecutor" "$WSP/age
 echo x > "$WSP/oldrepo/hostexecutor/sub/f"; echo x > "$WSP/freshrepo/hostexecutor/f"
 echo x > "$WSP/agedrepo/hostexecutor/stale"; find "$WSP/oldrepo" "$WSP/agedrepo" -exec touch -d '4 days ago' {} +
 echo x > "$WSP/agedrepo/hostexecutor/one-fresh-file" # one recent write anywhere must protect the tree
+# The shared tool cache (RUNNER_TOOL_CACHE) is read-only after extraction, so it always LOOKS stale; a job
+# that put Node 22 from it on PATH lost it mid-job on 2026-11-23 (ci-runner-3). It must never be pruned.
+mkdir -p "$WSP/tool_cache/node/22.23.2/x64/bin"; echo x > "$WSP/tool_cache/node/22.23.2/x64/bin/node"
+: > "$WSP/tool_cache/node/22.23.2/x64.complete"; find "$WSP/tool_cache" -exec touch -d '30 days ago' {} +
 run_case 0 50
 [ ! -e "$WSP/oldrepo" ]   && ok "F: fully-stale workspace pruned"        || bad "F: fully-stale workspace pruned"
 [ -e "$WSP/freshrepo" ]   && ok "F: fresh workspace kept"                || bad "F: fresh workspace kept"
 [ -e "$WSP/agedrepo" ]    && ok "F: workspace with one fresh file kept"  || bad "F: workspace with one fresh file kept"
+[ -e "$WSP/tool_cache/node/22.23.2/x64/bin/node" ] && ok "F: stale-looking tool_cache kept" || bad "F: stale-looking tool_cache kept"
+# Not vacuous: the same log must hold the prune line of oldrepo, so a missing or renamed log fails here.
+if grep -q "prune stale workspace .*/oldrepo " "$WORK/logger.log" 2>/dev/null \
+   && ! grep -q "prune stale workspace .*tool_cache" "$WORK/logger.log"; then
+  ok "F: tool_cache never logged as a pruned workspace (the log holds oldrepo's prune)"
+else
+  bad "F: tool_cache never logged as a pruned workspace (the log holds oldrepo's prune)"
+fi
+
+echo "[F2] a job picked up during the sweep stops the workspace prune; the mid-job critical path does not"
+# 2026-11-23: the gap was confirmed at 00:52:57, a job had been picked up at 00:52:56, and the prune ran
+# at 00:53:04. Here the runner turns busy once the sweep has started (after `container prune`).
+mkdir -p "$WSP/oldrepo3/hostexecutor"; echo x > "$WSP/oldrepo3/hostexecutor/f"
+find "$WSP/oldrepo3" -exec touch -d '4 days ago' {} +
+MOCK_BUSY_FROM=container run_case 0 50
+[ -e "$WSP/oldrepo3" ] && ok "F2: stale workspace kept once a job started mid-sweep" \
+  || bad "F2: stale workspace kept once a job started mid-sweep"
+grep -q "stop workspace prune: a job started during the sweep" "$WORK/logger.log" \
+  && ok "F2: ...and the sweep says so" || bad "F2: ...and the sweep says so"
+# Busy for the whole gap wait at CRITICAL disk: the mid-job path still prunes by age alone.
+MOCK_BUSY=1 run_case 1 95
+[ ! -e "$WSP/oldrepo3" ] && ok "F2: critical mid-job path still prunes the stale workspace" \
+  || bad "F2: critical mid-job path still prunes the stale workspace"
 
 echo "[G] prune age 0 disables the stale-workspace prune"
 mkdir -p "$WSP/oldrepo2/hostexecutor"; echo x > "$WSP/oldrepo2/hostexecutor/f"

@@ -55,8 +55,8 @@ pve_thin_pool_zero: true
 # docs/runbooks/node-maintenance.md "LXC volume trim (nightly)".
 pve_lxc_fstrim_enabled: false
 pve_lxc_fstrim_storages: [local-lvm]
-# Container ids the sweep never touches. ai-node1 lists 5004: the registry LXC has its own weekly unit
-# (registry-lxc-fstrim.timer, docs/runbooks/registry-cache.md), and two trims of one volume are waste.
+# Container ids the sweep never touches (a container with its own trim unit; none today: CT 5004's weekly unit
+# went with 5004 on 2026-11-22, and the registry CT 5005 is in ai-node3's sweep).
 pve_lxc_fstrim_exclude: []
 # The slot, HH:MM UTC (quoted: YAML 1.1 reads an unquoted 04:30 as a number). The timer starts the sweep
 # there, every day; no chunk starts after start + run_max_min (less one chunk's worst case). The hosts'

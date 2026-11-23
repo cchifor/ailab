@@ -9,9 +9,65 @@ inventory, logout/reboot and fresh hub heartbeat checks pass.
 
 ## Release and inventory
 
+**Relay v0.10.11** (release workflow run 145909, 2026-11-22, source
+`12ea8d52cda75fe67519ffd700c5e43ea9116ef0`) is the default connector release:
+
+| Field | Pin |
+|---|---|
+| Source | `12ea8d52cda75fe67519ffd700c5e43ea9116ef0` |
+| Linux amd64 SHA-256 | `a2a0b34104440a421781b43affbadee91db0a514c500fac429282b1269870a48` |
+| Linux arm64 SHA-256 | `13e9e4da9b4e5f6ea713d8933ad97d134b7c9b41c9ec078b8a7bc401bfa70d55` |
+
+The pins were checked on 2026-11-23 against the release's `manifest.json`, `SHA256SUMS` and the downloaded
+binaries; the amd64 binary reports `relay-connector 0.10.11`, the arm64 one was checked by hash only (no worker runs
+arm64). The relay-bus skill and the unit are unchanged since v0.10.10.
+
+**What v0.10.11 changes** (Relay #575, #576, #580, "Claude Code state"): for a pane running Claude Code, the
+connector reads Claude Code's session file (`<config>/sessions/<pid>.json`, internal, checked against 2.1.330) and
+sends its state with the pane's terminal sample: Working, Idle, or waiting for a decision (a permission question)
+or an answer. It finds the Claude process among the pane's foreground processes and reads the file only as a regular
+file of its own account, at most 64 KiB, never following a link, within 1 s per pass. A missing, unreadable or
+ambiguous session sends no state, and the console falls back to the terminal evidence of v0.10.10. No migration.
+
+**Roll out as for v0.10.10** (below): the connector first, one worker at a time, with the v0.10.11 binary at
+`~/.ailab-converge/artifacts/relay-connector/v0.10.11/relay-connector-linux-amd64` as `relay_connector_source`; then
+the hub pin. Mixed versions are safe both ways: a v0.10.10 hub ignores the Claude Code state, and a v0.10.10
+connector sends none. **Roll back** by repinning v0.10.10 (below) and converging.
+
+**Relay v0.10.10** (release workflow run 145785, 2026-11-22, source
+`716c2ed8a8090cd5b38799adb39d99cf89550026`), the previous connector release and the rollback target:
+
+| Field | Pin |
+|---|---|
+| Source | `716c2ed8a8090cd5b38799adb39d99cf89550026` |
+| Linux amd64 SHA-256 | `e213a063444d376662adcd5cf981d30078c1ea4750fd36830a1c34a4cac25187` |
+| Linux arm64 SHA-256 | `f06551fbb95752b8ef992b60bb09065f5445d5930e812d207e68fd0131aec24d` |
+
+The pins were checked on 2026-11-22 against the release's `manifest.json`, `SHA256SUMS` and the downloaded
+binaries; the amd64 binary reports `relay-connector 0.10.10`. The arm64 binary was checked by hash only: no
+worker runs arm64. The relay-bus skill is unchanged (its pins are
+those of v0.9.1, below), and so is the unit: the connector's unit generator did not change since v0.9.0.
+
+**What v0.10.10 changes** (Relay #573, "truthful agent state"): the console shows an agent's activity only
+as observed. A connector that sees the hub advertise `activity` sends, every 10 s, each pane's terminal
+sample: how long ago the terminal last received output (a write proven by the terminal's own times) and
+for how long at least it has been quiet. The hub keeps the samples in memory and derives the state it shows
+(Output observed, Quiet, No signal with its reason, Offline) with its source and age. No migration.
+
+**Roll out the connector first**, one worker at a time (dev-worker-1, then -2, -3 and -4), then the hub
+pin, which is its own pull request. Each worker is converged as in [Converge one worker](#converge-one-worker),
+with the v0.10.10 binary at `~/.ailab-converge/artifacts/relay-connector/v0.10.10/relay-connector-linux-amd64`
+passed as `-e relay_connector_source=…`. Mixed versions are safe both ways: a v0.10.10 connector sends no
+samples to a hub that does not advertise `activity`, and an older connector shows "No signal: update the
+connector" on the new hub. The converge restarts the connector service (a short gap on the bus and in the
+console); it never restarts an agent or a tmux server. On each worker, check that
+`relay-connector status --json` is fresh and connected. **Roll back** by repinning v0.9.0 (below) and
+converging; against a v0.10.10 hub, a v0.9.0 connector's agents then show "No signal: update the
+connector", as expected.
+
 **Relay v0.9.1** (release workflow run 120886, 2026-11-04, source
-`a53a3ee8786c1af3dd258106f18387eface4b7d0`) changes the hub and the relay-bus skill only; the
-connector stays on the v0.9.0 pin below. The hub image is
+`a53a3ee8786c1af3dd258106f18387eface4b7d0`) changed the hub and the relay-bus skill only; the
+connector stayed on the v0.9.0 pin below until v0.10.10 (above). The hub image is
 `sha256:b2c269e787243b01acf2893faec5d69ad4fde76fed510ee33b323e899808cbce`, and the skill pins are
 `relay-bus-SKILL.md` `9994513bbeb50f28ff4bd7b5688a003499bc17c59c941b1fbaeaf51e676a90d3` and
 `relay-bus.py` `7f570a08c892c67a84f3e94f9f01be6252ba2128d8da36aa6d3ccb65bc73b89d`. These were checked
@@ -31,7 +87,7 @@ files and the tagged sources. What it changes:
 Roll out the hub first (Flux), then `just relay-agent-skill` one worker at a time. The hook command
 does not change, and no connector converge is needed.
 
-The default release is the v0.9.0 connector manifest from Relay release
+The previous connector release, and the rollback target, is the v0.9.0 connector manifest from Relay release
 [v0.9.0](https://git.chifor.me/cchifor/relay/releases/tag/v0.9.0) (release
 workflow run 120163, 2026-11-04). The upgraded hub serves the same manifest at
 `https://relay.chifor.me/downloads/connector/v0.9.0/manifest.json`:

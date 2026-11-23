@@ -69,7 +69,7 @@ variable "lxc_rootfs_gb" {
 # Bumped 64 -> 192 GiB: at 64 GiB the store filled (no retention pre-fix), 100% full → blob writes
 # failed (`blob upload unknown` / `provided digest did not match`) while reads still served, which
 # reds cchifor/platform CI builds. 192 GiB gives headroom alongside the new storage.retention
-# policy (config.json.j2). Applied live via `pct resize 5004 mp0 192G`; this keeps tofu in sync.
+# policy (config.json.j2). Applied live then via `pct resize` on the old CT 5004; this keeps tofu in sync.
 variable "data_datastore" {
   type    = string
   default = "local-lvm"
@@ -104,33 +104,14 @@ variable "lxc_template_file" {
   default     = "registry-debian-13-standard_13.1-2_amd64.tar.zst"
 }
 
-# ---- The one registry LXC ----
-# IP .36 is free static (the .5-.36 reserve, below the router DHCP pool at .51 — no router change).
-# vmid 5004 is the next free LXC id (ai-llm uses 5001-5003).
-variable "registry_lxc" {
-  type = object({
-    node_name = string
-    vm_id     = number
-    ip        = string
-    hostname  = string
-  })
-  default = {
-    node_name = "ai-node1"
-    vm_id     = 5004
-    ip        = "192.168.0.36"
-    hostname  = "registry"
-  }
-}
-
 # cloud-init style SSH key so Ansible can reach the CT (the same key tofu uses elsewhere).
 variable "ssh_public_key" {
   description = "Public key injected into the CT root account for Ansible access."
   type        = string
 }
 
-# The NEW registry CT on ai-node3 (the zot move, 2026-11-21). vmid 5005 is free cluster-wide (5001-5003 belong to
-# the ai-lxc module's range, 5004 is the current registry). Same IP: only one of the two CTs ever owns .36 (5005 is
-# created stopped with its NIC link-down; the cutover stops 5004 first).
+# The registry CT on ai-node3 (since the zot move, 2026-11-21): vmid 5005 (5001-5003 are the ai-lxc module's range;
+# 5004, the old registry on ai-node1, was destroyed 2026-11-22). IP .36 (registry.chifor.me), IP/hostname as before.
 variable "registry_lxc_n3" {
   type = object({
     node_name = string
