@@ -590,6 +590,34 @@ Readback after the roll (operator):
 - Fleet's Terminals view shows the dev-workers' terminals, those that need a person first, and opens and controls
   one from its tile.
 
+### H10. v0.10.17: the Assistant's action registry
+
+Why: the console's changes and the Assistant's tools ran separate code, so the Assistant could not be held to the
+console's checks, and in Auto it switched plugins without a click.
+- Relay #595 with #597, released as v0.10.17 (#596, `a5fde4a5`, run 146573), hub only: host decisions, the
+  plugin switch and Needs you's decisions (keys, bus access, Router access, snooze, claim) are one registered
+  action each, which the console's routes and the Assistant's tools both dispatch. Each change holds the
+  administrator's authority until it commits; Auto no longer applies authority actions (`/enable` and `/disable`
+  show a card); the Assistant's model never reads text a requester wrote (pending hosts are named by id); the
+  Assistant's Apply bar shows the host in full.
+
+Hub only, no migrations (schema 79). The deployment receipt's runtime, skill, tools and prerequisites equal
+v0.10.16's, so re-pinning v0.10.16 (`bc607424…36c2`, H9) is a valid rollback. The connector is rebuilt with the
+same code; the dev-workers stay on the v0.10.11 pin. H10 gates no other step.
+
+Change: this PR pins the v0.10.17 digest in `migrate` and `relay`, with the annotations. One Recreate roll by the
+merge itself (Flux), with the pre-migration backup; outside the QNAP windows.
+
+Readback after the roll (operator):
+
+- one Running Pod; source `a5fde4a5b3846a5d1395c115db00d3f7a897689e`, release `relay-0.10.17-release-146573`;
+  the `relay` container's image ID ends in
+  `sha256:e20b6def872d65f4eede96a0a0217c0f5ea1b16715c569eda2d17638d69aca0c`; the migrate init container exited
+  0 and `schema_migrations` reads `79|79`; the env is unchanged from H9;
+- the feature's production check (the owner, in the console): decide one host request from Fleet or Needs you
+  and another from the Assistant (ask it to approve the host, then Apply). In Activity, both `connector` events
+  carry `action: host.authorize`, one with `via: console`, the other with `via: assistant`.
+
 ## Enablement order at a glance
 
 > **Campaign rows are historical.** The owner retired the researcher qualification campaign and its
@@ -616,6 +644,7 @@ Readback after the roll (operator):
 | canary | HISTORICAL, campaign retired 2026-11-22: H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
 | H4b | HISTORICAL while the campaign is retired (needs its genuine approval): `RELAY_WORKER_PROFILES_FILE`/`_SHA256` (profile registry) | the genuine approval, the qualified `tokenPolicyDigests`, registry reviewed | file pin equal; no `profiles-unavailable`; budget still `started`. Before the bounded general lifecycle trial |
 | H9 | hub image → v0.10.16 (agent state, Claude Code's state, Activity table, Needs you, Fleet, Terminals); gates no step above | every dev-worker connector on v0.10.11 (ailab #1947, #1949, read back per worker); H8's state only (no new settings) | v0.10.16 digest running, schema still 79, agents show observed states and Claude Code's, Activity pages by scrolling, Needs you lists pending requests |
+| H10 | hub image → v0.10.17 (the Assistant's action registry); gates no step above | H9 live | v0.10.17 digest running, schema still 79, a host decided from the console and one from the Assistant both read `action: host.authorize` in Activity |
 
 ## Rollback: migrations are forward-only
 
