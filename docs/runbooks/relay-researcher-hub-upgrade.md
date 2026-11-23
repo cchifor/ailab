@@ -590,7 +590,7 @@ Readback after the roll (operator):
 - Fleet's Terminals view shows the dev-workers' terminals, those that need a person first, and opens and controls
   one from its tile.
 
-### H10. v0.10.19: the Assistant's action registry, every Assistant tool on it, and its Needs you card
+### H10. v0.10.22: the Assistant's action registry, every Assistant tool on it, and its cards
 
 Why: the console's changes and the Assistant's tools ran separate code, so the Assistant could not be held to the
 console's checks, and in Auto it switched plugins without a click.
@@ -608,21 +608,29 @@ console's checks, and in Auto it switched plugins without a click.
   catalog. Its first card is Needs you: "/attention", or "what needs me" in the guide, shows Status's own rows. The
   latest card acts while its list is current; an older one is a read-only snapshot with Refresh. The model never
   receives a card, only a counts-only sentence; clicks from a card are recorded with `surface: assistant-card`.
+- Relay #604, released as v0.10.20 (#605, `a3ffa52b`, run 146743): the table card. "/agents", "/hosts",
+  "/plugins" and recent activity show as Fleet's and Activity's own compact table, a row opening its page.
+- Relay #607 with #611, released as v0.10.21 (#609, `dd3374c7`, run 146831): the lanes and session cards: the bus's
+  lanes (the Lanes page's diagram) and a managed session's timeline, names and states only, never a message's or
+  a prompt's text.
+- Relay #608 with #611 and #613, released as v0.10.22 (#612, `4ea243c0`, run 146865): the terminal card: a selected
+  terminal's name and state; its text only on "Show terminal text" (Operators and above, recorded), discarded
+  when the terminal is deselected. Also a deterministic worker source journal test (the v0.10.20 release flake).
 
-Hub only, no migrations (schema 79). v0.10.19's deployment receipt equals v0.10.16's to v0.10.18's in runtime,
+Hub only, no migrations (schema 79). v0.10.22's deployment receipt equals v0.10.16's to v0.10.19's in runtime,
 skill, tools and prerequisites (only the image, its source and run, the connector's hashes and the manifest
-differ), so re-pinning v0.10.18 (`ff85b992…fe06`), v0.10.17 (`e20b6def…ca0c`) or v0.10.16 (`bc607424…36c2`, H9)
-is a valid rollback. The
+differ), so re-pinning v0.10.19 (`db277a54…b44d`), v0.10.18 (`ff85b992…fe06`), v0.10.17 (`e20b6def…ca0c`) or
+v0.10.16 (`bc607424…36c2`, H9) is a valid rollback. The
 connector is rebuilt with the same code; the dev-workers stay on the v0.10.11 pin. H10 gates no other step.
 
-Change: this PR pins the v0.10.19 digest in `migrate` and `relay`, with the annotations. One Recreate roll by the
+Change: this PR pins the v0.10.22 digest in `migrate` and `relay`, with the annotations. One Recreate roll by the
 merge itself (Flux), with the pre-migration backup; outside the QNAP windows.
 
 Readback after the roll (operator):
 
-- one Running Pod; source `dd5bd2970380bfbfad62d8b6fbfe218d09967d01`, release `relay-0.10.19-release-146686`;
+- one Running Pod; source `4ea243c0c726b32f556de1322d7b7561cb7f5fb5`, release `relay-0.10.22-release-146865`;
   the `relay` container's image ID ends in
-  `sha256:db277a5498a089068fa82083bab706de1c14540658a77c8ba9262e9e03bfb44d`; the migrate init container exited
+  `sha256:9ea637c922bd8201e1e82f46c6f8edba20915f425e1b372d46ef168370dcafb2`; the migrate init container exited
   0 and `schema_migrations` reads `79|79`; the env is unchanged from H9;
 - the features' production checks (the owner, in the console):
   - D1a: decide one host request from Fleet or Needs you and another from the Assistant (ask it to approve the
@@ -632,7 +640,11 @@ Readback after the roll (operator):
     carries `action: conversation.rename` with `via: assistant`;
   - D2a: type "what needs me" in the Workspace guide (or `/attention`): the Needs you card lists the same items as
     Status. Approve a host request from the card: in Activity, its `connector` event carries
-    `action: host.authorize`, `via: console` and `surface: assistant-card`.
+    `action: host.authorize`, `via: console` and `surface: assistant-card`;
+  - D2b: ask the Assistant for the agents (or `/agents`), the lanes, a managed session and a selected terminal.
+    Each shows as its card: the agents' table lists Fleet's rows; the lanes card the Lanes page's lanes; the
+    session card the session's steps without prompt text; the terminal card the terminal's name and state, and its
+    text only after "Show terminal text" (that read is recorded in Activity).
 
 ## Enablement order at a glance
 
@@ -660,7 +672,7 @@ Readback after the roll (operator):
 | canary | HISTORICAL, campaign retired 2026-11-22: H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
 | H4b | HISTORICAL while the campaign is retired (needs its genuine approval): `RELAY_WORKER_PROFILES_FILE`/`_SHA256` (profile registry) | the genuine approval, the qualified `tokenPolicyDigests`, registry reviewed | file pin equal; no `profiles-unavailable`; budget still `started`. Before the bounded general lifecycle trial |
 | H9 | hub image → v0.10.16 (agent state, Claude Code's state, Activity table, Needs you, Fleet, Terminals); gates no step above | every dev-worker connector on v0.10.11 (ailab #1947, #1949, read back per worker); H8's state only (no new settings) | v0.10.16 digest running, schema still 79, agents show observed states and Claude Code's, Activity pages by scrolling, Needs you lists pending requests |
-| H10 | hub image → v0.10.19 (the Assistant's action registry, every Assistant tool on it, and its Needs you card); gates no step above | H9 live | v0.10.19 digest running, schema still 79, a host decided from the console and one from the Assistant both read `action: host.authorize`, an Assistant rename reads `action: conversation.rename`, and a host approved from the Needs you card reads `surface: assistant-card`, in Activity |
+| H10 | hub image → v0.10.22 (the Assistant's action registry, every Assistant tool on it, and its cards); gates no step above | H9 live | v0.10.22 digest running, schema still 79, a host decided from the console and one from the Assistant both read `action: host.authorize`, an Assistant rename reads `action: conversation.rename`, and a host approved from the Needs you card reads `surface: assistant-card`, in Activity, and the agents, lanes, session and terminal cards show (the terminal text only on request) |
 
 ## Rollback: migrations are forward-only
 
