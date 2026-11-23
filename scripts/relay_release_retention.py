@@ -25,7 +25,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLE = re.compile(r"^relay-(codex|pi|holder)-")
-VERSION = re.compile(r"\bv\d+\.\d+\.\d+\b")
+# A version as pins write it, with or without the `v` (`relay_connector_release.version: 0.10.11`), normalised to the
+# release tag `v0.10.11`. Not a fragment of a longer dotted run, so `192.168.0.36` is no version. (reviewer-codex,
+# #1957: the first matcher required the `v` and missed bare pins.)
+VERSION = re.compile(r"(?<![\w.])v?(\d+\.\d+\.\d+)(?!\.?\d)")
 ALWAYS_KEEP = {"v0.2.0"}
 KEEP_NEWEST = 5
 # Where a deployed or rollback-relevant Relay version is named. A version mentioned anywhere here keeps its bundles.
@@ -40,17 +43,24 @@ PIN_PATHS = (
 )
 
 
+class PinReadError(Exception):
+    """A pin path is missing or a file under it cannot be read: its versions would silently lose protection, so no
+    plan may be produced (reviewer-codex, #1957)."""
+
+
 def pinned_versions(root=ROOT, paths=PIN_PATHS):
     found = set()
     for rel in paths:
         base = root / rel
-        files = [base] if base.is_file() else (sorted(base.rglob("*")) if base.is_dir() else [])
-        for f in files:
-            if f.is_file() and f.suffix in {".yaml", ".yml", ".json", ".j2", ".md", ".txt", ""}:
-                try:
-                    found.update(VERSION.findall(f.read_text(encoding="utf-8", errors="replace")))
-                except OSError:
-                    continue
+        if not base.exists():
+            raise PinReadError("pin path missing: %s (renamed? update PIN_PATHS)" % rel)
+        files = [base] if base.is_file() else sorted(p for p in base.rglob("*") if p.is_file())
+        for f in files:   # every file, whatever its suffix: a pin in a .tf or .sh still protects
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                raise PinReadError("cannot read %s: %s" % (f, e)) from e
+            found.update("v" + m for m in VERSION.findall(text))
     return found
 
 
@@ -98,7 +108,12 @@ def main(argv=None):
     if not isinstance(releases, list) or not releases:
         print("no releases read; refusing to plan", file=sys.stderr)
         return 2
-    keep, items = plan(releases, pinned_versions(), a.keep_newest, a.keep)
+    try:
+        pins = pinned_versions()
+    except PinReadError as e:
+        print("STOP: %s; no plan" % e, file=sys.stderr)
+        return 3
+    keep, items = plan(releases, pins, a.keep_newest, a.keep)
     sha = plan_sha256(items)
     total = sum(i["size"] for i in items)
     print("KEEP (bundles untouched):")

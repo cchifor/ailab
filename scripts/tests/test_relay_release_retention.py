@@ -3,6 +3,7 @@
 
     python3 -m unittest scripts.tests.test_relay_release_retention
 """
+import io
 import json
 import os
 import shutil
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -62,14 +64,51 @@ class Planner(unittest.TestCase):
         rels[0]["draft"] = True
         self.assertFalse(any(i["tag"] == "v0.10.1" for i in rr.plan(rels, set(), 3)[1]))
 
-    def test_pins_are_read_from_the_tree(self):
+    PATHS = ("kubernetes/apps/apps/relay", "ansible/roles/relay_connector/defaults")
+
+    def tree(self, t):
+        root = Path(t)
+        (root / "kubernetes/apps/apps/relay").mkdir(parents=True)
+        (root / "kubernetes/apps/apps/relay/relay.yaml").write_text(
+            "# hub v0.10.16, rollback v0.10.9\nip: 192.168.0.36\n")
+        (root / "ansible/roles/relay_connector/defaults").mkdir(parents=True)
+        # a bare pin, as relay_connector_release writes it: no `v`, no helper comment (reviewer-codex, #1957)
+        (root / "ansible/roles/relay_connector/defaults/main.yml").write_text("relay_connector_release:\n  version: 0.10.11\n")
+        return root
+
+    def test_pins_are_read_from_the_tree_with_or_without_the_v(self):
         with tempfile.TemporaryDirectory() as t:
-            root = Path(t)
-            (root / "kubernetes/apps/apps/relay").mkdir(parents=True)
-            (root / "kubernetes/apps/apps/relay/relay.yaml").write_text("# hub v0.10.16, rollback v0.10.9\n")
-            (root / "ansible/roles/relay_connector/defaults").mkdir(parents=True)
-            (root / "ansible/roles/relay_connector/defaults/main.yml").write_text("version: 0.10.11  # v0.10.11\n")
-            self.assertEqual(rr.pinned_versions(root), {"v0.10.16", "v0.10.9", "v0.10.11"})
+            pins = rr.pinned_versions(self.tree(t), self.PATHS)
+            self.assertEqual(pins, {"v0.10.16", "v0.10.9", "v0.10.11"})   # and no v192.168.0
+            self.assertFalse(any(i["tag"] == "v0.10.11" for i in rr.plan(fixture(), pins, 3)[1]))
+
+    def test_an_unreadable_pin_file_stops_the_plan(self):
+        with tempfile.TemporaryDirectory() as t:
+            root = self.tree(t)
+            bad = root / "ansible/roles/relay_connector/defaults/main.yml"
+            real = Path.read_text
+
+            def read_text(p, *a, **k):
+                if p == bad:
+                    raise PermissionError(13, "Permission denied", str(p))
+                return real(p, *a, **k)
+            with unittest.mock.patch.object(Path, "read_text", read_text):
+                with self.assertRaises(rr.PinReadError):
+                    rr.pinned_versions(root, self.PATHS)
+
+    def test_a_missing_pin_path_stops_the_plan(self):
+        with tempfile.TemporaryDirectory() as t:
+            with self.assertRaises(rr.PinReadError):
+                rr.pinned_versions(self.tree(t), self.PATHS + ("ansible/roles/renamed_role",))
+
+    def test_main_prints_no_plan_when_pins_cannot_be_read(self):
+        with tempfile.TemporaryDirectory() as t:
+            rel = Path(t) / "r.json"
+            rel.write_text(json.dumps(fixture()))
+            with unittest.mock.patch.object(rr, "pinned_versions", side_effect=rr.PinReadError("cannot read x")):
+                with unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                    self.assertEqual(rr.main(["plan", "--releases", str(rel)]), 3)
+            self.assertNotIn("PLAN-SHA256", out.getvalue())
 
     def test_this_checkout_pins_the_running_hub(self):
         # the live pin must never be planned for deletion: whatever relay.yaml names is kept
