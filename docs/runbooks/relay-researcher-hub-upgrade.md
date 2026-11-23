@@ -529,7 +529,7 @@ After the owner approves the pool in their own session (owner rule, ailab #1799)
 - credential, binding and issuance-operation counts unchanged by the approval. Pool approval does not
   establish worker readiness.
 
-### H9. v0.10.11: truthful agent state and Claude Code's own state
+### H9. v0.10.12: truthful agent state, Claude Code's own state, and Activity on the shared table
 
 Why: the console derived an agent's state from defaults (a pane became Idle on connect), not from
 evidence.
@@ -539,6 +539,8 @@ evidence.
 - Relay #575 with #576 and #580, released as v0.10.11 (#579, `12ea8d52`, run 145909): a v0.10.11
   connector adds Claude Code's own state, read from its session file, and the hub shows Working, Idle, or
   Waiting for a decision or an answer.
+- Relay #581 with #583, released as v0.10.12 (#582, `c4601358`, run 146045), hub only: the Activity page
+  on the shared data table, paged by scrolling, with the view in its address.
 
 The samples live in the hub's memory; nothing is stored. Hub only in this step, no migrations (schema
 79), same runtime, skill, tools and prerequisites as v0.10.9 (the deployment receipts agree), so
@@ -550,19 +552,24 @@ one at a time, and on each `relay-connector status --json` reports 0.10.11, fres
 versions are safe both ways: a worker still on 0.10.10 shows terminal evidence without Claude Code's
 state, and one older than 0.10.10 shows "No signal: update the connector".
 
-Change: this PR pins the v0.10.11 digest in `migrate` and `relay`, with the annotations. One Recreate
+v0.10.12 rebuilds the connector (its code is v0.10.11's, only the version string differs), so the
+dev-workers stay on the v0.10.11 pin; the hub serves both.
+
+Change: this PR pins the v0.10.12 digest in `migrate` and `relay`, with the annotations. One Recreate
 roll by the merge itself (Flux), with the pre-migration backup; outside the QNAP windows. H9 gates no
 other step: H7 and the steps after it need only H8.
 
 Readback after the roll (operator):
 
-- one Running Pod; source `12ea8d52cda75fe67519ffd700c5e43ea9116ef0`, release
-  `relay-0.10.11-release-145909`; the `relay` container's image ID ends in
-  `sha256:8d3127d48bf259ba631027237c7a1816dc387e2036550c273cf49ce7e823945c`; the migrate init container
+- one Running Pod; source `c46013587430d87405fc0aa091199b018632eb79`, release
+  `relay-0.10.12-release-146045`; the `relay` container's image ID ends in
+  `sha256:d4427c7e3d648c142eda1cb192e936a5f4064d71fddd3527c751e7d6aa75765b`; the migrate init container
   exited 0 and `schema_migrations` reads `79|79`; the env is unchanged from H8;
 - the console's Agents page shows each dev-worker agent with an observed state and its age (Output
   observed or Quiet), not "No signal: update the connector", and each Claude Code agent as Working, Idle
-  or waiting, with "Claude Code <version>".
+  or waiting, with "Claude Code <version>";
+- Activity loads past its first page by scrolling, and a filtered address opens the same view in another
+  browser.
 
 ## Enablement order at a glance
 
@@ -584,7 +591,7 @@ Readback after the roll (operator):
 | approval | a genuine `ReleaseApproval` | the nineteen reports and the other release gates accepted | its `workerTemplates` subject asserts the nine passed gates |
 | canary | H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
 | H4b | `RELAY_WORKER_PROFILES_FILE`/`_SHA256` (profile registry) | the genuine approval, the qualified `tokenPolicyDigests`, registry reviewed | file pin equal; no `profiles-unavailable`; budget still `started`. Before the bounded general lifecycle trial |
-| H9 | hub image → v0.10.11 (truthful agent state, Claude Code's own state); gates no step above | every dev-worker connector on v0.10.11 (ailab #1947, #1949, read back per worker); H8's state only (no new settings) | v0.10.11 digest running, schema still 79, agents show observed states and Claude Code's |
+| H9 | hub image → v0.10.12 (truthful agent state, Claude Code's own state, Activity table); gates no step above | every dev-worker connector on v0.10.11 (ailab #1947, #1949, read back per worker); H8's state only (no new settings) | v0.10.12 digest running, schema still 79, agents show observed states and Claude Code's, Activity pages by scrolling |
 
 ## Rollback: migrations are forward-only
 

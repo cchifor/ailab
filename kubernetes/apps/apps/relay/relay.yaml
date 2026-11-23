@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.10.11-release-145909
-        chifor.me/source-commit: 12ea8d52cda75fe67519ffd700c5e43ea9116ef0
+        chifor.me/release: relay-0.10.12-release-146045
+        chifor.me/source-commit: c46013587430d87405fc0aa091199b018632eb79
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -133,15 +133,15 @@ spec:
         - name: tmp
           mountPath: /tmp
       # FORWARD-ONLY: schema 79 (migrations 057-079, applied by v0.10.2 on 2026-11-15); v0.10.3,
-      # v0.10.4, v0.10.9, v0.10.10 and v0.10.11 add none, so re-pinning v0.10.9 (1b0f2f72...), v0.10.4
+      # v0.10.4 and v0.10.9 to v0.10.12 add none, so re-pinning v0.10.9 (1b0f2f72...), v0.10.4
       # (d1482bc1...), v0.10.3 (a97437e4...) or v0.10.2 (994ecee1...) is a valid rollback. v0.9.1
       # must never run against schema 79: going below v0.10.2 = restore the v0.10.2 rollout's
       # pre-migration generation 20261115T162747Z-119fcc01-b84d-4be5-a80c-ac5196caaf73 (else H1's),
       # then a reviewed PR re-pins v0.9.1: docs/runbooks/relay-researcher-hub-upgrade.md, "Rollback:
       # migrations are forward-only".
-      # Relay v0.10.11, source 12ea8d52cda75fe67519ffd700c5e43ea9116ef0 (release/v0.10)
-      # release v0.10.11 / run 145909.
-      - image: registry.chifor.me/relay/control-plane@sha256:8d3127d48bf259ba631027237c7a1816dc387e2036550c273cf49ce7e823945c
+      # Relay v0.10.12, source c46013587430d87405fc0aa091199b018632eb79 (release/v0.10)
+      # release v0.10.12 / run 146045.
+      - image: registry.chifor.me/relay/control-plane@sha256:d4427c7e3d648c142eda1cb192e936a5f4064d71fddd3527c751e7d6aa75765b
         workingDir: /app
         envFrom:
         - secretRef:
@@ -185,9 +185,9 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      # Relay v0.10.11, source 12ea8d52cda75fe67519ffd700c5e43ea9116ef0 (release/v0.10)
-      # release v0.10.11 / run 145909.
-      - image: registry.chifor.me/relay/control-plane@sha256:8d3127d48bf259ba631027237c7a1816dc387e2036550c273cf49ce7e823945c
+      # Relay v0.10.12, source c46013587430d87405fc0aa091199b018632eb79 (release/v0.10)
+      # release v0.10.12 / run 146045.
+      - image: registry.chifor.me/relay/control-plane@sha256:d4427c7e3d648c142eda1cb192e936a5f4064d71fddd3527c751e7d6aa75765b
         workingDir: /app
         envFrom:
         - secretRef:
