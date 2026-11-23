@@ -103,8 +103,9 @@ pve_ec_fan_rampdown_curve: [35, 50, 60, 61, 62]
 #   - node2: most of its 60 % episodes were the curve's instant step on a momentary 94 C spike, while the
 #     average was only 78-85 C; each held 60 % for 3+ min.
 #   - node3: real heat, minutes long (average 86-90 C), up at each CI job and down in the dips between
-#     jobs. node3 also runs ~9 C hotter than node1 at the same package power (median Tctl at 52-56 W:
-#     75 / 80 / 84 C on node1 / node2 / node3) with the same fan rpm; see the runbook for what that may be.
+#     jobs. On package power alone node3 looked ~9 C hotter than node1 (median Tctl at 52-56 W:
+#     75 / 80 / 84 C on node1 / node2 / node3), mostly its lighter, boost-heavy load: matched on CPU busy
+#     too it is +5-6 C at 10-30 % busy and level at 30-40 % (runbook, "EC fan curve").
 # The retune: the governor's up and down 2 C higher (up 88 / 92 / 96, down 80 / 86 / 90), its average
 # doubled to 120 s (it rides through the dips between jobs), and the curve's first instant step 1 C higher
 # (95 / 96 / 98; 96 would have gained little more: node2 18 instead of 20 changes, node3 56-46 instead of
