@@ -194,6 +194,33 @@ While this release was staged, automated digest-only PRs #1014 and #1015 resolve
 
 The release PVC requests 2 GiB. After staging on 2026-10-01, `du -sk` reported 70,210 KiB for 0.1.0 and 79,519 KiB for 0.1.2: approximately 146 MiB total, or 7.2% of that budget. The NFS `df` result describes the shared export, so it is not used as the PVC budget. Before staging, compare existing `du -sk /releases/*` usage plus the new archive's extracted size against that budget. Retain the active release and the previous validated rollback release. Additional historical runtime directories can be removed by an operator only after their archive and checksum are verified in Gitea and no pod mounts them. Keep at most three connector versions in the next runtime archive; older pinned public URLs are retired explicitly. Long-term archive retention belongs in the release repository, rather than accumulating every runtime directory on the PVC.
 
+### Release asset retention (Gitea attachments)
+
+Owner-approved 2026-11-23. Every Relay release uploads about 306 MB of assets to Gitea's `gitea-shared-storage`
+volume. Most of it is three per-commit bundles, `relay-codex-*` (three ~84 MB parts), `relay-pi-*` (~75 MB) and
+`relay-holder-*` (~13 MB), rebuilt and re-uploaded even by hub-only releases. Releasing every console feature as it
+lands added about 2 GB in one night and took the volume to 90.5% (expanded to 50 Gi in ailab #1953).
+
+**The rule.** Only those three bundle families are ever deleted. Every release object, tag and other asset
+(manifests, `SHA256SUMS`, connector binaries, skill files, receipts) stays. A release keeps its bundles when it is
+one of the newest five, or its version is named anywhere in this repo's Relay pins
+(`scripts/relay_release_retention.py`, `PIN_PATHS`), or it is passed with `--keep`. `v0.2.0` is never touched:
+llm-router's `deploy/publish.py` uses it as its artifact store for router image tarballs and their deployment
+receipts, which the llm-router runbooks link. A deleted bundle can be rebuilt from its tag by re-running that tag's
+release workflow.
+
+**Run it.** From a checkout of main, in Git Bash:
+
+```sh
+scripts/relay-release-retention.sh                 # dry run: prints KEEP, DELETE per release, TOTAL and PLAN-SHA256
+scripts/relay-release-retention.sh --execute <sha> # deletes exactly that plan, then re-reads each release
+```
+
+`--execute` deletes only when the freshly computed plan has exactly the sha256 the owner approved. A new release
+shifts the newest five and so changes the sha; re-run the dry run and get the new list approved. The script reads
+and deletes through `scripts/gitea-api.sh` (workstation-bot). Deleted files free ext4 space inside the volume; the
+QNAP LUN does not shrink (no UNMAP), which is fine.
+
 ## Worker approvals and Assistant parity: 0.2.0 CI image
 
 Gitea CI in [cchifor/relay](https://git.chifor.me/cchifor/relay) publishes the
