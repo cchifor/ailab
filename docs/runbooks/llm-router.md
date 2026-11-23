@@ -4813,6 +4813,95 @@ back, and a rolled-back release digest needs File B reissued again.
 
 No other Router change may follow before the canary.
 
+## Budget status on stdout release (2026-11-23, llm-router #195)
+
+Release `router-0.1.0-20261123-budget-stdout`:
+- source `50d879ca96c2b62ada9e37a4119bdcda786dec66`, on llm-router branch `release/router-20261123-budget-stdout`: the live
+  `bf19ce6f` plus a cherry-pick of [#195](https://git.chifor.me/cchifor/llm-router/pulls/195), which closes #191;
+- archive `router-0.1.0-20261123-budget-stdout.tar.gz`, SHA-256
+  `d2149bd58cab1a97927f7bbd6612e05179239ddcf5c4bdf20cf0a888eb685a41`, as asset 967 on Relay release v0.2.0;
+- Relay branch `release/router-20261123-budget-stdout`, packaging commit `00ef176f6`, Relay run
+  [146982](https://git.chifor.me/cchifor/relay/actions/runs/146982);
+- image `registry.chifor.me/llm-router/router@sha256:eb2243e96a84c4ba85ef64f4051c88fe7fa21d1dec9f3ee1aaf24fda24f61be8`.
+  The image's revision label is `50d879ca`.
+
+**What it changes.** The worker budget authority's status lines now reach stdout, so `kubectl logs deploy/llm-router -c router`
+shows them. Only eight enumerated lines are exported:
+- the disabled-configuration warning;
+- the unlinked-witness warning;
+- `Worker budget authority available`;
+- `Worker budget authority unavailable: <code>` for each of the five status codes.
+
+A line is exported only if its logger name, severity and single string argument match one of these exactly, and the
+canonical text is written through the telemetry pino. Every other cordis plugin log line, with its arguments, errors and
+causes, stays in the in-memory buffer as before. A first version that exported everything leaked formatted secrets in
+review, so the allowlist is deliberate. The older pino paths that already print raw exception text are llm-router #194.
+- Against the live archive, only the telemetry plugin's `dist` files (`index`, `otel`, and the new `plugin-logs`),
+  `SOURCE_COMMIT` and pnpm's bookkeeping timestamps differ.
+- No schema, migration, KV, plugin-settings or configuration change.
+
+**Stale-witness detection.** This supersedes the 11-21 note below that `rlinks_ok` is the only detection: the hourly
+unlinked-witness warning is now on stdout too. `rlinks_ok` stays the check after a Secret change.
+
+**Verified on the release tree.** The tests ran under docker compose in the pinned Node 26.10.0 image:
+- `tests/plugin-logs.test.ts`: 10/10;
+- the worker-budget runtime tests: 10 passed, 1 skipped (the opt-in bind-mount test);
+- the full suite: 2676 passed, 8 skipped;
+- `tsc --noEmit`: clean.
+
+The production smoke passed with no network, uid 1000, a read-only root and all capabilities dropped. `executingRelease`
+gives these values, both on the archive and inside the published image:
+- `routerReleaseDigest` `46a42f3ee469ac3018bdf6c96d33360ab053c88217913dfdf07222a629f5ae60`;
+- `adapterDigests.openai` unchanged (`bae4379dd7e924b2cf045475101955b54a8fd92993037f8cb5a31331be0061ba`).
+
+**Worker budgets: File B is not reissued after this roll** (decided 2026-11-23: Codex and an Opus review both chose
+skip-reissue; the record, with source references, is
+[llm-router #191 comment 139216](https://git.chifor.me/cchifor/llm-router/issues/191#issuecomment-139216)).
+- **What happens.** The release digest changes, so the Router filters out the qualified File B row (`5c0f84f4…`, which
+  expires 2026-11-27 anyway). Router `capabilities` then report `workerBudgets: false`, and a budget preflight
+  answers `WORKER_BUDGET_UNQUALIFIED`.
+- **What does not change.** The plugin's `available` status depends only on the snapshot identity and policy-digest
+  checks, not on a release-matching qualification. The hub observer and the `RelayWorkerBudget*` alerts read no
+  qualifications.
+- **Why that is acceptable.** No candidate, canary or ordinary worker budget path is configured: the qualification
+  campaign is obsolete (ailab #1753).
+- **Before any future worker-budget use:** reissue File B (budget runbook, "Reissuing File B (supersede)") and pass
+  `file_b_router_check`.
+
+**Rollback.** Revert the image, the comment above it and both annotations together:
+- image `registry.chifor.me/llm-router/router@sha256:9687bdc673a62046b5b13b89c8962be0b5d31e1b6973d051b578ba219e63c9e7`;
+- source `bf19ce6f6078df130e51b458e79664fc86cb83a3`;
+- release `router-0.1.0-20261121-witness-unlinked`.
+
+A rollback restores the old release digest, which the existing File B row matches only until it expires on
+2026-11-27T10:00Z. After that, a rolled-back Router also needs File B reissued before any worker-budget use.
+
+**Before the roll.** Take the `validate-live` baseline and save `GET /v1/routes` as the administrator.
+
+**The roll, in this order.** Stop at the first step that fails.
+1. **Merge = the roll** (no `roll_deploy`). Expect one Pod of image `eb2243e9…1be8`. The revision rises by exactly 1 and
+   is unchanged after Flux's next reconcile of `apps`.
+2. **Router readback,** as in "Worker-budget authority release":
+   - `rlinks_ok` (in [relay-researcher-remaining-live-steps.md](relay-researcher-remaining-live-steps.md)) shows
+     links 1 on the fresh Pod;
+   - `plugins` shows `worker-budget-authority` `active`.
+3. **The new log lines.** Each exported line is a pino JSON line with `"name":"worker-budget-authority"`, and its `msg`
+   is one of the eight canonical texts. No release before this one wrote that `name`, so these lines are exactly the export:
+
+   ```sh
+   kubectl --context admin@ai -n llm-router logs deploy/llm-router -c router \
+     | jq -Rr 'fromjson? | select(.name == "worker-budget-authority") | .msg' | sort | uniq -c
+   ```
+
+   Expect `Worker budget authority available` and no `unavailable:` line. Every printed `msg` must start with
+   `Worker budget authority available`, `Worker budget authority unavailable: `, `Worker budget authority is disabled: `
+   or `Worker budget witness file is unlinked: `. Anything else means the allowlist leaked: stop and roll back.
+4. **The ledger side is unchanged:** `rident` (the readers row's `deployment_digest`, the authority `instance_id`)
+   equals the values before the roll, the hub's `relay_control_worker_budget_check_succeeded` is 1, and no
+   `RelayWorkerBudget*` alert fires.
+5. **Release gate (router-ab)** on the live router, then compare with the baseline taken before the roll:
+   `validate-live` is clean, and `GET /v1/routes` is byte-identical to the saved copy. The release changes no route.
+
 ## Unlinked witness release (2026-11-21, llm-router #193)
 
 Release `router-0.1.0-20261121-witness-unlinked`: source `bf19ce6f6078df130e51b458e79664fc86cb83a3` (llm-router branch
