@@ -244,7 +244,7 @@ TLS verification to cover a missed renewal.
 
 The selected Relay image must contain compiled
 `/app/dist/scripts/candidate-journal-service.js` and its production dependencies.
-The current hub pin is v0.10.12 (`c4601358`, `control-plane@sha256:d4427c7e…765b` in
+The current hub pin is v0.10.13 (`5cd8c324`, `control-plane@sha256:ee312056…7335` in
 `kubernetes/apps/apps/relay/relay.yaml`; hub-upgrade H9), whose source includes that service and the Dockerfile's
 compiled scripts. The old v0.9.1 predates it. There is deliberately no service image default in this bundle.
 Require the reviewed publication receipt's digest-only image and source commit;
