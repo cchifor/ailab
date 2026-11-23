@@ -236,7 +236,7 @@ spec:
           # with a server-side dry run as kustomize-controller). Only nodes that already ran a connector
           # hold the image; a replica rescheduled elsewhere still pulls once, since there is no
           # node-level registry mirror.
-          image: cloudflare/cloudflared:2026.11.1@sha256:e613aadbc2d9511785d2e67a86b0c8ac18dd63a3f9af0d06faf04cbfdcb35f2d
+          image: cloudflare/cloudflared:2026.11.2@sha256:55c7e3e8d89d5e8d20b75a82f3602cbf98e06db406e73e282073cfdc5a9a3af6
           imagePullPolicy: IfNotPresent
           args: ["tunnel", "--config", "/etc/cloudflared/config/config.yaml", "run"]
           ports:
