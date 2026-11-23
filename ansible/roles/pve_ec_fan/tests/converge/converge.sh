@@ -86,7 +86,7 @@ eq "modprobe resolves the DKMS build" /lib/modules/$K/updates/dkms/ec_su_axb35.k
 eq "checkout at the pin" "$PIN" "$(git -C /usr/src/ec_su_axb35-$V rev-parse HEAD)"
 eq "modules-load.d" ec_su_axb35 "$(grep -v '^#' /etc/modules-load.d/ec_su_axb35.conf)"
 for n in 1 2; do
-  eq "fan$n rampup" 40,55,94,96,98 "$(cat $F/fan$n/rampup_curve)"
+  eq "fan$n rampup" 40,55,95,96,98 "$(cat $F/fan$n/rampup_curve)"
   eq "fan$n rampdown" 35,50,60,61,62 "$(cat $F/fan$n/rampdown_curve)"
   eq "fan$n mode" curve "$(cat $F/fan$n/mode)"
 done
@@ -102,7 +102,7 @@ eq "governor enabled" enabled "$(systemctl is-enabled ec-fan-governor.service)"
 eq "units verify" ok "$(systemd-analyze verify /etc/systemd/system/ec-fan-profile.service \
   /etc/systemd/system/ec-fan-governor.service \
   /etc/systemd/system/ec-fan-textfile.service /etc/systemd/system/ec-fan-textfile.timer > /tmp/verify.log 2>&1 && echo ok || cat /tmp/verify.log)"
-eq "governor config" "EC_FAN_GOV_UP=86,90,94 EC_FAN_GOV_DOWN=78,84,88 EC_FAN_GOV_TAU_S=60 EC_FAN_GOV_HOLD_S=180" \
+eq "governor config" "EC_FAN_GOV_UP=88,92,96 EC_FAN_GOV_DOWN=80,86,90 EC_FAN_GOV_TAU_S=120 EC_FAN_GOV_HOLD_S=180" \
   "$(grep '^EC_FAN_GOV_' /etc/default/ec-fan-profile | tr '\n' ' ' | sed 's/ $//')"
 sleep 3
 eq "textfile fan1 rpm" 1 "$(grep -c '^ec_fan_rpm{fan="1"} 1540$' $P)"
@@ -131,21 +131,21 @@ printf '[Service]\nReadWritePaths=%s\n' "$F" > /etc/systemd/system/ec-fan-govern
 systemctl daemon-reload
 echo 2 > $F/fan1/level
 echo 2 > $F/fan2/level
-echo 88 > $F/temp1/temp
+echo 90 > $F/temp1/temp
 systemctl restart ec-fan-governor.service
-# a restart on a hot reading does not step up at once (the warm-up: one time constant, 60 s, of readings)
+# a restart on a hot reading does not step up at once (the warm-up: one time constant, 120 s, of readings)
 sleep 5
 eq "governor: no step in the warm-up after a restart" "2 2" "$(cat $F/fan1/level) $(cat $F/fan2/level)"
-for _ in $(seq 1 75); do [ "$(cat $F/fan2/level)" = 3 ] && break; sleep 1; done
-eq "governor: fan1 to 60 % on a sustained 88 C" 3 "$(cat $F/fan1/level)"
-eq "governor: fan2 to 60 % on a sustained 88 C" 3 "$(cat $F/fan2/level)"
-eq "governor: logged the step" 1 "$(journalctl -u ec-fan-governor --no-pager | grep -c 'fan1: level 2 -> 3 (average 88.000 C')"
+for _ in $(seq 1 150); do [ "$(cat $F/fan2/level)" = 3 ] && break; sleep 1; done
+eq "governor: fan1 to 60 % on a sustained 90 C" 3 "$(cat $F/fan1/level)"
+eq "governor: fan2 to 60 % on a sustained 90 C" 3 "$(cat $F/fan2/level)"
+eq "governor: logged the step" 1 "$(journalctl -u ec-fan-governor --no-pager | grep -c 'fan1: level 2 -> 3 (average 90.000 C')"
 eq "governor: fan3 never written" "$FAN3_PRISTINE" "$(fan3_state)"
 # written as it starts (steps 0), then every 15 ticks: wait for the write after the step
 GP=/var/lib/prometheus/node-exporter/ec_fan_governor.prom
 for _ in $(seq 1 25); do grep -q '^ec_fan_governor_steps_total{direction="up"} 2$' $GP 2> /dev/null && break; sleep 1; done
 eq "governor: metrics file" 1 "$(grep -c '^ec_fan_governor_steps_total{direction="up"} 2$' $GP)"
-eq "governor: metrics average" 1 "$(grep -c '^ec_fan_governor_average_celsius 88.000$' $GP)"
+eq "governor: metrics average" 1 "$(grep -c '^ec_fan_governor_average_celsius 90.000$' $GP)"
 echo 52 > $F/temp1/temp
 echo 1 > $F/fan1/level
 echo 1 > $F/fan2/level
@@ -243,8 +243,8 @@ eq "textfile reports the power mode" 1 "$(grep -c '^ec_apu_power_mode_info{mode=
 if run fan3 -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_fans": [1, 2, 3]}'; then bad "fans [1,2,3] accepted"; else ok "fans [1,2,3] refused"; fi
 if run hysteresis -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampdown_curve": [35, 55, 60, 61, 62]}'; then bad "rampdown = rampup accepted"; else ok "rampdown = rampup refused"; fi
 if run gov-above-curve -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_governor_up": [86, 90, 98]}'; then bad "governor up at the curve's rampup accepted"; else ok "governor up at the curve's rampup refused"; fi
-eq "governor up at the curve's rampup: refused at the split check" yes "$(grep -q 'level 5: need curve rampdown 62 < governor down 88 < governor up 98 < curve rampup 98' /tmp/run-gov-above-curve.log && echo yes || echo no)"
-if run gov-below-rampdown -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampdown_curve": [35, 50, 80, 85, 90]}'; then bad "curve rampdown above the governor's down accepted"; else ok "curve rampdown above the governor's down refused"; fi
+eq "governor up at the curve's rampup: refused at the split check" yes "$(grep -q 'level 5: need curve rampdown 62 < governor down 90 < governor up 98 < curve rampup 98' /tmp/run-gov-above-curve.log && echo yes || echo no)"
+if run gov-below-rampdown -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampdown_curve": [35, 50, 81, 87, 91]}'; then bad "curve rampdown above the governor's down accepted"; else ok "curve rampdown above the governor's down refused"; fi
 if run gov-hold -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_governor_hold_s": "180"}'; then bad "string hold accepted"; else ok "string hold refused"; fi
 if run not-rising -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampup_curve": [35, 60, 50, 68, 95]}'; then bad "non-rising curve accepted"; else ok "non-rising curve refused"; fi
 if run strings -e pve_ec_fan_enabled=true -e '{"pve_ec_fan_rampup_curve": ["35", "50", "60", "68", "95"]}'; then bad "string curve accepted"; else ok "string curve refused"; fi

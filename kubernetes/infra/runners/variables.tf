@@ -278,9 +278,11 @@ variable "runner_nodes" {
     # aggressive EC curve (ec_su_axb35 driver, Secure Boot off on node1) and its NVMe dropped from 78 C to
     # ~50 C; this morning's 4-8 s cp1 stalls came with the drive above its 86 C warning temperature. The host's
     # writeback bound (2 GiB dirty_bytes, pve_base) still limits how fast they can dirty page cache.
-    # This depends on the fan curve. The driver and the curve are managed by the pve_ec_fan role (#1869); until it is
-    # applied they are loaded by hand and a reboot loses them. Re-cap trigger: if node1 runs without the curve
-    # (driver not loaded or ec-fan-profile inactive; the role's EcFan* alerts), or its NVMe composite passes 70 C
+    # This depends on the fan curve. The driver and the curve are managed by the pve_ec_fan role (#1869), applied
+    # on all three hosts, so a reboot keeps them. Since #1945 (2026-11-22) the curve is the quiet one plus
+    # ec-fan-governor (fans steady at 40 % under CI); node1's NVMe composite stayed at or below 60 C through
+    # its first night. Re-cap trigger: if node1 runs without the curve (driver not loaded, ec-fan-profile or
+    # ec-fan-governor down; the role's ProxmoxEcFan* / ProxmoxCpuFan* alerts), or its NVMe composite passes 70 C
     # under load, put ci-runner-1/-4/-9 back to 60 MiB/s until the curve is back. The stall budget below applies too.
     # 2026-11-19 (owner): ALL on-prem runners at 60 MiB/s (node1's are superseded by the entry above), no IOPS cap, with cache=unsafe
     # (var.runner_disk_cache, ADR 0042). At 30 MiB/s, Postgres-heavy suites died on these runners
