@@ -65,10 +65,14 @@ sha="$(sed -n 's/^PLAN-SHA256 //p' "$W/plan.txt")"
 
 # 3. delete by numeric ids only: an asset name never reaches this loop, so no name can inject a line
 echo "EXECUTING plan $sha"
+# Python writes the file itself with LF: its stdout on Windows is CRLF, and `read` keeps the CR, so every id failed
+# the numeric check below (the first live run, 2026-11-23: nothing was deleted).
 "$PY" -c '
 import json, sys
-for i in json.load(open(sys.argv[1], encoding="utf-8")):
-    print("%d\t%d" % (int(i["release_id"]), int(i["asset_id"])))' "$W/plan.json" > "$W/ids" || { echo "STOP: cannot read the plan ids" >&2; exit 1; }
+with open(sys.argv[2], "w", encoding="ascii", newline="\n") as out:
+    for i in json.load(open(sys.argv[1], encoding="utf-8")):
+        out.write("%d\t%d\n" % (int(i["release_id"]), int(i["asset_id"])))' "$W/plan.json" "$W/ids" \
+  || { echo "STOP: cannot read the plan ids" >&2; exit 1; }
 planned="$(grep -c . "$W/ids")"
 fail=0; done_n=0
 while IFS=$'\t' read -r rid aid; do

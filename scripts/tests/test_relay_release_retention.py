@@ -195,7 +195,12 @@ class Verifier(unittest.TestCase):
         self.assertTrue(any("asked for release" in p for p in problems), problems)
 
 
-@unittest.skipUnless(shutil.which("bash"), "needs bash")
+# The bash on PATH, by its full path: a bare "bash" on Windows resolves to System32's WSL launcher before PATH is
+# searched, while the wrapper runs under Git Bash there (and Windows Python's CRLF output is what it must survive).
+BASH = shutil.which("bash")
+
+
+@unittest.skipUnless(BASH, "needs bash")
 class Wrapper(unittest.TestCase):
     """The wrapper against a fake forge that serves FOUR releases per page (a cap below the requested 50)."""
 
@@ -211,8 +216,12 @@ class Wrapper(unittest.TestCase):
         fake = self.t / "fake-api.sh"
         fake.write_text("""#!/usr/bin/env bash
 echo "$1 $2" >> "%(log)s"
+# The FAKE hands "/repos/..." to a native python.exe, which Git Bash would rewrite into a Windows path; the real
+# gitea-api.sh puts the path inside a URL and must never see this variable (the wrapper unsets it).
+export MSYS_NO_PATHCONV=1
 exec %(py)s - "$@" <<'PY'
 import json, os, re, sys
+sys.stdout.reconfigure(newline="\\n")   # LF like the real gitea-api.sh (bash + curl), also under Windows Python
 state_path = %(state)r
 method, path = sys.argv[1], sys.argv[2]
 rels = json.load(open(state_path))
@@ -238,7 +247,7 @@ PY
         self.state = state
 
     def run_wrapper(self, *args, **env):
-        return subprocess.run(["bash", (ROOT / "scripts/relay-release-retention.sh").as_posix(), *args],
+        return subprocess.run([BASH, (ROOT / "scripts/relay-release-retention.sh").as_posix(), *args],
                               env=dict(self.env, **env), capture_output=True, text=True, timeout=180)
 
     def calls(self, method):
