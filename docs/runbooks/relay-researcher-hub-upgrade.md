@@ -590,7 +590,7 @@ Readback after the roll (operator):
 - Fleet's Terminals view shows the dev-workers' terminals, those that need a person first, and opens and controls
   one from its tile.
 
-### H10. v0.10.24: the Assistant's action registry, every Assistant tool on it, its cards, its brief and its routes
+### H10. v0.10.25: the Assistant's action registry, every Assistant tool on it, its cards, its brief and its routes; Fleet as designed
 
 Why: the console's changes and the Assistant's tools ran separate code, so the Assistant could not be held to the
 console's checks, and in Auto it switched plugins without a click.
@@ -625,21 +625,24 @@ console's checks, and in Auto it switched plugins without a click.
   it stays off and nothing about the Assistant's model changes. #618: an inference connection that a newer Relay
   stored reads as disabled and is said so in Settings and at a turn's start, so a later rollback to this release
   is safe.
+- Relay #624 with #626, released as v0.10.25 (#625, `175f9166`, run 147163): Fleet follows its design board (the
+  list, its toolbar and View panel, one-line host headers, the agent row, the footer, the Needs you filter, a held
+  order while the reader is in the list, the phone layout). Web only.
 
-Hub only, no migrations (schema 79), no new settings. v0.10.24's deployment receipt equals v0.10.16's to
-v0.10.22's in runtime, skill, tools and prerequisites (only the image, its source and run, the connector's hashes
-and the manifest differ), so re-pinning v0.10.22 (`9ea637c9…afb2`), v0.10.19 (`db277a54…b44d`), v0.10.18
+Hub only, no migrations (schema 79), no new settings. v0.10.25's deployment receipt equals v0.10.16's to
+v0.10.24's in runtime, skill, tools and prerequisites (only the image, its source and run, the connector's hashes
+and the manifest differ), so re-pinning v0.10.24 (`89f69cae…e037`), v0.10.22 (`9ea637c9…afb2`), v0.10.19 (`db277a54…b44d`), v0.10.18
 (`ff85b992…fe06`), v0.10.17 (`e20b6def…ca0c`) or v0.10.16 (`bc607424…36c2`, H9) is a valid rollback. The
 connector is rebuilt with the same code; the dev-workers stay on the v0.10.11 pin. H10 gates no other step.
 
-Change: this PR pins the v0.10.24 digest in `migrate` and `relay`, with the annotations. One Recreate roll by the
+Change: this PR pins the v0.10.25 digest in `migrate` and `relay`, with the annotations. One Recreate roll by the
 merge itself (Flux), with the pre-migration backup; outside the QNAP windows.
 
 Readback after the roll (operator):
 
-- one Running Pod; source `8f7f615b5b58ce048b1fb9f80a420336e5ab0b64`, release `relay-0.10.24-release-147126`;
+- one Running Pod; source `175f916602526504a4542afa02847a22f69748ba`, release `relay-0.10.25-release-147163`;
   the `relay` container's image ID ends in
-  `sha256:89f69cae169bab330c787067bf12e0ff20e22315cb25b4509ef92333d0a0e037`; the migrate init container exited
+  `sha256:d98c6ce7c5578f40057ac6873f07276dbcb4a7c4ca4d9b604d0a407337a2e22e`; the migrate init container exited
   0 and `schema_migrations` reads `79|79`; the env is unchanged from H9;
 - the features' production checks (the owner, in the console):
   - D1a: decide one host request from Fleet or Needs you and another from the Assistant (ask it to approve the
@@ -656,7 +659,9 @@ Readback after the roll (operator):
     text only after "Show terminal text" (that read is recorded in Activity);
   - D4: start a new conversation: the brief's Needs you lists the same items, with the same count, as Status's
     Needs you and the sidebar's badge;
-  - D3: Settings → Assistant shows the same connection as before and no Router routes (Router mode is off here).
+  - D3: Settings → Assistant shows the same connection as before and no Router routes (Router mode is off here);
+  - C1: Fleet shows one list of agents grouped by host, as `design/Fleet.html` draws it (four columns, one Open
+    action, View with grouping, density and columns, the Needs you filter); on a phone a host's Review is in its ⋯.
 
 ## Enablement order at a glance
 
@@ -684,7 +689,7 @@ Readback after the roll (operator):
 | canary | HISTORICAL, campaign retired 2026-11-22: H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
 | H4b | HISTORICAL while the campaign is retired (needs its genuine approval): `RELAY_WORKER_PROFILES_FILE`/`_SHA256` (profile registry) | the genuine approval, the qualified `tokenPolicyDigests`, registry reviewed | file pin equal; no `profiles-unavailable`; budget still `started`. Before the bounded general lifecycle trial |
 | H9 | hub image → v0.10.16 (agent state, Claude Code's state, Activity table, Needs you, Fleet, Terminals); gates no step above | every dev-worker connector on v0.10.11 (ailab #1947, #1949, read back per worker); H8's state only (no new settings) | v0.10.16 digest running, schema still 79, agents show observed states and Claude Code's, Activity pages by scrolling, Needs you lists pending requests |
-| H10 | hub image → v0.10.24 (the Assistant's action registry, every Assistant tool on it, its cards, its brief and its routes); gates no step above | H9 live | v0.10.24 digest running, schema still 79, a host decided from the console and one from the Assistant both read `action: host.authorize`, an Assistant rename reads `action: conversation.rename`, and a host approved from the Needs you card reads `surface: assistant-card`, in Activity, and the agents, lanes, session and terminal cards show (the terminal text only on request), and the brief's Needs you matches Status |
+| H10 | hub image → v0.10.25 (the Assistant's action registry, every Assistant tool on it, its cards, its brief and its routes; Fleet as designed); gates no step above | H9 live | v0.10.25 digest running, schema still 79, a host decided from the console and one from the Assistant both read `action: host.authorize`, an Assistant rename reads `action: conversation.rename`, and a host approved from the Needs you card reads `surface: assistant-card`, in Activity, and the agents, lanes, session and terminal cards show (the terminal text only on request), and the brief's Needs you matches Status |
 
 ## Rollback: migrations are forward-only
 
