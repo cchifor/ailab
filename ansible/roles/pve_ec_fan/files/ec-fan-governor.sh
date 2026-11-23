@@ -48,7 +48,7 @@
 #   EC_FAN_FANS, EC_FAN_RAMPUP_CURVE, EC_FAN_RAMPDOWN_CURVE  as for ec-fan-profile (the curve it works with)
 #   EC_FAN_GOV_UP            three average temperatures (deg C) that step up to level 3, 4 and 5
 #   EC_FAN_GOV_DOWN          three average temperatures that step down from level 3, 4 and 5
-#   EC_FAN_GOV_TAU_S         time constant of the average, seconds (default 60)
+#   EC_FAN_GOV_TAU_S         time constant of the average, seconds (default 120, the role's)
 #   EC_FAN_GOV_HOLD_S        least time from a step up to a step down, seconds (default 180)
 #   EC_FAN_GOV_INTERVAL_S    tick, seconds (default 1)
 #   EC_FAN_SYSFS             the driver's class dir (default /sys/class/ec_su_axb35)
@@ -65,7 +65,7 @@ RAMPUP="${EC_FAN_RAMPUP_CURVE:-}"
 RAMPDOWN="${EC_FAN_RAMPDOWN_CURVE:-}"
 GOV_UP="${EC_FAN_GOV_UP:-}"
 GOV_DOWN="${EC_FAN_GOV_DOWN:-}"
-TAU="${EC_FAN_GOV_TAU_S:-60}"
+TAU="${EC_FAN_GOV_TAU_S:-120}"
 HOLD="${EC_FAN_GOV_HOLD_S:-180}"
 TICK="${EC_FAN_GOV_INTERVAL_S:-1}"
 SLEEP_S="${EC_FAN_GOV_SLEEP_S:-$TICK}"

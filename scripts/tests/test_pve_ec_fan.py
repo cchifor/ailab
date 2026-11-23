@@ -51,13 +51,14 @@ TEXTFILE = ROLE / 'files/ec-fan-textfile.sh'
 GOVERNOR = ROLE / 'files/ec-fan-governor.sh'
 BASH = shutil.which('bash')
 
-# The role's default curve (2026-11-22: the floor and the instant safety steps; ec-fan-governor decides 3-5).
-UP = '40,55,94,96,98'
+# The role's default curve (2026-11-22: the floor and the instant safety steps; ec-fan-governor decides 3-5;
+# 2026-11-23: the first instant step 1 C higher).
+UP = '40,55,95,96,98'
 DOWN = '35,50,60,61,62'
 # The role's default governor (pve_ec_fan_governor_*).
-GOV_UP = '86,90,94'
-GOV_DOWN = '78,84,88'
-GOV_TAU = '60'
+GOV_UP = '88,92,96'
+GOV_DOWN = '80,86,90'
+GOV_TAU = '120'
 GOV_HOLD = '180'
 # The driver's own defaults (src/ec_su_axb35.c at the pin): what a freshly loaded module shows.
 DRIVER_UP = {1: '60,70,83,95,97', 2: '60,70,83,95,97', 3: '20,60,83,95,97'}
@@ -190,7 +191,7 @@ class ProfileTests(unittest.TestCase):
             'spaces': ('40, 55, 80, 90, 95', DOWN),
             'empty': ('', DOWN),
             'rampdown equal to rampup': (UP, '35,55,60,61,62'),
-            'rampdown above rampup': (UP, '35,50,60,97,98'),
+            'rampdown above rampup': (UP, '35,50,60,97,99'),
         }
         for name, (up, down) in bad.items():
             with self.subTest(name):
@@ -533,21 +534,22 @@ class GovernorTests(unittest.TestCase):
         self.assertEqual(set(self.simulate(([80, 82, 85, 81, 78] * 120))), {2})
 
     def test_sustained_heat_steps_up_then_comes_down_only_after_the_hold(self):
-        levels = self.simulate([80] * 60 + [88] * 300 + [72] * 400)
+        levels = self.simulate([80] * 60 + [92] * 120 + [72] * 500)
         ups = [c for c in self.changes(levels) if c[2] > c[1]]
         downs = [c for c in self.changes(levels) if c[2] < c[1]]
         self.assertEqual([(a, b) for _, a, b in ups], [(2, 3)])
         self.assertEqual([(a, b) for _, a, b in downs], [(3, 2)])
-        # up only once the average reaches 86 C: about a minute into the 88 C, not at its first second
+        # up only once the average reaches 88 C: well into the 92 C (~110 s), not at its first second
         self.assertGreater(ups[0][0], 60 + 60)
-        # down no sooner than the hold after the step up, and only once the 72 C has pulled the average under 78
-        self.assertGreaterEqual(downs[0][0] - ups[0][0], 180)
-        self.assertGreater(downs[0][0], 360)
+        # down only once the 72 C has pulled the average under 80, and no sooner than the hold after the step up:
+        # the average is under 80 ~86 s into the 72 C, before the hold is over, so the hold decides when
+        self.assertGreater(downs[0][0], 180)
+        self.assertEqual(downs[0][0] - ups[0][0], 180)
         self.assertNotIn(4, levels)
 
     def test_a_spike_past_the_curve_steps_up_at_once_and_is_held(self):
-        # the curve's 94 C rampup is the instant step; the governor then holds 60 % for the hold
-        levels = self.simulate([80] * 30 + [94] + [72] * 400)
+        # the curve's 95 C rampup is the instant step; the governor then holds 60 % for the hold
+        levels = self.simulate([80] * 30 + [95] + [72] * 400)
         self.assertEqual(levels[29], 2)
         self.assertEqual(levels[30], 3)
         self.assertEqual(self.changes(levels), [(30, 2, 3), (210, 3, 2)])
@@ -568,8 +570,8 @@ class GovernorTests(unittest.TestCase):
         self.assertEqual(self.simulate([45] * 10, level=3), [2] + [1] * 9)
 
     def test_it_does_not_step_down_into_the_curves_rampup(self):
-        # slow average, no hold: the average is still low when the EC itself is at the curve's 94 C
-        levels = self.simulate([70] * 60 + [94] * 3 + [93], level=2, EC_FAN_GOV_TAU_S=600, EC_FAN_GOV_HOLD_S=0)
+        # slow average, no hold: the average is still low when the EC itself is at the curve's 95 C
+        levels = self.simulate([70] * 60 + [95] * 3 + [94], level=2, EC_FAN_GOV_TAU_S=600, EC_FAN_GOV_HOLD_S=0)
         self.assertEqual(levels[60:63], [3, 3, 3])
         self.assertEqual(levels[63], 2)
 
@@ -586,21 +588,22 @@ class GovernorTests(unittest.TestCase):
         self.assertEqual([ln.split()[1] for ln in run.stdout.splitlines()], ['80', '98'])
 
     def test_the_average_reaches_a_steady_temperature_exactly(self):
-        # rounding alone would stall the average at 85.971 under a steady 86 and never reach the 86 C threshold
-        run = self.governor('simulate', '\n'.join(['80'] * 5 + ['86'] * 1200) + '\n')
+        # rounding alone would stall the average up to TAU/2 milli-degrees (60 with a 120 s average) short of a
+        # steady 88 C, and never reach the 88 C threshold
+        run = self.governor('simulate', '\n'.join(['80'] * 5 + ['88'] * 1200) + '\n')
         rows = [ln.split() for ln in run.stdout.splitlines()]
-        self.assertEqual(rows[-1][2], '86.000')
+        self.assertEqual(rows[-1][2], '88.000')
         self.assertEqual(rows[-1][3], '3')
 
     def test_a_restart_on_a_burst_sample_does_not_step_up(self):
         # every converge restarts the governor; one landing on a burst must not seed a 60 % hold
         self.assertEqual(set(self.simulate([90] * 20 + [80] * 300)), {2})
-        # nor weigh on the average after the warm-up: a 92 C first reading, then node2's settled 83 C (an
-        # exponential average seeded from that reading would still hold ~37 % of it at tick 60: 86.3 C)
-        self.assertEqual(set(self.simulate([92] + [83] * 300)), {2})
-        # a sustained 88 C does step up, once the average has a time constant of readings
-        levels = self.simulate([88] * 120)
-        self.assertEqual(self.changes(levels), [(59, 2, 3)])
+        # nor weigh on the average after the warm-up: a 94 C first reading, then a node settled at 85 C (an
+        # exponential average seeded from that reading would still hold ~37 % of it at tick 120: 88.3 C)
+        self.assertEqual(set(self.simulate([94] + [85] * 300)), {2})
+        # a sustained 90 C does step up, once the average has a time constant (120 s) of readings
+        levels = self.simulate([90] * 200)
+        self.assertEqual(self.changes(levels), [(119, 2, 3)])
         # the curve's instant step still applies during the warm-up
         self.assertEqual(self.simulate([95] * 3)[0], 3)
 
@@ -736,13 +739,13 @@ class GovernorTests(unittest.TestCase):
             'no fans': dict(EC_FAN_FANS=''),
             'two up values': dict(EC_FAN_GOV_UP='86,90'),
             'up not rising': dict(EC_FAN_GOV_UP='86,86,94'),
-            'down not below up': dict(EC_FAN_GOV_DOWN='78,90,92'),
+            'down not below up': dict(EC_FAN_GOV_DOWN='80,92,94'),
             'up not below the curve rampup': dict(EC_FAN_GOV_UP='86,90,98'),
             'down not above the curve rampdown': dict(EC_FAN_GOV_DOWN='60,84,88'),
             'zero time constant': dict(EC_FAN_GOV_TAU_S='0'),
             'fractional hold': dict(EC_FAN_GOV_HOLD_S='1.5'),
             'zero tick': dict(EC_FAN_GOV_INTERVAL_S='0'),
-            'bad curve': dict(EC_FAN_RAMPUP_CURVE='40,55,94,96'),
+            'bad curve': dict(EC_FAN_RAMPUP_CURVE='40,55,95,96'),
         }
         for name, over in bad.items():
             with self.subTest(name):
@@ -793,15 +796,15 @@ class RoleRenderTests(unittest.TestCase):
         self.assertEqual(ctx['pve_ec_fan_src_dir'], '/usr/src/ec_su_axb35-' + ctx['pve_ec_fan_dkms_version'])
         self.assertEqual(ctx['pve_ec_fan_fans'], [1, 2])
         up, down = ctx['pve_ec_fan_rampup_curve'], ctx['pve_ec_fan_rampdown_curve']
-        self.assertEqual(up, [40, 55, 94, 96, 98])
+        self.assertEqual(up, [40, 55, 95, 96, 98])
         self.assertEqual(down, [35, 50, 60, 61, 62])
         self.assertEqual(ctx['pve_ec_fan_power_mode'], 'quiet')
         for curve in (up, down):
             self.assertEqual(curve, sorted(set(curve)))
         self.assertTrue(all(d < u for d, u in zip(down, up)))
         gup, gdown = ctx['pve_ec_fan_governor_up'], ctx['pve_ec_fan_governor_down']
-        self.assertEqual((gup, gdown), ([86, 90, 94], [78, 84, 88]))
-        self.assertEqual((ctx['pve_ec_fan_governor_tau_s'], ctx['pve_ec_fan_governor_hold_s']), (60, 180))
+        self.assertEqual((gup, gdown), ([88, 92, 96], [80, 86, 90]))
+        self.assertEqual((ctx['pve_ec_fan_governor_tau_s'], ctx['pve_ec_fan_governor_hold_s']), (120, 180))
         # the split of levels 3-5: curve rampdown < governor down < governor up < curve rampup
         for i in range(3):
             self.assertLess(down[i + 2], gdown[i])

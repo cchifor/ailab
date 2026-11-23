@@ -159,7 +159,7 @@ tests:
               instance: 192.168.0.3:9100
             exp_annotations:
               summary: "Proxmox host 192.168.0.3:9100: ec-fan-governor silent for 6m 0s"
-              description: "ec-fan-governor has not rewritten ec_fan_governor.prom on 192.168.0.3:9100 for over 5m, so the CPU fans' levels 3-5 are not being decided on the smoothed temperature. The driver's curve still keeps the floor and steps up at 94/96/98 C (the APU is safe), but a fan the governor raised to 60 %+ stays there and a sustained-heat step up waits for 94 C. Check `systemctl status ec-fan-governor ec-fan-profile` and `journalctl -u ec-fan-governor`, then `systemctl restart ec-fan-profile` (it restarts the governor too) or converge `just ec-fan --limit <host>`. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+              description: "ec-fan-governor has not rewritten ec_fan_governor.prom on 192.168.0.3:9100 for over 5m, so the CPU fans' levels 3-5 are not being decided on the smoothed temperature. The driver's curve still keeps the floor and steps up at 95/96/98 C (the APU is safe), but a fan the governor raised to 60 %+ stays there and a sustained-heat step up waits for 95 C. Check `systemctl status ec-fan-governor ec-fan-profile` and `journalctl -u ec-fan-governor`, then `systemctl restart ec-fan-profile` (it restarts the governor too) or converge `just ec-fan --limit <host>`. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
   - interval: 1m
     name: a governor writing every 15 s never warns
     input_series:
@@ -188,7 +188,7 @@ tests:
               instance: 192.168.0.4:9100
             exp_annotations:
               summary: "Proxmox host 192.168.0.4:9100: the EC fan driver is loaded but ec-fan-governor has never reported"
-              description: "On 192.168.0.4:9100 the ec_su_axb35 driver has been loaded for 10m but there is no ec_fan_governor.prom, so the CPU fans' levels 3-5 are not decided on the smoothed temperature (the curve's floor and its instant steps up at 94/96/98 C still work). The governor writes that file as it starts: it has not started, or its config is refused. Check `systemctl status ec-fan-governor` and `journalctl -u ec-fan-governor` (a refused config names the rule it breaks), then converge `just ec-fan --limit <host>`. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
+              description: "On 192.168.0.4:9100 the ec_su_axb35 driver has been loaded for 10m but there is no ec_fan_governor.prom, so the CPU fans' levels 3-5 are not decided on the smoothed temperature (the curve's floor and its instant steps up at 95/96/98 C still work). The governor writes that file as it starts: it has not started, or its config is refused. Check `systemctl status ec-fan-governor` and `journalctl -u ec-fan-governor` (a refused config names the rule it breaks), then converge `just ec-fan --limit <host>`. Runbook: docs/runbooks/node-maintenance.md \"EC fan curve\"."
   - interval: 1m
     name: a loaded driver with its governor reporting, or an unloaded driver without one, never warns
     input_series:

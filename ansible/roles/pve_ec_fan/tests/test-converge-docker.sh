@@ -6,7 +6,7 @@
 # after apply; a converge with the repo unreachable; a second installed kernel; a curve change next to a
 # failing build for another kernel (the curve is still applied); a fan dropped from the list (back to auto);
 # recovery after a module reload under the active service; the APU power mode (applied on start, changed by a
-# converge, balanced again on stop, a bad one refused); ec-fan-governor live under systemd (a sustained 88 C
+# converge, balanced again on stop, a bad one refused); ec-fan-governor live under systemd (a sustained 90 C
 # takes a fan at 40 % to 60 %, its metrics file, restarted with the profile, a config change reaches it, a
 # governor outside the curve refused); refused profiles; disable after an apply that stopped
 # part-way, and re-enable; a re-pin; an edited checkout; another DKMS version of the same source already

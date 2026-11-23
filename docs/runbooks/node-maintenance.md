@@ -508,14 +508,14 @@ that curve for the two CPU fans and sets the APU power mode:
   dropped from that list goes back to `auto`. From then on the driver re-reads the EC temperature every
   second and moves one level at a time. Stopping the service sets both CPU fans back to `auto`. Since
   2026-11-22 the curve keeps only the floor and the safety net: 20 % from 40 C, 40 % from 55 C (the level
-  a loaded host runs at), and an instant step to 60 / 80 / 100 % at 94 / 96 / 98 C on the instantaneous
-  temperature. Its rampdown values for levels 3-5 (60-62 C) are deliberately low, so the driver does not
-  step down from 60 %+ on its own: the governor does.
+  a loaded host runs at), and an instant step to 60 / 80 / 100 % at 95 / 96 / 98 C on the instantaneous
+  temperature (the first step was 94 C until 2026-11-23). Its rampdown values for levels 3-5 (60-62 C) are
+  deliberately low, so the driver does not step down from 60 %+ on its own: the governor does.
 - **Governor:** `ec-fan-governor.service` (a small bash daemon, `/usr/local/sbin/ec-fan-governor`) decides
-  levels 3-5 on the SMOOTHED EC temperature (moving average, 60 s time constant). It steps up to 60 / 80 /
-  100 % when the average reaches 86 / 90 / 94 C (sustained heat, not a CI burst), and back down when the
-  average is at or below 78 / 84 / 88 C, the last step up was at least 180 s ago, and the instantaneous
-  temperature is below the curve's step for that level. For its first 60 s after a start (every converge
+  levels 3-5 on the SMOOTHED EC temperature (moving average, 120 s time constant). It steps up to 60 / 80 /
+  100 % when the average reaches 88 / 92 / 96 C (sustained heat, not a CI burst), and back down when the
+  average is at or below 80 / 86 / 90 C, the last step up was at least 180 s ago, and the instantaneous
+  temperature is below the curve's step for that level. For its first 120 s after a start (every converge
   restarts it) it does not step up: the average starts at the first reading, and one landing on a CI
   burst must not seed a 60 % hold; the curve's instant steps still apply. A config it refuses exits 78
   and is not restarted (`RestartPreventExitStatus=78`). It writes only `level`, only on a fan in curve
@@ -540,14 +540,39 @@ that curve for the two CPU fans and sets the APU power mode:
   2. the EC temperature follows the APU within seconds: a 30 s CI burst takes it from 80 to 92 C and back
      to 75 C. A wide-band curve (60 % from 88 C, down at 76 C), tried for 20 min, cut node1 to 6
      changes/h but still made 21-36/h on node2/node3, each for heat that was gone before the airflow
-     changed. The driver has no time filter; the governor is one. Its 8 C band (86 up, 78 down) is wider
+     changed. The driver has no time filter; the governor is one. Its 8 C band (88 up, 80 down) is wider
      than the 6.3 C step, so no steady load under the cap can cycle; keep it so.
 
   | Under live CI, node1 / node2 / node3 | CPU-fan level changes | EC avg, max | NVMe composite avg, controller max |
   |---|---|---|---|
   | old curve (80/75 C): 24 h at 30 s, and 1 Hz spot checks | ~800/day on node1/node2; ~120/h at 1 Hz | median 76 / 76 / 69 C, max 93 / 96 / 97 C | median 53 / 53 / 45 C, max 84 / 85 / 84 C |
   | wide-band curve (88/76 C), 20 min at 1 Hz | 6 / 36 / 21 per h | 79.5 / 80.4 / 70.5 C, max 89 / 94 / 90 C | 56 / 54 / 44 C, max 83 / 81 / 74 C |
-  | **curve + governor**, 28 min at 1 Hz | **0 / 0 / 0** (node1: one scheduled step down from where the old curve had it) | 73.9 / 76.6 / 69.5 C, max 89 / 92 / 90 C | 54.6 / 56.0 / 45.6 C, max 82 / 83 / 77 C |
+  | **curve + governor** (86/78 C, 60 s), 28 min at 1 Hz | **0 / 0 / 0** (node1: one scheduled step down from where the old curve had it) | 73.9 / 76.6 / 69.5 C, max 89 / 92 / 90 C | 54.6 / 56.0 / 45.6 C, max 82 / 83 / 77 C |
+  | old curve, the 12.6 h before the rollout (30 s samples; package power avg 54 / 50 / 40 W) | 466 / 468 / 136 | Tctl avg 77.3 / 76.7 / 67.4 C, max 94 / 98 / 97 C | 53.1 / 54.1 / 44.6 C, max 58 / 61 / 55 C (composite) |
+  | curve + governor (86/78 C, 60 s), the first 12.6 h night (55 / 54 / 49 W: node3 much busier) | 4 / 39 / 89 | Tctl avg 75.8 / 79.2 / 78.6 C, max 96 / 97 / 98 C | 54.8 / 53.4 / 46.4 C, max 60 / 59 / 56 C (composite) |
+
+- **The 2026-11-23 retune (owner: running ~2 C hotter is fine):** after the first night, node2's
+  remaining 60 % episodes were mostly the curve's instant step on a momentary 94 C spike (the average was
+  78-85 C), each holding 60 % for 3+ min. node3's were real heat, minutes long (average 86-90 C), up at each
+  CI job and down in the dips between jobs. The governor's up and down moved 2 C higher (up 88 / 92 / 96,
+  down 80 / 86 / 90), its average doubled to 120 s (it rides through those dips), and the curve's first
+  instant step moved 1 C higher (95 / 96 / 98). A closed-loop replay of that night (30 s samples; the
+  recorded average turned back into the EC signal; a fan level held lower than recorded warms the EC by
+  6.3 / 3.2 / 2.5 C for 60 / 80 / 100 % through a 30-60 s lag; it reproduces the recorded 4 / 39 / 89
+  changes as 6 / 41-36 / 86-81 under the old values) gives 2 / 20 / 62-56 changes, 60 %+ time
+  1 / 10 / 29 % -> 0.4 / 5 / 22 %, and an EC mean +0.0 / +0.3 / +0.5 C, p95 +0.3 / +0.6 / +1.3 C. The cost
+  is a slower answer to sustained heat (`simulate`): on a steady 94 C the fans wait ~100 s for 60 % where
+  they stepped at once, on a steady 90 C ~190 s instead of ~55 s, and a 0.1 C/s ramp reaches 95 C instead of
+  91 C first. A first step at 96 C would have gained little more (node2 18, node3 56-46 changes); a 600 s
+  hold cut node3 to 48-50 changes but kept it at 60 %+ 30 % of the time (against 22 %).
+- **node3 runs hotter at the same power (hardware follow-up, cause not confirmed):** at the same package
+  power node3 ran ~9 C hotter than node1 (median Tctl at 52-56 W, 2026-11-22/23 night: node1 75, node2 80,
+  node3 84 C), with the same CPU-fan rpm on all three (~2630 at 40 %, ~3460 at 60 %). Dust in the heatsink
+  fins or dried thermal paste would do that, but so could a different workload mix at the same package
+  power (Tctl is the hottest spot) or the airflow where node3 stands. Before opening it, compare the three
+  under a matched load: the same fixed fan level and the same synthetic load on each, one node at a time.
+  Until then node3 changes level the most. Both the test and a cleaning take load off a node that is
+  processing data: plan them with the owner.
 - **APU power mode:** the service writes `pve_ec_fan_power_mode` (default `quiet`; also `balanced`, the
   AXB35's factory EC default, or `performance`) to `apu/power_mode` on start, and sets `balanced` on stop
   (it does not restore a mode that was set before the role). Measured on ai-node1 under CI load
@@ -641,7 +666,9 @@ or performance; the role refuses anything else) and changes the same way. The go
 restarts the profile and with it the governor. Keep the split: for each level 3-5, curve rampdown <
 governor down < governor up < curve rampup (the role refuses anything else), and keep the governor's
 40 <-> 60 % band (up[0] - down[0]) wider than the ~6.3 C one step takes off at the cap, or a steady load
-cycles again.
+cycles again. To judge a change, count `changes(ec_fan_level{fan="1"}[12h])` per host over a night before
+and after, next to `ec_fan_governor_steps_total` (a step down the governor made after a step up it did not
+make was the curve's instant step).
 To try a curve by hand first, write it to
 `/sys/class/ec_su_axb35/fan{1,2}/rampup_curve` (and `rampdown_curve`) on the host. The next converge
 (which sees the fans off the profile) or the next reboot puts the role's curve back. Write the curves

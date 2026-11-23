@@ -44,8 +44,8 @@ perf:
 thinpool *args:
     cd {{ansible_dir}} && ansible-playbook site.yml --tags thinpool {{args}}
 
-# Ansible: EC fan driver (ec_su_axb35, DKMS) + CPU-fan curve + fan metrics on the Proxmox hosts
-# (pve_ec_fan_enabled: ai-node1 and ai-node2). `just ec-fan --limit ai-node1 --check --diff` first
+# Ansible: EC fan driver (ec_su_axb35, DKMS) + CPU-fan curve + ec-fan-governor + fan metrics on the Proxmox
+# hosts (pve_ec_fan_enabled: all three ai-nodes). `just ec-fan --limit ai-node1 --check --diff` first
 # (docs/runbooks/node-maintenance.md "EC fan curve").
 ec-fan *args:
     cd {{ansible_dir}} && ansible-playbook site.yml --tags ec_fan {{args}}
