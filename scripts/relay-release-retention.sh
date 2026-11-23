@@ -86,6 +86,6 @@ for rid in $(cut -f1 "$W/ids" | sort -un); do
   out="$(bash "$API" GET "/repos/$REPO/releases/$rid" 2>&1)"
   [ "$(status "$out")" = "HTTP 200" ] || { echo "VERIFY FAILED: cannot re-read release $rid: $(status "$out")" >&2; fail=1; continue; }
   body "$out" > "$W/after-$rid.json"
-  "$PY" "$PLANNER" verify --before "$W/releases.json" --plan "$W/plan.json" --after "$W/after-$rid.json" || fail=1
+  "$PY" "$PLANNER" verify --before "$W/releases.json" --plan "$W/plan.json" --after "$W/after-$rid.json" --release-id "$rid" || fail=1
 done
 [ "$fail" = 0 ] && echo "DONE: plan $sha executed and verified" || { echo "INCOMPLETE: see the lines above" >&2; exit 1; }

@@ -70,9 +70,9 @@ class Planner(unittest.TestCase):
         self.assertNotEqual(rr.plan_sha256(a), rr.plan_sha256(rr.plan(fixture(), {"v0.10.1"})[1]))
 
     def test_versions_as_pins_write_them(self):
-        text = "tag: v0.10.8\nversion: 0.10.11\nrc: v0.11.0-rc.1\nip: 192.168.0.36\nnode: 22.23.4.1\n"
+        text = "tag: v0.10.8\nversion: 0.10.11\nrc: v0.11.0-rc.1\nrc2: v0.11.0-rc-1\nip: 192.168.0.36\nnode: 22.23.4.1\n"
         found = {"v" + m for m in rr.VERSION.findall(text)}
-        self.assertEqual(found, {"v0.10.8", "v0.10.11", "v0.11.0-rc.1"})
+        self.assertEqual(found, {"v0.10.8", "v0.10.11", "v0.11.0-rc.1", "v0.11.0-rc-1"})
 
     PATHS = ("kubernetes/apps/apps/relay", "ansible/roles/relay_connector/defaults", "docs/relay-workers")
 
@@ -175,19 +175,24 @@ class Verifier(unittest.TestCase):
         self.rel["assets"] = [a for a in self.rel["assets"] if a["id"] not in planned]
 
     def test_exactly_the_planned_removal_passes(self):
-        self.assertEqual(rr.verify(self.before, self.items, self.rel), [])
+        self.assertEqual(rr.verify(self.before, self.items, self.rel, self.rel["id"]), [])
 
     def test_a_collateral_deletion_fails(self):
         self.rel["assets"] = [a for a in self.rel["assets"] if a["name"] != "manifest.json"]
-        self.assertTrue(any("NOT in the plan are gone" in p for p in rr.verify(self.before, self.items, self.rel)))
+        self.assertTrue(any("NOT in the plan are gone" in p for p in rr.verify(self.before, self.items, self.rel, self.rel["id"])))
 
     def test_a_planned_asset_still_present_fails(self):
         self.rel["assets"].append({"id": self.items[0]["asset_id"], "name": "x", "size": 1})
-        self.assertTrue(any("still present" in p for p in rr.verify(self.before, self.items, self.rel)))
+        self.assertTrue(any("still present" in p for p in rr.verify(self.before, self.items, self.rel, self.rel["id"])))
 
     def test_a_malformed_reread_fails(self):
-        self.assertTrue(rr.verify(self.before, self.items, {"id": 1}))
-        self.assertTrue(rr.verify(self.before, self.items, None))
+        self.assertTrue(rr.verify(self.before, self.items, {"id": 1}, 1))
+        self.assertTrue(rr.verify(self.before, self.items, None, 1))
+
+    def test_another_release_cannot_stand_in_for_the_requested_one(self):
+        other = json.loads(json.dumps(next(r for r in self.before if r["tag_name"] == "v0.10.9")))   # unchanged, known
+        problems = rr.verify(self.before, self.items, other, self.rel["id"])
+        self.assertTrue(any("asked for release" in p for p in problems), problems)
 
 
 @unittest.skipUnless(shutil.which("bash"), "needs bash")

@@ -33,7 +33,7 @@ BUNDLE = re.compile(r"^relay-(?:codex-linux-x64-%s\.tar\.gz\.part-\d{4}|pi-linux
                     % (SHA40, SHA40, SHA40))
 # A version as pins write it, with or without the `v` (`relay_connector_release.version: 0.10.11`), with any prerelease
 # suffix, normalised to the tag. Not a fragment of a longer dotted run (`192.168.0.36` is no version).
-VERSION = re.compile(r"(?<![\w.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?)(?![.\d])")
+VERSION = re.compile(r"(?<![\w.])v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z.-]+)?)(?![.\d])")
 ALWAYS_KEEP = {"v0.2.0"}
 KEEP_NEWEST = 5   # the approved minimum
 # Every place a deployed, rollback or worker-runtime Relay version is named. A version mentioned anywhere here keeps its
@@ -113,11 +113,14 @@ def plan_sha256(items):
     return hashlib.sha256(body).hexdigest()
 
 
-def verify(before, plan_items, after):
-    """One re-read release vs the pre-execution inventory: -> list of problems (empty = exactly the planned removal)."""
+def verify(before, plan_items, after, release_id):
+    """The re-read of release_id vs the pre-execution inventory: -> list of problems (empty = exactly the planned
+    removal). The re-read must BE that release: another, unchanged release would otherwise pass (Codex round 2)."""
     problems = []
     if not isinstance(after, dict) or not isinstance(after.get("id"), int) or not isinstance(after.get("assets"), list):
         return ["the re-read is not a release object with an asset list"]
+    if after["id"] != release_id:
+        return ["asked for release %d, got release %d" % (release_id, after["id"])]
     rid = after["id"]
     pre = next((r for r in before if r["id"] == rid), None)
     if pre is None:
@@ -146,6 +149,7 @@ def main(argv=None):
     v.add_argument("--before", required=True)
     v.add_argument("--plan", required=True)
     v.add_argument("--after", required=True)
+    v.add_argument("--release-id", type=int, required=True, help="the release that was requested")
     a = ap.parse_args(argv)
     if a.cmd == "verify":
         before = json.loads(Path(a.before).read_text(encoding="utf-8"))
@@ -154,7 +158,7 @@ def main(argv=None):
             after = json.loads(Path(a.after).read_text(encoding="utf-8"))
         except ValueError:
             after = None
-        problems = verify(before, items, after)
+        problems = verify(before, items, after, a.release_id)
         for line in problems:
             print("VERIFY FAILED: " + line)
         if not problems:
