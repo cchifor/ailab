@@ -565,32 +565,38 @@ that curve for the two CPU fans and sets the APU power mode:
   they stepped at once, on a steady 90 C ~190 s instead of ~55 s, and a 0.1 C/s ramp reaches 95 C instead of
   91 C first. A first step at 96 C would have gained little more (node2 18, node3 56-46 changes); a 600 s
   hold cut node3 to 48-50 changes but kept it at 60 %+ 30 % of the time (against 22 %).
-- **node3 reads hotter mostly because of what it runs (checked 2026-11-23):** on package power alone node3
-  looked ~9 C hotter than node1 (median Tctl at 52-56 W, the 2026-11-22/23 night: node1 75, node2 80,
-  node3 84 C), with the same CPU-fan rpm on all three (~2630 at 40 %, ~3460 at 60 %). But the kind of load
-  moves Tctl (the hottest spot) a lot at the same power: node1 reads 68 C when 60 %+ of the CPU is busy
-  and 78-80 C when 10-40 % is, a few cores boosting hard. node3 has two CI runners, not three, plus the
-  reviewer VMs, relay-worker-1, the registry and the LLM container, and in 24 h it never ran 40 %+ busy at
-  that power. Matched on both (24 h, 30 s samples, median Tctl at 50-57 W):
+- **node3 runs hotter at the same power and the same load (hardware follow-up, cause not confirmed):** on
+  package power alone node3 looked ~9 C hotter than node1 (median Tctl at 52-56 W, the 2026-11-22/23
+  night: node1 75, node2 80, node3 84 C), with the same CPU-fan rpm on all three (~2630 at 40 %, ~3460 at
+  60 %). Part of that is the load mix: at the same power Tctl (the hottest spot) depends a lot on the kind
+  of load (node1 reads 68 C when 60 %+ of the CPU is busy and 78-80 C when 10-40 % is, a few cores boosting
+  hard), and node3, with two CI runners instead of three plus the reviewer VMs, relay-worker-1, the registry
+  and the LLM container, never ran 40 %+ busy at that power. Matched on both (2026-11-23, a later 24 h at
+  30 s samples; the power window widened to 50-57 W for enough samples per band, so do not subtract these
+  from the night's medians above), median Tctl (samples):
 
   | CPU busy (1 min average) | node1 | node2 | node3 |
   |---|---|---|---|
-  | 10-20 % | 78 C | 80 C | 84 C |
-  | 20-30 % | 80 C | 82 C | 85 C |
-  | 30-40 % | 80 C | 81 C | 81 C |
-  | 40-60 % | 74 C | 76 C | no samples |
-  | 60-100 % | 68 C | 72 C | no samples |
+  | 10-20 % | 78 C (374) | 80 C (351) | 84 C (552) |
+  | 20-30 % | 80 C (387) | 82 C (763) | 85 C (389) |
+  | 30-40 % | 80 C (698) | 81 C (616) | 81 C (121) |
+  | 40-60 % | 74 C (978) | 76 C (526) | none |
+  | 60-100 % | 68 C (369) | 72 C (57) | none |
 
-  So node3 is +5-6 C at light load and level at 30-40 %, node2 ~+2 C. A small cooling difference (dust,
-  dried paste, where node3 stands) is possible but not shown, and it is low priority. Only the same synthetic
-  load at the same fixed fan level, one node at a time, would settle it; that test and a cleaning take load
+  So the load mix explains only ~3-4 C of the gap: node3 is still +5-6 C at 10-30 % busy, where 941 of its 1062
+  samples in the table are, and level only in the 30-40 % band (121 samples); node2 is ~+2 C. A 1 min busy average can
+  still hide a different per-core boost pattern, so this does not prove a cooling problem either. Dust in
+  the heatsink fins, dried thermal paste or the airflow where node3 stands remain open. The next step is the
+  same synthetic load at the same fixed fan level, one node at a time; that test and a cleaning take load
   off a node that is processing data, so plan them with the owner.
-- **The 95 C+ readings are boost transients, not a fault:** in the same 24 h they were 0.1 / 0.9 / 0.9 % of
-  the samples on node1 / node2 / node3, each 1 min or shorter. At them the CPU was 13-31 % busy (1 min
-  average) with the GPU idle and 15-22 cores above 4.5 GHz (fastest 4.75-4.9 GHz): the start of a burst.
-  The APU limits itself at Tctl 100 C, and the curve's 95 C instant step answers them. The NVMe is a
-  separate part with its own cooling: node3's runs cooler (composite avg 46 C against 54 C) because it
-  writes less (~18 MB/s against ~31-32 MB/s on node1 / node2), with the same drive and firmware on all three.
+- **The 95 C+ readings look like boost transients:** in the same 24 h they were 0.1 / 0.9 / 0.9 % of the
+  samples on node1 / node2 / node3, each 1 min or shorter. At them the CPU was 13-31 % busy (1 min average)
+  with the GPU idle and 15-22 cores above 4.5 GHz (fastest 4.75-4.9 GHz), consistent with the start of a
+  burst. That does not rule out weaker cooling (the node3 item above is still open), and reaching the APU's
+  own limit (it throttles at Tctl 100 C) says nothing about the cooler's health; the curve's 95 C instant
+  step answers them. The NVMe is a separate part with its own cooling: node3's runs cooler (composite avg
+  46 C against 54 C) and also writes less (~18 MB/s against ~31-32 MB/s on node1 / node2), with the same
+  drive and firmware on all three.
 - **APU power mode:** the service writes `pve_ec_fan_power_mode` (default `quiet`; also `balanced`, the
   AXB35's factory EC default, or `performance`) to `apu/power_mode` on start, and sets `balanced` on stop
   (it does not restore a mode that was set before the role). Measured on ai-node1 under CI load
