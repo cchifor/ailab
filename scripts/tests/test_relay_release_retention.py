@@ -112,6 +112,42 @@ class Planner(unittest.TestCase):
                 with self.assertRaises(rr.PinReadError):
                     rr.pinned_versions(root, self.PATHS)
 
+    def test_an_unlistable_nested_directory_stops_the_plan(self):
+        # Path.rglob() would skip it silently (reviewer-codex, #1957 round 3); os.walk's onerror must raise
+        with tempfile.TemporaryDirectory() as t:
+            root = self.tree(t)
+            nested = root / "docs/relay-workers/sub"
+            nested.mkdir()
+            (nested / "pins.json").write_text('{"tag": "v0.10.3"}')
+            real = os.scandir
+
+            def scandir(p="."):
+                if Path(p) == nested:
+                    raise PermissionError(13, "Permission denied", str(p))
+                return real(p)
+            with unittest.mock.patch.object(os, "scandir", scandir):
+                with self.assertRaises(rr.PinReadError):
+                    rr.pinned_versions(root, self.PATHS)
+            rel = Path(t) / "r.json"
+            rel.write_text(json.dumps(fixture()))
+            real_pins = rr.pinned_versions
+            with unittest.mock.patch.object(os, "scandir", scandir), \
+                    unittest.mock.patch.object(rr, "pinned_versions", lambda: real_pins(root, self.PATHS)), \
+                    unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(rr.main(["plan", "--releases", str(rel)]), 3)
+            self.assertNotIn("PLAN-SHA256", out.getvalue())
+
+    def test_an_unknown_keep_tag_stops_the_plan(self):
+        with self.assertRaises(ValueError):
+            rr.plan(fixture(), set(), extra_keep=["v0.10.99"])
+
+    def test_drafts_take_no_newest_slot(self):
+        rels = fixture()
+        rels.append(release(11, "v0.10.11", 20, BUNDLES, draft=True))   # the newest by date, but a draft
+        keep = rr.plan(rels, set())[0]
+        self.assertEqual({t for t, why in keep.items() if why.startswith("newest")},
+                         {"v0.10.10", "v0.10.9", "v0.10.8", "v0.10.7", "v0.10.6"})
+
     def test_a_missing_pin_path_stops_the_plan(self):
         with tempfile.TemporaryDirectory() as t:
             with self.assertRaises(rr.PinReadError):

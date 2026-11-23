@@ -73,7 +73,7 @@ planned="$(grep -c . "$W/ids")"
 fail=0; done_n=0
 while IFS=$'\t' read -r rid aid; do
   [[ "$rid" =~ ^[0-9]+$ && "$aid" =~ ^[0-9]+$ ]] || { echo "STOP: a non-numeric id in the plan" >&2; exit 1; }
-  out="$(bash "$API" DELETE "/repos/$REPO/releases/$rid/assets/$aid" 2>&1)"
+  out="$(bash "$API" DELETE "/repos/$REPO/releases/$rid/assets/$aid" 2>&1 </dev/null)"   # never the loop's id stream
   case "$(status "$out")" in
     'HTTP 204'|'HTTP 200') done_n=$((done_n + 1)); echo "deleted release $rid asset $aid" ;;
     *) echo "FAILED release $rid asset $aid: $(status "$out")" >&2; fail=1 ;;

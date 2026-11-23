@@ -21,6 +21,7 @@ The rule (docs/runbooks/relay.md, "Release asset retention"):
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -49,13 +50,24 @@ class PinReadError(Exception):
     """A pin source is missing or a file under it cannot be read: its versions would silently lose protection."""
 
 
+def _walk_files(base):
+    """Every file under base. os.walk with an onerror that raises: Path.rglob() silently skips a subdirectory it
+    cannot list, which would drop that subtree's pins without stopping the plan (reviewer-codex, #1957 round 3)."""
+    def fail(err):
+        raise PinReadError("cannot list %s: %s" % (getattr(err, "filename", base), err))
+    out = []
+    for dirpath, _dirs, files in os.walk(base, onerror=fail, followlinks=False):
+        out.extend(Path(dirpath) / f for f in files)
+    return sorted(out)
+
+
 def pinned_versions(root=ROOT, paths=PIN_PATHS):
     found = set()
     for rel in paths:
         base = root / rel
         if not base.exists():
             raise PinReadError("pin path missing: %s (renamed? update PIN_PATHS)" % rel)
-        files = [base] if base.is_file() else sorted(p for p in base.rglob("*") if p.is_file())
+        files = [base] if base.is_file() else _walk_files(base)
         for f in files:   # every file, whatever its suffix
             try:
                 text = f.read_text(encoding="utf-8", errors="replace")
@@ -70,8 +82,13 @@ def plan(releases, pinned, keep_newest=KEEP_NEWEST, extra_keep=()):
     if keep_newest < KEEP_NEWEST:
         raise ValueError("keep_newest must be at least %d (the approved rule)" % KEEP_NEWEST)
     ordered = sorted(releases, key=lambda r: (r["created_at"], r["id"]), reverse=True)
+    published = [r for r in ordered if not r.get("draft") and not r.get("prerelease")]
+    tags = {r["tag_name"] for r in releases}
+    unknown = [t for t in extra_keep if t not in tags]
+    if unknown:   # a typo would leave the tag it meant unprotected
+        raise ValueError("--keep names no release: %s" % ", ".join(unknown))
     keep = {}
-    for r in ordered[:keep_newest]:
+    for r in published[:keep_newest]:   # five real releases: drafts and prereleases take no slot
         keep.setdefault(r["tag_name"], "newest %d" % keep_newest)
     for t in sorted(pinned):
         keep.setdefault(t, "pinned in ailab")
