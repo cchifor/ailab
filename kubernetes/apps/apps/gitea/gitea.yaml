@@ -73,7 +73,12 @@ spec:
       # return freed blocks (verified 2026-07-20 — ~1.1 GB trimmed, zvol released <8 MiB). Expanding
       # to 20Gi drops usage to ~45% and clears the alert with headroom. The ~4.9 GiB DB is dominated by
       # Actions logs stuck in-DB (DBFS) — bounded via LOG_RETENTION_DAYS below, not by VACUUM.
-      size: 20Gi
+      # 50Gi (was 20Gi), owner-approved 2026-11-23: the volume reached 90.5% (KubePersistentVolumeFillingUp,
+      # ~4 days to full). /data/attachments holds the release assets, 10 GB, nearly all Relay's: each
+      # Relay release adds ~306 MB (three ~84 MB relay-codex parts), and releasing every console feature
+      # as it lands added ~2 GB in a night. A retention rule for old releases' assets is a separate owner
+      # decision. Online expansion: qnap-iscsi has allowVolumeExpansion; the LUN never shrinks (no UNMAP).
+      size: 50Gi
     # The Actions storage PVC (actions-storage.yaml), mounted only into the RUNTIME container —
     # extraContainerVolumeMounts, not the deprecated extraVolumeMounts, so the chart's init
     # containers are untouched. Mounted at /data-actions rather than under /data, which is the main
