@@ -310,10 +310,12 @@ PY
 
     def test_a_foreign_sort_on_path_cannot_skip_verification(self):
         # System32's sort.exe ahead of Git's once emptied the list of releases to verify, and a run whose deletion
-        # took an unplanned asset still printed "executed and verified" (#1961)
+        # took an unplanned asset still printed "executed and verified" (#1961). tr and grep are tools the wrapper
+        # still runs: without its own-tools-first PATH line they break the run before the collateral check, so this
+        # test also guards that line (reviewer-claude, #1961).
         hostile = self.t / "hostile-bin"
         hostile.mkdir()
-        for tool in ("sort", "find", "cut"):
+        for tool in ("sort", "find", "cut", "tr", "grep"):
             p = hostile / tool
             p.write_bytes(b"#!/bin/sh\necho 'The system cannot find the file specified.' >&2\nexit 1\n")
             p.chmod(0o755)
