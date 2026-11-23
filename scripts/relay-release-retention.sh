@@ -11,6 +11,10 @@
 # returns an empty body when MSYS_NO_PATHCONV is set at all, so this script never sets it.
 set -uo pipefail
 unset MSYS_NO_PATHCONV
+# This bash's own tools first: with System32 ahead of Git in PATH, Windows' sort.exe once stood in for sort, the list
+# of releases to verify came out empty, and the run still reported success (#1961). The API is called with "$BASH"
+# for the same reason (a bare `bash` can be System32's WSL launcher).
+PATH="${BASH%/*}:$PATH"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API="${RELAY_RETENTION_API:-$ROOT/scripts/gitea-api.sh}"   # the override is for scripts/tests only
 REPO="cchifor/relay"
@@ -35,9 +39,9 @@ body() { case "$1" in *$'\n'*) printf '%s\n' "${1#*$'\n'}";; *) printf '';; esac
 # 1. every page until an empty one: a server page cap below the requested limit must not end the listing early
 page=1; : > "$W/pages"
 while :; do
-  out="$(bash "$API" GET "/repos/$REPO/releases?limit=50&page=$page" 2>&1)" || { echo "STOP: page $page: $(status "$out")" >&2; exit 1; }
+  out="$("$BASH" "$API" GET "/repos/$REPO/releases?limit=50&page=$page" 2>&1)" || { echo "STOP: page $page: $(status "$out")" >&2; exit 1; }
   [ "$(status "$out")" = "HTTP 200" ] || { echo "STOP: page $page: $(status "$out")" >&2; exit 1; }
-  n="$(body "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list); print(len(d))' 2>/dev/null)" \
+  n="$(body "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); assert isinstance(d, list); print(len(d))' 2>/dev/null | tr -d '\r')" \
     || { echo "STOP: page $page is not a JSON array (empty body?)" >&2; exit 1; }
   [ "$n" -gt 0 ] || break
   body "$out" | tr -d '\n' >> "$W/pages"; printf '\n' >> "$W/pages"
@@ -58,22 +62,34 @@ PY
 # 2. the plan
 "$PY" "$PLANNER" plan --releases "$W/releases.json" --json-out "$W/plan.json" "${args[@]}" | tee "$W/plan.txt"
 [ "${PIPESTATUS[0]}" = 0 ] || { echo "STOP: no plan" >&2; exit 1; }
-sha="$(sed -n 's/^PLAN-SHA256 //p' "$W/plan.txt")"
+sha="$(sed -n 's/^PLAN-SHA256 //p' "$W/plan.txt" | tr -d '\r')"   # Windows Python's stdout is CRLF
 [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "STOP: the planner printed no PLAN-SHA256" >&2; exit 1; }
 [ -n "$execute" ] || { echo "DRY RUN: nothing deleted. To delete exactly this list: $0 ${args[*]} --execute $sha"; exit 0; }
 [ "$sha" = "$execute" ] || { echo "STOP: the plan changed (now $sha, approved $execute); nothing deleted" >&2; exit 1; }
 
 # 3. delete by numeric ids only: an asset name never reaches this loop, so no name can inject a line
 echo "EXECUTING plan $sha"
+# Python writes the file itself with LF: its stdout on Windows is CRLF, and `read` keeps the CR, so every id failed
+# the numeric check below (the first live run, 2026-11-23: nothing was deleted).
+# It also writes the distinct release ids, so verification needs no external sort.
 "$PY" -c '
 import json, sys
-for i in json.load(open(sys.argv[1], encoding="utf-8")):
-    print("%d\t%d" % (int(i["release_id"]), int(i["asset_id"])))' "$W/plan.json" > "$W/ids" || { echo "STOP: cannot read the plan ids" >&2; exit 1; }
+items = json.load(open(sys.argv[1], encoding="utf-8"))
+with open(sys.argv[2], "w", encoding="ascii", newline="\n") as out:
+    for i in items:
+        out.write("%d\t%d\n" % (int(i["release_id"]), int(i["asset_id"])))
+with open(sys.argv[3], "w", encoding="ascii", newline="\n") as out:
+    for rid in sorted({int(i["release_id"]) for i in items}):
+        out.write("%d\n" % rid)' "$W/plan.json" "$W/ids" "$W/rids" \
+  || { echo "STOP: cannot read the plan ids" >&2; exit 1; }
 planned="$(grep -c . "$W/ids")"
+[ "$planned" -gt 0 ] || { echo "DONE: the plan is empty, nothing to delete"; exit 0; }
+mapfile -t rids < "$W/rids"
+[ "${#rids[@]}" -gt 0 ] || { echo "STOP: the plan has assets but no release ids" >&2; exit 1; }
 fail=0; done_n=0
 while IFS=$'\t' read -r rid aid; do
   [[ "$rid" =~ ^[0-9]+$ && "$aid" =~ ^[0-9]+$ ]] || { echo "STOP: a non-numeric id in the plan" >&2; exit 1; }
-  out="$(bash "$API" DELETE "/repos/$REPO/releases/$rid/assets/$aid" 2>&1 </dev/null)"   # never the loop's id stream
+  out="$("$BASH" "$API" DELETE "/repos/$REPO/releases/$rid/assets/$aid" 2>&1 </dev/null)"   # never the loop's id stream
   case "$(status "$out")" in
     'HTTP 204'|'HTTP 200') done_n=$((done_n + 1)); echo "deleted release $rid asset $aid" ;;
     *) echo "FAILED release $rid asset $aid: $(status "$out")" >&2; fail=1 ;;
@@ -81,11 +97,19 @@ while IFS=$'\t' read -r rid aid; do
 done < "$W/ids"
 [ "$done_n" = "$planned" ] || { echo "INCOMPLETE: $done_n of $planned deletions succeeded" >&2; fail=1; }
 
-# 4. verify each touched release against the pre-execution inventory
-for rid in $(cut -f1 "$W/ids" | sort -un); do
-  out="$(bash "$API" GET "/repos/$REPO/releases/$rid" 2>&1)"
+# 4. verify each touched release against the pre-execution inventory; every one of them, counted, so a list that
+# comes out short can never read as success
+verified=0
+for rid in "${rids[@]}"; do
+  [[ "$rid" =~ ^[0-9]+$ ]] || { echo "VERIFY FAILED: a non-numeric release id" >&2; fail=1; continue; }
+  out="$("$BASH" "$API" GET "/repos/$REPO/releases/$rid" 2>&1)"
   [ "$(status "$out")" = "HTTP 200" ] || { echo "VERIFY FAILED: cannot re-read release $rid: $(status "$out")" >&2; fail=1; continue; }
   body "$out" > "$W/after-$rid.json"
-  "$PY" "$PLANNER" verify --before "$W/releases.json" --plan "$W/plan.json" --after "$W/after-$rid.json" --release-id "$rid" || fail=1
+  if "$PY" "$PLANNER" verify --before "$W/releases.json" --plan "$W/plan.json" --after "$W/after-$rid.json" --release-id "$rid"; then
+    verified=$((verified + 1))
+  else
+    fail=1
+  fi
 done
+[ "$verified" = "${#rids[@]}" ] || { echo "VERIFY INCOMPLETE: $verified of ${#rids[@]} releases verified" >&2; fail=1; }
 [ "$fail" = 0 ] && echo "DONE: plan $sha executed and verified" || { echo "INCOMPLETE: see the lines above" >&2; exit 1; }

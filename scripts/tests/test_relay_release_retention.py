@@ -195,7 +195,36 @@ class Verifier(unittest.TestCase):
         self.assertTrue(any("asked for release" in p for p in problems), problems)
 
 
-@unittest.skipUnless(shutil.which("bash"), "needs bash")
+def _bash():
+    """A bash by its full path. On Windows it must be Git Bash, where the wrapper runs (and Windows Python's CRLF
+    output is what it must survive): a bare "bash" resolves to System32's WSL launcher before PATH is searched, and
+    which("bash") does too when System32 precedes Git in PATH. So Git's own bash first, and a candidate counts only
+    if `uname -s` says MSYS/MINGW/CYGWIN."""
+    if os.name != "nt":
+        return shutil.which("bash")
+    cands = []
+    git = shutil.which("git")
+    if git:   # <Git>/cmd/git.exe or <Git>/mingw64/bin/git.exe: look for <Git>/usr/bin/bash.exe up the tree
+        for root in list(Path(git).resolve().parents)[:3]:
+            cands += [root / "usr" / "bin" / "bash.exe", root / "bin" / "bash.exe"]
+    if shutil.which("bash"):
+        cands.append(Path(shutil.which("bash")))
+    for c in cands:
+        if not c.exists():
+            continue
+        try:
+            u = subprocess.run([str(c), "-c", "uname -s"], capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if u.startswith(("MINGW", "MSYS", "CYGWIN")):
+            return str(c)
+    return None
+
+
+BASH = _bash()
+
+
+@unittest.skipUnless(BASH, "needs bash (Git Bash on Windows; the WSL launcher does not count)")
 class Wrapper(unittest.TestCase):
     """The wrapper against a fake forge that serves FOUR releases per page (a cap below the requested 50)."""
 
@@ -209,10 +238,15 @@ class Wrapper(unittest.TestCase):
         state.write_text(json.dumps(rels))
         self.log = self.t / "calls.log"
         fake = self.t / "fake-api.sh"
-        fake.write_text("""#!/usr/bin/env bash
+        # bytes, so the script is LF on Windows too: write_text would make it CRLF (a "PY\r" heredoc end, a "log\r" name)
+        fake.write_bytes(("""#!/usr/bin/env bash
 echo "$1 $2" >> "%(log)s"
+# The FAKE hands "/repos/..." to a native python.exe, which Git Bash would rewrite into a Windows path; the real
+# gitea-api.sh puts the path inside a URL and must never see this variable (the wrapper unsets it).
+export MSYS_NO_PATHCONV=1
 exec %(py)s - "$@" <<'PY'
 import json, os, re, sys
+sys.stdout.reconfigure(newline="\\n")   # LF like the real gitea-api.sh (bash + curl), also under Windows Python
 state_path = %(state)r
 method, path = sys.argv[1], sys.argv[2]
 rels = json.load(open(state_path))
@@ -231,14 +265,14 @@ if method == "DELETE":
     json.dump(rels, open(state_path, "w")); print("HTTP 204"); sys.exit(0)
 print("HTTP 400"); sys.exit(1)
 PY
-""" % {"log": self.log.as_posix(), "py": Path(sys.executable).as_posix(), "state": state.as_posix()})
+""" % {"log": self.log.as_posix(), "py": Path(sys.executable).as_posix(), "state": state.as_posix()}).encode("utf-8"))
         fake.chmod(0o755)
         self.env = dict(os.environ, RELAY_RETENTION_API=fake.as_posix())
         self.env.pop("MSYS_NO_PATHCONV", None)
         self.state = state
 
     def run_wrapper(self, *args, **env):
-        return subprocess.run(["bash", (ROOT / "scripts/relay-release-retention.sh").as_posix(), *args],
+        return subprocess.run([BASH, (ROOT / "scripts/relay-release-retention.sh").as_posix(), *args],
                               env=dict(self.env, **env), capture_output=True, text=True, timeout=180)
 
     def calls(self, method):
@@ -272,6 +306,23 @@ PY
         sha = self.sha_of(self.run_wrapper())
         r = self.run_wrapper("--execute", sha, FAKE_COLLATERAL="1")
         self.assertNotEqual(r.returncode, 0)
+        self.assertIn("NOT in the plan are gone", r.stdout)
+
+    def test_a_foreign_sort_on_path_cannot_skip_verification(self):
+        # System32's sort.exe ahead of Git's once emptied the list of releases to verify, and a run whose deletion
+        # took an unplanned asset still printed "executed and verified" (#1961). tr and grep are tools the wrapper
+        # still runs: without its own-tools-first PATH line they break the run before the collateral check, so this
+        # test also guards that line (reviewer-claude, #1961).
+        hostile = self.t / "hostile-bin"
+        hostile.mkdir()
+        for tool in ("sort", "find", "cut", "tr", "grep"):
+            p = hostile / tool
+            p.write_bytes(b"#!/bin/sh\necho 'The system cannot find the file specified.' >&2\nexit 1\n")
+            p.chmod(0o755)
+        sha = self.sha_of(self.run_wrapper())
+        r = self.run_wrapper("--execute", sha, FAKE_COLLATERAL="1", PATH=str(hostile) + os.pathsep + os.environ["PATH"])
+        self.assertNotEqual(r.returncode, 0, r.stdout[-400:])
+        self.assertNotIn("executed and verified", r.stdout)
         self.assertIn("NOT in the plan are gone", r.stdout)
 
     def test_a_short_sha_and_a_low_keep_newest_are_refused(self):
