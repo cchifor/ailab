@@ -3,8 +3,9 @@
 > **Obsolete (owner, 2026-11-22; ailab #1753 comments 136886 and 136889).** The Relay researcher
 > qualification campaign is obsolete. Do not run E6, R1-R7 or the canary from this runbook. Of the campaign, only drill
 > runs R0 and R0b ran live (signed, never granted, and each reset on 2026-11-21). The researcher-workers program and its
-> live state stay, as do the staged candidate code and the Renovate freeze (#1941). The candidate journal stack is
-> being retired. This file stays as the record.
+> live state stay, as do the staged candidate code and the Renovate freeze (#1941). The candidate journal is
+> retired: its Flux Kustomization and overlay are removed, and the staged candidate code it names is kept.
+> This file stays as the record.
 
 Status: **plan only. Nothing here is applied, and merging changes no cluster object.** It is item E5
 of the campaign plan rev 2 ([relay#277 comment 124936](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-124936)):
@@ -292,7 +293,7 @@ is unchanged. `verify` prints `runDigest` and `expiresAt`; record both with `t_s
    (operator login). It refuses an expired run in the database clock too
    (`rel:deploy/worker-candidate-journal/002-signed-clients.sql:47`).
 3. Apply the render without its protocol Service, which only Flux manages
-   (`kubernetes/apps/relay-candidate-journal/service.yaml`; the tests keep it equal to the render's copy):
+   (formerly `kubernetes/apps/relay-candidate-journal/service.yaml`, deleted at the retirement on 2026-11-22):
    `python3 -c 'import json,sys; d=json.load(sys.stdin); d["items"]=[o for o in d["items"] if (o["kind"], o["metadata"]["name"]) != ("Service", "relay-candidate-journal")]; json.dump(d, sys.stdout)' < /operator/<run>/service-rendered.json | kubectl apply -f -`
    (an opted-in metrics Service, `relay-candidate-journal-metrics`, is still applied). The render has `replicas: 0`, so then
    `kubectl -n relay-candidate-journal scale deploy/relay-candidate-journal --replicas=1` and wait for

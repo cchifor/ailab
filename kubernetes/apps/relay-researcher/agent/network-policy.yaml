@@ -76,6 +76,9 @@ spec:
 # the agent Pod only, TCP 8443 only. The journal's own per-run ingress policy admits this namespace on
 # 8443 (kubernetes/optional/relay-candidate-journal/render.py). Remove it with the qualification stage
 # (installation runbook Q7: no ordinary worker runs under a policy that still admits the journal).
+# KEPT DELIBERATELY after the journal's retirement (2026-11-22, ailab #1753 comment 136889): removing
+# it would prune a live object of this Flux unit. With the relay-candidate-journal namespace gone it
+# selects no Pod and admits nothing; it leaves with the qualification stage as stated above.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

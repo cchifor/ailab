@@ -14,8 +14,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 BUNDLE = ROOT / 'kubernetes/optional/relay-candidate-journal'
-# The activation overlay and its Flux Kustomization (runbook, "Activation under Flux").
+# The former activation overlay and its Flux Kustomization, both RETIRED on 2026-11-22 (owner decision,
+# ailab #1753 comment 136889: the qualification campaign is obsolete). The staged base stays.
 OVERLAY = ROOT / 'kubernetes/apps/relay-candidate-journal'
+FLUX_FILE = ROOT / 'kubernetes/apps/clusters/ai/relay-candidate-journal.yaml'
 CLUSTER = ROOT / 'kubernetes/apps/clusters/ai'
 spec = importlib.util.spec_from_file_location('candidate_journal_render', BUNDLE / 'render.py')
 render = importlib.util.module_from_spec(spec)
@@ -183,11 +185,10 @@ class JournalBundle(unittest.TestCase):
                          {render.DB_NS: 'restricted', render.SERVICE_NS: 'baseline'})
         claim = yaml.safe_load((BUNDLE / 'storage.yaml').read_text())
         self.assertEqual(claim['metadata']['annotations']['kustomize.toolkit.fluxcd.io/prune'], 'disabled')
-        # Before activation no kustomization outside the bundle named it. The activation PR admits
-        # exactly one, the overlay (runbook, "Activation under Flux"); Activation pins its content.
+        # Retired: no kustomization outside the bundle names it (Retirement checks every edge).
         referencing = sorted(path.relative_to(ROOT).as_posix() for path in (ROOT / 'kubernetes').rglob('kustomization.yaml')
                              if BUNDLE not in path.parents and 'optional/relay-candidate-journal' in path.read_text())
-        self.assertEqual(referencing, [(OVERLAY / 'kustomization.yaml').relative_to(ROOT).as_posix()])
+        self.assertEqual(referencing, [])
 
 
 def yaml_docs(path):
@@ -219,131 +220,57 @@ def inside(target, directory):
     return target == directory or directory in target.parents
 
 
-class Activation(unittest.TestCase):
-    """The activation PR: one Flux Kustomization over one overlay, which is the reviewed base, the
-    database replica count (0, then 1 after the one-time initialization) and the protocol Service on
-    10.96.0.42. The initialization Job and every per-run render stay outside every Flux inventory."""
-    setUp = JournalBundle.setUp
-    pin = JournalBundle.pin
-    fixture = JournalBundle.fixture
+class Retirement(unittest.TestCase):
+    """The candidate journal is retired (owner decision 2026-11-22, ailab #1753 comment 136889): no Flux
+    Kustomization, no activation overlay, and nothing reaches the staged base. The base, render.py and
+    initialize/ stay as staged code; their own contracts are still tested above and below."""
 
-    def test_flux_kustomization_encodes_the_runbook_preconditions(self):
+    def test_no_flux_kustomization_and_no_overlay(self):
+        self.assertFalse(FLUX_FILE.exists(), FLUX_FILE)
+        self.assertFalse(OVERLAY.exists(), OVERLAY)
         flux = flux_kustomizations()
-        mine = {key: d for key, d in flux.items() if key[1] == 'relay-candidate-journal'}
-        self.assertEqual(list(mine), [('kubernetes/apps/clusters/ai/relay-candidate-journal.yaml', 'relay-candidate-journal')])
-        ks = next(iter(mine.values()))
-        self.assertEqual(ks['metadata']['namespace'], 'flux-system')
-        spec = ks['spec']
-        self.assertEqual(spec['path'], './' + OVERLAY.relative_to(ROOT).as_posix())
-        self.assertEqual(spec['sourceRef'], {'kind': 'GitRepository', 'name': 'flux-system'})
-        self.assertIs(spec['wait'], True, 'the PVC and both Certificates must gate readiness')
-        self.assertIs(spec['prune'], True)
-        # Exactly these fields: no suspend, decryption, patches, components, postBuild, targetNamespace,
-        # namePrefix/nameSuffix, commonMetadata or force can rename, relabel or reshape what the tests
-        # below check in source (a prefix would move 10.96.0.42 to another Service name).
-        self.assertEqual(set(spec), {'interval', 'retryInterval', 'timeout', 'dependsOn', 'sourceRef', 'path', 'prune', 'wait'})
-        deps = {d['name'] for d in spec['dependsOn']}
-        # The StorageClass qnap-iscsi and the ClusterIssuer ailab-ca come first.
-        self.assertTrue({'qnap-storage', 'cert-manager-config'} <= deps, deps)
-        # wait:true needs the PVC Bound while the database is at zero replicas: no Pod consumes the claim,
-        # so the StorageClass must bind Immediately (no WaitForFirstConsumer).
-        (storage_class,) = yaml_docs(ROOT / 'kubernetes/apps/qnap-storage/storageclass.yaml')
-        self.assertEqual((storage_class['metadata']['name'], storage_class['reclaimPolicy']), ('qnap-iscsi', 'Retain'))
-        self.assertEqual(storage_class.get('volumeBindingMode', 'Immediate'), 'Immediate')
-        # Every dependency is a defined Flux Kustomization: a typo would wait on `dependency not found`.
-        cluster = {name for (path, name) in flux if path.startswith(CLUSTER.relative_to(ROOT).as_posix() + '/')}
-        self.assertTrue(deps <= cluster, deps)
-
-    def test_only_the_overlay_reaches_the_bundle_and_nothing_reaches_the_overlay(self):
-        # Flux paths, resolved: exactly ours names the overlay, none points into the bundle (its
-        # initialize/ above all), and none is an ancestor that Flux would expand without a
-        # kustomization.yaml (that generates one over every manifest below it, ours included).
-        paths = {key: (ROOT / d['spec'].get('path', '')).resolve() for key, d in flux_kustomizations().items()}
-        self.assertEqual([key for key, target in paths.items() if inside(target, OVERLAY)],
-                         [('kubernetes/apps/clusters/ai/relay-candidate-journal.yaml', 'relay-candidate-journal')])
-        self.assertEqual([key for key, target in paths.items() if inside(target, BUNDLE)], [])
+        self.assertEqual([key for key in flux if key[1] == 'relay-candidate-journal'], [])
+        # No Flux path is, or is inside, the base or the former overlay.
+        paths = {key: (ROOT / d['spec'].get('path', '')).resolve() for key, d in flux.items()}
+        self.assertEqual([key for key, target in paths.items() if inside(target, BUNDLE) or inside(target, OVERLAY)], [])
+        # No Flux path is an ancestor that Flux would expand without a kustomization.yaml (that would
+        # generate one over every manifest below it, the staged base included).
         for key, target in paths.items():
-            if OVERLAY.resolve() in target.parents or BUNDLE.resolve() in target.parents:
-                continue
-            if target in OVERLAY.resolve().parents or target in BUNDLE.resolve().parents:
+            if target in BUNDLE.resolve().parents:
                 self.assertTrue(any((target / name).is_file() for name in ('kustomization.yaml', 'kustomization.yml', 'Kustomization')), key)
-        # Kustomize entries, resolved, from every kustomization under kubernetes/ (each edge, so any
-        # transitive path too): only the overlay names the bundle, only its root directory, and
-        # nothing names the overlay, which only its own Flux Kustomization reconciles.
+
+    def test_no_kustomization_reaches_the_staged_base(self):
         reached = []
         for path in [*(ROOT / 'kubernetes').rglob('kustomization.yaml'), *(ROOT / 'kubernetes').rglob('kustomization.yml'),
                      *(ROOT / 'kubernetes').rglob('Kustomization')]:
             here = path.parent.resolve()
-            # yaml_docs: every document; `or []`: a key present with no entries parses as None.
             entries = [entry for k in yaml_docs(path)
                        for entry in (k.get('resources') or []) + (k.get('components') or []) + (k.get('bases') or [])]
             for entry in entries:
                 target = (path.parent / entry).resolve()
-                if (inside(target, BUNDLE) and not inside(here, BUNDLE)) or (inside(target, OVERLAY) and not inside(here, OVERLAY)):
+                if inside(target, BUNDLE) and not inside(here, BUNDLE):
                     reached.append((path.parent.relative_to(ROOT).as_posix(), target.relative_to(ROOT).as_posix()))
-        self.assertEqual(reached, [(OVERLAY.relative_to(ROOT).as_posix(), BUNDLE.relative_to(ROOT).as_posix())])
+        self.assertEqual(reached, [])
 
-    def test_flux_inventory_is_exactly_the_stopped_base_and_the_pinned_service(self):
-        # Every object Flux can create here, from the base's own resource files, its one generator and
-        # the overlay's Service: no Job, Deployment, Secret or workload beyond the StatefulSet at 0/1.
+    def test_retained_state_stays_prune_disabled_in_the_staged_base(self):
+        # Re-activation from the staged base must again never let a Flux prune delete the claim.
         base = yaml.safe_load((BUNDLE / 'kustomization.yaml').read_text())
-        self.assertEqual(set(base), {'apiVersion', 'kind', 'resources', 'configMapGenerator', 'labels'})
-        self.assertEqual(base['resources'], ['namespace.yaml', 'storage.yaml', 'certificate.yaml',
-                                             'journal-certificate.yaml', 'postgres.yaml', 'network-policy.yaml'])
-        self.assertEqual(base['configMapGenerator'], [{'name': render.NAME + '-postgres', 'namespace': render.DB_NS,
-                                                       'files': ['start.sh', 'pg_hba.conf']}])
-        self.assertEqual(base['labels'], [{'pairs': {'app.kubernetes.io/part-of': render.NAME, 'velero.io/exclude-from-backup': 'true'},
-                                           'includeSelectors': False, 'includeTemplates': True}])
-        # Retained state: removing the Flux file must never delete the namespaces or the claim. Checked on
-        # the objects the base actually includes.
         retained = [d for entry in base['resources'] for d in yaml_docs(BUNDLE / entry)
                     if d['kind'] in ('Namespace', 'PersistentVolumeClaim')]
         self.assertEqual(len(retained), 3)
         for d in retained:
             self.assertEqual(d['metadata']['annotations']['kustomize.toolkit.fluxcd.io/prune'], 'disabled', d['metadata']['name'])
-        inventory = sorted((d['kind'], d['metadata'].get('namespace', ''), d['metadata']['name'])
-                           for entry in base['resources'] for d in yaml_docs(BUNDLE / entry))
-        inventory += [(d['kind'], d['metadata']['namespace'], d['metadata']['name']) for d in yaml_docs(OVERLAY / 'service.yaml')]
-        db, svc = render.DB_NS, render.SERVICE_NS
-        self.assertEqual(sorted(inventory), sorted([
-            ('Namespace', '', db), ('Namespace', '', svc),
-            ('PersistentVolumeClaim', db, render.NAME + '-postgres-data'),
-            ('Certificate', db, render.NAME + '-postgres-tls'), ('Certificate', svc, render.NAME + '-tls'),
-            ('Service', db, render.NAME + '-postgres'), ('StatefulSet', db, render.NAME + '-postgres'),
-            ('NetworkPolicy', db, 'default-deny'), ('NetworkPolicy', svc, 'default-deny'),
-            ('NetworkPolicy', db, 'postgres-clients'), ('NetworkPolicy', db, 'operator-client'),
-            ('NetworkPolicy', db, 'postgres-operator'),
-            ('Service', svc, render.NAME)]))
 
-    def test_overlay_is_the_base_the_replica_count_and_the_pinned_service(self):
-        self.assertEqual(sorted(p.name for p in OVERLAY.iterdir()), ['kustomization.yaml', 'replicas.yaml', 'service.yaml'])
-        k = yaml.safe_load((OVERLAY / 'kustomization.yaml').read_text())
-        self.assertEqual(set(k), {'apiVersion', 'kind', 'resources', 'patches'})
-        self.assertEqual(k['resources'], ['../../optional/relay-candidate-journal', 'service.yaml'])
-        self.assertEqual(k['patches'], [{'path': 'replicas.yaml'}])
-        (patch,) = yaml_docs(OVERLAY / 'replicas.yaml')
-        self.assertEqual((patch['kind'], patch['metadata']), ('StatefulSet', {'name': render.NAME + '-postgres', 'namespace': render.DB_NS}))
-        self.assertEqual(set(patch['spec']), {'replicas'})
-        # Zero until the initialization Job is terminal and its Pod gone; then ONE, never more.
-        self.assertIn(patch['spec']['replicas'], (0, 1))
-        self.assertIs(type(patch['spec']['replicas']), int)
-        (service,) = yaml_docs(OVERLAY / 'service.yaml')
-        self.assertEqual(service['kind'], 'Service')
-
-    def test_flux_service_is_exactly_the_rendered_pinned_service(self):
-        # The per-run render applies the same object, so it never moves or changes the Service.
-        config, _, _ = self.fixture()
-        # By name: an opted-in render also carries the separate relay-candidate-journal-metrics Service.
-        rendered = [o for o in render.service(config) if o['kind'] == 'Service' and o['metadata']['name'] == render.NAME]
-        (service,) = yaml_docs(OVERLAY / 'service.yaml')
-        self.assertEqual(rendered, [service])
-        self.assertEqual(service['spec']['clusterIP'], '10.96.0.42')
-        self.assertEqual(service['spec']['clusterIPs'], ['10.96.0.42'])
-        self.assertEqual(service['spec']['ports'], [{'name': 'https', 'port': 8443, 'targetPort': 'https'}])
+    def test_network_plan_keeps_42_reserved_and_marks_it_retired(self):
+        # render.py still emits the Service on 10.96.0.42 and the installation binding still names it,
+        # so the address stays reserved (never reassigned) although no Flux source creates it.
+        self.assertEqual(render.CLUSTER_IP, '10.96.0.42')
         plan = (ROOT / 'docs/network-plan.md').read_text(encoding='utf-8')
-        row = re.search(r'^\| `10\.96\.0\.42` \| `relay-candidate-journal/relay-candidate-journal` \|([^|]*)\|', plan, re.M)
+        row = re.search(r'^\| `10\.96\.0\.42` \| `relay-candidate-journal/relay-candidate-journal` \(RETIRED 2026-11-22\) \|([^|]*)\|[^|]*\|([^|]*)\|$',
+                        plan, re.M)
         self.assertIsNotNone(row)
-        self.assertIn('`' + (OVERLAY / 'service.yaml').relative_to(ROOT).as_posix() + '`', row.group(1))
+        self.assertNotIn((OVERLAY / 'service.yaml').relative_to(ROOT).as_posix(), row.group(1))
+        self.assertIn('RESERVED', row.group(2))
 
 
 class TlsLifecycle(unittest.TestCase):

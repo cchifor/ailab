@@ -1689,9 +1689,9 @@ the hub runbook's H6 preconditions (`relay-researcher-hub-upgrade.md:322-327`) a
      rotated the witness after H4a's roll, and H6's Recreate rollout is what mounts B.
    - Budget startup `start_failed` is expected until H7. `RelayWorkerBudgetStartupFailed` stays quiet for it
      (since 2026-11-22 it fires only for a hub Pod that carries a candidate).
-2. **The candidate journal** on `10.96.0.42`. It is under Flux at zero replicas since ailab #1813,
-   and its activation is its own held PRs
-   ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md), "Activation under Flux").
+2. **The candidate journal: RETIRED 2026-11-22** (ailab #1753 comment 136889). Its Flux Kustomization
+   and overlay are removed and nothing runs on `10.96.0.42`
+   ([relay-worker-candidate-journal.md](relay-worker-candidate-journal.md)).
 3. **File B,** budget step 7's `qualifications` row (#1753 comment 124071). It is generated from live
    Router readings taken after the last Router rollout: this checklist's step 5 rolls, or any later
    Router change. **File A and File B are separate.** File B must be committed, read back and
