@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Relay release-asset retention: the planner's rule, and the wrapper's dry run, sha gate, delete and verify.
+"""Relay release-asset retention: the planner's rule and verifier, and the wrapper's paging, dry run, sha gate,
+id-only deletion and verification, against a fake forge.
 
     python3 -m unittest scripts.tests.test_relay_release_retention
 """
@@ -18,69 +19,84 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import relay_release_retention as rr  # noqa: E402
 
-
-def release(rid, tag, day, names):
-    return {"id": rid, "tag_name": tag, "created_at": "2026-11-%02dT10:00:00Z" % day, "draft": False,
-            "assets": [{"id": rid * 100 + n, "name": name, "size": 1000 * (n + 1)} for n, name in enumerate(names)]}
-
-
-BUNDLES = ["relay-codex-linux-x64-aaaa.tar.gz.part-0001", "relay-codex-linux-x64-aaaa.tar.gz.part-0002",
-           "relay-pi-linux-x64-aaaa.tar.gz", "relay-holder-aaaa.tar.gz"]
+SHA = "a" * 40
+BUNDLES = ["relay-codex-linux-x64-%s.tar.gz.part-0001" % SHA, "relay-codex-linux-x64-%s.tar.gz.part-0002" % SHA,
+           "relay-pi-linux-x64-%s.tar.gz" % SHA, "relay-holder-%s.tar.gz" % SHA]
+# near misses the planner must never select: receipts, checksums, other relay-* assets, a hostile name
 SMALL = ["SHA256SUMS", "manifest.json", "control-plane-manifest.json", "relay-connector-linux-amd64",
-         "relay-agent-tools-aaaa.tar.gz", "install.sh"]
+         "relay-agent-tools-%s.tar.gz" % SHA, "install.sh", "relay-holder-receipt.json",
+         "relay-pi-linux-x64-%s.tar.gz.sha256" % SHA, "relay-holder-%s.tar.gz\n9\t901" % SHA]
+
+
+def release(rid, tag, day, names, **extra):
+    r = {"id": rid, "tag_name": tag, "created_at": "2026-11-%02dT10:00:00Z" % day, "draft": False, "prerelease": False,
+         "assets": [{"id": rid * 100 + n, "name": name, "size": 1000 * (n + 1)} for n, name in enumerate(names)]}
+    r.update(extra)
+    return r
 
 
 def fixture():
     rels = [release(i, "v0.10.%d" % i, i, BUNDLES + SMALL) for i in range(1, 11)]   # v0.10.1 .. v0.10.10
-    rels.append(release(75, "v0.2.0", 1, ["router-0.1.0-x.tar.gz", "relay-pi-linux-x64-old.tar.gz"]))
+    rels.append(release(75, "v0.2.0", 1, ["router-0.1.0-x.tar.gz", "relay-pi-linux-x64-%s.tar.gz" % SHA]))
     return rels
 
 
 class Planner(unittest.TestCase):
     def test_the_rule(self):
-        keep, items = rr.plan(fixture(), pinned={"v0.10.2"}, keep_newest=3, extra_keep=["v0.10.4"])
-        # newest 3 by creation time, the pinned one, the --keep one, and the llm-router store
-        self.assertEqual(set(keep), {"v0.10.10", "v0.10.9", "v0.10.8", "v0.10.2", "v0.10.4", "v0.2.0"})
-        touched = {i["tag"] for i in items}
-        self.assertEqual(touched, {"v0.10.1", "v0.10.3", "v0.10.5", "v0.10.6", "v0.10.7"})
-        # only the large bundles, never a manifest, a checksum file, a connector binary or agent tools
-        self.assertTrue(all(rr.BUNDLE.match(i["name"]) for i in items))
-        self.assertEqual(len(items), 5 * len(BUNDLES))
-        self.assertFalse(any(i["tag"] == "v0.2.0" for i in items))
+        keep, items = rr.plan(fixture(), pinned={"v0.10.2"}, extra_keep=["v0.10.4"])
+        self.assertEqual(set(keep), {"v0.10.10", "v0.10.9", "v0.10.8", "v0.10.7", "v0.10.6",   # newest 5
+                                     "v0.10.2", "v0.10.4", "v0.2.0"})
+        self.assertEqual({i["tag"] for i in items}, {"v0.10.1", "v0.10.3", "v0.10.5"})
+        self.assertEqual(sorted({i["name"] for i in items}), sorted(BUNDLES))   # exactly the bundles, no near miss
+        self.assertEqual(len(items), 3 * len(BUNDLES))
 
-    def test_the_sha_ignores_input_order_and_changes_with_the_list(self):
-        a = rr.plan(fixture(), set(), 3)[1]
-        b = rr.plan(list(reversed(fixture())), set(), 3)[1]
-        self.assertEqual(rr.plan_sha256(a), rr.plan_sha256(b))
-        c = rr.plan(fixture(), {"v0.10.1"}, 3)[1]
-        self.assertNotEqual(rr.plan_sha256(a), rr.plan_sha256(c))
+    def test_fewer_than_five_newest_is_refused(self):
+        for n in (0, 1, 4):
+            with self.assertRaises(ValueError):
+                rr.plan(fixture(), set(), n)
 
-    def test_keep_newest_must_keep_something(self):
-        with self.assertRaises(ValueError):
-            rr.plan(fixture(), set(), 0)
-
-    def test_drafts_are_never_touched(self):
+    def test_drafts_and_prereleases_are_never_touched(self):
         rels = fixture()
         rels[0]["draft"] = True
-        self.assertFalse(any(i["tag"] == "v0.10.1" for i in rr.plan(rels, set(), 3)[1]))
+        rels[2]["prerelease"] = True
+        tags = {i["tag"] for i in rr.plan(rels, set())[1]}
+        self.assertNotIn("v0.10.1", tags)
+        self.assertNotIn("v0.10.3", tags)
 
-    PATHS = ("kubernetes/apps/apps/relay", "ansible/roles/relay_connector/defaults")
+    def test_the_sha_ignores_input_order_and_changes_with_the_list(self):
+        a = rr.plan(fixture(), set())[1]
+        b = rr.plan(list(reversed(fixture())), set())[1]
+        self.assertEqual(rr.plan_sha256(a), rr.plan_sha256(b))
+        self.assertNotEqual(rr.plan_sha256(a), rr.plan_sha256(rr.plan(fixture(), {"v0.10.1"})[1]))
+
+    def test_versions_as_pins_write_them(self):
+        text = "tag: v0.10.8\nversion: 0.10.11\nrc: v0.11.0-rc.1\nip: 192.168.0.36\nnode: 22.23.4.1\n"
+        found = {"v" + m for m in rr.VERSION.findall(text)}
+        self.assertEqual(found, {"v0.10.8", "v0.10.11", "v0.11.0-rc.1"})
+
+    PATHS = ("kubernetes/apps/apps/relay", "ansible/roles/relay_connector/defaults", "docs/relay-workers")
 
     def tree(self, t):
         root = Path(t)
-        (root / "kubernetes/apps/apps/relay").mkdir(parents=True)
-        (root / "kubernetes/apps/apps/relay/relay.yaml").write_text(
-            "# hub v0.10.16, rollback v0.10.9\nip: 192.168.0.36\n")
-        (root / "ansible/roles/relay_connector/defaults").mkdir(parents=True)
+        for d in self.PATHS:
+            (root / d).mkdir(parents=True)
+        (root / "kubernetes/apps/apps/relay/relay.yaml").write_text("# hub v0.10.16, rollback v0.10.9\nip: 192.168.0.36\n")
         # a bare pin, as relay_connector_release writes it: no `v`, no helper comment (reviewer-codex, #1957)
         (root / "ansible/roles/relay_connector/defaults/main.yml").write_text("relay_connector_release:\n  version: 0.10.11\n")
+        # the researcher binding's agent release (Codex review of #1957)
+        (root / "docs/relay-workers/researcher-binding-inputs.json").write_text('{"agentRelease": {"tag": "v0.10.8"}}')
         return root
 
-    def test_pins_are_read_from_the_tree_with_or_without_the_v(self):
+    def test_pins_are_read_from_every_source(self):
         with tempfile.TemporaryDirectory() as t:
             pins = rr.pinned_versions(self.tree(t), self.PATHS)
-            self.assertEqual(pins, {"v0.10.16", "v0.10.9", "v0.10.11"})   # and no v192.168.0
-            self.assertFalse(any(i["tag"] == "v0.10.11" for i in rr.plan(fixture(), pins, 3)[1]))
+            self.assertEqual(pins, {"v0.10.16", "v0.10.9", "v0.10.11", "v0.10.8"})
+            planned = {i["tag"] for i in rr.plan(fixture(), pins)[1]}
+            self.assertFalse(planned & pins)
+
+    def test_the_default_pin_sources_include_the_researcher_binding(self):
+        self.assertIn("docs/relay-workers", rr.PIN_PATHS)
+        self.assertTrue(all((ROOT / p).exists() for p in rr.PIN_PATHS), rr.PIN_PATHS)
 
     def test_an_unreadable_pin_file_stops_the_plan(self):
         with tempfile.TemporaryDirectory() as t:
@@ -111,15 +127,36 @@ class Planner(unittest.TestCase):
             self.assertNotIn("PLAN-SHA256", out.getvalue())
 
     def test_this_checkout_pins_the_running_hub(self):
-        # the live pin must never be planned for deletion: whatever relay.yaml names is kept
-        pins = rr.pinned_versions()
-        self.assertTrue(any(p.startswith("v0.10.") for p in pins), pins)
+        self.assertTrue(any(p.startswith("v0.10.") for p in rr.pinned_versions()))
+
+
+class Verifier(unittest.TestCase):
+    def setUp(self):
+        self.before = fixture()
+        self.items = rr.plan(self.before, set())[1]
+        self.rel = json.loads(json.dumps(next(r for r in self.before if r["tag_name"] == "v0.10.1")))
+        planned = {i["asset_id"] for i in self.items}
+        self.rel["assets"] = [a for a in self.rel["assets"] if a["id"] not in planned]
+
+    def test_exactly_the_planned_removal_passes(self):
+        self.assertEqual(rr.verify(self.before, self.items, self.rel), [])
+
+    def test_a_collateral_deletion_fails(self):
+        self.rel["assets"] = [a for a in self.rel["assets"] if a["name"] != "manifest.json"]
+        self.assertTrue(any("NOT in the plan are gone" in p for p in rr.verify(self.before, self.items, self.rel)))
+
+    def test_a_planned_asset_still_present_fails(self):
+        self.rel["assets"].append({"id": self.items[0]["asset_id"], "name": "x", "size": 1})
+        self.assertTrue(any("still present" in p for p in rr.verify(self.before, self.items, self.rel)))
+
+    def test_a_malformed_reread_fails(self):
+        self.assertTrue(rr.verify(self.before, self.items, {"id": 1}))
+        self.assertTrue(rr.verify(self.before, self.items, None))
 
 
 @unittest.skipUnless(shutil.which("bash"), "needs bash")
 class Wrapper(unittest.TestCase):
-    """The wrapper against a fake gitea-api.sh: dry run deletes nothing; a wrong sha deletes nothing; the right sha
-    deletes exactly the plan and verifies it."""
+    """The wrapper against a fake forge that serves FOUR releases per page (a cap below the requested 50)."""
 
     def setUp(self):
         self.t = Path(tempfile.mkdtemp())
@@ -134,19 +171,22 @@ class Wrapper(unittest.TestCase):
         fake.write_text("""#!/usr/bin/env bash
 echo "$1 $2" >> "%(log)s"
 exec %(py)s - "$@" <<'PY'
-import json, re, sys
+import json, os, re, sys
 state_path = %(state)r
 method, path = sys.argv[1], sys.argv[2]
 rels = json.load(open(state_path))
 if method == "GET" and "/releases?" in path:
     page = int(re.search(r"page=(\\d+)", path).group(1))
-    print("HTTP 200"); print(json.dumps(rels[(page - 1) * 50: page * 50])); sys.exit(0)
+    print("HTTP 200"); print(json.dumps(rels[(page - 1) * 4: page * 4])); sys.exit(0)
 m = re.match(r"/repos/cchifor/relay/releases/(\\d+)(?:/assets/(\\d+))?$", path)
 rid = int(m.group(1)); rel = next(r for r in rels if r["id"] == rid)
 if method == "GET":
     print("HTTP 200"); print(json.dumps(rel)); sys.exit(0)
 if method == "DELETE":
-    aid = int(m.group(2)); rel["assets"] = [a for a in rel["assets"] if a["id"] != aid]
+    aid = int(m.group(2))
+    rel["assets"] = [a for a in rel["assets"] if a["id"] != aid]
+    if os.environ.get("FAKE_COLLATERAL") and rel["assets"]:
+        rel["assets"] = [a for a in rel["assets"] if a["name"] != "manifest.json"]
     json.dump(rels, open(state_path, "w")); print("HTTP 204"); sys.exit(0)
 print("HTTP 400"); sys.exit(1)
 PY
@@ -156,40 +196,49 @@ PY
         self.env.pop("MSYS_NO_PATHCONV", None)
         self.state = state
 
-    def run_wrapper(self, *args):
-        return subprocess.run(["bash", (ROOT / "scripts/relay-release-retention.sh").as_posix(), "--keep-newest", "3",
-                               *args], env=self.env, capture_output=True, text=True, timeout=120)
+    def run_wrapper(self, *args, **env):
+        return subprocess.run(["bash", (ROOT / "scripts/relay-release-retention.sh").as_posix(), *args],
+                              env=dict(self.env, **env), capture_output=True, text=True, timeout=180)
 
-    def deletes(self):
-        return [l for l in self.log.read_text().splitlines() if l.startswith("DELETE")] if self.log.exists() else []
+    def calls(self, method):
+        return [l for l in self.log.read_text().splitlines() if l.startswith(method)] if self.log.exists() else []
 
-    def test_dry_run_then_execute_exactly_the_plan(self):
+    def sha_of(self, dry):
+        return [l.split()[1] for l in dry.stdout.splitlines() if l.startswith("PLAN-SHA256 ")][0]
+
+    def test_paging_dry_run_then_execute_exactly_the_plan(self):
         dry = self.run_wrapper()
         self.assertEqual(dry.returncode, 0, dry.stderr + dry.stdout)
+        self.assertIn("releases read: 11", dry.stdout)            # 3 pages of 4 and the empty 4th
+        self.assertEqual(len([c for c in self.calls("GET") if "page=" in c]), 4)
         self.assertIn("DRY RUN: nothing deleted", dry.stdout)
-        self.assertEqual(self.deletes(), [])
-        sha = [l.split()[1] for l in dry.stdout.splitlines() if l.startswith("PLAN-SHA256 ")][0]
+        self.assertEqual(self.calls("DELETE"), [])
+        sha = self.sha_of(dry)
 
         wrong = self.run_wrapper("--execute", "0" * 64)
         self.assertNotEqual(wrong.returncode, 0)
         self.assertIn("the plan changed", wrong.stderr)
-        self.assertEqual(self.deletes(), [])
+        self.assertEqual(self.calls("DELETE"), [])
 
         ok = self.run_wrapper("--execute", sha)
         self.assertEqual(ok.returncode, 0, ok.stderr + ok.stdout)
         self.assertIn("DONE: plan %s executed and verified" % sha, ok.stdout)
-        planned = rr.plan(fixture(), rr.pinned_versions(), 3)[1]
-        self.assertEqual(len(self.deletes()), len(planned))
-        left = json.loads(self.state.read_text())
-        for r in left:   # small assets everywhere, and the kept releases' bundles, all survive
-            names = {a["name"] for a in r["assets"]}
-            if r["tag_name"] != "v0.2.0":
-                self.assertTrue(set(SMALL) <= names, r["tag_name"])
+        planned = rr.plan(fixture(), rr.pinned_versions())[1]
+        want = sorted("DELETE /repos/cchifor/relay/releases/%d/assets/%d" % (i["release_id"], i["asset_id"]) for i in planned)
+        self.assertEqual(sorted(self.calls("DELETE")), want)       # exactly the plan: the hostile name injected nothing
 
-    def test_a_short_sha_is_refused(self):
-        r = self.run_wrapper("--execute", "abc")
-        self.assertEqual(r.returncode, 2)
-        self.assertEqual(self.deletes(), [])
+    def test_a_collateral_deletion_fails_verification(self):
+        sha = self.sha_of(self.run_wrapper())
+        r = self.run_wrapper("--execute", sha, FAKE_COLLATERAL="1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("NOT in the plan are gone", r.stdout)
+
+    def test_a_short_sha_and_a_low_keep_newest_are_refused(self):
+        self.assertEqual(self.run_wrapper("--execute", "abc").returncode, 2)
+        low = self.run_wrapper("--keep-newest", "1")
+        self.assertNotEqual(low.returncode, 0)
+        self.assertNotIn("PLAN-SHA256", low.stdout)
+        self.assertEqual(self.calls("DELETE"), [])
 
 
 if __name__ == "__main__":
