@@ -805,6 +805,31 @@ Readback after the roll (operator):
 - health samples keep arriving each minute (H12's query);
 - the owner, in the console: Status shows Needs you, Health, then the fleet map grouped by host; a tile opens its agent.
 
+### H14. v0.11.6: the single-agent page, no migration
+
+Why: the console redesign's C1b. Each agent gets its own page at `#/fleet/agents/<id>`: Terminal first (the live tile,
+focus on the page's own address, the agent's Needs you items), Overview (the reported task, today's events and
+exceptions as Activity counts them) and Details (the shared facts, edit and delete). Status, Activity, Fleet, the
+tile's menu and the Assistant link to it. Relay #657, released as v0.11.6 (#659, `eae6709c`, run 148372), on top of
+v0.11.5 (live since 2026-11-24, ailab #1989, H13).
+
+No migration: schema stays 89, and the relay env is unchanged. No new settings.
+
+Change: this PR pins the v0.11.6 digest `8adca17a…0b8e` in `migrate` and `relay`, with the annotations. The merge
+rolls the hub once (Recreate, through Flux), with the pre-migration backup as every roll, outside the QNAP windows.
+
+Rollback: a reviewed PR re-pins v0.11.5 (`f8e2acc8…30ba`); no restore or fence. Below v0.11.4 the H12 chain applies.
+
+Readback after the roll (operator):
+
+- one Running Pod; source `eae6709c9d4bd537b68601f9baa4cd79f1a03812`, release `relay-0.11.6-release-148372`; the
+  `relay` container's image ID ends in `sha256:8adca17a954913f3bd920dfc5fbba1343c1570a724a3f2171715fe4956270b8e`;
+- the backup and migrate init containers exited 0, and `schema_migrations` still reads `89|89`; the relay env is
+  identical to v0.11.5's;
+- health samples keep arriving each minute (H12's query);
+- the owner, in the console: an agent's name on Status's map opens `#/fleet/agents/<id>` with Terminal first; Focus
+  opens the terminal full-size and Exit focus returns to the tab.
+
 ## Enablement order at a glance
 
 > **Campaign rows are historical.** The owner retired the researcher qualification campaign and its
@@ -835,6 +860,7 @@ Readback after the roll (operator):
 | H11 | hub image → v0.11.1 (schema 88: migrations 080-088; Terminals as designed; the new shell behind `?console=new`); `PGOPTIONS` lock timeout on `migrate`; gates no step above | H10 live; the operator's rehearsal of the published digest PASS | v0.11.1 digest running, `schema_migrations` `88\|88`, the backup generation recorded, the console's checks pass, the dev-workers reconnected |
 | H12 | hub image → v0.11.4 (schema 89: health samples; health tiles on Status); gates no step above | v0.11.3 live (ailab #1979); the operator's 88 → 89 check PASS | v0.11.4 digest running, `schema_migrations` `89\|89`, the backup generation recorded, health samples written each minute, the tiles on Status |
 | H13 | hub image → v0.11.5 (Status as the board draws it, the fleet map; no migration); gates no step above | H12 live | v0.11.5 digest running, `schema_migrations` still `89\|89`, Status shows Needs you, Health and the fleet map |
+| H14 | hub image → v0.11.6 (the single-agent page; no migration); gates no step above | H13 live | v0.11.6 digest running, `schema_migrations` still `89\|89`, an agent's page opens from Status with Terminal first |
 
 ## Rollback: migrations are forward-only
 
@@ -866,6 +892,7 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
 - **H12 (schema 89):** as H11: never a bare re-pin. Restore the v0.11.4 rollout's **earliest** pre-migration
   generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
   v0.11.3 (`2c350aee…8a2b`); H11's cost applies.
+- **H14 (schema 89, no migration):** a reviewed PR re-pins v0.11.5 (`f8e2acc8…30ba`); no restore or fence.
 - **H13 (schema 89, no migration):** a reviewed PR re-pins v0.11.4 (`4f30750e…97c9`); no restore or fence.
 - **H8:** a reviewed PR re-pins v0.10.4 (`d1482bc1…57a7`); schema 79 is unchanged. A connection row or
   pool approved under v0.10.9 stays, and v0.10.4 accepts it (its check only reads the row).
