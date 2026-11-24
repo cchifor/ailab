@@ -1,8 +1,7 @@
 # Give the QNAP Thunderbolt bridge its service IP at boot (static `tbtbr0`)
 
-Status: decided 2026-11-24, no window. To be written live (`APPLY=1 LIVE_WRITE=1`) once the live mode is on main,
-then proven at the next NAS boot. Record both results under "Results" below · Created: 2026-11-24 ·
-Script: `scripts/qnap-tbtbr0-static-ip.sh`
+Status: written live 2026-11-24 13:47Z (no window, no outage). Proof pending: the first NAS boot after it (see
+"Results") · Created: 2026-11-24 · Script: `scripts/qnap-tbtbr0-static-ip.sh`
 Follows the 2026-11-24 power cut, the second outage of this kind. The first was 2026-10-30. Runbook:
 `docs/runbooks/qnap-storage-setup.md` §2 and §12. Backstop already live: the iSCSI portal watchdog (#1974).
 
@@ -72,7 +71,19 @@ reported, because counts lag a real flush and move for unrelated reasons. An unk
 
 ## Results
 
-- **Live write:** pending. Record the `APPLY=1 LIVE_WRITE=1` output (the read-back, and the 30 s check lines) here.
+- **Live write: done 2026-11-24 13:47:27Z** (from main `ff401821`, #1977; script md5 `b3a85d45…`).
+  - Before: the live `nm.conf` md5 was `37acce9d…`, a copy is in `_out/qnap-nm.conf.20261124-before-tbtbr0-static`, and
+    a scratch-copy APPLY/REVERT rehearsal came back byte-identical.
+  - Run: interlock `sessions=30`; pre-image `/etc/config/nm.conf.bak-tbtbr0-20261124-154806`; read-back
+    `STATIC|10.55.0.254|255.255.255.0`; live check t+0 to t+30 s every 5 s: `10.55.0.254/24 sessions=30` at every step;
+    `OK`, rc 0.
+  - After:
+    - QNAP's network logs show 0 `setup_ipv4` / `setup_by_config` / `reconfig` / `br_delbr` / `disable_ipv4` events
+      in the write window;
+    - the read-only mode says `already as wanted`;
+    - the watchdog check reports `ok: 44 targets … sessions=30`;
+    - 7/7 nodes are Ready, with no unhealthy pod;
+    - etcd shows the same raft index on all three members.
 - **First NAS boot after it:** pending. Record the step 4 checks: `bootup.log` says `STATIC`, the portals are on
   `10.55.0.254` from boot (`hero_iscsi_scst.log`), and `watchdog.log` shows no restart.
 
