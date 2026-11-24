@@ -200,6 +200,35 @@ not qualify this route. Readback: `GET /v1/routes` with the worker's key lists
 `relay-researcher-luna` with `available: true`, `capabilities.tools: true`,
 `adaptedResponses: {protocol: "codex-responses"}` and targets `[{provider: openai, model: gpt-6-luna}]`.
 
+### The Pi canary's two routes (stop until both read back exactly)
+
+The trust ceiling's `subscription` and `local` access is safe only because each canary route admits
+exactly one access kind through exactly one target ("Router trust mapping" above). Both routes are
+created through the same `GET`/`PUT /admin/v1/config` edit (the body keeps `revision`, and
+`If-Match` carries it), with new deployment IDs. They were created on 2026-11-24 at 20:18Z, revision
+2509 -> 2510, with every existing route and account unchanged. Their shape is the one the
+inference session's live wire canary passed with (revision 2506):
+
+```json
+{"alias": "canary-pi-codex", "namespace": "default",
+ "deployments": [{"id": "canary-pi-codex:fixed", "accountId": "codex-2", "model": "gpt-6-astra", "enabled": true, "weight": 1}],
+ "strategy": "smart", "affinity": "none", "access": ["subscription"], "maxAttempts": 1, "fallbackAliases": [],
+ "timeoutMs": 90000, "idleTimeoutMs": 90000, "models": ["gpt-6-astra"], "native": ["codex-responses"], "placement": "conversation"}
+{"alias": "canary-pi-qwen", "namespace": "default",
+ "deployments": [{"id": "canary-pi-qwen:fixed", "accountId": "lan-192.168.0.28-18020", "model": "qwen3.8-27b", "enabled": true, "weight": 1}],
+ "strategy": "usage", "affinity": "none", "access": ["local"], "maxAttempts": 1, "fallbackAliases": [],
+ "timeoutMs": 90000, "idleTimeoutMs": 90000, "compat": "lenient", "models": ["qwen3.8-27b"], "placement": "conversation"}
+```
+
+Readback before the trust restart (and again before any binding is created), from
+`GET /admin/v1/config` inside the Router pod. For each of the two routes:
+- `access` is exactly `["subscription"]` or `["local"]` respectively;
+- exactly one deployment, enabled, on `codex-2` / `gpt-6-astra` or `lan-192.168.0.28-18020` / `qwen3.8-27b`;
+- `fallbackAliases` is `[]` and `maxAttempts` is 1.
+
+The two accounts' own `access` must still read `subscription` and `local`. If any of these differs, stop: do
+not restart the Router with the widened trust, and do not create a binding.
+
 ## OpenBao documents the operator fills
 
 All in the KV-v2 mount `af`. The provision Job creates none of them.
