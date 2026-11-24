@@ -85,10 +85,25 @@ The separate `relay-holder-control-plane.service` uses the already-enrolled
 connector identity, reconciles only this holder and does not replace the tmux
 service. Startup rejects shadowed units and unreviewed drop-ins.
 
+The reconciliation client's journal is retained under
+`SyslogIdentifier=relay-holder-control-plane`, with rate limiting. Its continuous
+loop in Relay `connector/src/agent_control.rs::run` prints only the fixed
+`Holder control reconciliation failed; retrying with durable command identities`
+message on cycle errors, discarding HTTP/IPC error bodies. Startup failures are
+local filesystem/identity/URL/TLS setup errors; inspect their handling again when
+repinning the connector. The same function calls `load(state_path)` on each cycle
+and never calls `save` or writes the identity file. Its only local write is its
+exclusive `connector-control.lock` under holder state. Sharing the enrolled
+identity with the tmux connector depends on this read-only control-plane behavior;
+recheck it for future releases.
+
 After owner approval of profiles and successful managed binding installation,
 set `relay_holder_start: true` through reviewed inventory and converge. Require
 both user services active, the expected holder incarnation/profile digest in
-Relay, healthy managed-router admission, and no secrets in logs. A repeat must
+Relay, healthy managed-router admission, and no secrets in the reconciliation
+journal. Read that journal successfully from service start; a failed read is not
+a clean result. The upstream holder deliberately discards raw subprocess output;
+inspect its minimized durable journal and systemd state for holder failures. A repeat must
 not restart either service or modify published artifacts.
 
 ## Live acceptance and rollback

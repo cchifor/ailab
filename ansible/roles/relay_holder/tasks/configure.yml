@@ -140,8 +140,8 @@
     follow: false
   register: relay_holder_pins
   loop:
-    - {path: "{{ relay_holder_config }}/profiles.json", sha: "{{ relay_holder_profiles_sha256 }}"}
-    - {path: "/opt/relay-holder/connectors/{{ relay_holder_connector_sha256 }}/relay-connector", sha: "{{ relay_holder_connector_sha256 }}"}
+    - {path: "{{ relay_holder_config }}/profiles.json", sha: "{{ relay_holder_profiles_sha256 }}", uid: "{{ relay_holder_uid }}", mode: "0600"}
+    - {path: "/opt/relay-holder/connectors/{{ relay_holder_connector_sha256 }}/relay-connector", sha: "{{ relay_holder_connector_sha256 }}", uid: 0, mode: "0755"}
 
 - name: Refuse drift rather than replace profiles or executables
   ansible.builtin.assert:
@@ -149,6 +149,8 @@
       - item.stat.isreg | default(false)
       - item.stat.nlink | default(0) == 1
       - item.stat.checksum | default('') == item.item.sha
+      - item.stat.uid | default(-1) | int == item.item.uid | int
+      - item.stat.mode | default('') == item.item.mode
   loop: "{{ relay_holder_pins.results }}"
 
 - name: Verify the pinned connector version as the execution user

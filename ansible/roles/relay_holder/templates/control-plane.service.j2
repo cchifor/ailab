@@ -14,8 +14,11 @@ UMask=0077
 NoNewPrivileges=yes
 MemoryMax=512M
 TasksMax=128
-StandardOutput=null
-StandardError=null
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=relay-holder-control-plane
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=20
 
 [Install]
 WantedBy=default.target

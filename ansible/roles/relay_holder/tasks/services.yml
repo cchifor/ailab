@@ -61,6 +61,8 @@
       - item.stat.isreg | default(false)
       - item.stat.nlink | default(0) == 1
       - item.stat.checksum == item.item.content | hash('sha256')
+      - item.stat.uid | default(-1) | int == relay_holder_uid | int
+      - item.stat.mode | default('') == '0644'
     fail_msg: Existing unit differs; use the reviewed holder maintenance and sealed upgrade process.
   loop: "{{ relay_holder_unit_pins.results }}"
 
