@@ -1,7 +1,36 @@
 # Relay/Pi inference sessions rollout
 
-Status: router deployed and baseline checks passed; Relay/Pi activation pending. Deployment completion
-requires the post-roll readbacks below, not merely the Git merge.
+Status at 2026-11-24 16:21 UTC: router and Relay v0.11.3 deployed with successful
+post-roll readbacks. Managed Pi activation, router comparison reruns and paired
+live acceptance remain pending. Deployment completion requires the readbacks
+below, not merely the Git merge.
+
+## Coordinated release readback — 2026-11-24
+
+Relay AILab #1979 merged and reconciled at `8cfb09844043a8c5abf2524b937db21bb2f51223`.
+The [v0.11.3 readback](relay-inference-v0113-20261124.md#deployment-evidence)
+records exact image/source, schema 88, readiness and verified recovery generation.
+
+Router AILab #1972 merged at `bd141030d8a730caa0d74450671e46d713832442`.
+Pod `llm-router-7d5f86d656-xmq7b` was ready on image
+`registry.chifor.me/llm-router/router@sha256:1d3eaf5671cb85be3720eab7a65a87acc1aa3a33f283ef88a21580ea78fb8167`,
+source `a16a6846e89d6971d9549bac5ff3a7dde99b361b`, release
+`router-0.1.0-20261124-inference-safe-errors-r2`. The completed SQLite backup
+verified. Anonymous routes/config returned 401; the authenticated route listing
+remained byte-identical to the preserved baseline `cb9904a0` below. Claude CLI
+2.1.283 was saved and active with no pending restart. Provider settings remained
+`sdk-resume`, warm retention false, maxRunning 8, warmIdleMs 300000. The installed
+safe-error module and canonical budget/secret-shape log checks passed.
+
+The normal router-ab report started at 14:43:25 UTC on that exact image, paired
+Claude account `claude` and Codex account `codex-2`, has overall verdict RERUN.
+All provider Layer (a) checks passed. Six-pair reruns are required for Claude
+recall/stock-agentic, Codex and Codex-control code-edit, and Qwen/cloud3 code-edit.
+The operator session owns those reruns; the three-pair report does not establish
+the release gate passing. Native Messages and warm activation remain pending.
+
+The sections below preserve earlier rollout checkpoints; their historical CLI,
+image and activation observations are superseded by this dated readback.
 
 ## Router rollout readback — 2026-11-24
 

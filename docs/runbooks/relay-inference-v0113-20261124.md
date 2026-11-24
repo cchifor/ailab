@@ -81,10 +81,27 @@ is a separate release; it is not interchangeable with this qualified pin.
 
 ## Deployment evidence
 
-Pending post-merge readback: record the observation time, merged Git/Flux revision,
-application and migration image/source, backup verification, migration completion,
-schema version and readiness here. Record paired Pi and warm/rollback acceptance
-separately; healthy hub deployment does not establish those outcomes.
+Read back on 2026-11-24 at 16:21 UTC after owner merge of AILab #1979:
+
+- Merge and Flux `apps` applied revision:
+  `8cfb09844043a8c5abf2524b937db21bb2f51223`; Flux Ready is true.
+- Pod `relay-c75f846b9-sfvb4`: both containers ready, zero restarts; all four init
+  containers exited zero. Application and migration images match `2c350aee` above.
+- `/app/SOURCE_COMMIT` is `aaad724607e2f9a97f64a40951142cf39815e7d4`.
+- Read-only `schema_migrations` query: maximum version 88, row count 88.
+- Database backup published coordinated recovery generation
+  `20261124T162049Z-bfa30aad-dc8a-4f90-a6fd-f837a31b2216` with five verified
+  artifacts. Artifact init verified that same pre-migration generation.
+- Migration init reported the schema and restricted application role ready.
+
+This establishes hub deployment only. Paired Pi and warm/rollback acceptance
+remain pending. A read-only query using the forced-RLS application connection
+found no managed credential bindings for the assigned connector. The operator
+must provision those bindings and its dedicated renderer reader before activation.
+The existing tenant is `00000000-0000-4000-8000-000000000001`, enabled router
+connection `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`, and workspace communication
+channel `b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1`. These nonsecret identifiers are
+discovery evidence, not approval of an exact profile or credential policy.
 
 ## Rollback
 
