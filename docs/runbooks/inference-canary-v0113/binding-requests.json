@@ -1,0 +1,53 @@
+[
+  {
+    "operationId": "27b77454-b32d-4267-af10-5620639a6ff0",
+    "bindingId": "a0f57684-747f-4c3e-8d90-e684b7262590",
+    "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+    "name": "pi-canary-codex",
+    "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+    "executionIdentity": "c4",
+    "grant": {
+      "routes": [
+        "canary-pi-codex"
+      ],
+      "access": [
+        "subscription"
+      ],
+      "lifetimeSeconds": 86400
+    }
+  },
+  {
+    "operationId": "fdaeb472-6cb1-421f-b64d-e6f1f7cbc4f0",
+    "bindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+    "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+    "name": "pi-canary-qwen",
+    "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+    "executionIdentity": "c4",
+    "grant": {
+      "routes": [
+        "canary-pi-qwen"
+      ],
+      "access": [
+        "local"
+      ],
+      "lifetimeSeconds": 86400
+    }
+  },
+  {
+    "operationId": "b75de755-4be8-4ed5-a65a-daa39ece0efb",
+    "bindingId": "a8f6211c-d7e2-4ffd-824d-b158e349a8d4",
+    "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+    "name": "pi-canary-claude",
+    "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+    "executionIdentity": "c4",
+    "grant": {
+      "routes": [
+        "canary-pi-claude"
+      ],
+      "access": [
+        "subscription"
+      ],
+      "lifetimeSeconds": 86400
+    }
+  }
+]

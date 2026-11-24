@@ -1,0 +1,248 @@
+[
+  {
+    "name": "pi-canary-codex",
+    "connectorId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+    "holder": {
+      "version": 1,
+      "id": "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
+      "revision": 1,
+      "executable": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/node",
+      "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
+      "artifacts": {
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-pi.mjs": "5800a10cda63edce53419995536c82dad8683b5214a900b74193e0d9dcad787f",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/pi-worker.mjs": "e3ba40ee30fce8a8bbc58ae08bf30c7707bf56ff44891a6488b03d0b419d5476",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-pi-policy.mjs": "bfea9e93474332b6b119b236933196aa9ad3cef9f82f575666f276ef35f62a59",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-agent-tools.mjs": "95cdea84d25a170b7cbbfd0e4e0862b8c7804e9792c5dcca56fdcaeaba0de6f2",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/bin/pi": "b227ca690d402915855c94b5181a395c6ed003ed4dd4caa29d035c5708de65f1",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/bin/npm": "275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/manifest.json": "a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7"
+      },
+      "args": [],
+      "environment": {},
+      "executionUid": 1000,
+      "credentialHome": "/home/c4/.local/state/relay-holder/native-homes/1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
+      "roots": [
+        "/home/c4/.local/state/relay-holder/workspaces/1d9a7d6e-4b26-49fd-9053-7b0a22e1baae"
+      ],
+      "maxRequestSeconds": 120,
+      "qualification": "protocol-fixture",
+      "native": {
+        "kind": "pi",
+        "runtimeDirectory": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7",
+        "contextWindow": 200000,
+        "maxTokens": 1024
+      },
+      "router": {
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+        "executionIdentity": "c4",
+        "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+        "bindingId": "a0f57684-747f-4c3e-8d90-e684b7262590",
+        "origin": "https://router.chifor.me",
+        "credentialFile": "/home/c4/.local/state/relay/router-managed/a0f57684-747f-4c3e-8d90-e684b7262590/credential.json",
+        "protocol": "openai-responses",
+        "selection": {
+          "kind": "route",
+          "alias": "canary-pi-codex"
+        }
+      },
+      "communication": {
+        "executable": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/node",
+        "args": [
+          "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-agent-tools.mjs"
+        ],
+        "origin": "https://relay.chifor.me"
+      }
+    },
+    "session": {
+      "id": "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
+      "revision": 1,
+      "adapterDigest": "5800a10cda63edce53419995536c82dad8683b5214a900b74193e0d9dcad787f",
+      "harness": "pi",
+      "executionIdentity": "c4",
+      "maxRequestSeconds": 120,
+      "inference": {
+        "kind": "llm-router",
+        "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+        "credentialBindingId": "a0f57684-747f-4c3e-8d90-e684b7262590",
+        "protocol": "openai-responses",
+        "selection": {
+          "kind": "route",
+          "alias": "canary-pi-codex"
+        }
+      },
+      "communication": {
+        "version": 1,
+        "required": true,
+        "channels": [
+          "b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1"
+        ],
+        "defaultChannelId": "b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1"
+      }
+    }
+  },
+  {
+    "name": "pi-canary-qwen",
+    "connectorId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+    "holder": {
+      "version": 1,
+      "id": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
+      "revision": 1,
+      "executable": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/node",
+      "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
+      "artifacts": {
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-pi.mjs": "5800a10cda63edce53419995536c82dad8683b5214a900b74193e0d9dcad787f",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/pi-worker.mjs": "e3ba40ee30fce8a8bbc58ae08bf30c7707bf56ff44891a6488b03d0b419d5476",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-pi-policy.mjs": "bfea9e93474332b6b119b236933196aa9ad3cef9f82f575666f276ef35f62a59",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-agent-tools.mjs": "95cdea84d25a170b7cbbfd0e4e0862b8c7804e9792c5dcca56fdcaeaba0de6f2",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/bin/pi": "b227ca690d402915855c94b5181a395c6ed003ed4dd4caa29d035c5708de65f1",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/bin/npm": "275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/manifest.json": "a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7"
+      },
+      "args": [],
+      "environment": {},
+      "executionUid": 1000,
+      "credentialHome": "/home/c4/.local/state/relay-holder/native-homes/f25c187b-1e50-4c7c-860e-52947bfdf39e",
+      "roots": [
+        "/home/c4/.local/state/relay-holder/workspaces/f25c187b-1e50-4c7c-860e-52947bfdf39e"
+      ],
+      "maxRequestSeconds": 120,
+      "qualification": "protocol-fixture",
+      "native": {
+        "kind": "pi",
+        "runtimeDirectory": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7",
+        "contextWindow": 32768,
+        "maxTokens": 1024
+      },
+      "router": {
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+        "executionIdentity": "c4",
+        "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+        "bindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+        "origin": "https://router.chifor.me",
+        "credentialFile": "/home/c4/.local/state/relay/router-managed/d2871eec-8f5a-4afe-a917-014f0ae8e14d/credential.json",
+        "protocol": "openai-chat",
+        "selection": {
+          "kind": "route",
+          "alias": "canary-pi-qwen"
+        }
+      },
+      "communication": {
+        "executable": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/node",
+        "args": [
+          "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-agent-tools.mjs"
+        ],
+        "origin": "https://relay.chifor.me"
+      }
+    },
+    "session": {
+      "id": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
+      "revision": 1,
+      "adapterDigest": "5800a10cda63edce53419995536c82dad8683b5214a900b74193e0d9dcad787f",
+      "harness": "pi",
+      "executionIdentity": "c4",
+      "maxRequestSeconds": 120,
+      "inference": {
+        "kind": "llm-router",
+        "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+        "credentialBindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+        "protocol": "openai-chat",
+        "selection": {
+          "kind": "route",
+          "alias": "canary-pi-qwen"
+        }
+      },
+      "communication": {
+        "version": 1,
+        "required": true,
+        "channels": [
+          "b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1"
+        ],
+        "defaultChannelId": "b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1"
+      }
+    }
+  },
+  {
+    "name": "pi-canary-claude",
+    "connectorId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+    "holder": {
+      "version": 1,
+      "id": "fdb56ca5-908b-40ee-94b3-aac735dd8622",
+      "revision": 1,
+      "executable": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/node",
+      "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
+      "artifacts": {
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-pi.mjs": "5800a10cda63edce53419995536c82dad8683b5214a900b74193e0d9dcad787f",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/pi-worker.mjs": "e3ba40ee30fce8a8bbc58ae08bf30c7707bf56ff44891a6488b03d0b419d5476",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-pi-policy.mjs": "bfea9e93474332b6b119b236933196aa9ad3cef9f82f575666f276ef35f62a59",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-agent-tools.mjs": "95cdea84d25a170b7cbbfd0e4e0862b8c7804e9792c5dcca56fdcaeaba0de6f2",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/bin/pi": "b227ca690d402915855c94b5181a395c6ed003ed4dd4caa29d035c5708de65f1",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/bin/npm": "275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc",
+        "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/manifest.json": "a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7"
+      },
+      "args": [],
+      "environment": {},
+      "executionUid": 1000,
+      "credentialHome": "/home/c4/.local/state/relay-holder/native-homes/fdb56ca5-908b-40ee-94b3-aac735dd8622",
+      "roots": [
+        "/home/c4/.local/state/relay-holder/workspaces/fdb56ca5-908b-40ee-94b3-aac735dd8622"
+      ],
+      "maxRequestSeconds": 120,
+      "qualification": "protocol-fixture",
+      "native": {
+        "kind": "pi",
+        "runtimeDirectory": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7",
+        "contextWindow": 200000,
+        "maxTokens": 1024
+      },
+      "router": {
+        "tenantId": "00000000-0000-4000-8000-000000000001",
+        "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+        "executionIdentity": "c4",
+        "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+        "bindingId": "a8f6211c-d7e2-4ffd-824d-b158e349a8d4",
+        "origin": "https://router.chifor.me",
+        "credentialFile": "/home/c4/.local/state/relay/router-managed/a8f6211c-d7e2-4ffd-824d-b158e349a8d4/credential.json",
+        "protocol": "anthropic-messages",
+        "selection": {
+          "kind": "route",
+          "alias": "canary-pi-claude"
+        }
+      },
+      "communication": {
+        "executable": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/node",
+        "args": [
+          "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-agent-tools.mjs"
+        ],
+        "origin": "https://relay.chifor.me"
+      }
+    },
+    "session": {
+      "id": "fdb56ca5-908b-40ee-94b3-aac735dd8622",
+      "revision": 1,
+      "adapterDigest": "5800a10cda63edce53419995536c82dad8683b5214a900b74193e0d9dcad787f",
+      "harness": "pi",
+      "executionIdentity": "c4",
+      "maxRequestSeconds": 120,
+      "inference": {
+        "kind": "llm-router",
+        "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+        "credentialBindingId": "a8f6211c-d7e2-4ffd-824d-b158e349a8d4",
+        "protocol": "anthropic-messages",
+        "selection": {
+          "kind": "route",
+          "alias": "canary-pi-claude"
+        }
+      },
+      "communication": {
+        "version": 1,
+        "required": true,
+        "channels": [
+          "b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1"
+        ],
+        "defaultChannelId": "b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1"
+      }
+    }
+  }
+]
