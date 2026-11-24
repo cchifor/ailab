@@ -4897,8 +4897,13 @@ A rollback restores the old release digest, which the existing File B row matche
    `Worker budget authority available`, `Worker budget authority unavailable: `, `Worker budget authority is disabled: `
    or `Worker budget witness file is unlinked: `. Anything else means the allowlist leaked: stop and roll back.
 4. **The ledger side is unchanged:** `rident` (the readers row's `deployment_digest`, the authority `instance_id`)
-   equals the values before the roll, the hub's `relay_control_worker_budget_check_succeeded` is 1, and no
-   `RelayWorkerBudget*` alert fires.
+   equals the values before the roll, the hub's budget metrics are unchanged from before the roll, and no
+   `RelayWorkerBudget*` alert fires. Today's expected hub state is H6's, not a running authority: `relay_control_worker_budget_authority_start_failed` 1, `observer_started` 0 and
+   `check_succeeded` 0, since the R0b reset on 2026-11-21 22:17Z
+   ([relay-researcher-r0-relay-drills.md](relay-researcher-r0-relay-drills.md) §10 step 2). The hub starts its budget
+   authority only with `RELAY_INFRASTRUCTURE_INSTALLATIONS=1` and a worker-profiles file that loads. The first is set,
+   but the live hub has no `RELAY_WORKER_PROFILES_FILE` (read 2026-11-24) while worker budgets are unused. A Router roll does not change it. Bringing worker budgets back needs the
+   profiles file as well as File B. (The roll on 2026-11-23 read it as unchanged, 1/0/0; ailab #1962.)
 5. **Release gate (router-ab)** on the live router, then compare with the baseline taken before the roll:
    `validate-live` is clean, and `GET /v1/routes` is byte-identical to the saved copy. The release changes no route.
 
