@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 50d879ca96c2b62ada9e37a4119bdcda786dec66
-        chifor.me/release: router-0.1.0-20261123-budget-stdout
+        chifor.me/source-commit: 300856ff7881eba67d2081650fca9f66a7f26b66
+        chifor.me/release: router-0.1.0-20261124-inference-sessions
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -119,12 +119,29 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
+      # Recreate stops the previous writer before this consistent backup runs.
+      initContainers:
+        - name: backup-before-inference-sessions
+          image: registry.chifor.me/llm-router/router@sha256:370bf5bf7f03da92b728e92fcc62b06439f886730a8a670d13be0d84924f1909
+          command: [node, /app/deploy/backup-router.mjs]
+          env:
+            - {name: ROUTER_BACKUP_LABEL, value: pre-inference-sessions-20261124}
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}
       containers:
         - name: router
-          # Source 50d879ca96c2b62ada9e37a4119bdcda786dec66: the live bf19ce6f plus llm-router #195 (closes #191: the
-          # worker budget authority's eight enumerated status lines go to stdout; other plugin log lines stay in memory).
-          # Relay run 146982; archive sha256:d2149bd58cab1a97927f7bbd6612e05179239ddcf5c4bdf20cf0a888eb685a41.
-          image: registry.chifor.me/llm-router/router@sha256:eb2243e96a84c4ba85ef64f4051c88fe7fa21d1dec9f3ee1aaf24fda24f61be8
+          # Merged llm-router #196, source 300856ff7881eba67d2081650fca9f66a7f26b66.
+          # Relay publication 147499; archive sha256:79df76afc52dedc7f80381b31d9f3744e134fde8e3e0454ea83d7de63c25f391.
+          # Native Messages and warm reuse remain opt-in; see relay-inference-sessions-20261124.md.
+          image: registry.chifor.me/llm-router/router@sha256:370bf5bf7f03da92b728e92fcc62b06439f886730a8a670d13be0d84924f1909
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]

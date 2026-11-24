@@ -2,6 +2,29 @@
 
 Status: source review and release preparation. No production deployment claimed.
 
+Router source merged at `300856ff7881eba67d2081650fca9f66a7f26b66`.
+[Publication 147499](https://git.chifor.me/cchifor/relay/actions/runs/147499)
+published image `registry.chifor.me/llm-router/router@sha256:370bf5bf7f03da92b728e92fcc62b06439f886730a8a670d13be0d84924f1909`.
+Archive `router-0.1.0-20261124-inference-sessions.tar.gz` has SHA-256
+`79df76afc52dedc7f80381b31d9f3744e134fde8e3e0454ea83d7de63c25f391`;
+the publication receipt is attached to Relay v0.2.0 as
+`deployment-images-147499.json`. This is the router image only; the legacy Relay
+image also emitted by that packaging workflow must not be used for this rollout.
+The router pin adds an init-container backup, after the Recreate writer stops,
+under `/data/backups/pre-inference-sessions-20261124`. Failure blocks startup.
+This first pin stages the router with native Messages and warm retention still
+disabled. It may roll before the paired Relay release; it does not activate the
+new profile or constitute end-to-end acceptance. Relay's pin follows separately
+after its source, version and migration rehearsal are qualified.
+
+Pre-roll route baseline is preserved inside the existing router PVC at
+`/data/inference-rollout-20261124/routes-before.json` (0600), SHA-256
+`cb9904a07f3a4627cbf849a60ad9396f544a4db9cb886c83ccae03ea6fa85afa`.
+Validation: router full verification on Node 26.10.0, production-only smoke,
+image publication smoke/backup tests, 17 rollout-check tests, Kustomize render,
+and cluster server-side dry run. Source PR #196's final CI includes the split
+UTF-8 regression. Real-Claude active warm-to-cold rollback also passed locally.
+
 Source changes are [Relay #644](https://git.chifor.me/cchifor/relay/pulls/644)
 and [llm-router #196](https://git.chifor.me/cchifor/llm-router/pulls/196).
 The implementation and acceptance plan is Relay
@@ -56,9 +79,12 @@ image, and configuration revisions may change while releases are reviewed.
    do not separately roll the deployments.
 3. Check deployment readiness, image/source readback, anonymous auth refusal,
    existing route baseline, and Flux convergence after its next reconcile.
-4. Requalify worker-budget evidence and reissue File B for the new router release
-   digest according to [the router runbook](llm-router.md). Do not reuse File B
-   from the prior binary. Verify witness readback and the budget gate.
+4. Verify witness readback and preserve the existing disabled worker-budget use.
+   The 2026-11-23 router release explicitly left File B unqualified because no
+   worker-budget path is configured (router runbook, "Worker budgets: File B is
+   not reissued after this roll"). This rollout does not reopen that campaign.
+   Before any future worker-budget use, requalify evidence, reissue File B for
+   this binary, and pass `file_b_router_check`. Never reuse the prior release row.
 5. Enable `api-anthropic` and `inference-sessions`, pin Claude 2.1.283, and retain
    `sdk-resume` with warm retention disabled. Compare existing routes before and
    after this shared CLI change. Use dedicated no-fallback canary routes for
