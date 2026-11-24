@@ -530,11 +530,91 @@ monthly scrub (§4) is not on that list: it is a latency event to watch, not an 
 checklist is in `docs/runbooks/node-maintenance.md`, "QNAP maintenance is control-plane maintenance". Never move,
 rename or snapshot-roll-back `images/` by hand.
 
+## 12. After a cold boot, iSCSI targets can be bound to a vanished address (2026-10-30, 2026-11-24)
+
+**Symptom:** after a site power cut every node is `Ready`, but every `qnap-iscsi` volume fails
+`MountDevice … failed to stage volume: iSCSI login failed` (Trident logs `iscsiadm` exit 19, a non-retryable
+login rejection; Talos `ext-iscsid` logs `target not found (02/03)`). infra-pg, gitea, openbao, prometheus,
+the strive/trueswarm/relay databases stay `Unknown`. authelia, keycloak and grafana crashloop on the missing
+databases, oauth2-proxy fails OIDC discovery, and the edge 502s. The Flux gitea sources report `no such host`
+(the headless service has no endpoints), so `infrastructure` and everything after it stalls. On the NAS
+everything looks fine: the zpool is ONLINE, `iscsi-scstd` listens on 3260, and `iscsiadmin get_target` lists
+all targets `enable`. Yet SendTargets discovery answers "No portals found" from every initiator.
+
+**Mechanism:** the targets are bound to interfaces (`tbtbr0,lo`), and `scst_util --load` resolves each one to
+an IPv4 **once**, at boot (uptime ~190 s). On a cold boot `tbtbr0` still holds a link-local placeholder
+(`169.254.6.247`) at that moment. The Thunderbolt-net init then removes and rebuilds `tbtbr0` with
+`10.55.0.254` (~260-290 s), and nothing re-resolves the targets. Check it directly:
+
+```bash
+python scripts/qnap-ssh.py --sudo 'iscsiadmin get_allow_portal "$(iscsiadmin get_target | sed -n "1s/^target = \([^,]*\),.*/\1/p")"'
+# broken: "Allow portal = 169.254.6.247"   healthy: "Allow portal = 10.55.0.254" (plus 127.0.0.1 either way)
+```
+
+**Fix (as code):** `scripts/qnap-iscsi-portal-watchdog.sh`, installed by
+`bash scripts/qnap-iscsi-portal-watchdog-install.sh` (`DRY_RUN=1` first) into
+`/share/ZFS2_DATA/.iscsi-portal-watchdog/` with one root cron line (every minute). It restarts the target
+service (`/etc/init.d/iscsitrgt.sh restart`, ~80 s), which re-resolves the interfaces, when ALL of these hold:
+- some target's allowed portal is an IPv4 that no local interface holds;
+- every target's portal query succeeded and listed a portal (a failed query is "cannot judge", never
+  "healthy");
+- the same picture showed on two consecutive runs (a bridge mid-rebuild moves the addresses); a run that
+  cannot judge (service loading, no addresses, no targets, a failed query) breaks the sequence;
+- **no iSCSI session is logged in** (a restart drops every session), read again right before the restart, and an
+  unparseable count counts as "some". If one is, it logs an error and a QuLog event and leaves the decision to
+  a person;
+- the boot's budget (3 restarts, 10 min apart) is not spent.
+
+It writes actions and refusals to syslog (tag `iscsi-portal-watchdog`), a QuLog event, and
+`/share/ZFS2_DATA/.iscsi-portal-watchdog/watchdog.log` (on the pool, so it survives the reboot it is for).
+`sh …/watchdog.sh --check` is the read-only verdict (exit 0 ok, 1 stale, 2 cannot judge).
+
+**Manual fallback** (what fixed both incidents, if the watchdog is absent or refuses):
+1. Back up `/etc/config/hero_iscsi_scst.json`, `hero_iscsi_scst_init_lun_acl.json` and `hero_zfs_lun.json`
+   to `kubernetes/infra/_out/qnap-*.<date>-before-iscsi-restart`.
+2. Confirm nothing is logged in **NAS-wide**: the restart drops every initiator's sessions, not just one node's.
+   Count on the NAS, from every target:
+
+   ```bash
+   python scripts/qnap-ssh.py --sudo <<'EOF'
+   iscsiadmin get_target | awk '/^target = / { n++; if (match($0, /sess_cnt = [0-9]+/)) { s += substr($0, RSTART + 11, RLENGTH - 11); k++ } }
+     END { print n + 0 " targets, " k + 0 " parsed counts, sessions=" s + 0 }'
+   EOF
+   ```
+
+   Restart only if the targets are non-zero, the parsed counts equal the targets, and `sessions=0`. Anything
+   else (a failed query, an unparseable line, a live session) means **do not restart**. With the watchdog
+   installed, `sh /share/ZFS2_DATA/.iscsi-portal-watchdog/watchdog.sh --check` reports the same NAS-wide
+   `sessions=` (`unknown` when unparseable). A per-node look is supplementary only:
+   `iscsiadm -m session -P 1 | grep -c LOGGED_IN` in a trident node container (`IN LOGIN` / `FREE` is an
+   attempt, not a session).
+3. On the NAS (its busybox has no `nohup`):
+   `python scripts/qnap-ssh.py --sudo "( trap '' HUP; exec /etc/init.d/iscsitrgt.sh restart ) > /tmp/iscsi-restart.log 2>&1 < /dev/null &"`
+4. Wait for `scst_util` to leave `ps`. Re-check the allowed portal, then SendTargets from a host:
+   `iscsiadm -m discovery -t st -p 10.55.0.254 -o nonpersistent`. Kubelet's mount retries (backoff ≤ 2 min)
+   do the rest; dependants recover as their crashloop backoff (≤ 5 min) expires.
+
+**After it is fixed,** compare each re-staged volume's ext4 `s_mkfs_time` with its PV creation time. The CSI
+driver once ran mkfs over an in-use volume on re-stage (relay-data, 2026-10-09), and that loss is silent.
+Neither incident reformatted a volume, but the check is cheap. Per trident node pod (`trident-main` has no
+`sh`, only `busybox`):
+
+```bash
+MSYS_NO_PATHCONV=1 kubectl --context admin@ai -n trident exec <trident-node-linux-pod> -c trident-main -- busybox sh -c \
+  'busybox awk '"'"'$2 ~ /kubernetes.io~csi\/pvc-/ {print $1, $2}'"'"' /proc/mounts | while read dev mp; do
+     echo "$mp" | busybox sed -n "s#.*kubernetes.io~csi/\(pvc-[^/]*\)/mount.*#\1#p" | busybox tr "\n" " "
+     busybox dd if=$dev bs=1 skip=1288 count=4 2>/dev/null | busybox od -An -tu4; done | busybox sort -u'
+# prints "<pv> <mkfs epoch>"; an mkfs time after the boot, or long after the PV's creationTimestamp, is a reformat
+```
+
+Then force-sync any ExternalSecret whose hourly refresh hit the OpenBao outage
+(`kubectl annotate externalsecret <name> force-sync=$(date +%s) --overwrite`).
+
 ## Open items this audit did NOT close
 
 | Gap | Why it is still open |
 |---|---|
-| **UPS (owner-reported 2026-11-20)** | The owner reports the NAS is on a UPS with a clean-shutdown path. Its configuration is not recorded here yet. All 5 SSDs already reported `unsafe_shutdowns: 2`. The pool's KC3000 drives have volatile write caches and no power-loss protection: the owner accepted that residual risk (#1753 comment 133410; ADR 0043). |
+| **UPS (owner-reported 2026-11-20)** | The owner reports the NAS is on a UPS with a clean-shutdown path. Its configuration is not recorded here yet. All 5 SSDs reported `unsafe_shutdowns: 2` on 2026-08-16 and **11 of 15 power cycles** on 2026-11-24, after a site power cut that rebooted the NAS together with the hosts (§12). The pool's KC3000 drives have volatile write caches and no power-loss protection: the owner accepted that residual risk (#1753 comment 133410; ADR 0043). |
 | **QNAP-native notification** | Cluster side is built and verified (§7); the last mile is two UI steps in Notification Center, because QuTS hero exposes no CLI and no usable API for it. |
 | **`/mnt/ext` at 93%** | 29 MB free on the 417 MB QTS app partition (`/dev/md13`). All QNAP system files — nothing safe to prune by hand. Firmware updates and app installs write here, so it is a known wedge point. Not exposed over SNMP; check by hand. |
 | **Thin-LUN reclaim** | See §6. Needs a privileged `fstrim` DaemonSet; deliberately not built without an operator decision on the PSA/hostPath trade-off. |
