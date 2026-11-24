@@ -14,6 +14,59 @@
   register: relay_holder_stage
   changed_when: (relay_holder_stage.stdout | from_json).changed
 
+- name: Authenticate the packaged Pi Node before executing it
+  when: archive.component == 'pi-linux-x64'
+  block:
+    - name: Check the independently pinned Pi manifest
+      ansible.builtin.stat:
+        path: "{{ relay_holder_transfer }}/{{ archive.sha256 }}/manifest.json"
+        checksum_algorithm: sha256
+        follow: false
+      register: relay_holder_pi_manifest_stat
+
+    - name: Require the approved regular Pi manifest
+      ansible.builtin.assert:
+        that:
+          - relay_holder_pi_manifest_stat.stat.isreg | default(false)
+          - relay_holder_pi_manifest_stat.stat.nlink | default(0) == 1
+          - relay_holder_pi_manifest_stat.stat.checksum | default('') == archive.manifestSha256
+
+    - name: Read the authenticated Pi inventory
+      ansible.builtin.slurp:
+        src: "{{ relay_holder_transfer }}/{{ archive.sha256 }}/manifest.json"
+      register: relay_holder_pi_manifest_bytes
+
+    - name: Require the pinned Node version and unique executable entry
+      ansible.builtin.assert:
+        that:
+          - (relay_holder_pi_manifest_bytes.content | b64decode | hash('sha256')) == archive.manifestSha256
+          - manifest.node == '22.23.2'
+          - node_entries | length == 1
+          - node_entries[0].type == 'file'
+          - node_entries[0].sha256 is match('^[a-f0-9]{64}$')
+      vars:
+        manifest: "{{ relay_holder_pi_manifest_bytes.content | b64decode | from_json }}"
+        node_entries: "{{ manifest.entries | selectattr('path', 'equalto', 'node') | list }}"
+
+    - name: Hash the staged Node without following a link
+      ansible.builtin.stat:
+        path: "{{ relay_holder_transfer }}/{{ archive.sha256 }}/node"
+        checksum_algorithm: sha256
+        follow: false
+      register: relay_holder_pi_node_stat
+
+    - name: Refuse changed or unsafe packaged Node bytes before execution
+      ansible.builtin.assert:
+        that:
+          - relay_holder_pi_node_stat.stat.isreg | default(false)
+          - relay_holder_pi_node_stat.stat.nlink | default(0) == 1
+          - relay_holder_pi_node_stat.stat.uid | default(-1) == 0
+          - relay_holder_pi_node_stat.stat.mode | default('') == '0755'
+          - relay_holder_pi_node_stat.stat.checksum | default('') == node_entries[0].sha256
+      vars:
+        manifest: "{{ relay_holder_pi_manifest_bytes.content | b64decode | from_json }}"
+        node_entries: "{{ manifest.entries | selectattr('path', 'equalto', 'node') | list }}"
+
 - name: Write the upstream installer input
   ansible.builtin.copy:
     content: "{{ {'version': 1, 'sourceDirectory': relay_holder_transfer + '/' + archive.sha256, 'manifestSha256': archive.manifestSha256, 'installationRoot': (relay_holder_root if archive.component == 'holder' else relay_holder_pi_root)} | to_nice_json }}\n"
@@ -39,7 +92,7 @@
       - "type=bind,src={{ relay_holder_root }},dst={{ relay_holder_root }}"
       - --mount
       - "type=bind,src={{ relay_holder_pi_root }},dst={{ relay_holder_pi_root }}"
-      - --entrypoint=node
+      - "--entrypoint={{ relay_holder_transfer + '/' + archive.sha256 + '/node' if archive.component == 'pi-linux-x64' else 'node' }}"
       - "{{ relay_holder_image }}"
       - "dist/scripts/{{ 'install-holder-release' if archive.component == 'holder' else 'install-pi-runtime' }}.js"
       - "{{ relay_holder_transfer }}/{{ archive.component }}-install.json"

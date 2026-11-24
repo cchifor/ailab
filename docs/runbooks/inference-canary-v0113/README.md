@@ -73,6 +73,14 @@ nine-key policy contract. Its 11 Linux/Ansible integration tests passed, includi
 private idempotent Claude staging and ten refusal cases that preserve staged
 files and invoke no service commands. These tests use disposable local fixtures;
 they do not establish live managed delivery.
+Independent offline validation also installed and reverified the complete published
+holder/Pi archives and loaded all three exact profiles in the packaged Rust holder
+as UID 1000, with networking disabled. IPC `hello` reported `nativeStateReady: true`,
+the three expected profile IDs and zero sessions. This proves artifact integrity
+and profile admission, not live inference. The Pi installer must execute using
+the verified Node 22.23.2 shipped in its archive; the image's default Node 22.23.3
+does not satisfy this runtime's verifier. Stage the renderer first so the private
+credential parent directories exist even before credentials are issued.
 Run `python3 docs/runbooks/inference-canary-v0113/validate.py` from the checkout
 before using any file. CI also runs this check through
 `scripts/tests/test_inference_canary_inputs.py`. It checks the exact byte hash,
@@ -138,3 +146,10 @@ still pending; keep the installed profile array unchanged. Follow the
 [inference rollout](../relay-inference-sessions-20261124.md) for denial/approval,
 one effect, native history, branch/compact, cancellation, reconciliation, restart,
 warm measurement and active warm-to-cold rollback. Preserve all durable receipts.
+After startup, allow at most 120 seconds for a successful holder IPC `hello` on
+its state directory's `control.sock`, as the execution user. Require
+`nativeStateReady: true` and exactly the three IDs in `profiles.json`; require zero
+sessions before the first acceptance launch. Service-active status alone does not
+prove profile admission has finished. If readiness times out, stop acceptance and
+inspect the holder journal without replacing its state. This startup allowance is
+separate from each profile's inference request deadline.
