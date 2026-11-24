@@ -1,0 +1,55 @@
+---
+- name: Copy the reviewed archive
+  ansible.builtin.copy:
+    src: "{{ archive.source }}"
+    dest: "{{ relay_holder_transfer }}/{{ archive.sha256 }}.tar.gz"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Verify and stage the bounded release archive
+  ansible.builtin.script:
+    cmd: "stage_archive.py {{ relay_holder_transfer }}/{{ archive.sha256 }}.tar.gz {{ archive.sha256 }} {{ relay_holder_transfer }}/{{ archive.sha256 }}"
+    executable: python3
+  register: relay_holder_stage
+  changed_when: (relay_holder_stage.stdout | from_json).changed
+
+- name: Write the upstream installer input
+  ansible.builtin.copy:
+    content: "{{ {'version': 1, 'sourceDirectory': relay_holder_transfer + '/' + archive.sha256, 'manifestSha256': archive.manifestSha256, 'installationRoot': (relay_holder_root if archive.component == 'holder' else relay_holder_pi_root)} | to_nice_json }}\n"
+    dest: "{{ relay_holder_transfer }}/{{ archive.component }}-install.json"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Run the release's immutable installer without network or host Node
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network=none
+      - --read-only
+      - --cap-drop=ALL
+      - --security-opt=no-new-privileges
+      - --user=0:0
+      - --mount
+      - "type=bind,src={{ relay_holder_transfer }},dst={{ relay_holder_transfer }},readonly"
+      - --mount
+      - "type=bind,src={{ relay_holder_root }},dst={{ relay_holder_root }}"
+      - --mount
+      - "type=bind,src={{ relay_holder_pi_root }},dst={{ relay_holder_pi_root }}"
+      - --entrypoint=node
+      - "{{ relay_holder_image }}"
+      - "dist/scripts/{{ 'install-holder-release' if archive.component == 'holder' else 'install-pi-runtime' }}.js"
+      - "{{ relay_holder_transfer }}/{{ archive.component }}-install.json"
+  register: relay_holder_install
+  changed_when: (relay_holder_install.stdout | from_json).changed
+
+- name: Retain the nonsecret installation receipt
+  ansible.builtin.copy:
+    content: "{{ relay_holder_install.stdout }}\n"
+    dest: "{{ relay_holder_transfer }}/{{ archive.component }}-installed.json"
+    owner: root
+    group: root
+    mode: "0644"
