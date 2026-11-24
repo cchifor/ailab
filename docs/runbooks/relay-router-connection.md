@@ -112,7 +112,7 @@ public keys:
 - issuer `relay.chifor.me`; key `relay-admin-2026-11` with roles `[admin]`, key
   `relay-reconciler-2026-11` with roles `[reconciler]`;
 - tenant `00000000-0000-4000-8000-000000000001`, Router namespace `default` (every live route and key);
-- `routes: ["relay-researcher-luna"]`, `access: ["api"]`, `maxLifetimeSeconds: 86400`, `maxKeys: 4`;
+- `routes: ["relay-researcher-luna", "canary-pi-codex", "canary-pi-qwen"]`, `access: ["api", "subscription", "local"]`, `maxLifetimeSeconds: 86400`, `maxKeys: 8`. The two `canary-pi-*` routes and the `subscription`/`local` access are the Pi inference canary's (2026-11-24, [relay-pi-canary-holder.md](relay-pi-canary-holder.md)), one one-route binding each; remove them when the canary ends. `maxKeys` counts per issuer and tenant, so it went from 4 to 8 with them;
 - `workerBudgets: {maxTokens: 8 × (I + 8192), maxAuthoritySeconds: 120, maxRequests: 8}` (comment
   120818 D), set to `maxTokens: 7441536`: I = 922,000, the gpt-6-luna input bound the owner accepted
   (comment 122095), so 8 × (922,000 + 8,192). It is per allocation; the Router schema allows up to
@@ -121,8 +121,8 @@ public keys:
   comment 124122). The activation test still refuses including the component with the old
   placeholder string.
 
-`maxLifetimeSeconds` 86400 and `maxKeys` 4 are conservative ceilings for one worker at a time with
-a rotation overlap: review them against the researcher pool's lifetime before step 6. The pool
+`maxLifetimeSeconds` 86400 and `maxKeys` 8 are conservative ceilings for one researcher worker and the
+two canary bindings, each with a rotation overlap: review them against the researcher pool's lifetime before step 6. The pool
 inference policy's grant (`routes`, `access`, `lifetimeSeconds`) must be a subset of this ceiling.
 
 ### Route precondition (stop until the route exists)
