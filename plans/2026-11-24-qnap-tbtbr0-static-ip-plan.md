@@ -1,6 +1,6 @@
 # Give the QNAP Thunderbolt bridge its service IP at boot (static `tbtbr0`)
 
-Status: written live 2026-11-24 13:47Z (no window, no outage). Proof pending: the first NAS boot after it (see
+Status: written live 2026-11-24 13:48Z (15:48 EET on the NAS; no window, no outage). Proof pending: the first NAS boot after it (see
 "Results") · Created: 2026-11-24 · Script: `scripts/qnap-tbtbr0-static-ip.sh`
 Follows the 2026-11-24 power cut, the second outage of this kind. The first was 2026-10-30. Runbook:
 `docs/runbooks/qnap-storage-setup.md` §2 and §12. Backstop already live: the iSCSI portal watchdog (#1974).
@@ -71,15 +71,24 @@ reported, because counts lag a real flush and move for unrelated reasons. An unk
 
 ## Results
 
-- **Live write: done 2026-11-24 13:47:27Z** (from main `ff401821`, #1977; script md5 `b3a85d45…`).
-  - Before: the live `nm.conf` md5 was `37acce9d…`, a copy is in `_out/qnap-nm.conf.20261124-before-tbtbr0-static`, and
-    a scratch-copy APPLY/REVERT rehearsal came back byte-identical.
-  - Run: interlock `sessions=30`; pre-image `/etc/config/nm.conf.bak-tbtbr0-20261124-154806`; read-back
-    `STATIC|10.55.0.254|255.255.255.0`; live check t+0 to t+30 s every 5 s: `10.55.0.254/24 sessions=30` at every step;
-    `OK`, rc 0.
+- **Live write: done 2026-11-24 13:48:07Z** (from main `ff401821`, #1977; script md5
+  `b3a85d452d822ff35c54c66c1d449739`). Times are from the NAS clock. The NAS runs EET (UTC+2), so its file names and
+  logs read 15:48. The workstation clock ran ~38 s behind the NAS and the cluster.
+  - Before: the live `nm.conf` md5 was `37acce9db4da2d38670a01292f9cccde`, and a scratch-copy APPLY/REVERT rehearsal
+    came back byte-identical.
+  - Run:
+    - interlock `sessions=30`;
+    - pre-image `/etc/config/nm.conf.bak-tbtbr0-20261124-154806` (15:48:06 EET);
+    - the three `nacli setcfg` calls in `/var/log/network/main.log` at 15:48:06.938–15:48:07.004 EET;
+    - read-back `STATIC|10.55.0.254|255.255.255.0`;
+    - live check every 5 s from t+0 to t+30 s (to ~15:48:38 EET): `10.55.0.254/24 sessions=30` at every step;
+      `OK`, rc 0.
+  - **The backup to revert to is the on-NAS pre-image.** Its md5 was verified as `37acce9db4da2d38670a01292f9cccde`,
+    equal to the pre-write live file. The operator's `_out/qnap-nm.conf.20261124-before-tbtbr0-static` has the same
+    md5, but `_out/` is gitignored (local only).
   - After:
     - QNAP's network logs show 0 `setup_ipv4` / `setup_by_config` / `reconfig` / `br_delbr` / `disable_ipv4` events
-      in the write window;
+      between 15:48:06 and 15:48:38 EET;
     - the read-only mode says `already as wanted`;
     - the watchdog check reports `ok: 44 targets … sessions=30`;
     - 7/7 nodes are Ready, with no unhealthy pod;

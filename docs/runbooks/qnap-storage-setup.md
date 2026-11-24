@@ -60,7 +60,8 @@ cluster mounts.
    takes effect at the next NAS boot). With sessions logged in, it needs `LIVE_WRITE=1`, and then checks for 30 s that
    the bridge keeps its address and no session drops. A write was measured to apply nothing live: no network-stack
    watcher on `nm.conf`, and `nacli setcfg` has no apply step (`plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`).
-   **Status: written live 2026-11-24 13:47Z** with `APPLY=1 LIVE_WRITE=1`. Nothing changed on the running bridge (the
+   **Status: written live 2026-11-24 13:48Z** (15:48 EET, the NAS clock) with `APPLY=1 LIVE_WRITE=1`. To revert, use
+   the on-NAS pre-image `/etc/config/nm.conf.bak-tbtbr0-20261124-154806` (or `REVERT=1 LIVE_WRITE=1`). Nothing changed on the running bridge (the
    plan's "Results"). Check the current state with the read-only mode (`bash scripts/qnap-tbtbr0-static-ip.sh` says
    `already as wanted`). **Not yet proven:** the first NAS boot after the write is the test. Run the plan's step 4
    checks then, and record them in the plan.
