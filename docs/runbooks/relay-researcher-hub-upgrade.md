@@ -830,6 +830,55 @@ Readback after the roll (operator):
 - the owner, in the console: an agent's name on Status's map opens `#/fleet/agents/<id>` with Terminal first; Focus
   opens the terminal full-size and Exit focus returns to the tab.
 
+### H15. v0.12.0: the console preference and Needs you message problems, schema 91
+
+Why: the console redesign's F0b and B3b. F0b: Settings → Appearance → Console (Classic | New), saved per person and
+followed across devices; the `?console=` address switch stays as an override. B3b: withheld, undeliverable,
+expired-unread and backlog message problems in Needs you, each with Open thread, in a new Failing tier. Relay #658
+(F0b), #661 (B3b) and #660 (the agent page's release-review notes), released as v0.12.0 (#662, `11ac8f72`, run
+148517). This is the first release from `release/v0.12`, cut from main at `738711a6`, on top of v0.11.6 (live since
+2026-11-24, ailab #1990, H14).
+
+Migrations 090 and 091 (schema 89 → 91):
+- 090: the `user_preferences` table: forced row security, policy `tenant_isolation`, a composite reference to
+  `memberships(tenant_id, user_id)` with `ON DELETE CASCADE`; `relay_app` gets SELECT, INSERT and
+  UPDATE(console, updated_at) only;
+- 091: two partial indexes on `agent_message_recipients`, under `lock_timeout 10s`. The builds hold SHARE on that table
+  (writes wait, reads don't); production's table is small, so expect milliseconds.
+
+Check before the merge (operator), recorded on the operator's message of 2026-11-24 21:09Z and on this PR, PASS (13/13):
+- the published digest `e63d533f…c364` (deployment-images-148517.json and the image's revision label) migrates the
+  latest production generation (20261124T194107Z-5a59ca38, schema 89) to schema 1..91 contiguous, `migrate` and
+  bootstrap as `relay_migrator` with `lock_timeout 10s`, rc 0 in 1.07 s including the container start; 090 and 091
+  applied 12 ms apart;
+- `agent_message_recipients` has 1,844 rows (memberships 2), so the index builds take milliseconds;
+- `user_preferences`: owned by `relay_migrator`, row security forced, policy `tenant_isolation`, the foreign key to
+  memberships with cascade; grants: owner SIUD, app S + I + UPDATE(console, updated_at) (no table UPDATE, no
+  `tenant_id` update, no DELETE), backup S;
+- both partial indexes present; 137 tables, all owned by the migrator;
+- the v0.12.0 hub on that copy answered `/ready` 200 in about 4 s, and the sampler wrote all six sources.
+
+Change: this PR pins the v0.12.0 digest in `migrate` and `relay`, with the annotations, and moves the fence comment to
+schema 91. `migrate` keeps `PGOPTIONS=-c lock_timeout=10s` (H11). The merge rolls the hub once (Recreate, through
+Flux), with the pre-migration backup, outside the QNAP windows. No new settings.
+
+Rollback: forward-only, as H12. v0.11.6 starts against schema 91 and recovery's checks demand exactly 1..91, so a bare
+re-pin is never a rollback. Rollback to v0.11.6 (`8adca17a…0b8e`) = restore this roll's **earliest** pre-migration
+generation (the first `backup-database` log of the v0.12.0 rollout), `recovery:fence` with a **fresh** generation
+kept in `relay-restore-fencing`, then a reviewed PR re-pins v0.11.6; H11's cost applies.
+
+Readback after the roll (operator):
+
+- one Running Pod; source `11ac8f72efc6edb0f820e02db67eeaf6351e33da`, release `relay-0.12.0-release-148517`; the
+  `relay` container's image ID ends in
+  `sha256:e63d533fae058a5674d705ad86a0c57cc5ca421d677dc710ad7023ebc10dc364`;
+- the backup init container exited 0 (record its generation: the rollback's restore point), the migrate init container
+  exited 0, and `schema_migrations` reads `91|91`; the `relay` container's env is unchanged from v0.11.6;
+- health samples keep arriving each minute (H12's query);
+- the owner, in the console: Settings → Appearance shows Console with Classic and New; choosing New on one device opens
+  the new shell on another after a reload (F0b's done-when). Needs you lists a withheld message within 25 s plus query
+  time, made with a short-lived test key that is then revoked, and opens its thread (B3b's done-when).
+
 ## Enablement order at a glance
 
 > **Campaign rows are historical.** The owner retired the researcher qualification campaign and its
@@ -861,6 +910,7 @@ Readback after the roll (operator):
 | H12 | hub image → v0.11.4 (schema 89: health samples; health tiles on Status); gates no step above | v0.11.3 live (ailab #1979); the operator's 88 → 89 check PASS | v0.11.4 digest running, `schema_migrations` `89\|89`, the backup generation recorded, health samples written each minute, the tiles on Status |
 | H13 | hub image → v0.11.5 (Status as the board draws it, the fleet map; no migration); gates no step above | H12 live | v0.11.5 digest running, `schema_migrations` still `89\|89`, Status shows Needs you, Health and the fleet map |
 | H14 | hub image → v0.11.6 (the single-agent page; no migration); gates no step above | H13 live | v0.11.6 digest running, `schema_migrations` still `89\|89`, an agent's page opens from Status with Terminal first |
+| H15 | hub image → v0.12.0 (schema 91: migrations 090-091; the console preference per person; Needs you message problems); gates no step above | H14 live; the operator's 89 → 91 check PASS | v0.12.0 digest running, `schema_migrations` `91\|91`, the backup generation recorded, the console preference follows the owner across devices, a withheld message shows in Needs you |
 
 ## Rollback: migrations are forward-only
 
@@ -892,6 +942,9 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
 - **H12 (schema 89):** as H11: never a bare re-pin. Restore the v0.11.4 rollout's **earliest** pre-migration
   generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
   v0.11.3 (`2c350aee…8a2b`); H11's cost applies.
+- **H15 (schema 91):** as H12: never a bare re-pin. Restore the v0.12.0 rollout's **earliest** pre-migration
+  generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
+  v0.11.6 (`8adca17a…0b8e`); H11's cost applies.
 - **H14 (schema 89, no migration):** a reviewed PR re-pins v0.11.5 (`f8e2acc8…30ba`); no restore or fence.
 - **H13 (schema 89, no migration):** a reviewed PR re-pins v0.11.4 (`4f30750e…97c9`); no restore or fence.
 - **H8:** a reviewed PR re-pins v0.10.4 (`d1482bc1…57a7`); schema 79 is unchanged. A connection row or
