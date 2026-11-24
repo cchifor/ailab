@@ -27,5 +27,6 @@ export function seatsOf(ctx, ids) {
   // every attempt counts: a failover inside one request shows as a second account. A retry on the same account is not a
   // move (it is judged by the retries margin).
   const all = [...new Set(ids.flatMap((id) => j[id].accounts))];
-  return { accounts: all, moved: all.length > 1 };
+  // `first`: the account of the run's first request's first attempt, placed before the model said anything
+  return { accounts: all, moved: all.length > 1, first: j[ids[0]].accounts[0] };
 }

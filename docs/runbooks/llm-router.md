@@ -3848,8 +3848,21 @@ node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
 | PASS (exit 0) | Every Layer (a) check and every margin passed | Record the report with the release |
 | PASS (known deviation) (exit 0) | A margin is outside §9.6 but inside the looser bound of a known deviation in the task registry (the report prints the mechanism) | As PASS. If the report says the deviation no longer shows, retire the entry |
 | RERUN (exit 3) | Under 6 pairs, a metric is outside its margin (OUT) or within half a margin of it (NEAR). §9.6 takes 3 more pairs and decides on all 6 | Rerun that provider and task with `--providers p --tasks t --pairs 6`. The 6-pair run decides |
-| INCOMPLETE (exit 3) | A run was invalid: a seat throttled (429), the router failed over between accounts mid-run (the pairing is broken), the pairing could not be verified, or a harness error | Rerun later; never read it as a router result |
+| INCOMPLETE (exit 3) | A run was invalid: a seat throttled (429), the router failed over between accounts mid-run (the pairing is broken), the pairing could not be verified, a harness error, or fewer valid Codex pairs than `--pairs` (`INVALID (not paired; rerun)`, below) | Rerun later; never read it as a router result |
 | FAIL (exit 1) | A Layer (a) check failed, a router error occurred, or at 6 pairs a metric is outside its margin | The diff names the mechanism. Treat it as a router defect until shown otherwise, and roll back |
+
+**Account pairing.** Both arms must run on the account of the worker's own login, or the comparison measures the
+account's prompt cache, not the router. Claude: `RAB_CLAUDE_ACCOUNT` (default `claude-2`); a run elsewhere is invalid.
+Codex (`codex`, `codex-control`): `RAB_CODEX_ACCOUNT`, which must be the router account of the ChatGPT login the gate
+runs under; the default `codex-2` is the recorded dev-worker-1 mapping, to be confirmed by the operator for theirs. The
+router cannot pin a request to an account, so the gate decides on the **first router request of a run only**, because
+that placement is made before any outcome. A run that starts elsewhere is discarded and redone (up to 8 times); still
+elsewhere, its pair is INVALID, "not paired: router served <accounts>", left out of every metric, and its ABBA slot runs
+again with the same orientation (at most `--pairs` more). Fewer than `--pairs` valid pairs gives no verdict
+(`INVALID (not paired; rerun)`). A run that starts on the account and moves later (a failover, a spill) is kept, since
+that is router behaviour, and the verdict says so (`PASS (2 pairs moved accounts mid-run)`). Discarding those instead would
+keep the fast, cached runs and could turn a FAIL into a PASS. The notes list every discarded first placement and every
+move. The 1.2x margin is unchanged.
 
 **Safety.**
 - It creates no credential and prints none.

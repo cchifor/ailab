@@ -11,9 +11,9 @@
 //          --keep (debugging only: leave the temp dirs, recordings included, for the operator to delete)
 import fs from 'node:fs';
 import path from 'node:path';
-import { abba } from './core/abba.mjs';
 import { createContext, HERE } from './core/context.mjs';
-import { evaluate, evaluateLayerA } from './core/margins.mjs';
+import { evaluateLayerA } from './core/margins.mjs';
+import { judgePairs, schedule, validPairs } from './core/pairing.mjs';
 import { render } from './core/report.mjs';
 import { loadProviders, selectProviders } from './providers/index.mjs';
 import { TASKS, tasksFor } from './tasks/registry.mjs';
@@ -64,21 +64,32 @@ try {
       for (const task of tasks) {
         if (throttled) { taskResults.push({ id: task.id, rows: [], pairs: 0, verdict: 'INVALID (seat, failover or harness; rerun)', notes: ['skipped: the seat is throttled'] }); continue; }
         const runs = [];
-        for (const { pair, arm } of abba(pairs)) {
-          const runId = `${p.name}-${task.id}-${pair}-${arm}`;
-          ctx.log(`${runId}: start`);
-          let metrics;
-          try { metrics = await p.run(ctx, task, arm, runId); } catch (e) { metrics = { pass: false, invalid: true, detail: `harness error: ${e.message}`, wall_s: null, router_errors: 0, retries: 0 }; }
-          ctx.log(`${runId}: ${metrics.pass ? 'pass' : 'FAIL'} ${metrics.detail ?? ''} (${metrics.wall_s} s)`);
-          runs.push({ pair, arm, metrics });
-          // the task is already INVALID: stop spending the seat on it
-          if (metrics.invalid) { throttled = /seat throttled/.test(metrics.detail); break; }
+        // a pair whose router run did not start on the direct arm's account is INVALID ("not paired", core/pairing.mjs):
+        // its ABBA slot runs again with the same orientation, at most `pairs` more, so the verdict rests on `pairs`
+        // valid pairs with the requested direct-first/router-first balance
+        const plan = schedule(pairs);
+        let stop = false;
+        for (let next = plan.next(); next && !stop; next = plan.next()) {
+          const { pair, arms } = next;
+          for (const arm of arms) {
+            const runId = `${p.name}-${task.id}-${pair}-${arm}`;
+            ctx.log(`${runId}: start`);
+            let metrics;
+            try { metrics = await p.run(ctx, task, arm, runId); } catch (e) { metrics = { pass: false, invalid: true, detail: `harness error: ${e.message}`, wall_s: null, router_errors: 0, retries: 0 }; }
+            ctx.log(`${runId}: ${metrics.unpaired ? 'INVALID' : metrics.pass ? 'pass' : 'FAIL'} ${metrics.detail ?? ''} (${metrics.wall_s} s)`);
+            runs.push({ pair, arm, metrics });
+            // the task is already INVALID: stop spending the seat on it
+            if (metrics.invalid) { throttled = /seat throttled/.test(metrics.detail); stop = true; break; }
+            // an unpaired router run voids the pair: its direct run, if not yet made, is not needed
+            if (metrics.unpaired) break;
+          }
+          plan.done(pair, validPairs(runs).includes(pair));
         }
-        const v = evaluate(runs, task.known);
+        const v = judgePairs(runs, { want: pairs, known: task.known });
         // a run that could not be compared (a seat limit, a failover between accounts, a harness error) says nothing about
         // the router
         if (runs.some((r) => r.metrics.invalid)) v.verdict = 'INVALID (seat, failover or harness; rerun)';
-        taskResults.push({ id: task.id, ...v, notes: [...v.notes, ...runs.filter((r) => !r.metrics.pass).map((r) => `${r.arm} pair ${r.pair} failed: ${r.metrics.detail ?? ''}`)] });
+        taskResults.push({ id: task.id, ...v, notes: [...v.notes, ...runs.filter((r) => !r.metrics.pass && !runs.some((x) => x.pair === r.pair && x.metrics.unpaired)).map((r) => `${r.arm} pair ${r.pair} failed: ${r.metrics.detail ?? ''}`)] });
       }
     } catch (e) {
       ctx.log(`${p.name}: harness error: ${e.message}`);
