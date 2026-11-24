@@ -32,7 +32,10 @@ checks. Subsequent Codex/Qwen native acceptance is recorded below; Claude native
 activation, packaged Relay/Pi acceptance and warm-to-cold rollback remain pending.
 Recovery fix #650 (first-turn tool interruption with only a pending admission
 receipt) merged as `a27afd8cbd91b9ab6a266247d6b1e40c160a1277` with both reviews
-and all CI checks passing. Relay v0.11.3 release PR #648 must incorporate it.
+and all CI checks passing. Relay v0.11.3 release PR #648 incorporated it and
+the Pi output-cap fix #651; publication 147885 passed. The exact Relay pin and
+remaining live acceptance are recorded in
+[the v0.11.3 deployment runbook](relay-inference-v0113-20261124.md).
 
 ## Live Codex and Qwen session acceptance — 2026-11-24
 
