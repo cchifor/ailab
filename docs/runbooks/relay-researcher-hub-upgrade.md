@@ -846,6 +846,10 @@ Migrations 090 and 091 (schema 89 → 91):
 - 091: two partial indexes on `agent_message_recipients`, under `lock_timeout 10s`. The builds hold SHARE on that table
   (writes wait, reads don't); production's table is small, so expect milliseconds.
 
+Content parity: no v0.11.x fix regressed. The operator checked every release/v0.11 change against `11ac8f72`: 8
+reverse-apply cleanly, 8 are present as their main merge commits, and the rest are release merges
+(https://git.chifor.me/cchifor/ailab/pulls/1993#issuecomment-141543).
+
 Check before the merge (operator), recorded on the operator's message of 2026-11-24 21:09Z and on this PR, PASS (13/13):
 - the published digest `e63d533f…c364` (deployment-images-148517.json and the image's revision label) migrates the
   latest production generation (20261124T194107Z-5a59ca38, schema 89) to schema 1..91 contiguous, `migrate` and
@@ -939,14 +943,14 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
   `relay-restore-fencing`, then a reviewed PR re-pins v0.10.25 (`d98c6ce7…e22e`). Cost, rehearsed: every connector
   and agent key revoked (4 and 8), every session ended (49), the undelivered outbox deleted, a new generation
   ConfigMap; writes after the backup are lost.
-- **H12 (schema 89):** as H11: never a bare re-pin. Restore the v0.11.4 rollout's **earliest** pre-migration
-  generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
-  v0.11.3 (`2c350aee…8a2b`); H11's cost applies.
 - **H15 (schema 91):** as H12: never a bare re-pin. Restore the v0.12.0 rollout's **earliest** pre-migration
   generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
   v0.11.6 (`8adca17a…0b8e`); H11's cost applies.
 - **H14 (schema 89, no migration):** a reviewed PR re-pins v0.11.5 (`f8e2acc8…30ba`); no restore or fence.
 - **H13 (schema 89, no migration):** a reviewed PR re-pins v0.11.4 (`4f30750e…97c9`); no restore or fence.
+- **H12 (schema 89):** as H11: never a bare re-pin. Restore the v0.11.4 rollout's **earliest** pre-migration
+  generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
+  v0.11.3 (`2c350aee…8a2b`); H11's cost applies.
 - **H8:** a reviewed PR re-pins v0.10.4 (`d1482bc1…57a7`); schema 79 is unchanged. A connection row or
   pool approved under v0.10.9 stays, and v0.10.4 accepts it (its check only reads the row).
 - **H7's candidate files:** the next run's PR replaces a run's values; before the canary one PR drops
