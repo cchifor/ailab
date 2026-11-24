@@ -51,6 +51,10 @@ the scheduling and every lease go with them.
   after the share is mounted on every host). Write and rehearse one before the first planned NAS reboot.
 - **Afterwards, on every host:** `findmnt /mnt/pve/qnap-nfs`; `qm status <vmid>` running for each CP (`qm start` any
   that is not); etcd 3/3 in sync; then the post-maintenance checklist.
+- **After any NAS boot, planned or a power cut:** the iSCSI targets can come up bound to `tbtbr0`'s boot-time
+  placeholder address, which blocks every `qnap-iscsi` volume. The NAS-side watchdog restarts the target service when
+  no session is logged in. Confirm with `sh /share/ZFS2_DATA/.iscsi-portal-watchdog/watchdog.sh --check` on the NAS
+  (`qnap-storage-setup.md` §12).
 - **After a host boot**, check that its CP is running (`qm status <vmid>`). The boot-order guard (#1899; its state
   is under "Implementation state" in ADR 0043) holds the start until the share is ready, and logs that it did.
 
