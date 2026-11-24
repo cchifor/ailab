@@ -8,42 +8,40 @@ the other release branch or PR.
 
 ## Immutable provenance
 
-- Reviewed router main: `700c51c160213edd8486a0ca1ecdf11e5b8ebbe2`, merging
-  inference #196 and safe-error classification #197.
-- Archive: `router-0.1.0-20261124-inference-safe-errors.tar.gz`, Relay v0.2.0
-  asset 1099; SHA-256
-  `24fdd42885d2f409f9b7d5a2178339f53e2d19dafe73060b25dbe7198a790af4`.
-- [Publication run 147708](https://git.chifor.me/cchifor/relay/actions/runs/147708),
-  packaging source `b29fe37`, receipt `deployment-images-147708.json` on Relay
+- Reviewed router main: `a16a6846e89d6971d9549bac5ff3a7dde99b361b`, merging
+  inference #196, safe-error classification #197 and timeout classification #199.
+- Archive: `router-0.1.0-20261124-inference-safe-errors-r2.tar.gz`, Relay v0.2.0
+  asset 1102; SHA-256
+  `187ee75d73b75bd87ece82ef164fb9aea43c0551e8538bf3d5ec77f03ea031d6`.
+- [Publication run 147751](https://git.chifor.me/cchifor/relay/actions/runs/147751),
+  packaging source `d152e35`, receipt `deployment-images-147751.json` on Relay
   v0.2.0. Only its router image is intended for deployment.
-- Image: `registry.chifor.me/llm-router/router@sha256:eeb06e101aefc9202e76b46d9fc210071535ae08bc6633349511c0373259ed84`.
+- Image: `registry.chifor.me/llm-router/router@sha256:1d3eaf5671cb85be3720eab7a65a87acc1aa3a33f283ef88a21580ea78fb8167`.
 - Runtime: pinned Node 26.10.0. Frozen production pnpm 10.32.1 installation with
   install scripts disabled. Production smoke and publication backup tests pass.
 
-Full verification passed 3,256 tests (49 gated and 3,207 general), with 20 skipped;
-typecheck and production build passed. An initial full run failed one existing
-stream-timeout status assertion (`cancelled` instead of `failed`). Its entire
-52-test file passed separately, then the full verification passed without source
-changes or waived tests. Retain both runs as evidence; this is not a claim that
-the initial failure was fixed by the logging change.
-The unresolved classification race is tracked in
-[llm-router #198](https://git.chifor.me/cchifor/llm-router/issues/198), including
-the failed assertion, runtime, reproduction evidence and required investigation.
-Passing reruns do not establish its cause. The release owner must assess that
-record alongside the passing qualification before approving this pin.
+Full verification on the exact merged source passed 3,257 tests (49 gated and
+3,208 general), with 20 skipped; typecheck, build and production smoke passed.
+The initial combined release exposed a timeout classification race. Investigation
+reproduced a router-owned response close reaching the client-abort listener before
+iterator cleanup, incorrectly recording CLIENT_CLOSED. Reviewed router #199
+fixes this by detaching the handler's abort listeners before deadline destruction.
+Its deterministic regression checks TIMEOUT/MAX_DURATION, released engine capacity,
+an aborted upstream signal and generator cleanup. Issue #198 is resolved by #199;
+this r2 archive replaces the intermediate artifact that lacked the fix.
 
-Relative to the deployed source `300856ff`, the only source delta is reviewed
-#197 (fixed error classifications and their tests). No schema, account, route or
+Relative to deployed source `300856ff`, this includes reviewed #197 and #199.
+No schema, account, route or
 credential migration is introduced. The original backup init container retains
 its label and mount restrictions; the new image verifies the historical COMPLETE
 snapshot without overwriting it. Preserve that snapshot and all live receipts.
 The backup implementation, backup tests and publisher are unchanged between
 packaging commits `b0336729fbd9915379246df3e64b616197736642` (deployed image) and
-`b29fe37` (this image); an exact Git diff of those three files is empty.
+`d152e35` (this image); an exact Git diff of those three files is empty.
 The backup script's Git blob is `021ead1128c3d0fe4688c893c810a9794f5216fb`
 in both. Both images already contain inference sessions; this is not a change
 from a pre-inference backup implementation to a post-inference one. Publication
-147708 again tested the same script at `/app/deploy/backup-router.mjs` inside
+147751 again tested the same script at `/app/deploy/backup-router.mjs` inside
 the newly built image, including repeat verification of the historical snapshot.
 
 ## Rollout and acceptance
@@ -54,6 +52,10 @@ the newly built image, including repeat verification of the historical snapshot.
    normal administrator settings API, use its current revision and preserve all
    other values; confirm saved 2.1.283, active 2.1.281 and `pending: true` before
    the rollout. This setting takes effect on restart, not through plugin toggles.
+   Staging completed at 10:15 UTC: saved 2.1.283, active 2.1.281, pending true,
+   revision `974be1b47ad7507dd2128e786b778907bb2cc9936aea0e6a68114a6eca02bc62`.
+   All other settings were preserved. Re-read this state before rollout; do not
+   repeat the staging write blindly. Messages and warm retention remain disabled.
 2. Owner-approved merge triggers Flux. Require the exact image/source above,
    successful backup init, one ready pod, and convergence after reconciliation.
    Confirm saved and active CLI versions agree after restart. Do not restart a
@@ -80,7 +82,7 @@ Preserve native history and all admitted receipts. The immediately previous imag
 is `registry.chifor.me/llm-router/router@sha256:370bf5bf7f03da92b728e92fcc62b06439f886730a8a670d13be0d84924f1909`,
 source `300856ff7881eba67d2081650fca9f66a7f26b66`, release
 `router-0.1.0-20261124-inference-sessions`. It retains the inference schema but
-loses #197's logging hardening, so prefer recovery forward when practical.
+loses #197's logging hardening and #199's timeout fix, so prefer recovery forward when practical.
 
 Revert image/source/release pins (including the init image) through the reviewed
 owner-approved GitOps path. Both binaries support CLI 2.1.283; retaining that pin

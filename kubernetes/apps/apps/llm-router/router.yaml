@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: 700c51c160213edd8486a0ca1ecdf11e5b8ebbe2
-        chifor.me/release: router-0.1.0-20261124-inference-safe-errors
+        chifor.me/source-commit: a16a6846e89d6971d9549bac5ff3a7dde99b361b
+        chifor.me/release: router-0.1.0-20261124-inference-safe-errors-r2
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -124,7 +124,7 @@ spec:
       # later restarts never overwrite it. Retain this backup while init is present.
       initContainers:
         - name: backup-before-inference-sessions
-          image: registry.chifor.me/llm-router/router@sha256:eeb06e101aefc9202e76b46d9fc210071535ae08bc6633349511c0373259ed84
+          image: registry.chifor.me/llm-router/router@sha256:1d3eaf5671cb85be3720eab7a65a87acc1aa3a33f283ef88a21580ea78fb8167
           command: [node, /app/deploy/backup-router.mjs]
           env:
             - {name: ROUTER_BACKUP_LABEL, value: pre-inference-sessions-20261124}
@@ -140,10 +140,10 @@ spec:
             - {name: tmp, mountPath: /tmp}
       containers:
         - name: router
-          # Merged llm-router #196 + #197: inference sessions and fixed error classifications.
-          # Relay publication 147708; archive sha256:24fdd42885d2f409f9b7d5a2178339f53e2d19dafe73060b25dbe7198a790af4.
+          # Merged llm-router #196 + #197 + #199: inference, safe errors and timeout classification.
+          # Relay publication 147751; archive sha256:187ee75d73b75bd87ece82ef164fb9aea43c0551e8538bf3d5ec77f03ea031d6.
           # Retains native inference; see relay-inference-safe-errors-20261124.md.
-          image: registry.chifor.me/llm-router/router@sha256:eeb06e101aefc9202e76b46d9fc210071535ae08bc6633349511c0373259ed84
+          image: registry.chifor.me/llm-router/router@sha256:1d3eaf5671cb85be3720eab7a65a87acc1aa3a33f283ef88a21580ea78fb8167
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
