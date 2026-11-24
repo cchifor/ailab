@@ -3831,6 +3831,16 @@ rules. For each provider (Codex seat, Claude seat, each qwen3.8-27b backend) it 
 - **For a change to the Claude seat transport:** also `--tasks textkit-agentic --pairs 6` with
   `RAB_CLAUDE_MODEL=fable`, on a seat with headroom. That is the acceptance test of the Claude real-session continuity
   design.
+- **When a matched parent-versus-release comparison is required** (owner decision 2026-11-24, ailab #1962 comment
+  140542). Roll the parent back and gate it against the release on the same day only when the release changes
+  forwarding, placement or request bodies, i.e. something that can change what an upstream receives or which account
+  serves it.
+  - A release that changes only logging, telemetry, admin read paths or documentation is gated once, after its roll.
+    The #195 and #194 releases are such.
+  - A Codex `code-edit` FAIL on uncached tokens alone, with every other metric inside its margin and the pairs paired
+    (see `RAB_CODEX_ACCOUNT`), is then read against the open cache-dip note below and recorded.
+  - Measuring that dip's same-image spread (three or more paired runs in a quiet window) comes before the 1.2x margin
+    is reconsidered.
 - **Mind the Claude seats.** Both Claude arms run on the same Max seat. Check its weekly use first (`/admin/v1/usage`,
   `limits.windows`). Close to the limit, run the Claude chat tasks only (`--tasks math,tool-choice,recall` plus the
   other providers' tasks), as the 2026-11-05 baseline did at 98 %.
@@ -3887,7 +3897,10 @@ gate, provider `codex` (the `codex` arm via the router against its direct contro
 tokens read router 4,116 vs direct 10,287 (0.40x, 3 pairs, 20:10Z), then router 39,050 vs direct 20,642 (1.89x,
 6 pairs, 20:18Z) on the same image minutes apart, with Layer (a) identical (19,047 input tokens) and every other
 metric inside its margin. The FAIL was recorded and the release kept as a documented exception (#1910). A matched
-parent-versus-release comparison is still owed by the ailab operator session (the gate result and this open item are recorded in #1910); concurrent router traffic during the gate remains the only lead.
+parent-versus-release comparison was owed by the ailab operator session; on 2026-11-24 the owner closed it as not needed
+(ailab #1962 comment 140542; the rule is under "When a matched parent-versus-release comparison is required" above).
+Concurrent router traffic, and the router arm landing on other Codex accounts than the direct arm (now caught as "not
+paired"), remain the leads.
 
 **Open at rev 2247:** `qwen-cloud3` `code-edit` is FAIL on uncached tokens in 2 of 2 runs (1.29x, 1.20x), with Layer (a)
 clean and the model doing more work via the router (1.30x, 1.91x output tokens). cloud2 passes on the same day. On one
