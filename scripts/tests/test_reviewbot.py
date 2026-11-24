@@ -6152,13 +6152,15 @@ class OwnerApprovalPathsTest(unittest.TestCase):
         for path in ("tests/locks.sha256", "tests/milestones/registry.json"):
             self.assertNotIn(path, paths)
         self.assertEqual(["cchifor/workbricks", "cchifor/ailab"], list(defaults["pr_reviewer_owner_approval_paths_by_repo"]))
-        # ailab #1963: the production pins fail closed, and so does the gate's own configuration
+        # ailab #1963: the production pins fail closed, and so does everything that decides the gate
         ailab = defaults["pr_reviewer_owner_approval_paths_by_repo"]["cchifor/ailab"]
         for path in ("kubernetes/apps/apps/relay/relay.yaml", "kubernetes/apps/apps/llm-router/router.yaml",
-                     "ansible/roles/relay_connector/defaults/main.yml", "ansible/roles/pr_reviewer/defaults/main.yml",
-                     "ansible/roles/pr_reviewer/templates/config.json.j2"):
+                     "ansible/roles/relay_connector/defaults/main.yml", "ansible/roles/pr_reviewer/",
+                     "ansible/reviewers.yml", "ansible/group_vars/reviewers.yml", "ansible/host_vars/reviewer-1.yml",
+                     "ansible/host_vars/reviewer-2.yml", "scripts/tests/test_reviewbot.py"):
             self.assertIn(path, ailab)
-            self.assertTrue((ROOT / path).is_file(), path)   # an exact path that names nothing would gate nothing
+            # an entry that names nothing would gate nothing: a "/" entry is a directory, any other a file
+            self.assertTrue((ROOT / path).is_dir() if path.endswith("/") else (ROOT / path).is_file(), path)
         self.assertEqual(["chifor"], defaults["pr_reviewer_owner_approvers_by_repo"]["cchifor/ailab"])
         env = jinja2.Environment(undefined=jinja2.StrictUndefined)
         env.filters["to_json"] = json.dumps
@@ -6166,6 +6168,21 @@ class OwnerApprovalPathsTest(unittest.TestCase):
         config = json.loads(template.render(defaults))
         self.assertEqual(defaults["pr_reviewer_owner_approval_paths_by_repo"],
                          config["owner_approval_paths_by_repo"])
+
+    def test_no_override_of_the_owner_gate_outside_the_role(self):
+        # Role defaults have Ansible's lowest precedence: a playbook, group_vars or host_vars value would silently
+        # replace the owner-only paths or approvers without touching a gated file (reviewer-claude, ailab #1966).
+        # The reviewers' own vars files are gated paths; this test, itself gated, holds every other file.
+        keys = re.compile(r"^\s*(pr_reviewer_owner_approval_paths_by_repo|pr_reviewer_owner_approvers_by_repo|"
+                          r"pr_reviewer_owner_approvers|pr_reviewer_owner_approval_label|pr_reviewer_automerge)\s*:", re.M)
+        role = ROOT / "ansible" / "roles" / "pr_reviewer"
+        found = []
+        for f in sorted((ROOT / "ansible").rglob("*")):
+            if not f.is_file() or f.suffix not in (".yml", ".yaml", ".json", ".ini", ".cfg") or role in f.parents:
+                continue
+            for m in keys.finditer(f.read_text(encoding="utf-8", errors="replace")):
+                found.append("%s: %s" % (f.relative_to(ROOT).as_posix(), m.group(1)))
+        self.assertEqual([], found)
 
 
 class MergeAuthorTransitionTest(unittest.TestCase):

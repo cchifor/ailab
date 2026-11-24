@@ -311,14 +311,21 @@ pr_reviewer_owner_approval_paths_by_repo:
   # was merged by the bots and rolled the hub without the owner's go): a label the author must
   # remember fails open, so the production pins are owner-only paths and fail closed. A PR touching
   # one merges only with the owner's Approve at its head (or the owner's own merge). The hub image
-  # (relay.yaml), the Router image (router.yaml) and the connector release; plus this gate's own
-  # configuration, so a PR cannot drop a path or an approver without the owner.
+  # (relay.yaml), the Router image (router.yaml) and the connector release; plus everything that
+  # decides this gate, so a PR cannot weaken it without the owner: the whole role (the reviewbot
+  # code that matches paths, its tasks, these defaults, the config template), the playbook and the
+  # reviewers' group/host vars that outrank role defaults, and the test that forbids an override
+  # anywhere else under ansible/ (the bot merges only on green CI, so that gated test holds the rest).
   cchifor/ailab:
     - kubernetes/apps/apps/relay/relay.yaml
     - kubernetes/apps/apps/llm-router/router.yaml
     - ansible/roles/relay_connector/defaults/main.yml
-    - ansible/roles/pr_reviewer/defaults/main.yml
-    - ansible/roles/pr_reviewer/templates/config.json.j2
+    - ansible/roles/pr_reviewer/
+    - ansible/reviewers.yml
+    - ansible/group_vars/reviewers.yml
+    - ansible/host_vars/reviewer-1.yml
+    - ansible/host_vars/reviewer-2.yml
+    - scripts/tests/test_reviewbot.py
 # Owner decision, 2026-11-10 ("Your Approve survives a conflict-free main merge that both bots
 # re-approved"): in these repos an owner's APPROVED at an earlier commit also counts at the current
 # head when every commit since it, following first parents, is a two-parent merge of a commit
