@@ -16,8 +16,16 @@ a minute (runbook §2 chose this because `qcli_network` cannot address the syste
 |---|---|---|
 | ~86 s | `S45network`: QNAP's network manager creates the bridge (member `dummy0`). Its `setup_ipv4` reads `ip4_type: DHCP` and starts `avahi-autoipd` + `dhclient` | link-local `169.254.6.247` (no DHCP server on the link) |
 | 116–191 s | `S46iSCSItrgt`: `scst_util --load` resolves each target's interface binding (`tbtbr0,lo`) to IPs **once** (`iscsiadmin add_allow_portal`) | all 44 targets bound to `169.254.6.247` + `127.0.0.1` |
-| ~191 s+ | `S70crond` starts; the reconciler adds `10.55.0.254` | link-local + `10.55.0.254` |
-| 261 s | `S99nfs`, then `S99thunderbolt.sh`: `ip link del tbtbr0`, then `brctl addbr tbtbr0`. This happens outside the network manager, so **no address is applied** (the bridge's ifindex changes from ~7 to 11) | no address until the next cron minute, then `10.55.0.254` |
+| 245 s | `S70crond` starts | link-local |
+| 261 s | `S99nfs` starts NFS, then `S99thunderbolt.sh` loads the Thunderbolt driver and brings `tbtbr0` up; the ports join at ~281 s | link-local |
+| ~301 s | the reconciler's first run, at the next cron minute (its re-export flag `/tmp/.ailab-nfs-reexported` has mtime uptime 301 s): adds `10.55.0.254`, re-exports NFS. `avahi-autoipd` then releases its link-local (it sleeps while a routable address exists) | `10.55.0.254` |
+
+**Correction (same day):** an earlier version of this table said `S99thunderbolt.sh` deletes and recreates the bridge
+without an address. That was wrong. The script logs `Remove tbtbr0` unconditionally, but it runs `ip link del` only when
+the loop-prevention flag `/tmp/nasconfig_tmp/tbtbr_disable` exists (absent here), and `brctl addbr` only when
+`/mnt/ext/opt/netmgr` is absent (present here). Evidence: `dummy0` is still port 1 from 86 s, and `tbtnet0p0` /
+`tbtnet1p0` joined as ports 2 and 3 at 281 s. A recreated bridge would not contain `dummy0`. The ifindex reasoning
+behind the original claim was mistaken: index 11 is simply the order in which the network manager created its switches.
 
 Every initiator then gets "No portals found" and a refused login, so no `qnap-iscsi` volume mounts. The reconciler's other
 job, a once-per-boot `nfs restart` for "a QNAP boot-race drops the per-subnet rw rule", is very likely the same race
@@ -30,11 +38,25 @@ seen from NFS.
 virtual switches (`lxcbr0`, `docker0`). With it, `S45network` puts `10.55.0.254` on the first bridge at ~86 s, before
 `S46iSCSItrgt` binds the portals and before `S99nfs`.
 
-What it does not change, on purpose:
-- **The cron reconciler stays.** `S99thunderbolt.sh` recreates the bridge with no address. The iSCSI portal binding is an
-  IP filter, so it stays valid once the reconciler re-adds the same IP (≤ 60 s).
+What it does not change yet:
+- **The cron reconciler stays until a boot proves the static config.** Today's running bridge still has the DHCP config
+  (`dhclient` and `avahi-autoipd` run on it), and the reconciler is what holds `10.55.0.254` on it. Since S99 does not
+  rebuild the bridge, the reconciler's address line has nothing left to do at boot once the static config applies.
+  Drop it after a boot that passes step 4.
 - **The watchdog stays**, as the backstop for anything else that leaves the binding stale.
-- **The NFS re-export in the reconciler stays** until the window shows whether the rw-rule race is gone.
+- **The NFS re-export in the reconciler stays** until a boot shows whether the rw-rule race is gone. The timing fits
+  the same root cause: `S99nfs` started NFS at 261 s while the bridge had only its link-local address, and the
+  reconciler added `10.55.0.254` and re-exported at ~301 s. With the static config, NFS starts with the address in
+  place. **But no observation available today can prove the re-export unnecessary.**
+  - The reconciler runs on the first cron minute after `crond` starts (anywhere ~1–60 s later), so no uptime is a
+    safe cutoff.
+  - An export table read later shows the state after the re-export, not before.
+
+  A valid test needs a timestamped `exportfs -v` snapshot taken after `S99nfs` and **immediately before** the
+  re-export, i.e. inside the reconciler. A boot without that snapshot, or one where the re-export flag already
+  existed, is inconclusive. Follow-up: add the snapshot to the reconciler and give it its own installer
+  (`qnap-setup.sh` also re-applies eth1 and the share, so it is not a safe way to redeploy it). Until a snapshot shows
+  the rw rule present before the re-export, the re-export stays.
 
 Measured before the window, on the live NAS:
 - Read-only: `nacli getcfg` reads the section (`now: ip4_type=DHCP ip= subnet_mask=255.255.0.0`).
@@ -206,9 +228,10 @@ Wait until uptime > 6 min.
 | Static applied at boot | `grep 'Interface : tbtbr0 , ip4_type' /var/log/network/bootup.log` | `ip4_type: STATIC` |
 | Portals bound right **from boot** | `grep add_allow_portal /var/log/hero_iscsi_scst.log \| tail -3` and `iscsiadmin get_allow_portal <any iqn>` | `10.55.0.254`, no `169.254.*` |
 | Root fix, not the backstop | `cat /share/ZFS2_DATA/.iscsi-portal-watchdog/watchdog.log` (absent or no new lines) and `sh …/watchdog.sh --check` | no restart this boot; `ok: 44 targets` |
-| Rebuilt bridge got the IP | `ip -4 addr show tbtbr0`; `dmesg \| grep -E 'Remove tbtbr0\|S99'` | `10.55.0.254/24` after the S99 rebuild |
+| The address held through S99 | `ip -4 addr show tbtbr0`; `brctl show tbtbr0`; `dmesg \| grep 'tbtbr0: port'` | `10.55.0.254/24`; `dummy0` is still port 1 |
+| The reconciler had nothing to do | `ps \| grep -E 'autoipd\|dhclient' \| grep tbtbr0` | neither runs (static config); then the reconciler's address line can go |
 | NFS | `exportfs -v \| grep pve-nfs`; from each host `findmnt /mnt/pve/qnap-nfs && ls /mnt/pve/qnap-nfs/images` | rw for `10.55.0.0/24` and `10.55.1.0/24`; listing answers |
-| NFS rw race (observation) | `exportfs -v` **before** the reconciler's first run, if you are fast | record whether the rw rule is present without the re-export |
+| NFS rw race | only the reconciler's pre-re-export snapshot can show it (follow-up above); a manual `exportfs -v` is not evidence | without that snapshot: inconclusive, and the re-export stays |
 | versitygw | `grep ' sdb$' /proc/partitions; netstat -lnt \| grep ':7070 '` | present, listening |
 | Clean shutdown | `nvme smart-log /dev/nvme0` … `unsafe_shutdowns` | unchanged from step 0 |
 
@@ -258,4 +281,5 @@ Close the rollout-freeze issue.
 - Record the results here (the step 4 table, timings, unsafe_shutdowns) and set the status line.
 - Update `qnap-storage-setup.md` §2/§12 from "pending the window" to the measured result.
 - Promote steps 1–6 into `node-maintenance.md` as the rehearsed planned-NAS-outage procedure, and close its open item.
-- If the NFS rw rule held without the re-export, a follow-up PR can drop the reconciler's `nfs restart`.
+- Drop the reconciler's `nfs restart` only after the reconciler's own pre-re-export snapshot (follow-up above) shows the
+  rw rule present at a boot with the static config.

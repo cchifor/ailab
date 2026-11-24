@@ -5,9 +5,10 @@
 #
 # WHY (2026-10-30, and again 2026-11-24). Every qnap-iscsi target is bound to interfaces (tbtbr0,lo).
 # At boot, `scst_util --load` (S46iSCSItrgt, at uptime ~190 s) resolves each interface to its IPv4
-# ONCE, through `iscsiadmin add_allow_portal`. On a cold boot tbtbr0 still holds a link-local
-# placeholder (169.254.x.x) at that moment. QNAP's Thunderbolt-net init then removes tbtbr0 (~260 s)
-# and rebuilds it with the service IP 10.55.0.254, and nothing re-resolves the targets. Every target
+# ONCE, through `iscsiadmin add_allow_portal`. At that moment tbtbr0 held only a link-local
+# 169.254.x.x (QNAP's config had it as DHCP). The service IP 10.55.0.254 came later, from the cron
+# reconciler (~300 s), and nothing re-resolved the targets. Root cause fixed by the static config
+# (scripts/qnap-tbtbr0-static-ip.sh); this watchdog is the backstop. Every target
 # then answers SendTargets with "No portals found", and every initiator login is rejected with
 # "target not found (02/03)" (iscsiadm exit 19). No qnap-iscsi volume in the cluster mounts: infra-pg,
 # gitea, openbao, prometheus and the rest stay down, and the whole estate 502s. Both times the fix was
@@ -17,8 +18,8 @@
 #   - A target is STALE when one of its allowed portals is an IPv4 that no local interface holds.
 #     0.0.0.0 ("any"), 127.0.0.1 and non-IPv4 values are ignored.
 #   - It acts only when the SAME picture (stale addresses + local addresses) shows on two runs in a
-#     row. During a bridge rebuild the addresses move for a moment, and a restart in that moment
-#     would bind to the half-built state again. A run that cannot judge breaks the sequence.
+#     row. While addresses are still changing (boot, a network re-apply), a restart would bind to
+#     the half-done state again. A run that cannot judge breaks the sequence.
 #   - It cannot judge, and so does nothing, when the service is (re)loading (scst_util or
 #     iscsitrgt.sh running), no local address or no target can be listed, or any target's portal
 #     query fails or lists nothing. A failed query is never read as "healthy".
