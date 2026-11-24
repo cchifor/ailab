@@ -24,6 +24,11 @@ def validate(root=Path(__file__).resolve().parent):
     require(hashlib.sha256(raw).hexdigest() == inputs["relay_holder_profiles_sha256"],
             "Profile byte pin differs")
     require(inputs["relay_holder_start"] is False, "Staging must not start services")
+    archives = inputs["relay_holder_archives"]
+    require(sorted(a["component"] for a in archives) == ["holder", "pi-linux-x64"],
+            "Expected exactly holder and Pi archives")
+    pi_pin = next(a["manifestSha256"] for a in archives if a["component"] == "pi-linux-x64")
+    runtime = "/opt/relay-pi/releases/" + pi_pin
     require(len(profiles) == len(definitions) == len(requests) == len(policies) == 3,
             "Expected exactly three matching canary inputs")
     require({d["name"] for d in definitions} ==
@@ -34,6 +39,9 @@ def validate(root=Path(__file__).resolve().parent):
         for value in values:
             uuid.UUID(value[key])
     for profile, definition, request, policy in zip(profiles, definitions, requests, policies):
+        require(profile["native"]["runtimeDirectory"] == runtime and
+                profile["artifacts"].get(runtime + "/manifest.json") == pi_pin,
+                "Pi archive and profile runtime pins differ")
         require(definition["holder"] == profile, "Hub and holder definitions differ")
         require(profile["router"] == policy, "Renderer and holder policies differ")
         require(request["name"] == definition["name"], "Binding name differs")
