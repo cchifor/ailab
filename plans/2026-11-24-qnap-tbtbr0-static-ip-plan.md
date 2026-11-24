@@ -35,9 +35,17 @@ What it does not change, on purpose:
 - **The watchdog stays**, as the backstop for anything else that leaves the binding stale.
 - **The NFS re-export in the reconciler stays** until the window shows whether the rw-rule race is gone.
 
-Measured before the window (read-only, and the interlock): `nacli getcfg` reads the section
-(`now: ip4_type=DHCP ip= subnet_mask=255.255.0.0`). `APPLY=1` with the cluster up stopped at
-`interlock: NAS-wide iSCSI sessions=30`, wrote no backup, and left the config at `DHCP`.
+Measured before the window, on the live NAS:
+- Read-only: `nacli getcfg` reads the section (`now: ip4_type=DHCP ip= subnet_mask=255.255.0.0`).
+- Interlock: `APPLY=1` with the cluster up stopped at `interlock: NAS-wide iSCSI sessions=30`. It wrote nothing, and
+  the config is still `DHCP`.
+- Rehearsal on a scratch copy (`NM_CONF=/tmp/nm.conf.rehearse`, which the network daemon does not read):
+  - `APPLY=1` changed exactly `ip`, `ip4_type` and `subnet_mask` in `[tbtbr0]` (the `diff` against the live file
+    shows nothing else).
+  - `REVERT=1` wrote `ip = ` (an empty value works through `nacli setcfg`), and the copy came back **byte-identical**
+    to the live file.
+  - Each write left its own timestamped pre-image.
+  - The live `nm.conf` md5 (`37acce9d…`) and the bridge's `10.55.0.254` were unchanged throughout.
 
 ### Why a window, and not "just write it now"
 
@@ -84,22 +92,38 @@ pods go Pending: they do NOT re-attach their iSCSI volumes on another node, whic
 path.
 
 ```bash
+# The whole sequence is ONE function that returns at the first failed check, so no shutdown can run after a failed
+# cordon or gate. (A pasted list of commands carries on past a printed "STOP".)
 NODES="talos-cp1 talos-cp2 talos-cp3 talos-agent-node-1 talos-agent-node-2 talos-agent-node-3 relay-worker-1"
-for n in $NODES; do $K cordon $n || { echo "STOP: cordon $n failed"; break; }; done
-# GATE: no shutdown until the cluster has exactly these 7 nodes and every one is unschedulable. One schedulable
-# node would receive the evicted pods and re-attach their volumes, which is what this step exists to prevent.
-total=$($K get nodes --no-headers | wc -l)
-cordoned=$($K get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{"\n"}{end}' | grep -c '^true$')
-echo "cordoned $cordoned of $total"                                  # must read: cordoned 7 of 7
-[ "$total" = 7 ] && [ "$cordoned" = 7 ] \
-  && $T shutdown -n 192.168.0.47,192.168.0.48,192.168.0.49,192.168.0.52 \
-  || echo "STOP: not 7 of 7 cordoned; fix that before any shutdown"  # workers first; drain timeout 5 min
-# poll until stopped: 4301 on .2, 4302 on .3, 4303 + 4304 on .4
-python scripts/node-ssh.py 192.168.0.4 "for i in \$(seq 1 90); do qm status 4303 | grep -q stopped && qm status 4304 | grep -q stopped && break; sleep 5; done; qm status 4303; qm status 4304"
-$T shutdown -n 192.168.0.41,192.168.0.42,192.168.0.43               # then all three CPs
-# poll 4001 on .2, 4002 on .3, 4003 on .4. If one is still up after 10 min (the last CP has lost quorum, so its drain
-# cannot reach the API), `qm stop <vmid>` it: the other two have stopped, and its etcd data is fsynced.
+wait_stopped() {  # $1 = host, $2 = vmid, $3 = attempts of 5 s; succeeds only on "status: stopped"
+  python scripts/node-ssh.py "$1" "for i in \$(seq 1 $3); do qm status $2 | grep -q 'status: stopped' && break; sleep 5; done; qm status $2" \
+    | grep -q 'status: stopped'
+}
+stop_cluster() {
+  for n in $NODES; do $K cordon "$n" || { echo "STOP: cordon $n failed"; return 1; }; done
+  # GATE: exactly these 7 nodes, every one unschedulable. One schedulable node would receive the evicted pods and
+  # re-attach their volumes, which is what this step exists to prevent.
+  total=$($K get nodes --no-headers | wc -l)
+  cordoned=$($K get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{"\n"}{end}' | grep -c '^true$')
+  echo "cordoned $cordoned of $total"
+  [ "$total" = 7 ] && [ "$cordoned" = 7 ] || { echo "STOP: not 7 of 7 cordoned"; return 1; }
+
+  $T shutdown -n 192.168.0.47,192.168.0.48,192.168.0.49,192.168.0.52 || { echo "STOP: worker shutdown failed"; return 1; }
+  for hv in "192.168.0.2 4301" "192.168.0.3 4302" "192.168.0.4 4303" "192.168.0.4 4304"; do
+    wait_stopped $hv 120 || { echo "STOP: worker VM $hv not stopped after 10 min; CPs left up"; return 1; }
+  done
+  echo "workers stopped"
+
+  $T shutdown -n 192.168.0.41,192.168.0.42,192.168.0.43 || echo "note: talosctl reported an error; checking the VMs"
+  for hv in "192.168.0.2 4001" "192.168.0.3 4002" "192.168.0.4 4003"; do
+    wait_stopped $hv 120 || echo "WARN: CP $hv still up after 10 min (see below)"
+  done
+}
+stop_cluster && echo "CLUSTER STOPPED"
 ```
+
+A CP still up after 10 min is the last one: it has lost quorum, so its drain cannot reach the API. Once the other two
+show `stopped`, `qm stop <vmid>` it; its etcd data is fsynced. Do not move on until all seven Talos VMs are `stopped`.
 
 Then stop the NAS's other consumers on the hosts:
 
@@ -112,11 +136,18 @@ Leave the hosts' `qnap-nfs` storage mounted (hard mount; it resumes). Runners, d
 are on `local-lvm` and stay up. They only lose Gitea and the cluster for the window. The cloudlab LLM hosts (`.26`–`.28`)
 also read models from this NAS: loaded models keep serving, and their `qnap-nfs-mount.service` handles the gap.
 
-Gate: `python scripts/qnap-ssh.py --sudo "iscsiadmin get_target | grep -c 'sess_cnt = [1-9]'"` → `0`.
+Gate: `python scripts/qnap-ssh.py --sudo "sh /share/ZFS2_DATA/.iscsi-portal-watchdog/watchdog.sh --check"` reports
+`sessions=0` (exit 0, or 1 if a binding is stale; either way the count is NAS-wide, and `unknown` means stop). The
+`APPLY=1` interlock below checks it again.
 
 ### 3. Write the config and reboot the NAS
 
 ```bash
+# rehearse on a scratch copy first (seconds; proves nacli still behaves after any QuTS update since 2026-11-24)
+python scripts/qnap-ssh.py --sudo "cp /etc/config/nm.conf /tmp/nm.conf.rehearse"
+NM_CONF=/tmp/nm.conf.rehearse APPLY=1 bash scripts/qnap-tbtbr0-static-ip.sh
+NM_CONF=/tmp/nm.conf.rehearse REVERT=1 bash scripts/qnap-tbtbr0-static-ip.sh
+python scripts/qnap-ssh.py --sudo "diff /etc/config/nm.conf /tmp/nm.conf.rehearse && echo IDENTICAL"   # must say IDENTICAL
 APPLY=1 bash scripts/qnap-tbtbr0-static-ip.sh        # interlock passes (sessions=0); writes and reads back STATIC
 python scripts/qnap-ssh.py --sudo "cat /etc/config/nm.conf" > kubernetes/infra/_out/qnap-nm.conf.<date>-after-static
 python scripts/qnap-ssh.py --sudo "( trap '' HUP; exec /sbin/reboot ) >/dev/null 2>&1 < /dev/null &"
@@ -173,7 +204,9 @@ Close the rollout-freeze issue.
 
 - **The bridge or NFS misbehaves after boot** (no `10.55.0.254`, exports wrong): the reconciler re-adds the IP within a
   minute anyway. If something is still wrong, `REVERT=1 bash scripts/qnap-tbtbr0-static-ip.sh` (interlock: run it before
-  step 5) and reboot the NAS once more. That is the old behaviour, with the watchdog in place.
+  step 5) and reboot the NAS once more. That is the old behaviour, with the watchdog in place. REVERT was rehearsed
+  on a scratch copy and is byte-identical to the original. The pre-image of every write is also kept next to the file
+  (`/etc/config/nm.conf.bak-tbtbr0-<timestamp>`) for a plain `cp` back.
 - **Portals still bound to `169.254.*`:** the static setting did not reach `S46` in time. The watchdog fixes the binding
   within ~3 min (check `watchdog.log`). Record it, keep or revert the static config (harmless either way), and re-open
   the root-cause question.
