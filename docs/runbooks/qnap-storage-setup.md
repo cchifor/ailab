@@ -57,10 +57,10 @@ cluster mounts.
 1. **Static IP in QNAP's config** (`ip4_type=STATIC ip=10.55.0.254 subnet_mask=255.255.255.0`, the same layout as
    QNAP's static `lxcbr0`), so `S45network` gives the first bridge the service IP before iSCSI (and NFS) start.
    `scripts/qnap-tbtbr0-static-ip.sh` writes it through QNAP's network CLI (`nacli setcfg`). It is config-only (it
-   takes effect at the next NAS boot), and `APPLY=1` refuses while any iSCSI session is logged in, because a live
-   re-apply could flush the address that carries the control-plane disks. **Status: prepared, not applied.** It waits
-   for its window, `plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`, which also rehearses the planned-NAS-outage
-   procedure.
+   takes effect at the next NAS boot). With sessions logged in, it needs `LIVE_WRITE=1`, and then checks for 30 s that
+   the bridge keeps its address and no session drops. A write was measured to apply nothing live: no network-stack
+   watcher on `nm.conf`, and `nacli setcfg` has no apply step (`plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`).
+   **Status: written live 2026-11-24, proven at the next NAS boot** (the plan's step 4 checks).
 2. **The cron reconciler** stays, for the bridge that `S99thunderbolt.sh` recreates without an address.
 
 The UI route (Control Panel → Network & Virtual Switch → Interfaces → Thunderbolt → Static) writes the same keys.
@@ -565,9 +565,9 @@ all targets `enable`. Yet SendTargets discovery answers "No portals found" from 
 (`169.254.6.247`) that QNAP gives it: QNAP's own config has the bridge as DHCP, and `10.55.0.254` comes only from our
 cron reconciler (§2; crond is `S70`). `S99thunderbolt.sh` (~261 s) then deletes and recreates the bridge with no
 address, the reconciler adds `10.55.0.254`, and nothing re-resolves the targets. This happens on every boot. Whether
-it bites depends on timing (2026-11-01 came back clean four times). **Root-cause fix, prepared:** §2's static config,
-which puts `10.55.0.254` on the bridge at `S45network` (~86 s), before `S46`. It is pending its proving window,
-`plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`. Check the binding directly:
+it bites depends on timing (2026-11-01 came back clean four times). **Root-cause fix:** §2's static config,
+which puts `10.55.0.254` on the bridge at `S45network` (~86 s), before `S46`. It was written live on 2026-11-24 and
+is proven at the next NAS boot (`plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`, step 4). Check the binding directly:
 
 ```bash
 python scripts/qnap-ssh.py --sudo 'iscsiadmin get_allow_portal "$(iscsiadmin get_target | sed -n "1s/^target = \([^,]*\),.*/\1/p")"'

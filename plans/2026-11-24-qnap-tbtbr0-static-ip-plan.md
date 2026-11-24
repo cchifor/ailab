@@ -1,6 +1,7 @@
-# Give the QNAP Thunderbolt bridge its service IP at boot (static `tbtbr0`), proven by one planned NAS reboot
+# Give the QNAP Thunderbolt bridge its service IP at boot (static `tbtbr0`)
 
-Status: prepared, window not scheduled · Created: 2026-11-24 · Script: `scripts/qnap-tbtbr0-static-ip.sh`
+Status: decided 2026-11-24 — written live (`APPLY=1 LIVE_WRITE=1`), no window; proven at the next NAS boot ·
+Created: 2026-11-24 · Script: `scripts/qnap-tbtbr0-static-ip.sh`
 Follows the 2026-11-24 power cut, the second outage of this kind. The first was 2026-10-30. Runbook:
 `docs/runbooks/qnap-storage-setup.md` §2 and §12. Backstop already live: the iSCSI portal watchdog (#1974).
 
@@ -47,19 +48,32 @@ Measured before the window, on the live NAS:
   - Each write left its own timestamped pre-image.
   - The live `nm.conf` md5 (`37acce9d…`) and the bridge's `10.55.0.254` were unchanged throughout.
 
-### Why a window, and not "just write it now"
+### Decision (2026-11-24): write it live, prove it at the next boot
 
-- **Writing:** whether QNAP's network daemon re-applies a written value to the live bridge is unknown. A live re-apply can
-  flush `10.55.0.254`, and that address carries the control-plane disks (NFS, ADR 0043) and every iSCSI session.
-  So the script refuses `APPLY=1` unless the NAS-wide iSCSI session count is 0 (cluster down).
-- **Proving:** the only proof is a NAS boot. Since 2026-11-20 a NAS boot is a full-cluster outage. The window doubles as
-  the first rehearsal of a planned NAS outage, which `node-maintenance.md` lists as an open item ("write and
-  rehearse one before the first planned NAS reboot").
+The first version of this plan wanted a 45–60 min full-cluster window for two reasons. The owner asked why a static
+address needs that.
+- **Writing:** it was unknown whether QNAP's network daemon re-applies a written value to the live bridge. A live re-apply
+  could flush `10.55.0.254`, the address that carries the control-plane disks (NFS, ADR 0043) and every iSCSI session.
+  Settled by measurement:
+  - `nacli setcfg` is only a load / change one key / save through `ncaas`, QNAP's network config store. Its own debug
+    log in `/var/log/network/main.log` shows no apply step; applying is the separate `nacli setup_by_config` /
+    `reconfig`.
+  - `ncaas`'s API (`cfgapi`: `read_ini`, `write_ini`, `sync_ini`, `write_back`, `write_key`) has no hook that applies.
+  - The only inotify watchers on the config directory are `hda_monitor` (it checks the partition stays writable) and
+    `qmmsd`. Neither belongs to the network stack.
+  - `nm.conf`'s mtime stays at its boot-time write.
+- **Proving:** the only proof is a NAS boot, which is a full-cluster outage. The NAS has had four unplanned boots in four
+  weeks, and the watchdog covers iSCSI if the static setting does not, so the proof can come from the next natural boot.
 
-The alternative is to wait for the next unplanned power cut, with the watchdog covering it. But the config cannot be
-written safely while the cluster is up, and an unplanned boot does not give a clean before/after. Recommended: the window.
+So the script gained `LIVE_WRITE=1`: a write with sessions logged in, followed by a 30 s check that the bridge keeps
+`10.55.0.254` (re-added at once if not) and that no session drops. An unknown session count still refuses. At the next
+NAS boot, run the step 4 checks below (`bootup.log` says `STATIC`, the portals are on `10.55.0.254` from boot, and
+`watchdog.log` shows no restart) and record the result here.
 
-## Window procedure (est. 45–60 min full outage)
+The window procedure below is kept as the first written planned-NAS-outage procedure (for firmware updates or pool work),
+not as a precondition of this change. Its steps 3–4 apply to any planned NAS reboot.
+
+## Window procedure (est. 45–60 min full outage; kept for planned NAS outages)
 
 Paths relative to the ops checkout `C:\Users\chifo\work\home\ailab` (it holds `.env` and `kubernetes/infra/_out/`).
 `T=kubernetes/infra/_out/talosctl-1142.exe --talosconfig kubernetes/infra/_out/talosconfig`,

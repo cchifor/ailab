@@ -50,8 +50,8 @@ the scheduling and every lease go with them.
 - **Open item:** there is no rehearsed procedure yet for a planned NAS outage (stopping the CPs before, starting them
   after the share is mounted on every host). A first one is written, not yet run: steps 0-7 of
   `plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`. It cordons all seven nodes before the Talos shutdowns, so drained
-  pods go Pending instead of re-attaching iSCSI volumes elsewhere, and it stops the AI LXCs (hard NFS mount). Its first
-  run is the window that proves the static `tbtbr0` IP. Promote it here afterwards.
+  pods go Pending instead of re-attaching iSCSI volumes elsewhere, and it stops the AI LXCs (hard NFS mount). It has
+  not been run yet. Rehearse it at the first planned NAS reboot (a firmware update, pool work), then promote it here.
 - **Afterwards, on every host:** `findmnt /mnt/pve/qnap-nfs`; `qm status <vmid>` running for each CP (`qm start` any
   that is not); etcd 3/3 in sync; then the post-maintenance checklist.
 - **After any NAS boot, planned or a power cut:** the iSCSI targets can come up bound to `tbtbr0`'s boot-time
