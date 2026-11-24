@@ -39,5 +39,5 @@ jobs:
         run: |
           set -euo pipefail
           docker run --rm --cap-drop=ALL --security-opt=no-new-privileges \
-            -v "$PWD:/repo:ro" -w /repo python:3.13 \
+            -v "$PWD:/repo:ro" -w /repo python:3.13@sha256:debad600e8d6e754012528dc796488acc52438fea3d28596b87262df9b91c71e \
             sh -ec 'pip install --disable-pip-version-check ansible-core==2.20.0 PyYAML==6.0.3 && python scripts/tests/integration/test_relay_holder_archives.py'

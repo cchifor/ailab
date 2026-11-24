@@ -18,7 +18,8 @@
       "source": "/evidence/v0.11.3/relay-pi-linux-x64-aaad724607e2f9a97f64a40951142cf39815e7d4.tar.gz",
       "component": "pi-linux-x64",
       "sha256": "0f38af6d2a5a3343e58b07b75c6e5dc5f33acee8db59ac08cf5f523770d6cbf9",
-      "manifestSha256": "a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7"
+      "manifestSha256": "a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7",
+      "nodeVersion": "22.23.2"
     }
   ],
   "relay_holder_profiles_source": "/repo/docs/runbooks/inference-canary-v0113/profiles.json",

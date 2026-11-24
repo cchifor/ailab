@@ -59,7 +59,11 @@ Provide these variables in the reviewed per-host release inputs:
   `relay_holder_binary_sha256` from the qualified release.
 - `relay_holder_archives`: exactly two maps with `component` (`holder` or
   `pi-linux-x64`), controller-local `source`, archive `sha256` and
-  `manifestSha256`.
+  `manifestSha256`. The `pi-linux-x64` entry also requires `nodeVersion` in
+  `major.minor.patch` form, copied from the reviewed manifest's `node` field.
+  The role compares that version with the authenticated manifest and verifies
+  the packaged Node digest before execution. The holder archive needs no Node
+  version pin; the compiled upstream installer's own runtime checks still apply.
 - `relay_holder_profiles_source` and the independently approved exact file
   `relay_holder_profiles_sha256`.
 - `relay_holder_connector_source`, `relay_holder_connector_sha256` and

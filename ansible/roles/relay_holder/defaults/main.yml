@@ -14,6 +14,7 @@ relay_holder_config: "{{ relay_holder_home }}/.config/relay-holder"
 # Controller-local, joined release archives and independently reviewed pins.
 relay_holder_archives: []
 # Exactly holder and pi-linux-x64, each with source, sha256, manifestSha256.
+# pi-linux-x64 additionally requires the reviewed manifest's nodeVersion.
 relay_holder_profiles_source: ""
 relay_holder_profiles_sha256: ""
 relay_holder_binary_sha256: ""

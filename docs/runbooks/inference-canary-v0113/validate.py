@@ -2,6 +2,7 @@
 """Validate the exact nonsecret canary inputs before review or staging."""
 import hashlib
 import json
+import re
 from pathlib import Path
 import uuid
 
@@ -27,7 +28,12 @@ def validate(root=Path(__file__).resolve().parent):
     archives = inputs["relay_holder_archives"]
     require(sorted(a["component"] for a in archives) == ["holder", "pi-linux-x64"],
             "Expected exactly holder and Pi archives")
-    pi_pin = next(a["manifestSha256"] for a in archives if a["component"] == "pi-linux-x64")
+    pi_archive = next(a for a in archives if a["component"] == "pi-linux-x64")
+    node_version = pi_archive.get("nodeVersion")
+    require(isinstance(node_version, str) and
+            re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", node_version) is not None,
+            "Pi archive requires an explicit Node version pin")
+    pi_pin = pi_archive["manifestSha256"]
     runtime = "/opt/relay-pi/releases/" + pi_pin
     require(len(profiles) == len(definitions) == len(requests) == len(policies) == 3,
             "Expected exactly three matching canary inputs")

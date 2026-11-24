@@ -55,7 +55,8 @@ if args[-2] == 'dist/scripts/install-pi-runtime.js':
     # Simulate the real image's mismatched default Node: the old task fails here.
     assert entrypoint != 'node', 'image Node 22.23.3 cannot install Pi 22.23.2'
     assert entrypoint == config['sourceDirectory'] + '/node', args
-    assert subprocess.check_output([entrypoint, '--version'], text=True).strip() == 'v22.23.2'
+    manifest = json.loads((pathlib.Path(config['sourceDirectory'])/'manifest.json').read_text())
+    assert subprocess.check_output([entrypoint, '--version'], text=True).strip() == 'v' + manifest['node']
 else:
     assert args[-2] == 'dist/scripts/install-holder-release.js', args
     assert entrypoint == 'node', args
@@ -91,6 +92,8 @@ print(json.dumps(dict(changed=changed, directory=str(receipt.parent))))
             relay_holder_transfer=str(self.transfer), relay_holder_root=str(self.root / 'holder'),
             relay_holder_pi_root=str(self.root / 'pi'),
             relay_holder_image='fixture-image@sha256:' + 'a'*64)
+        if component == 'pi-linux-x64':
+            self.values['archive']['nodeVersion'] = '22.23.2'
         for directory in ['holder', 'pi']:
             (self.root / directory).mkdir(exist_ok=True)
 
@@ -153,6 +156,24 @@ print(json.dumps(dict(changed=changed, directory=str(receipt.parent))))
         self.manifest['node'] = '22.23.3'
         self.make_archive()
         self.run_tasks(success=False)
+
+    def test_reviewed_new_node_version_does_not_require_a_role_change(self):
+        self.node = self.node.replace(b'22.23.2', b'24.1.0')
+        self.manifest['node'] = '24.1.0'
+        self.manifest['entries'][0]['sha256'] = hashlib.sha256(self.node).hexdigest()
+        self.make_archive()
+        self.values['archive']['nodeVersion'] = '24.1.0'
+        self.run_tasks()
+        self.assertTrue(self.marker.exists())
+
+    def test_missing_or_malformed_version_pin_is_refused(self):
+        for pin in [None, '', '22.23', 22]:
+            with self.subTest(pin=pin):
+                if pin is None:
+                    self.values['archive'].pop('nodeVersion', None)
+                else:
+                    self.values['archive']['nodeVersion'] = pin
+                self.run_tasks(success=False)
 
     def test_duplicate_node_entries_are_refused(self):
         self.manifest['entries'] *= 2

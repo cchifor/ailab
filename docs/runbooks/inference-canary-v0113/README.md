@@ -78,8 +78,12 @@ holder/Pi archives and loaded all three exact profiles in the packaged Rust hold
 as UID 1000, with networking disabled. IPC `hello` reported `nativeStateReady: true`,
 the three expected profile IDs and zero sessions. This proves artifact integrity
 and profile admission, not live inference. The Pi installer must execute using
-the verified Node 22.23.2 shipped in its archive; the image's default Node 22.23.3
-does not satisfy this runtime's verifier. Stage the renderer first so the private
+the verified Node 22.23.2 shipped in its archive, pinned as `nodeVersion` beside
+`manifestSha256` in the Pi entry of `holder-inputs.json`. The role requires this
+version to match the authenticated manifest's `node` field before execution;
+future reviewed archives supply their own version pin without changing the role.
+The image's default Node 22.23.3 does not satisfy this runtime's verifier.
+Stage the renderer first so the private
 credential parent directories exist even before credentials are issued.
 Run `python3 docs/runbooks/inference-canary-v0113/validate.py` from the checkout
 before using any file. CI also runs this check through
