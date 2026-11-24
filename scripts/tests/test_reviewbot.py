@@ -6054,6 +6054,27 @@ class OwnerApprovalPathsTest(unittest.TestCase):
         self._owner_approves()
         self._merged()
 
+    def test_the_shipped_ailab_entries_hold_through_the_real_matcher(self):
+        # reviewer-claude, ailab #1966: prove the SHIPPED list through maybe_merge, not only that its entries exist.
+        # The "/" entry must cover what is under it, and must not swallow a sibling with the same prefix.
+        defaults = AllowlistDefaultsTest._strict_yaml(
+            (ROOT / "ansible" / "roles" / "pr_reviewer" / "defaults" / "main.yml").read_text(encoding="utf-8"))
+        self.m.CFG["owner_approval_paths_by_repo"] = {
+            "o/r": defaults["pr_reviewer_owner_approval_paths_by_repo"]["cchifor/ailab"]}
+        for path, held in (("ansible/roles/pr_reviewer/tasks/main.yml", True),
+                           ("ansible/roles/pr_reviewer/files/reviewbot.py", True),
+                           ("kubernetes/apps/apps/relay/relay.yaml", True),
+                           ("scripts/fleet-converge-daily.sh", True),
+                           ("ansible/roles/pr_reviewer_extra/tasks/main.yml", False),
+                           ("kubernetes/apps/apps/relay/backup.yaml", False)):
+            with self.subTest(path=path):
+                self.posts.clear()
+                self.diff = self._section(path)
+                if held:
+                    self._held("owner approval (owner-only paths: %s)" % path)
+                else:
+                    self._merged()
+
     def test_a_directory_entry_covers_what_is_under_it_and_a_file_entry_one_path(self):
         for paths, held in ((["docs/x.md", ".gitea/workflows/ci.yml"], True),
                             ([".gitea/workflowsx/ci.yml"], False),
@@ -6157,7 +6178,8 @@ class OwnerApprovalPathsTest(unittest.TestCase):
         for path in ("kubernetes/apps/apps/relay/relay.yaml", "kubernetes/apps/apps/llm-router/router.yaml",
                      "ansible/roles/relay_connector/defaults/main.yml", "ansible/roles/pr_reviewer/",
                      "ansible/reviewers.yml", "ansible/group_vars/reviewers.yml", "ansible/host_vars/reviewer-1.yml",
-                     "ansible/host_vars/reviewer-2.yml", "scripts/tests/test_reviewbot.py"):
+                     "ansible/host_vars/reviewer-2.yml", "scripts/fleet-converge-daily.sh",
+                     "scripts/fleet-converge-bootstrap.sh", "scripts/tests/test_reviewbot.py"):
             self.assertIn(path, ailab)
             # an entry that names nothing would gate nothing: a "/" entry is a directory, any other a file
             self.assertTrue((ROOT / path).is_dir() if path.endswith("/") else (ROOT / path).is_file(), path)
@@ -6169,20 +6191,69 @@ class OwnerApprovalPathsTest(unittest.TestCase):
         self.assertEqual(defaults["pr_reviewer_owner_approval_paths_by_repo"],
                          config["owner_approval_paths_by_repo"])
 
-    def test_no_override_of_the_owner_gate_outside_the_role(self):
-        # Role defaults have Ansible's lowest precedence: a playbook, group_vars or host_vars value would silently
-        # replace the owner-only paths or approvers without touching a gated file (reviewer-claude, ailab #1966).
-        # The reviewers' own vars files are gated paths; this test, itself gated, holds every other file.
-        keys = re.compile(r"^\s*(pr_reviewer_owner_approval_paths_by_repo|pr_reviewer_owner_approvers_by_repo|"
-                          r"pr_reviewer_owner_approvers|pr_reviewer_owner_approval_label|pr_reviewer_automerge)\s*:", re.M)
+    def test_no_override_of_the_owner_gate_outside_the_gated_files(self):
+        # Role defaults have Ansible's lowest precedence: a value for ANY pr_reviewer_* variable in a playbook,
+        # group_vars, host_vars or inventory outranks them, and could change what the bot serves or how it merges
+        # without touching a gated file (reviewer-claude and reviewer-codex, ailab #1966). The reviewers' own vars
+        # files and the converge scripts are gated paths; this test, itself gated, holds every other file under
+        # ansible/, whatever its suffix: YAML keys are read by parsing (a quoted key is still a key), and the text
+        # is searched too for quoted, JSON, INI and `-e key=value` forms.
+        import yaml
+        gated = {"ansible/reviewers.yml", "ansible/group_vars/reviewers.yml", "ansible/host_vars/reviewer-1.yml",
+                 "ansible/host_vars/reviewer-2.yml"}
         role = ROOT / "ansible" / "roles" / "pr_reviewer"
-        found = []
+        text_form = re.compile(r"""(?:^|[\s{,'"])["']?(pr_reviewer_\w+)["']?\s*(?::|=)(?!=)""", re.M)
+
+        def yaml_keys(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    yield str(k)
+                    yield from yaml_keys(v)
+            elif isinstance(node, list):
+                for v in node:
+                    yield from yaml_keys(v)
+
+        found = set()
         for f in sorted((ROOT / "ansible").rglob("*")):
-            if not f.is_file() or f.suffix not in (".yml", ".yaml", ".json", ".ini", ".cfg") or role in f.parents:
+            rel = f.relative_to(ROOT).as_posix()
+            if not f.is_file() or role in f.parents or rel in gated:
                 continue
-            for m in keys.finditer(f.read_text(encoding="utf-8", errors="replace")):
-                found.append("%s: %s" % (f.relative_to(ROOT).as_posix(), m.group(1)))
-        self.assertEqual([], found)
+            text = f.read_text(encoding="utf-8", errors="replace")
+            if "pr_reviewer_" not in text:
+                continue
+            try:
+                for doc in yaml.safe_load_all(text):
+                    found.update("%s: %s" % (rel, k) for k in yaml_keys(doc) if k.startswith("pr_reviewer_"))
+            except yaml.YAMLError:
+                pass
+            found.update("%s: %s" % (rel, m.group(1)) for m in text_form.finditer(text))
+        self.assertEqual([], sorted(found))
+
+    def test_the_override_check_sees_quoted_json_ini_and_extra_vars_forms(self):
+        # The regression for reviewer-codex's quoted key: each form must be caught by the scan above.
+        form = re.compile(r"""(?:^|[\s{,'"])["']?(pr_reviewer_\w+)["']?\s*(?::|=)(?!=)""", re.M)
+        for text in ('"pr_reviewer_owner_approval_paths_by_repo": {}\n', "pr_reviewer_owner_approvers_by_repo: {}\n",
+                     "{'pr_reviewer_automerge': true}\n", "pr_reviewer_merge_personas=[]\n",
+                     "ansible-playbook reviewers.yml -e pr_reviewer_owner_approvers_by_repo={}\n"):
+            with self.subTest(text=text):
+                self.assertTrue(form.search(text))
+        for text in ("when: pr_reviewer_enabled | default(false)\n", "# pr_reviewer_merge_authors names the same\n",
+                     "x: '{{ pr_reviewer_enabled == true }}'\n"):
+            with self.subTest(text=text):
+                self.assertIsNone(form.search(text))
+
+    def test_reviewers_playbook_runs_nowhere_else_with_extra_vars(self):
+        # The daily converge (gated) runs `ansible-playbook reviewers.yml`; a run elsewhere with -e/--extra-vars
+        # would outrank every vars file. Runbook lines are documentation and run nothing.
+        bad = []
+        for f in [ROOT / "justfile", *(ROOT / "scripts").rglob("*.sh"), *(ROOT / ".gitea").rglob("*.y*ml")]:
+            if not f.is_file() or f.relative_to(ROOT).as_posix() in ("scripts/fleet-converge-daily.sh",
+                                                                     "scripts/fleet-converge-bootstrap.sh"):
+                continue
+            for n, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                if "reviewers.yml" in line and re.search(r"(^|\s)(-e|--extra-vars)(\s|=)", line):
+                    bad.append("%s:%d" % (f.relative_to(ROOT).as_posix(), n))
+        self.assertEqual([], bad)
 
 
 class MergeAuthorTransitionTest(unittest.TestCase):
