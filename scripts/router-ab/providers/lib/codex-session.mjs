@@ -8,14 +8,22 @@ import { grade } from '../../tasks/graders.mjs';
 import { seatsOf } from '../../core/seats.mjs';
 import { notPaired } from '../../core/pairing.mjs';
 
-/** The router's name for the account of the worker's own ChatGPT login (dev-worker-1: codex-2), where the direct arm
- * runs. The Codex providers hold their router arm to it (RAB_CODEX_ACCOUNT, as RAB_CLAUDE_ACCOUNT for Claude). */
-export const CODEX_ACCOUNT = process.env.RAB_CODEX_ACCOUNT ?? 'codex-2';
+/** The router's name for the account of the ChatGPT login the direct arm runs under (RAB_CODEX_ACCOUNT, as
+ * RAB_CLAUDE_ACCOUNT for Claude). The Codex providers hold their router arm to it. No default: the mapping is per worker
+ * and a wrong one labels a cross-account comparison paired (dev-worker-1 was codex-2 on 2026-11-05, plans/2026-11-05-
+ * router-transparency-and-planning-revalidation.md), so a Codex provider refuses to set up without it. */
+export const CODEX_ACCOUNT = process.env.RAB_CODEX_ACCOUNT || undefined;
+
+/** A Codex provider's setup: the paired account must be named. */
+export function requireCodexAccount(account = CODEX_ACCOUNT) {
+  if (!account) throw new Error('RAB_CODEX_ACCOUNT is not set: set it to the router account of the ChatGPT login the gate runs under (dev-worker-1 was codex-2 on 2026-11-05; confirm it for your worker)');
+}
 
 /** The router placed a run on another backend or account than the direct arm's: the provider may run it again.
  * `account`: where the run's first request was placed. */
 export class Misplaced extends Error {
-  constructor(message, account) { super(message); this.account = account; }
+  /** account: where the run's first request was placed; accounts: every account its requests reached. */
+  constructor(message, account, accounts = [account]) { super(message); this.account = account; this.accounts = accounts; }
 }
 
 /** Writes the task's prompts on the worker and runs one session. arm: { target, home, model } from the provider. */
@@ -42,8 +50,8 @@ export function runCodexTask(ctx, task, arm, runId, env = {}) {
       // A Codex arm held to an account (core/pairing.mjs). Only the run's FIRST request decides: its placement is made
       // before the model says anything, so discarding on it cannot select on time, cache, errors or work. A run that
       // starts on the account and moves later (a failover, a spill) is router behaviour: kept in every metric, reported.
-      if (seats.error) throw new Error(`seat pairing not verified: ${seats.error}`);
-      if (seats.first !== arm.account) throw new Misplaced(`first request placed on ${seats.first}, the direct arm is on ${arm.account}`, seats.first);
+      if (seats.error || !seats.first) throw new Error(`seat pairing not verified: ${seats.error ?? seats.firstError}`);
+      if (seats.first !== arm.account) throw new Misplaced(`first request placed on ${seats.first}, the direct arm is on ${arm.account}`, seats.first, seats.accounts);
       moved = seats.moved ? seats.accounts : undefined;
     } else if (seats.moved) throw new Error(seats.error ? `seat pairing not verified: ${seats.error}` : `the router moved this run between accounts (${seats.accounts.join(', ')}): the pairing is broken`);
     // a route with several backends may place the run on another server than the direct arm's
@@ -71,16 +79,17 @@ export function runCodexTask(ctx, task, arm, runId, env = {}) {
  * returns { unpaired } instead of throwing: that pair is INVALID, not the task (core/pairing.mjs), and the gate runs
  * another pair in its place. */
 export function runPlaced(ctx, task, arm, runId, env, tries = 8) {
-  const discarded = [];
+  const discarded = [], seen = new Set();
   for (let attempt = 1; ; attempt++) {
     try {
       const m = runCodexTask(ctx, task, arm, attempt === 1 ? runId : `${runId}-p${attempt}`, env);
       return arm.paired && discarded.length ? { ...m, discarded } : m;
     } catch (e) {
-      if (e instanceof Misplaced && arm.paired) discarded.push(e.account);
+      if (e instanceof Misplaced && arm.paired) { discarded.push(e.account); for (const a of e.accounts) seen.add(a); }
       if (e instanceof Misplaced && attempt === tries && arm.paired) {
         const why = notPaired([...new Set(discarded)], arm.account);
-        return { unpaired: why, discarded, pass: false, detail: why, wall_s: null, router_errors: 0, retries: 0 };
+        // `seen`: every account any discarded run reached; the gate stops a task whose account never shows (core/pairing.mjs)
+        return { unpaired: why, discarded, seen: [...seen], account: arm.account, pass: false, detail: why, wall_s: null, router_errors: 0, retries: 0 };
       }
       if (!(e instanceof Misplaced) || attempt === tries) throw e;
       ctx.log(`${runId}: ${e.message}: discarded, running it again`);

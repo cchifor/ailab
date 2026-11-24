@@ -12,8 +12,8 @@ import { loadProviders, selectProviders, validate } from '../providers/index.mjs
 import { TASKS } from '../tasks/registry.mjs';
 import { GRADERS } from '../tasks/graders.mjs';
 import { seatsOf } from '../core/seats.mjs';
-import { judgePairs, notPaired, NOT_PAIRED, schedule, validPairs } from '../core/pairing.mjs';
-import { Misplaced, runPlaced } from '../providers/lib/codex-session.mjs';
+import { judgePairs, notPaired, NOT_PAIRED, schedule, stuck, validPairs } from '../core/pairing.mjs';
+import { Misplaced, requireCodexAccount, runPlaced } from '../providers/lib/codex-session.mjs';
 
 const HERE = path.dirname(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')));
 const run = (arm, pair, m) => ({ arm, pair, metrics: { pass: true, wall_s: 10, router_errors: 0, retries: 0, ...m } });
@@ -182,9 +182,19 @@ test('a qwen backend the route does not use is refused at setup, before any run'
   assert.deepEqual(sent[0], ['route-targets.mjs', 'default', 'qwen-27b']);
 });
 
+test('the seat guard: the first placement is the earliest attempt by journal time, not by recorded order', () => {
+  const ctx = { inPod: () => ({ stdout: JSON.stringify({ late: { accounts: ['codex-2'], starts: [2000] }, early: { accounts: ['codex-3', 'codex-2'], starts: [1000, 1500] } }) }) };
+  // the ids arrive out of order: the run's first request is `early`, placed on codex-3
+  assert.equal(seatsOf(ctx, ['late', 'early']).first, 'codex-3');
+  assert.equal(seatsOf(ctx, ['early', 'late']).first, 'codex-3');
+});
+
 test('the seat guard: one account passes, a second account or an unreadable journal is a broken pairing', () => {
   const ctx = (out) => ({ inPod: () => ({ stdout: typeof out === 'string' ? out : JSON.stringify(out) }) });
-  assert.deepEqual(seatsOf(ctx({ a: { accounts: ['claude-2'] }, b: { accounts: ['claude-2', 'claude-2'] } }), ['a', 'b']), { accounts: ['claude-2'], moved: false, first: 'claude-2' });
+  assert.deepEqual(seatsOf(ctx({ a: { accounts: ['claude-2'], starts: [1] }, b: { accounts: ['claude-2', 'claude-2'], starts: [2, 3] } }), ['a', 'b']), { accounts: ['claude-2'], moved: false, first: 'claude-2' });
+  // a journal that does not time its attempts still guards a move, but names no first placement
+  const untimed = seatsOf(ctx({ a: { accounts: ['claude-2'] } }), ['a']);
+  assert.equal(untimed.moved, false); assert.equal(untimed.first, undefined); assert.match(untimed.firstError, /does not time/);
   assert.equal(seatsOf(ctx({ a: { accounts: ['claude-2'] }, b: { accounts: ['claude-3'] } }), ['a', 'b']).moved, true);
   assert.equal(seatsOf(ctx({ a: { accounts: ['claude-2', 'claude-3'] } }), ['a']).moved, true);
   for (const [out, ids] of [['not json', ['a']], [{ a: { error: 404 } }, ['a']], [{}, []], [{}, [null]], [{ a: { accounts: ['claude-2'] } }, ['a', null]]]) {
@@ -219,10 +229,10 @@ test('every known deviation names a boundable margin, a looser bound and a reaso
 // codex-2, codex, codex-2 against a direct arm on codex-2, and read 1.49x uncached with every other metric PASS.
 const unpaired = (pair, accounts) => ({ arm: 'router', pair, metrics: { pass: false, unpaired: notPaired(accounts, 'codex-2'), detail: 'x', wall_s: null, router_errors: 0, retries: 0 } });
 
-test('pairing: a run is paired only when every router request reached the direct arm\'s account', () => {
+test('pairing: the "not paired" reason names the accounts the discarded first requests were placed on', () => {
   assert.equal(notPaired(['codex-2'], 'codex-2'), undefined);
   assert.equal(notPaired(['codex-3'], 'codex-2'), 'not paired: router served codex-3, the direct arm is on codex-2');
-  assert.match(notPaired(['codex-2', 'codex-3'], 'codex-2'), /router served codex-2, codex-3/); // moved mid-run
+  assert.match(notPaired(['codex-3', 'codex'], 'codex-2'), /router served codex-3, codex/); // several tries, several first placements
   assert.match(notPaired([], 'codex-2'), /no account/);
 });
 
@@ -275,7 +285,7 @@ function codexWorld(sessions) {
       const s = sessions[m[1]];
       return { status: 0, stdout: JSON.stringify({ ...s.summary, trajectories: s.requests.map((_, i) => `${m[1]}#${i}`) }) };
     },
-    inPod: (_script, ids) => ({ stdout: JSON.stringify(Object.fromEntries(ids.map((id) => { const [run, i] = id.split('#'); return [id, { accounts: sessions[run].requests[i] }]; }))) }),
+    inPod: (_script, ids) => ({ stdout: JSON.stringify(Object.fromEntries(ids.map((id) => { const [run, i] = id.split('#'); const a = sessions[run].requests[i]; return [id, { accounts: a, starts: a.map((_, k) => Number(i) * 100 + k) }]; }))) }),
     localDir: (name) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), `rab-test-${name}-`)); fs_.dirs = [...(fs_.dirs ?? []), d]; return d; },
     pull(cmd, dir) { const run = /runs\/(\S+) /.exec(cmd)[1]; fs_.pulled.push(run); const answer = sessions[run].answer ?? 'ANSWER=1';
       // the provider grades the last of [last.md, last.2.md] (the final turn's answer): write both, as a real pull would
@@ -368,4 +378,29 @@ test('pairing: replacement pairs keep their slot\'s ABBA orientation (pairs 2, 4
   const never = schedule(3); let n = 0;
   for (let x = never.next(); x; x = never.next()) { n++; never.done(x.pair, false); }
   assert.equal(n, 6);
+});
+
+test('pairing: a task stops after two consecutive unpaired pairs that never reached the account (wrong or drained)', () => {
+  const u = (pair, seen) => ({ arm: 'router', pair, metrics: { unpaired: 'not paired', account: 'codex-2', discarded: ['codex-3'], seen, pass: false } });
+  assert.equal(stuck([run('direct', 1, {}), u(1, ['codex-3'])]), undefined); // one pair is not enough
+  const note = stuck([run('direct', 1, {}), u(1, ['codex-3']), u(2, ['codex', 'codex-3'])]);
+  assert.match(note, /2 consecutive pairs never reached codex-2/);
+  assert.match(note, /RAB_CODEX_ACCOUNT is wrong .* or codex-2 is drained or unavailable: the two look identical/);
+  // the account showed up in a discarded run (a later request): it exists and serves, so go on
+  assert.equal(stuck([u(1, ['codex-3']), u(2, ['codex-3', 'codex-2'])]), undefined);
+  // a valid pair in between breaks the run of unpaired pairs
+  assert.equal(stuck([u(1, ['codex-3']), run('direct', 2, {}), run('router', 2, {})]), undefined);
+  // runPlaced records every account its discarded runs reached
+  const w = codexWorld({ r: { summary: summary(5, 10), requests: [['codex-3'], ['codex-3', 'codex-2']] } });
+  try { assert.deepEqual(runPlaced(w.ctx, TASK, ARM, 'r', {}, 1).seen.sort(), ['codex-2', 'codex-3']); } finally { w.cleanup(); }
+});
+
+test('the Codex providers refuse to set up without RAB_CODEX_ACCOUNT, and the report header names the paired accounts', async () => {
+  assert.throws(() => requireCodexAccount(undefined), /RAB_CODEX_ACCOUNT is not set/);
+  assert.doesNotThrow(() => requireCodexAccount('codex-2'));
+  const providers = await loadProviders(path.join(HERE, 'providers'));
+  for (const n of ['codex', 'codex-control']) assert.equal(providers.find((p) => p.name === n).pairing.env, 'RAB_CODEX_ACCOUNT');
+  const r = render({ image: 'x', startedAt: 't', pairing: [{ env: 'RAB_CODEX_ACCOUNT', account: 'codex-2' }, { env: 'RAB_CLAUDE_ACCOUNT', account: 'claude-2' }], providers: [{ name: 'p', layerA: { verdict: 'PASS', checks: [] }, tasks: [] }] });
+  assert.match(r.text, /^Paired accounts: RAB_CODEX_ACCOUNT=codex-2, RAB_CLAUDE_ACCOUNT=claude-2$/m);
+  assert.ok(r.text.indexOf('Paired accounts') < r.text.indexOf('**Overall'));
 });

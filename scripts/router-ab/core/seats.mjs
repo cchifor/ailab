@@ -27,6 +27,11 @@ export function seatsOf(ctx, ids) {
   // every attempt counts: a failover inside one request shows as a second account. A retry on the same account is not a
   // move (it is judged by the retries margin).
   const all = [...new Set(ids.flatMap((id) => j[id].accounts))];
-  // `first`: the account of the run's first request's first attempt, placed before the model said anything
-  return { accounts: all, moved: all.length > 1, first: j[ids[0]].accounts[0] };
+  // `first`: the account of the run's chronologically first attempt (by the journal's attempt start time, not by the
+  // order the ids were recorded in), placed before the model said anything. Undefined, with `firstError`, when the
+  // journal does not time every attempt: a caller that decides on it must then fail closed.
+  const attempts = ids.flatMap((id) => j[id].accounts.map((account, i) => ({ account, at: j[id].starts?.[i] })));
+  if (!attempts.every((a) => Number.isFinite(a.at))) return { accounts: all, moved: all.length > 1, firstError: 'the router journal does not time every attempt' };
+  const first = attempts.reduce((a, b) => (b.at < a.at ? b : a)).account;
+  return { accounts: all, moved: all.length > 1, first };
 }

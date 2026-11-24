@@ -8,12 +8,14 @@
 //           request went to another seat runs again; still elsewhere after 8 tries, its pair is INVALID, "not paired"; a
 //           later move is kept and reported; core/pairing.mjs).
 // The two arms differ only by the router. Layer (a): a body recorded on the control arm, sent both ways.
-import { CODEX_ACCOUNT as SEAT, runPlaced, sameBody } from './lib/codex-session.mjs';
+import { CODEX_ACCOUNT as SEAT, requireCodexAccount, runPlaced, sameBody } from './lib/codex-session.mjs';
 
 const MODEL = 'gpt-6-astra';
 export default {
   name: 'codex-control',
-  describe: `ChatGPT seat via Codex CLI 0.166 in API-provider mode in both arms (direct: plain forwarder on the host login; router: pool-codex, runs placed on ${SEAT})`,
+  describe: `ChatGPT seat via Codex CLI 0.166 in API-provider mode in both arms (direct: plain forwarder on the host login; router: pool-codex, runs placed on ${SEAT ?? 'RAB_CODEX_ACCOUNT (unset)'})`,
+  pairing: { env: 'RAB_CODEX_ACCOUNT', account: SEAT },
+  async setup() { requireCodexAccount(); },
   kinds: ['codex-exec'],
   forwarder: true, // the tap's `fwd` target stays off unless a selected provider asks for it
   async layerA(ctx) {

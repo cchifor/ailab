@@ -11,7 +11,7 @@ Run it after every router image roll, and before every config change that touche
 
 ```sh
 node scripts/router-ab/gate.mjs --plan                 # what would run
-node scripts/router-ab/gate.mjs --out gate.md          # everything: about 20 min
+RAB_CODEX_ACCOUNT=codex-2 node scripts/router-ab/gate.mjs --out gate.md   # everything: about 20 min (see Codex account pairing)
 node scripts/router-ab/gate.mjs --providers qwen --pairs 3
 RAB_CLAUDE_MODEL=fable node scripts/router-ab/gate.mjs --providers claude --tasks textkit-agentic --pairs 6
 ```
@@ -185,12 +185,20 @@ request decides**:
   router behaviour, and the verdict names it, e.g. `PASS (2 pairs moved accounts mid-run)`. Retrying such runs would
   select on the outcome: a long, slow or failing session has more requests that can move, so the retries would keep the
   fast, cached runs and could turn a FAIL into a PASS.
-- Every discarded first placement and every kept move is listed in the task's notes.
+- Every discarded first placement and every kept move is listed in the task's notes. The first placement is the
+  earliest attempt by the journal's `attempt.started` time, not the order the tap recorded the ids in; a journal that
+  does not time every attempt makes the run unverified (fail closed).
+- **Early stop.** Two consecutive unpaired pairs whose discarded runs never reached the account at all stop the task
+  (`INVALID (not paired; rerun)`) instead of spending up to `--pairs` x 2 pairs x 8 router sessions. The note says why:
+  either `RAB_CODEX_ACCOUNT` is wrong for the worker's login, or the account is drained or unavailable. The two look
+  identical from the gate; check the account's state and the mapping before a rerun.
 
-`RAB_CODEX_ACCOUNT` must be the router account of the ChatGPT login the gate's direct arm runs under. The default,
-`codex-2`, is the recorded mapping for dev-worker-1's login (`plans/2026-11-05-router-transparency-and-planning-revalidation.md`);
-the operator confirms it for the worker they gate from. A wrong value labels a cross-account comparison paired. The
-margins do not change. Before 2026-11-24 the `codex` arm was not held: on 2026-11-23 (ailab #1962) its six pairs ran on
+`RAB_CODEX_ACCOUNT` is **required**: it must be the router account of the ChatGPT login the gate's direct arm runs under,
+and `codex` and `codex-control` refuse to set up without it (their tasks read INVALID, the gate INCOMPLETE). There is no
+default, because a wrong value labels a cross-account comparison paired. The recorded mapping for dev-worker-1's login
+is `codex-2` (`plans/2026-11-05-router-transparency-and-planning-revalidation.md`); the operator confirms it for the
+worker they gate from. The report header records the accounts the arms were paired on (`Paired accounts:
+RAB_CODEX_ACCOUNT=codex-2, RAB_CLAUDE_ACCOUNT=claude-2`). The margins do not change. Before 2026-11-24 the `codex` arm was not held: on 2026-11-23 (ailab #1962) its six pairs ran on
 codex-3, codex-2, codex-3, codex-2, codex and codex-2 and read 1.49x uncached.
 
 **A route with several backends.** The router balances new conversations, and a client cannot pick the backend, so each

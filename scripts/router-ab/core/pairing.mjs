@@ -45,6 +45,24 @@ export function schedule(pairs) {
   };
 }
 
+/** Consecutive unpaired pairs in which the paired account never appeared at all that stop a task (stuck()). */
+export const STUCK_PAIRS = 2;
+
+/**
+ * Whether to stop a task early: the last STUCK_PAIRS pairs were all unpaired, and the paired account appeared in none of
+ * their discarded runs, at any request. Then a wrong RAB_CODEX_ACCOUNT and a drained or unavailable account look the
+ * same, and more pairs (up to `pairs` x 2 x 8 router sessions) would only spend the other seats. Returns the note, or
+ * undefined to go on.
+ */
+export function stuck(runs) {
+  const last = [...new Set(runs.map((r) => r.pair))].sort((a, b) => a - b).slice(-STUCK_PAIRS);
+  if (last.length < STUCK_PAIRS) return undefined;
+  const u = last.map((p) => runs.find((r) => r.pair === p && r.metrics.unpaired));
+  if (!u.every((r) => r && r.metrics.account && !(r.metrics.seen ?? []).includes(r.metrics.account))) return undefined;
+  const account = u[0].metrics.account, seen = [...new Set(u.flatMap((r) => r.metrics.seen ?? []))];
+  return `stopped early: ${STUCK_PAIRS} consecutive pairs never reached ${account} (their router runs reached ${seen.join(', ') || 'no account'}). Either RAB_CODEX_ACCOUNT is wrong for this worker's login, or ${account} is drained or unavailable: the two look identical from here. Check the account's state and the login mapping before a rerun`;
+}
+
 /** Pair numbers whose runs are all present and none is `unpaired`, in order. */
 export function validPairs(runs) {
   const by = new Map();

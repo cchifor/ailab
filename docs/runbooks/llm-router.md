@@ -3848,8 +3848,10 @@ rules. For each provider (Codex seat, Claude seat, each qwen3.8-27b backend) it 
 **How.** From the operator workstation, with `kubectl --context admin@ai` and ssh to dev-worker-1:
 
 ```sh
-node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
+RAB_CODEX_ACCOUNT=codex-2 node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
 ```
+
+`RAB_CODEX_ACCOUNT` is required (below); `codex-2` is dev-worker-1's recorded mapping, to be confirmed first.
 
 **Reading the verdict.**
 
@@ -3863,16 +3865,19 @@ node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
 
 **Account pairing.** Both arms must run on the account of the worker's own login, or the comparison measures the
 account's prompt cache, not the router. Claude: `RAB_CLAUDE_ACCOUNT` (default `claude-2`); a run elsewhere is invalid.
-Codex (`codex`, `codex-control`): `RAB_CODEX_ACCOUNT`, which must be the router account of the ChatGPT login the gate
-runs under; the default `codex-2` is the recorded dev-worker-1 mapping, to be confirmed by the operator for theirs. The
-router cannot pin a request to an account, so the gate decides on the **first router request of a run only**, because
-that placement is made before any outcome. A run that starts elsewhere is discarded and redone (up to 8 times); still
+Codex (`codex`, `codex-control`): `RAB_CODEX_ACCOUNT`, **required**, the router account of the ChatGPT login the gate
+runs under. Without it the Codex providers refuse to set up. `codex-2` is the recorded dev-worker-1 mapping, to be
+confirmed by the operator for their worker; the report header records it (`Paired accounts: ...`). The router cannot
+pin a request to an account, so the gate decides on the **first router request of a run only** (the earliest attempt by
+the journal's start time), because that placement is made before any outcome. A run that starts elsewhere is discarded and redone (up to 8 times); still
 elsewhere, its pair is INVALID, "not paired: router served <accounts>", left out of every metric, and its ABBA slot runs
 again with the same orientation (at most `--pairs` more). Fewer than `--pairs` valid pairs gives no verdict
 (`INVALID (not paired; rerun)`). A run that starts on the account and moves later (a failover, a spill) is kept, since
 that is router behaviour, and the verdict says so (`PASS (2 pairs moved accounts mid-run)`). Discarding those instead would
 keep the fast, cached runs and could turn a FAIL into a PASS. The notes list every discarded first placement and every
-move. The 1.2x margin is unchanged.
+move. Two consecutive unpaired pairs that never reached the account at all stop the task early: `RAB_CODEX_ACCOUNT` is
+wrong, or the account is drained or unavailable. The two look identical from the gate, so check both before a rerun.
+The 1.2x margin is unchanged.
 
 **Safety.**
 - It creates no credential and prints none.
