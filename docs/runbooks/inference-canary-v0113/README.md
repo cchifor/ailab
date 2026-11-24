@@ -2,8 +2,9 @@
 
 These are proposed, nonsecret inputs for owner review. Committing them does not
 approve profiles, issue credentials or enable an inventory host. The operator
-owns route creation, managed credential issuance, dedicated OpenBao reader
-provisioning and the host converge. The inference session owns these pinned
+owns route creation, trust configuration, dedicated OpenBao reader provisioning
+and the host converge. The owner issues credentials in their own authorized
+Relay session and approves the profiles. The inference session owns these pinned
 definitions and subsequent paired acceptance. Do not overlap the operator's
 router-ab gate with route changes or new inference qualification workloads.
 
@@ -21,6 +22,10 @@ user `c4`/UID 1000. Tenant `00000000-0000-4000-8000-000000000001`, router connec
 | pi-canary-claude | anthropic-messages | canary-pi-claude | claude / sonnet |
 
 Every route must have exactly one enabled target, no fallback and maxAttempts 1.
+Profiles select that alias as `{"kind":"model","model":"<route alias>"}`:
+the managed Router advertises `routeSelectors:false`. The same selection appears
+in the holder, hub and renderer definitions; no explicit route selector is sent.
+The issued key's one-route grant confines the alias at Router admission.
 The Qwen target is the one that passed the earlier native session canary.
 Each profile has a separate UUID, private home/workspace, 120-second request
 deadline, 1024 output-token limit and mandatory Relay communication. Context
@@ -31,8 +36,10 @@ only by Relay's existing router-credential flow; no token is present here.
 ## Files and review
 
 - `binding-requests.json`: three exact `CreateCredential` request bodies. Relay
-  accepts caller-selected binding/operation UUIDs. Submit each unchanged through
-  the normal authorized flow after its route exists. Preserve operation IDs on
+  accepts caller-selected binding/operation UUIDs. The owner submits each unchanged
+  to `/api/router-credentials` through their own admin `relay_session` cookie and
+  matching Origin after its route exists and activation is imminent. The operator's
+  JIT identity must not issue credentials. Preserve operation IDs on
   retries; inspect existing state before retrying. Do not substitute direct router
   keys or database inserts. If the operator has already created other bindings,
   revise all affected files and obtain renewed exact-profile approval.
@@ -57,6 +64,10 @@ v0.11.3 application image, with network disabled and read-only inputs. Cross-fil
 identities, routes and the profile-file hash match. The Pi manifest bytes were
 verified inside the SHA-pinned release archive before extracting entrypoint hashes.
 This validates configuration, not live launch or credential delivery.
+The same compiled image's `validateProfileReferences` also accepted all three
+model-alias selections with one-route binding fixtures and matching host/user/
+connection/channel references. This is a local validation of the hub code path;
+actual grant confinement at inference remains the Router's key-admission check.
 Run `python3 docs/runbooks/inference-canary-v0113/validate.py` from the checkout
 before using any file. CI also runs this check through
 `scripts/tests/test_inference_canary_inputs.py`. It checks the exact byte hash,
@@ -70,8 +81,8 @@ assets at `/evidence/v0.11.3`. Mount the operator's local verified-evidence
 directory for v0.11.3 read-only at `/evidence/v0.11.3` when using a container.
 The holder role validates its own archive hashes and upstream inventories again.
 
-After exact-profile approval, managed binding issuance and dedicated renderer
-provisioning, run from `/repo/ansible`:
+After the definitions are reviewed and the operator stages the dedicated renderer
+with services stopped, run from `/repo/ansible` (holder services also stay stopped):
 
 ```sh
 ansible-playbook relay-holders.yml --limit dev-worker-1 \
@@ -109,6 +120,9 @@ credential generation. Reconcile renderer delivery and hub readiness before
 resuming. Reusing the original CreateCredential operation only retries the original
 issuance; it does not renew its expiry. A failed/revoked/pending binding must be
 reconciled through its normal retry/revocation flow before rotation is allowed.
+Initial issuance is `installing`, not `ready`; staged services alone do not make
+it rotatable. The owner should issue late, then start the reviewed renderer for
+delivery and confirm readiness before attempting any rotation or Pi launch.
 Do not force state changes. If it cannot return to a rotatable state, replacement
 requires new binding IDs, revised files/pins and renewed exact-profile approval.
 

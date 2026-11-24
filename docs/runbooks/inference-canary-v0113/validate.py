@@ -55,10 +55,10 @@ def validate(root=Path(__file__).resolve().parent):
         require(request["name"] == definition["name"], "Binding name differs")
         for key in ["bindingId", "connectionId", "hostId", "executionIdentity"]:
             require(request[key] == policy[key], "Binding authority differs: " + key)
-        require(policy["selection"] == {"kind": "route", "alias":
+        require(policy["selection"] == {"kind": "model", "model":
                 "canary-pi-" + definition["name"].removeprefix("pi-canary-")},
                 "Profile route differs")
-        require(request["grant"]["routes"] == [policy["selection"]["alias"]],
+        require(request["grant"]["routes"] == [policy["selection"]["model"]],
                 "Binding route grant differs")
         require(request["grant"]["access"] ==
                 (["local"] if definition["name"] == "pi-canary-qwen" else ["subscription"]),
