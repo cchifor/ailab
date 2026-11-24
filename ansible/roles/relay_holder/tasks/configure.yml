@@ -68,7 +68,7 @@
 
 - name: Validate root-owned destination ancestry before writes
   ansible.builtin.script:
-    cmd: "check_paths.py 0 {{ relay_holder_transfer }} {{ relay_holder_root }} {{ relay_holder_pi_root }} /opt/relay-holder/connectors"
+    cmd: "check_paths.py 0 {{ relay_holder_transfer }} {{ relay_holder_root }} {{ relay_holder_pi_root }} /opt/relay-holder/connectors/{{ relay_holder_connector_sha256 }}"
     executable: python3
   changed_when: false
 

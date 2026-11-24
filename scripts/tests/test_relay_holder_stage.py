@@ -81,6 +81,24 @@ class StageTests(unittest.TestCase):
                 paths.check(os.getuid(), [str(root / 'new')])
             root.chmod(0o700)
 
+    def test_exact_connector_digest_directory_must_be_checked(self):
+        spec = importlib.util.spec_from_file_location('holder_paths', SOURCE.with_name('check_paths.py'))
+        paths = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(paths)
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
+            root = Path(temp).resolve()
+            connectors = root / 'connectors'
+            connectors.mkdir()
+            outside = root / 'unrelated'
+            outside.mkdir()
+            digest = connectors / ('a' * 64)
+            digest.symlink_to(outside, target_is_directory=True)
+            # Checking only the parent misses the redirection at the digest leaf.
+            paths.check(os.getuid(), [str(connectors)])
+            with self.assertRaises(ValueError):
+                paths.check(os.getuid(), [str(digest)])
+            self.assertEqual(list(outside.iterdir()), [])
+
 
 if __name__ == '__main__':
     unittest.main()
