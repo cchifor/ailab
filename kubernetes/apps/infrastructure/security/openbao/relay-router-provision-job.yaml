@@ -76,13 +76,18 @@ data:
       exit 1
     }
     # The reader's AppRole needs the approle mount, which devworker-provision-job.yaml enables and owns.
-    # Checked before anything is written, so its absence leaves every policy and role untouched.
+    # Checked before anything is written -- present AND of type approle -- so its absence (or another
+    # auth method at that path) leaves every policy and role untouched.
     AUTH_LIST="$(bao auth list -format=json)" || {
       echo "cannot list auth mounts; aborting rather than writing blind" >&2
       exit 1
     }
     echo "$AUTH_LIST" | grep -q '"approle/"' || {
       echo "the approle auth mount is absent (devworker-provision-job.yaml enables it); aborting before any write" >&2
+      exit 1
+    }
+    [ "$(bao read -field=type sys/auth/approle)" = "approle" ] || {
+      echo "the auth mount at approle/ is not of type approle; aborting before any write" >&2
       exit 1
     }
 
@@ -297,10 +302,11 @@ data:
       token_num_uses=0 \
       token_period=72h \
       token_type=service
-    AROLE_JSON="$(bao read -format=json "$arole" | tr -d '[:space:]')" || {
+    AROLE_RAW="$(bao read -format=json "$arole")" || {
       echo "cannot read back $arole; aborting" >&2
       exit 1
     }
+    AROLE_JSON="$(printf '%s' "$AROLE_RAW" | tr -d '[:space:]')"
     for want in '"bind_secret_id":true' '"token_policies":\["relay-router-reader-dev-worker-1"\]' \
                 '"secret_id_ttl":2592000[,}]' '"token_period":259200[,}]' '"token_no_default_policy":false' \
                 '"token_type":"service"'; do

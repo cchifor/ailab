@@ -116,10 +116,18 @@ denied() { # <description> <command...> -- the command must FAIL with the given 
 # 0. no approle mount -> refused before anything is written
 if run; then fail "a run without the approle mount must be refused"; fi
 expect $N "the approle auth mount is absent"
-if bao policy list | grep -q 'relay-router'; then fail "a refused run wrote a policy"; fi
+for p in relay-router-escrow af-app-relay-router af-app-router-relay-keys relay-router-reader-dev-worker-1; do
+  if bao policy list | grep -qx "$p"; then fail "a refused run wrote policy $p"; fi
+done
+if bao read $TROLE >/dev/null 2>&1; then fail "a refused run wrote the token role"; fi
 if bao read "$(role af-app-relay-router)" >/dev/null 2>&1; then fail "a refused run wrote a role"; fi
+bao auth enable -path=approle userpass >/dev/null
+if run; then fail "a run with another auth method at approle/ must be refused"; fi
+expect $N "the auth mount at approle/ is not of type approle"
+if bao policy list | grep -qx relay-router-reader-dev-worker-1; then fail "a refused run wrote the reader policy"; fi
+bao auth disable approle >/dev/null
 bao auth enable approle >/dev/null
-echo "0: no approle mount -> refused, nothing written"
+echo "0: no approle mount, or another auth method at approle/ -> refused, nothing written"
 
 # 1. first run
 before_tokens="$(accessors)"

@@ -453,7 +453,12 @@ class OpenBaoProvision(unittest.TestCase):
         # The Pi canary's renderer reader (relay-router-workers.md, relay-pi-canary-holder.md): exactly the
         # relay_router_renderer role's reader-policy.hcl.j2 for this estate's escrow (mount af, prefix
         # relay-router/escrow), the one tenant and dev-worker-1's approved connector. Read only.
-        host = "b3b1be1a-275c-4a2e-b515-428b39c43171"
+        # The host the renderer on dev-worker-1 requests: its approved connector, from the inventory that
+        # every relay role on that host reads (relay_connector_host_id), never a third copied literal.
+        host_vars = yaml.safe_load((ROOT / "ansible/host_vars/dev-worker-1.yml").read_text(encoding="utf-8"))
+        host = host_vars["relay_connector_host_id"]
+        self.assertRegex(host, r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        self.assertIn(host, self.script, "the Job's reader is for dev-worker-1's approved connector")
         template = (ROOT / "ansible/roles/relay_router_renderer/templates/reader-policy.hcl.j2").read_text(encoding="utf-8")
         rendered = (template.replace("{{ relay_router_bao_mount }}", "af")
                     .replace("{{ relay_router_bao_prefix }}", "relay-router/escrow")
