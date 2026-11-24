@@ -572,8 +572,22 @@ It writes actions and refusals to syslog (tag `iscsi-portal-watchdog`), a QuLog 
 **Manual fallback** (what fixed both incidents, if the watchdog is absent or refuses):
 1. Back up `/etc/config/hero_iscsi_scst.json`, `hero_iscsi_scst_init_lun_acl.json` and `hero_zfs_lun.json`
    to `kubernetes/infra/_out/qnap-*.<date>-before-iscsi-restart`.
-2. Confirm nothing is logged in. On a trident node container:
-   `iscsiadm -m session -P 1 | grep -c LOGGED_IN` must be 0. `IN LOGIN` / `FREE` is an attempt, not a session.
+2. Confirm nothing is logged in **NAS-wide**: the restart drops every initiator's sessions, not just one node's.
+   Count on the NAS, from every target:
+
+   ```bash
+   python scripts/qnap-ssh.py --sudo <<'EOF'
+   iscsiadmin get_target | awk '/^target = / { n++; if (match($0, /sess_cnt = [0-9]+/)) { s += substr($0, RSTART + 11, RLENGTH - 11); k++ } }
+     END { print n + 0 " targets, " k + 0 " parsed counts, sessions=" s + 0 }'
+   EOF
+   ```
+
+   Restart only if the targets are non-zero, the parsed counts equal the targets, and `sessions=0`. Anything
+   else (a failed query, an unparseable line, a live session) means **do not restart**. With the watchdog
+   installed, `sh /share/ZFS2_DATA/.iscsi-portal-watchdog/watchdog.sh --check` reports the same NAS-wide
+   `sessions=` (`unknown` when unparseable). A per-node look is supplementary only:
+   `iscsiadm -m session -P 1 | grep -c LOGGED_IN` in a trident node container (`IN LOGIN` / `FREE` is an
+   attempt, not a session).
 3. On the NAS (its busybox has no `nohup`):
    `python scripts/qnap-ssh.py --sudo "( trap '' HUP; exec /etc/init.d/iscsitrgt.sh restart ) > /tmp/iscsi-restart.log 2>&1 < /dev/null &"`
 4. Wait for `scst_util` to leave `ps`. Re-check the allowed portal, then SendTargets from a host:
