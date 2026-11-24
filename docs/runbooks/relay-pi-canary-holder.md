@@ -36,7 +36,11 @@ per protocol, naming them `pi-canary-claude`, `pi-canary-codex` and
 | `openai-chat` | `canary-pi-qwen` | One fixed qwen3.8-27b target | 32768 context, 1024 output, 120s request |
 
 These limits are proposed canary limits, not provider capacity claims. Restrict
-workspace roots to a dedicated `/workspace/c4/relay-pi-canary` directory. Use
+each workspace root to `/home/c4/.local/state/relay-holder/workspaces/<profile-id>`
+and its credential home to `.../relay-holder/native-homes/<profile-id>`. The role
+validates and creates these private per-profile directories. The existing
+`/workspace` ancestry is group-writable; this canary deliberately uses the
+private home filesystem instead. Use
 new profile IDs and native homes, exact installed Pi entrypoint hashes and
 mandatory Relay communication. Do not point a canary at another agent's worktree.
 Resolve tenant, router connection and binding IDs through the operator's normal
