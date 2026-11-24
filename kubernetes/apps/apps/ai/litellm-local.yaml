@@ -232,7 +232,7 @@ spec:
         - name: litellm
           # SAME pin as litellm.yaml (tag + digest). Bump the files together; see the pin
           # comment in litellm.yaml.
-          image: ghcr.io/berriai/litellm:v1.109.1@sha256:11175975a3093e05e92faee2fe2fe3412a3ae2fcaa849eb0fe25d5f0d8bcb2e9
+          image: ghcr.io/berriai/litellm:v1.109.4@sha256:028c2b2e096e785efaaf05eee6de598f0035a71be4c37c47500359ec39d4bc00
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
           ports:
