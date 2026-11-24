@@ -104,6 +104,24 @@ class RepoConfigTest(unittest.TestCase):
             self.assertTrue((REPO / path).is_file(), path)
             self.assertTrue(path.startswith('kubernetes/apps/apps/relay/'))
 
+    def test_litellm_held_at_its_audited_minor(self):
+        # LiteLLM 1.110 changes the chatgpt/ route's wire body and drops accounting tables (#1968): the hold
+        # stays until that audit lands, and the three gateway manifests stay on a tag the hold allows.
+        holds = [r for r in self.config['packageRules'] if r.get('matchPackageNames') == ['ghcr.io/berriai/litellm']]
+        self.assertEqual(len(holds), 1)
+        self.assertEqual(set(holds[0]), {'description', 'matchPackageNames', 'allowedVersions'})
+        allowed = holds[0]['allowedVersions']
+        self.assertTrue(allowed.startswith('/') and allowed.endswith('/'), allowed)
+        pattern = re.compile(allowed[1:-1])
+        for name in ('litellm.yaml', 'litellm-local.yaml', 'litellm-vkeys.yaml'):
+            text = (REPO / 'kubernetes/apps/apps/ai' / name).read_text(encoding='utf-8')
+            tags = re.findall(r'ghcr\.io/berriai/litellm:([^@\s]+)@sha256:[0-9a-f]{64}', text)
+            self.assertTrue(tags, name)
+            for tag in tags:
+                self.assertRegex(tag, pattern, '%s pins %s outside the hold' % (name, tag))
+        self.assertIsNone(pattern.search('1.110.3'), 'the hold must exclude the unaudited 1.110 line')
+        self.assertIsNone(pattern.search('v1.110.3'), 'the hold must exclude the unaudited 1.110 line')
+
 
 class AnsibleRequirementsTest(unittest.TestCase):
     def test_no_trailing_comment_on_name_lines(self):
