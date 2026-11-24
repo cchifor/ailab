@@ -153,9 +153,11 @@ spec:
         env:
         - name: NODE_ENV
           value: production
-        # A migration blocked on a lock fails (55P03) after 10 s and rolls back whole, instead of
-        # waiting behind a straggler: rehearsed, it failed in 11 s with nothing applied. The roll then
-        # stops at this init container with the old Pod already gone (Recreate); the backup is taken.
+        # A migration blocked on a lock fails (55P03) after 10 s instead of waiting behind a
+        # straggler (rehearsed: 11 s). Each migration commits on its own, so the schema is then at the
+        # last committed one (read schema_migrations); v0.10.25 does not support that either. The roll
+        # stops at this init container with the old Pod gone (Recreate) and the backup taken: clear the
+        # lock and roll again (migrate resumes), or roll back by restore (the fence comment above).
         - name: PGOPTIONS
           value: "-c lock_timeout=10s"
         - name: RELAY_HOST

@@ -684,15 +684,18 @@ Rehearsal (operator, on the published digest `d0bbbc58…fbbc` against a fresh p
 - the console against v0.10.25;
 - a rollback drill to v0.10.25.
 
-v0.11.0's rehearsal also showed two things. With `lock_timeout=10s`, a blocked migration fails 55P03 in 11 s and rolls
-back whole. The fleet's v0.10.11 connectors work with a v0.11 hub, and the reverse pairing works too. The dev-workers
-stay on the v0.10.11 pin.
+v0.11.0's rehearsal also showed two things. With `lock_timeout=10s`, a blocked migration fails 55P03 in 11 s; that
+migration rolls back, and the ones before it stay committed. The fleet's v0.10.11 connectors work with a v0.11 hub,
+and the reverse pairing works too. The dev-workers stay on the v0.10.11 pin.
 
 Change: this PR pins the v0.11.1 digest in `migrate` and `relay`, with the annotations. It also gives `migrate`
-`PGOPTIONS=-c lock_timeout=10s`, so a migration behind a lock fails instead of waiting. Recreate has already stopped
-the old Pod, so the roll then stops at `migrate`, with the backup taken and the schema unchanged. The fence comment
-says what rollback really is (below). The merge itself rolls the hub once (Recreate, through Flux), with the
-pre-migration backup, outside the QNAP windows. No new settings.
+`PGOPTIONS=-c lock_timeout=10s`, so a migration behind a lock fails (55P03) instead of waiting. Each migration commits
+in its own transaction, so the schema is then at the last migration that committed (read `schema_migrations`): in
+v0.11.0's rehearsal, 087 blocked and left 080-086 committed (schema 86). Recreate has already stopped the old Pod, so
+the roll stops at `migrate` with the backup taken. v0.10.25 does not support a partial schema either: recovery is to
+clear the lock and roll again (`migrate` resumes from the next migration), or the restore-based rollback below. The
+fence comment says what rollback really is (below). The merge itself rolls the hub once (Recreate, through Flux), with
+the pre-migration backup, outside the QNAP windows. No new settings.
 
 Rollback: forward-only from here. An older image is not refused: v0.10.25 starts against schema 88, so re-pinning it
 alone would run it on a schema it does not support. Rollback to v0.10.25 (`d98c6ce7…e22e`) takes four steps, in order:
@@ -725,6 +728,7 @@ Readback after the roll (operator):
   - Activity and the connectors are unaffected: the dev-workers' hosts reconnect on v0.10.11 and their agents show
     observed states.
 
+## Enablement order at a glance
 
 > **Campaign rows are historical.** The owner retired the researcher qualification campaign and its
 > candidate journal on 2026-11-22 ([ailab #1753 comment 136889](https://git.chifor.me/cchifor/ailab/issues/1753#issuecomment-136889)).
@@ -750,8 +754,8 @@ Readback after the roll (operator):
 | canary | HISTORICAL, campaign retired 2026-11-22: H7's canary file | the approval (its permit carries it) | the canary's reviewed report |
 | H4b | HISTORICAL while the campaign is retired (needs its genuine approval): `RELAY_WORKER_PROFILES_FILE`/`_SHA256` (profile registry) | the genuine approval, the qualified `tokenPolicyDigests`, registry reviewed | file pin equal; no `profiles-unavailable`; budget still `started`. Before the bounded general lifecycle trial |
 | H9 | hub image → v0.10.16 (agent state, Claude Code's state, Activity table, Needs you, Fleet, Terminals); gates no step above | every dev-worker connector on v0.10.11 (ailab #1947, #1949, read back per worker); H8's state only (no new settings) | v0.10.16 digest running, schema still 79, agents show observed states and Claude Code's, Activity pages by scrolling, Needs you lists pending requests |
-| H11 | hub image → v0.11.1 (schema 88: migrations 080-088; Terminals as designed; the new shell behind `?console=new`); `PGOPTIONS` lock timeout on `migrate`; gates no step above | H10 live; the operator's rehearsal of the published digest PASS | v0.11.1 digest running, schema `88|88`, the backup generation recorded, the console's checks pass, the dev-workers reconnected |
 | H10 | hub image → v0.10.25 (the Assistant's action registry, every Assistant tool on it, its cards, its brief and its routes; Fleet as designed); gates no step above | H9 live | v0.10.25 digest running, schema still 79, a host decided from the console and one from the Assistant both read `action: host.authorize`, an Assistant rename reads `action: conversation.rename`, and a host approved from the Needs you card reads `surface: assistant-card`, in Activity, and the agents, lanes, session and terminal cards show (the terminal text only on request), and the brief's Needs you matches Status |
+| H11 | hub image → v0.11.1 (schema 88: migrations 080-088; Terminals as designed; the new shell behind `?console=new`); `PGOPTIONS` lock timeout on `migrate`; gates no step above | H10 live; the operator's rehearsal of the published digest PASS | v0.11.1 digest running, `schema_migrations` `88\|88`, the backup generation recorded, the console's checks pass, the dev-workers reconnected |
 
 ## Rollback: migrations are forward-only
 
