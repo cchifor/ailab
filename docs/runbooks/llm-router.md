@@ -4813,6 +4813,73 @@ back, and a rolled-back release digest needs File B reissued again.
 
 No other Router change may follow before the canary.
 
+## Safe error classifications release (2026-11-24, llm-router #194)
+
+Release `router-0.1.0-20261124-safe-errors`:
+- source `dd02027277a59eade931dd545440f4754657100c`, on llm-router branch `release/router-20261124-safe-errors`: the live
+  `50d879ca` plus a cherry-pick of [#197](https://git.chifor.me/cchifor/llm-router/pulls/197), which closes #194;
+- archive `router-0.1.0-20261124-safe-errors.tar.gz`, SHA-256
+  `6a3e8f5300eaaadd7bd2460c5cd30e20e4958970ea47ae4ac034fdc01c1609e4`, as asset 1081 on Relay release v0.2.0;
+- Relay branch `release/router-20261124-safe-errors`, packaging commit `5e1a09ea4`, Relay run
+  [147591](https://git.chifor.me/cchifor/relay/actions/runs/147591);
+- image `registry.chifor.me/llm-router/router@sha256:a464b8d120b358b3c6215559e327547064a6f60da6c6f6b48e4b0c8dfc9fb3ec`.
+  The image's revision label is `dd020272`.
+
+**What it changes.** Pino log lines that used to print raw exception text now log a fixed classification from
+`packages/kernel/safe-error.ts`. The class and the code are each read once. A class name passes only if it is on an
+allowlist of known classes, and anything else becomes `Error`. A code passes only from fixed lists: named Node errno
+codes, 18 SQLSTATEs and the OIDC errors. At most two causes are followed, and the helper never throws.
+
+The changed producers are agent-core, auth's `why()`, chat-images, storage-sqlite, metrics, smart-pools, the o200k
+tokenizer, and the kernel drain and `http.ts`. Rejected tool or action strings are logged as their lengths. A hostile
+drain-hook error can no longer stop the later hooks, the runtime close or the exit. The llm-router README section
+"What a failure logs" documents the new lines. The #195 budget-status export is unchanged.
+- Against the live archive, only the `dist` of those packages, the new `kernel/safe-error.*`, `SOURCE_COMMIT` and pnpm's
+  bookkeeping differ.
+- No schema, migration, KV, plugin-settings or configuration change.
+
+**Verified on the release tree.** The tests ran under docker compose in the pinned Node 26.10.0 image, with a throwaway
+PostgreSQL:
+- the log-classification, safe-error, smart-pools and drain tests;
+- `tests/plugin-logs.test.ts`, 10/10;
+- the full suite: 2696 passed, 8 skipped;
+- `tsc`: clean.
+
+The production smoke passed sandboxed. `executingRelease` gives these values, both on the archive and inside the
+published image:
+- `routerReleaseDigest` `3f951ebf39cf432b28afab2e7ab316a91e6ad371afb64bc3bf3ce65f4c8b6fae`;
+- the adapter digests, which are unchanged.
+
+**Worker budgets.** Nothing changes from the release before. File B was already filtered out after that roll and is
+still not reissued, for the same reasons; the record is
+[llm-router #191 comment 139216](https://git.chifor.me/cchifor/llm-router/issues/191#issuecomment-139216). Router
+`capabilities` keep `workerBudgets: false`, and the plugin stays `available`. Before any future worker-budget use,
+reissue File B and configure the hub's worker-profiles file.
+
+**Rollback.** Revert the image, the comment above it and both annotations together:
+- image `registry.chifor.me/llm-router/router@sha256:eb2243e96a84c4ba85ef64f4051c88fe7fa21d1dec9f3ee1aaf24fda24f61be8`;
+- source `50d879ca96c2b62ada9e37a4119bdcda786dec66`;
+- release `router-0.1.0-20261123-budget-stdout`.
+
+**The roll, in this order.** Stop at the first step that fails.
+0. **Before:** take the `validate-live` baseline and save `GET /v1/routes` as the administrator.
+1. **Merge = the roll.** Expect one Pod of image `a464b8d1…b3ec`, with the revision up by exactly 1 (the live one is
+   117) and stable after Flux's next reconcile of `apps`.
+2. **Router readback:** `rlinks_ok` shows links 1, and `plugins` shows `worker-budget-authority` `active`.
+3. **Logs.** Run the #195 section's step 3 check unchanged: one `Worker budget authority available` line, and no
+   non-canonical budget-authority line. Then make sure no line printed since the roll carries a raw secret shape:
+
+   ```sh
+   kubectl --context admin@ai -n llm-router logs deploy/llm-router -c router --since=15m \
+     | grep -cE 'postgres(ql)?://[^ ]*:[^ ]*@|Bearer [A-Za-z0-9._-]{8,}|sk-[A-Za-z0-9_-]{8,}'
+   ```
+
+   Expect `0`.
+4. **Ledger and hub unchanged,** as in the #195 section's step 4: `rident` is unchanged, the hub's budget metrics are
+   unchanged (the H6 state), and no `RelayWorkerBudget*` alert fires.
+5. **Release gate (router-ab)** on the live router. Then `validate-live` must show no new failure against the baseline,
+   and `GET /v1/routes` must be byte-identical to the saved copy.
+
 ## Budget status on stdout release (2026-11-23, llm-router #195)
 
 Release `router-0.1.0-20261123-budget-stdout`:
