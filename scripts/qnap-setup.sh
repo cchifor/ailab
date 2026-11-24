@@ -4,11 +4,11 @@
 #
 # Prereqs: .env filled (QNAP_SSH_USER/QNAP_ADMIN_PASSWORD), SSH enabled on the QNAP.
 # NOTE: the Thunderbolt *bridge* service IP (10.55.0.254) cannot be set via qcli (system
-#       bridge has no interface ID). Two layers carry it (runbook qnap-storage-setup.md §2):
-#       the cron reconciler installed below (for the bridge S99thunderbolt.sh recreates with
-#       no address), and the static entry in QNAP's own config written by
-#       scripts/qnap-tbtbr0-static-ip.sh (so iSCSI binds the right IP at boot). On a fresh NAS
-#       with no cluster attached, run that script with APPLY=1 after this one.
+#       bridge has no interface ID). The primary carrier is the static entry in QNAP's own
+#       config, written by scripts/qnap-tbtbr0-static-ip.sh (so it exists before iSCSI and NFS
+#       start at boot); on a fresh NAS with no cluster attached, run that script with APPLY=1
+#       after this one. The cron reconciler installed below came first. It is redundant once
+#       the static config is proven at a boot (runbook qnap-storage-setup.md §2).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

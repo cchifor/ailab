@@ -10,10 +10,11 @@
 # (2026-10-30, 2026-11-24). With ip4_type=STATIC, S45network puts 10.55.0.254 on the bridge
 # before S46 runs.
 #
-# What this does NOT replace: S99thunderbolt.sh (~261 s) deletes tbtbr0 and recreates it with
-# brctl, outside QNAP's network manager and with NO address. The cron reconciler puts 10.55.0.254
-# on that second bridge, so it stays. The iSCSI portal watchdog
-# (scripts/qnap-iscsi-portal-watchdog.sh) stays too, as the backstop.
+# S99thunderbolt.sh does NOT rebuild the bridge on a normal boot: it logs "Remove tbtbr0" every
+# time, but deletes only when /tmp/nasconfig_tmp/tbtbr_disable exists, and creates only when
+# QNAP's network manager is absent. So the address set at S45 stays. The cron reconciler is kept
+# until a boot proves this config (runbook §2), and the iSCSI portal watchdog
+# (scripts/qnap-iscsi-portal-watchdog.sh) stays as the backstop.
 #
 # This WRITES CONFIG ONLY, through QNAP's network CLI (`nacli setcfg`). Nothing is applied to the
 # live bridge; the value takes effect at the next NAS boot. Measured 2026-11-24: QNAP's own log of

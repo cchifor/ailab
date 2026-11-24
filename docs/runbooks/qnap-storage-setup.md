@@ -50,12 +50,18 @@ cluster mounts.
 |---|---|---|
 | ~86 s | `S45network` creates the bridge from `nm.conf` | link-local `169.254.x.x` |
 | 116-191 s | `S46iSCSItrgt` binds every target's portal to the bridge's address **once** | portals on `169.254.x.x` (§12) |
-| ~191 s+ | `S70crond`; the reconciler adds `10.55.0.254` | |
-| ~261 s | `S99nfs`, then `S99thunderbolt.sh` deletes and recreates the bridge with `brctl`, outside QNAP's network manager, with **no** address | the reconciler re-adds `10.55.0.254` within a minute |
+| ~245 s | `S70crond` starts | link-local |
+| ~261 s | `S99nfs` starts NFS, then `S99thunderbolt.sh` loads the Thunderbolt driver and brings `tbtbr0` up; the ports join at ~281 s | link-local |
+| ~301 s | the reconciler's first run (the next cron minute): adds `10.55.0.254`, then the once-per-boot NFS re-export. `avahi-autoipd` then drops its link-local address | `10.55.0.254` |
 
-**Both layers are needed:**
+`S99thunderbolt.sh` logs `Remove tbtbr0` on every boot, but it only deletes the bridge when the loop-prevention flag
+`/tmp/nasconfig_tmp/tbtbr_disable` exists, and it only creates one when QNAP's network manager is absent. Normally it
+does neither: on 2026-11-24, `dummy0` stayed port 1 from 86 s and the Thunderbolt ports joined as ports 2 and 3.
+(An earlier version of this section said S99 recreates the bridge without an address. That was wrong.)
+
+**The two layers:**
 1. **Static IP in QNAP's config** (`ip4_type=STATIC ip=10.55.0.254 subnet_mask=255.255.255.0`, the same layout as
-   QNAP's static `lxcbr0`), so `S45network` gives the first bridge the service IP before iSCSI (and NFS) start.
+   QNAP's static `lxcbr0`), so `S45network` gives the bridge the service IP before iSCSI (and NFS) start.
    `scripts/qnap-tbtbr0-static-ip.sh` writes it through QNAP's network CLI (`nacli setcfg`). It is config-only (it
    takes effect at the next NAS boot). With sessions logged in, it needs `LIVE_WRITE=1`, and then checks for 30 s that
    the bridge keeps its address and no session drops. A write was measured to apply nothing live: no network-stack
@@ -65,10 +71,13 @@ cluster mounts.
    plan's "Results"). Check the current state with the read-only mode (`bash scripts/qnap-tbtbr0-static-ip.sh` says
    `already as wanted`). **Not yet proven:** the first NAS boot after the write is the test. Run the plan's step 4
    checks then, and record them in the plan.
-2. **The cron reconciler** stays, for the bridge that `S99thunderbolt.sh` recreates without an address.
+2. **The cron reconciler** (`/etc/config/tb-storage-ip.sh`, every minute). Its address line exists only because QNAP's
+   config said DHCP. Once the static config is proven at a boot, nothing is left for it to do at boot. **Keep it until
+   then:** the running bridge still has the DHCP config (`dhclient` and `avahi-autoipd` run on it), and the reconciler
+   is what put `10.55.0.254` there. After a boot that passes the plan's step 4 checks, drop its address line. Its
+   other job, the once-per-boot NFS re-export, is judged separately (plan, "Results").
 
 The UI route (Control Panel → Network & Virtual Switch → Interfaces → Thunderbolt → Static) writes the same keys.
-Do **not** remove the reconciler if you use it.
 
 ## 3. Optional cleanup of default datasets
 The factory left empty datasets (`ZFS1_DATA`, `ZFS530_DATA`, `Public`, `zfs1107`). They're harmless
@@ -567,8 +576,8 @@ all targets `enable`. Yet SendTargets discovery answers "No portals found" from 
 **Mechanism:** the targets are bound to interfaces (`tbtbr0,lo`), and `scst_util --load` (`S46iSCSItrgt`, uptime
 ~116-191 s) resolves each one to an IPv4 **once**. At that moment `tbtbr0` holds only the link-local address
 (`169.254.6.247`) that QNAP gives it: QNAP's own config has the bridge as DHCP, and `10.55.0.254` comes only from our
-cron reconciler (§2; crond is `S70`). `S99thunderbolt.sh` (~261 s) then deletes and recreates the bridge with no
-address, the reconciler adds `10.55.0.254`, and nothing re-resolves the targets. This happens on every boot. Whether
+cron reconciler (§2; crond is `S70`), which adds `10.55.0.254` after the targets are already bound. Nothing
+re-resolves them. This happens on every boot. Whether
 it bites depends on timing (2026-11-01 came back clean four times). **Root-cause fix:** §2's static config,
 which puts `10.55.0.254` on the bridge at `S45network` (~86 s), before `S46`. Whether it is written: §2's read-only
 check. Whether it worked: the first NAS boot after it (`plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`, step 4).
