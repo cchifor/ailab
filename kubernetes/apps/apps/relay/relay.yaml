@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.11.6-release-148372
-        chifor.me/source-commit: eae6709c9d4bd537b68601f9baa4cd79f1a03812
+        chifor.me/release: relay-0.12.0-release-148517
+        chifor.me/source-commit: 11ac8f72efc6edb0f820e02db67eeaf6351e33da
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -132,24 +132,24 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-      # FORWARD-ONLY: schema 89 (080-088 applied by v0.11.1, 089 by v0.11.4: the health_samples table
-      # and an index on agent_messages). An older image is NOT refused: v0.11.3 starts against schema
-      # 89, and recovery:fence/initialize demand exactly 1..CURRENT_SCHEMA_VERSION, so a bare re-pin is
-      # never a rollback. Rollback to v0.11.3 (2c350aee...) = restore this roll's EARLIEST pre-migration
-      # generation (the first backup-database log of the v0.11.4 rollout), then recovery:fence with a
-      # FRESH generation (relay-restore-fencing carries it), then a reviewed PR re-pins v0.11.3. Its
-      # cost is H11's: every connector and agent key revoked, every session ended, the undelivered
-      # outbox deleted, a new generation ConfigMap; writes after the backup are lost.
-      # docs/runbooks/relay-researcher-hub-upgrade.md, H12 and H11, and "Rollback: migrations are
-      # forward-only". v0.11.5 and v0.11.6 add no migration: back to v0.11.5 (f8e2acc8...) or v0.11.4
-      # (4f30750e...) is a reviewed re-pin (H13, H14). Further back: to v0.10.25 (d98c6ce7...) restore the v0.11.1 rollout's earliest
-      # pre-migration generation, fence, re-pin (H11); below v0.10.2 restore the v0.10.2 rollout's
-      # pre-migration generation 20261115T162747Z-119fcc01-b84d-4be5-a80c-ac5196caaf73 (else H1's),
-      # fence, then a reviewed PR re-pins v0.9.1 (runbook "Rollback", the H2 mechanics).
-      # Relay v0.11.6, source eae6709c9d4bd537b68601f9baa4cd79f1a03812 (release/v0.11)
-      # release v0.11.6 / run 148372; schema 89 (no migration; 089 came with v0.11.4).
+      # FORWARD-ONLY: schema 91 (080-088 applied by v0.11.1, 089 by v0.11.4, 090-091 by v0.12.0: the
+      # user_preferences table and two partial indexes on agent_message_recipients). An older image is
+      # NOT refused: v0.11.6 starts against schema 91, and recovery:fence/initialize demand exactly
+      # 1..CURRENT_SCHEMA_VERSION, so a bare re-pin is never a rollback. Rollback to v0.11.6
+      # (8adca17a...) = restore this roll's EARLIEST pre-migration generation (the first backup-database
+      # log of the v0.12.0 rollout), then recovery:fence with a FRESH generation (relay-restore-fencing
+      # carries it), then a reviewed PR re-pins v0.11.6. Its cost is H11's: every connector and agent
+      # key revoked, every session ended, the undelivered outbox deleted, a new generation ConfigMap;
+      # writes after the backup are lost. docs/runbooks/relay-researcher-hub-upgrade.md, H15, H12 and
+      # H11, and "Rollback: migrations are forward-only". Below v0.11.4: restore the v0.11.4 rollout's
+      # earliest pre-migration generation, fence, re-pin (H12); to v0.10.25 (d98c6ce7...) restore the v0.11.1
+      # rollout's earliest pre-migration generation, fence, re-pin (H11); below v0.10.2 restore the
+      # v0.10.2 rollout's pre-migration generation 20261115T162747Z-119fcc01-b84d-4be5-a80c-ac5196caaf73
+      # (else H1's), fence, then a reviewed PR re-pins v0.9.1 (runbook "Rollback", the H2 mechanics).
+      # Relay v0.12.0, source 11ac8f72efc6edb0f820e02db67eeaf6351e33da (release/v0.12)
+      # release v0.12.0 / run 148517; schema 91 (migrations 090 user_preferences, 091 message-problem indexes).
       # Native Pi inference sessions; see relay-inference-v0113-20261124.md.
-      - image: registry.chifor.me/relay/control-plane@sha256:8adca17a954913f3bd920dfc5fbba1343c1570a724a3f2171715fe4956270b8e
+      - image: registry.chifor.me/relay/control-plane@sha256:e63d533fae058a5674d705ad86a0c57cc5ca421d677dc710ad7023ebc10dc364
         workingDir: /app
         envFrom:
         - secretRef:
@@ -201,10 +201,10 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      # Relay v0.11.6, source eae6709c9d4bd537b68601f9baa4cd79f1a03812 (release/v0.11)
-      # release v0.11.6 / run 148372; schema 89 (no migration; 089 came with v0.11.4).
+      # Relay v0.12.0, source 11ac8f72efc6edb0f820e02db67eeaf6351e33da (release/v0.12)
+      # release v0.12.0 / run 148517; schema 91 (migrations 090 user_preferences, 091 message-problem indexes).
       # Native Pi inference sessions; see relay-inference-v0113-20261124.md.
-      - image: registry.chifor.me/relay/control-plane@sha256:8adca17a954913f3bd920dfc5fbba1343c1570a724a3f2171715fe4956270b8e
+      - image: registry.chifor.me/relay/control-plane@sha256:e63d533fae058a5674d705ad86a0c57cc5ca421d677dc710ad7023ebc10dc364
         workingDir: /app
         envFrom:
         - secretRef:
