@@ -22,6 +22,21 @@ refusal. Keep the completed snapshot while this init container is configured;
 remove the init block through a reviewed change before retiring that snapshot.
 This backup shares the live PVC. It protects against application-level corruption,
 not PVC loss; independent off-volume recovery remains the estate backup procedure.
+The [pinned publisher](https://git.chifor.me/cchifor/relay/src/commit/b0336729fbd9915379246df3e64b616197736642/deploy/ci/publish.py)
+copies `deploy/ci/backup-router.mjs` into the image's `/app/deploy/` directory and
+runs the backup test against that exact installed path. This was also verified
+after pulling the published digest, with no network, UID 1000, a read-only root,
+all capabilities dropped and writable `/tmp`: running
+`node /checks/test-backup.mjs /app/deploy/backup-router.mjs` passed live WAL backup,
+default/custom labels, repeat verification, invalid-label/corruption rejection
+and unchanged-source checks. `/checks` was the read-only pinned Relay CI directory.
+
+Storage rehearsal against an isolated consistent copy of the live database also
+passed: new store, current production store, then new store again. Schema version
+7, integrity `ok`, configuration hash and all 23,875 trajectories were unchanged.
+No server/provider process was started, no credential key was copied, and the
+temporary snapshot was removed. This establishes storage compatibility, not
+provider or end-to-end acceptance.
 This first pin stages the router with native Messages and warm retention still
 disabled. It may roll before the paired Relay release; it does not activate the
 new profile or constitute end-to-end acceptance. Relay's pin follows separately
