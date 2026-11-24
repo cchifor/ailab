@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.11.3-release-147885
-        chifor.me/source-commit: aaad724607e2f9a97f64a40951142cf39815e7d4
+        chifor.me/release: relay-0.11.4-release-147982
+        chifor.me/source-commit: 225b7747f8875da1ccc4e9badccae46c252e0abe
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -132,21 +132,21 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-      # FORWARD-ONLY: schema 88 (migrations 080-088, applied by v0.11.1). An older image is NOT
-      # refused: v0.10.25 starts against schema 88, so a bare re-pin would run it on a schema it does
-      # not support. Rollback to v0.10.25 (d98c6ce7...) = restore this roll's EARLIEST pre-migration
-      # generation (the first backup-database log of the v0.11.1 rollout), then recovery:fence with a
-      # FRESH generation (relay-restore-fencing carries it), then a reviewed PR re-pins v0.10.25; never
-      # a bare re-pin. Its cost (rehearsed): every connector and agent key revoked (4 and 8), every
-      # session ended (49), the undelivered outbox deleted, a new generation ConfigMap; writes after
-      # the backup are lost. docs/runbooks/relay-researcher-hub-upgrade.md, H11 and "Rollback:
-      # migrations are forward-only". Below v0.10.2: restore the v0.10.2 rollout's pre-migration
-      # generation 20261115T162747Z-119fcc01-b84d-4be5-a80c-ac5196caaf73 (else H1's), fence, then a
-      # reviewed PR re-pins v0.9.1.
-      # Relay v0.11.3, source aaad724607e2f9a97f64a40951142cf39815e7d4 (release/v0.11)
-      # release v0.11.3 / run 147885; unchanged schema 88.
+      # FORWARD-ONLY: schema 89 (080-088 applied by v0.11.1, 089 by v0.11.4: the health_samples table
+      # and an index on agent_messages). An older image is NOT refused: v0.11.3 starts against schema
+      # 89, and recovery:fence/initialize demand exactly 1..CURRENT_SCHEMA_VERSION, so a bare re-pin is
+      # never a rollback. Rollback to v0.11.3 (2c350aee...) = restore this roll's EARLIEST pre-migration
+      # generation (the first backup-database log of the v0.11.4 rollout), then recovery:fence with a
+      # FRESH generation (relay-restore-fencing carries it), then a reviewed PR re-pins v0.11.3. Its
+      # cost is H11's: every connector and agent key revoked, every session ended, the undelivered
+      # outbox deleted, a new generation ConfigMap; writes after the backup are lost.
+      # docs/runbooks/relay-researcher-hub-upgrade.md, H12 and H11, and "Rollback: migrations are
+      # forward-only". Further back follows H11's comment (v0.10.25 by the v0.11.1 rollout's earliest
+      # generation; below v0.10.2 as before).
+      # Relay v0.11.4, source 225b7747f8875da1ccc4e9badccae46c252e0abe (release/v0.11)
+      # release v0.11.4 / run 147982; schema 89 (migration 089: health_samples).
       # Native Pi inference sessions; see relay-inference-v0113-20261124.md.
-      - image: registry.chifor.me/relay/control-plane@sha256:2c350aeef49aaf0b7f596594cc4aa7b72d6d618c54ad5fb6317192bfcaca8a2b
+      - image: registry.chifor.me/relay/control-plane@sha256:4f30750efe6715f86f7cb1028d20833cfd74788baafbe466e05f86dd78bb97c9
         workingDir: /app
         envFrom:
         - secretRef:
@@ -198,10 +198,10 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      # Relay v0.11.3, source aaad724607e2f9a97f64a40951142cf39815e7d4 (release/v0.11)
-      # release v0.11.3 / run 147885; unchanged schema 88.
+      # Relay v0.11.4, source 225b7747f8875da1ccc4e9badccae46c252e0abe (release/v0.11)
+      # release v0.11.4 / run 147982; schema 89 (migration 089: health_samples).
       # Native Pi inference sessions; see relay-inference-v0113-20261124.md.
-      - image: registry.chifor.me/relay/control-plane@sha256:2c350aeef49aaf0b7f596594cc4aa7b72d6d618c54ad5fb6317192bfcaca8a2b
+      - image: registry.chifor.me/relay/control-plane@sha256:4f30750efe6715f86f7cb1028d20833cfd74788baafbe466e05f86dd78bb97c9
         workingDir: /app
         envFrom:
         - secretRef:
