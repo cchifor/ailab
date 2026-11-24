@@ -52,7 +52,7 @@ the newly built image, including repeat verification of the historical snapshot.
    normal administrator settings API, use its current revision and preserve all
    other values; confirm saved 2.1.283, active 2.1.281 and `pending: true` before
    the rollout. This setting takes effect on restart, not through plugin toggles.
-   Staging completed at 10:15 UTC: saved 2.1.283, active 2.1.281, pending true,
+   Staging completed on 2026-11-24 at 10:15 UTC: saved 2.1.283, active 2.1.281, pending true,
    revision `974be1b47ad7507dd2128e786b778907bb2cc9936aea0e6a68114a6eca02bc62`.
    All other settings were preserved. Re-read this state before rollout; do not
    repeat the staging write blindly. Messages and warm retention remain disabled.
@@ -65,8 +65,8 @@ the newly built image, including repeat verification of the historical snapshot.
    and the canonical authority-available log line. Preserve inactive hub budgets;
    File B remains unqualified for future worker-budget use.
 4. Require `/app/dist/packages/kernel/safe-error.js` in the running image. Read the
-   whole new pod log successfully and apply the secret-pattern checks from the
-   safe-errors release runbook; report only pass/fail, never matching secret text.
+   whole new pod log successfully and apply the [log checks below](#log-checks);
+   report only pass/fail, never matching secret text.
 5. Enable native Messages only with active CLI 2.1.283 and warm retention off.
    Use a temporary fixed-model Claude route with one deployment, maxAttempts 1,
    no fallback and a disposable scoped key. Run the published bounded session
@@ -74,6 +74,24 @@ the newly built image, including repeat verification of the historical snapshot.
 6. Complete the dedicated live Relay/Pi profile acceptance and warm-to-cold
    rollback in [the inference rollout](relay-inference-sessions-20261124.md).
    Router-only acceptance does not replace the paired Relay release or its tests.
+
+## Log checks
+
+Use the complete new router container log from pod start. A failed log read fails
+this gate; an empty result from a failed command never counts as clean. Require
+one `Worker budget authority available` line and no noncanonical budget-authority
+message. Fail on any match of this secret-shape expression, without printing the
+matching line:
+
+```text
+postgres(ql)?://[^ ]*:[^ ]*@|Bearer [A-Za-z0-9._-]{8,}|sk-[A-Za-z0-9_-]{8,}
+```
+
+This checklist is retained here because the separate
+[safe-errors release runbook](https://git.chifor.me/cchifor/ailab/src/commit/204bdf309024fcdd08df99c328f962fab8382caa/docs/runbooks/llm-router.md#safe-error-classifications-release-2026-11-24-llm-router-194)
+is on the unmerged #1970 branch. Do not use that branch's older image or rollback
+pins. A clean log alone does not exercise the error paths: also verify this
+release's exact image/source and the installed safe-error module in step 4.
 
 ## Rollback
 
