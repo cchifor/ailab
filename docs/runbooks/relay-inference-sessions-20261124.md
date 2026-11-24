@@ -9,6 +9,7 @@ Owner merged AILab #1967 at 09:14 UTC, commit
 `eb63210529ffc95849419acc9778cfd34b2909d7`. Flux `apps` reports this applied
 revision. The router Deployment runs the `370bf5bf` image digest recorded below;
 pod `llm-router-67bf4df5b7-brk5d` is ready (1/1), with zero restarts at readback.
+Readbacks and bounded baseline requests were collected at 09:18–09:23 UTC.
 Its source/release annotations match `300856ff` and
 `router-0.1.0-20261124-inference-sessions`.
 
@@ -16,6 +17,10 @@ Its source/release annotations match `300856ff` and
   pre-inference-sessions-20261124`.
 - Authenticated `/v1/routes` is byte-identical to the saved pre-roll baseline:
   SHA-256 `cb9904a07f3a4627cbf849a60ad9396f544a4db9cb886c83ccae03ea6fa85afa`.
+  Baseline location: `/data/inference-rollout-20261124/routes-before.json` on
+  the router PVC (mode 0600). Compare the authenticated response inside the pod;
+  do not extract or log the administrator credential. This file is the pre-roll
+  listing and must not be overwritten by later canary route changes.
 - Anonymous `/v1/routes` and `/admin/v1/config` both return 401.
 - Existing native Codex Responses: 200, completed, 2,535 ms.
 - Existing Qwen Chat: 200, completed, 416 ms.
