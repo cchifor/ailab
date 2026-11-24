@@ -730,6 +730,56 @@ Readback after the roll (operator):
   - Activity and the connectors are unaffected: the dev-workers' hosts reconnect on v0.10.11 and their agents show
     observed states.
 
+### H12. v0.11.4: health tiles with history, schema 89
+
+Why: Status had no record of the platform's health over time; the owner asked for health as discrete bars with
+history. Relay #649 (B4) with its review fixes (#653), released as v0.11.4 (#652, `225b7747`, run 147982), on top of
+v0.11.3 (live since 2026-11-24, ailab #1979: Activity Events and the native Pi inference work):
+- a sampler in the hub writes one sample a minute per source (Relay platform, Hosts, Bus, Agents, Control plane,
+  Inference) per tenant, only from an observation made in that minute, with its own small pools (app max 2, owner
+  max 1), statement and query timeouts and a 50 s tick deadline;
+- `GET /api/health/history?window=4h|24h|7d` for every member (check details for administrators);
+- Status shows the six tiles with 48 bars each, after Needs you.
+
+Migration 089 (schema 88 → 89):
+- the `health_samples` table, with forced row security, kept seven days by the sampler;
+- `CREATE INDEX agent_messages_expiry ON agent_messages(tenant_id, expires_at)`, under `lock_timeout 10s`. The build
+  holds SHARE on `agent_messages` for its duration; production's table is small, so expect well under a second;
+- `relay_app` gets SELECT, INSERT and DELETE on `health_samples`.
+
+Check before the merge (operator), recorded on the PR (ailab #1984, the operator's check comment), PASS when all hold:
+- the published digest `4f30750e…97c9` (deployment-images-147982.json and the image's revision label) migrates the
+  latest production generation (here 20261124T162049Z-bfa30aad, schema 88) to schema 1..89, `migrate` exit 0, with
+  its time recorded (1.1 s);
+- `health_samples` has forced row security and its policy; grants: owner SIUD, app SID, backup S;
+- the `agent_messages_expiry` index built, with the table's row count recorded (1,665 rows);
+- the hub on that copy writes samples each minute (9 rows in 3 minutes).
+
+Change: this PR pins the v0.11.4 digest in `migrate` and `relay`, with the annotations, and moves the fence comment to
+schema 89. `migrate` keeps `PGOPTIONS=-c lock_timeout=10s` (H11). The merge itself rolls the hub once (Recreate,
+through Flux), with the pre-migration backup, outside the QNAP windows. No new settings; `RELAY_HEALTH_SAMPLING=0`
+would turn the sampler off and is not set.
+
+Rollback: forward-only, as H11. v0.11.3 starts against schema 89 and recovery's checks demand exactly 1..89, so a bare
+re-pin is never a rollback. Rollback to v0.11.3 (`2c350aee…8a2b`) = restore this roll's **earliest** pre-migration
+generation (the first `backup-database` log of the v0.11.4 rollout), `recovery:fence` with a **fresh** generation kept
+in `relay-restore-fencing`, then a reviewed PR re-pins v0.11.3; H11's cost applies (every connector, agent key and
+session; the undelivered outbox; a new generation ConfigMap; writes after the backup lost).
+
+Readback after the roll (operator):
+
+- one Running Pod; source `225b7747f8875da1ccc4e9badccae46c252e0abe`, release `relay-0.11.4-release-147982`;
+  the `relay` container's image ID ends in
+  `sha256:4f30750efe6715f86f7cb1028d20833cfd74788baafbe466e05f86dd78bb97c9`;
+- the backup init container exited 0 (record its generation: the rollback's restore point), the migrate init container
+  exited 0, and `schema_migrations` reads `89|89`; the `relay` container's env is unchanged from v0.11.3;
+- after two minutes, `health_samples` has a row per source in use for the minute. Forced row security reads empty
+  without the tenant, so read it as the postgres superuser, or in one transaction:
+  `BEGIN; SET LOCAL relay.tenant_id = '00000000-0000-4000-8000-000000000001'; SELECT source, max(sampled_at) FROM
+  health_samples GROUP BY source; COMMIT;`;
+- the owner, in the console: Status shows Health after Needs you, with the six tiles, their bars filling from the
+  right, and a tile's Details opening under the grid.
+
 ## Enablement order at a glance
 
 > **Campaign rows are historical.** The owner retired the researcher qualification campaign and its
@@ -758,6 +808,7 @@ Readback after the roll (operator):
 | H9 | hub image → v0.10.16 (agent state, Claude Code's state, Activity table, Needs you, Fleet, Terminals); gates no step above | every dev-worker connector on v0.10.11 (ailab #1947, #1949, read back per worker); H8's state only (no new settings) | v0.10.16 digest running, schema still 79, agents show observed states and Claude Code's, Activity pages by scrolling, Needs you lists pending requests |
 | H10 | hub image → v0.10.25 (the Assistant's action registry, every Assistant tool on it, its cards, its brief and its routes; Fleet as designed); gates no step above | H9 live | v0.10.25 digest running, schema still 79, a host decided from the console and one from the Assistant both read `action: host.authorize`, an Assistant rename reads `action: conversation.rename`, and a host approved from the Needs you card reads `surface: assistant-card`, in Activity, and the agents, lanes, session and terminal cards show (the terminal text only on request), and the brief's Needs you matches Status |
 | H11 | hub image → v0.11.1 (schema 88: migrations 080-088; Terminals as designed; the new shell behind `?console=new`); `PGOPTIONS` lock timeout on `migrate`; gates no step above | H10 live; the operator's rehearsal of the published digest PASS | v0.11.1 digest running, `schema_migrations` `88\|88`, the backup generation recorded, the console's checks pass, the dev-workers reconnected |
+| H12 | hub image → v0.11.4 (schema 89: health samples; health tiles on Status); gates no step above | v0.11.3 live (ailab #1979); the operator's 88 → 89 check PASS | v0.11.4 digest running, `schema_migrations` `89\|89`, the backup generation recorded, health samples written each minute, the tiles on Status |
 
 ## Rollback: migrations are forward-only
 
@@ -786,6 +837,9 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
   `relay-restore-fencing`, then a reviewed PR re-pins v0.10.25 (`d98c6ce7…e22e`). Cost, rehearsed: every connector
   and agent key revoked (4 and 8), every session ended (49), the undelivered outbox deleted, a new generation
   ConfigMap; writes after the backup are lost.
+- **H12 (schema 89):** as H11: never a bare re-pin. Restore the v0.11.4 rollout's **earliest** pre-migration
+  generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
+  v0.11.3 (`2c350aee…8a2b`); H11's cost applies.
 - **H8:** a reviewed PR re-pins v0.10.4 (`d1482bc1…57a7`); schema 79 is unchanged. A connection row or
   pool approved under v0.10.9 stays, and v0.10.4 accepts it (its check only reads the row).
 - **H7's candidate files:** the next run's PR replaces a run's values; before the canary one PR drops
