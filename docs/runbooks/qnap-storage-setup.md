@@ -556,10 +556,14 @@ python scripts/qnap-ssh.py --sudo 'iscsiadmin get_allow_portal "$(iscsiadmin get
 `/share/ZFS2_DATA/.iscsi-portal-watchdog/` with one root cron line (every minute). It restarts the target
 service (`/etc/init.d/iscsitrgt.sh restart`, ~80 s), which re-resolves the interfaces, when ALL of these hold:
 - some target's allowed portal is an IPv4 that no local interface holds;
-- the same picture showed on two consecutive runs (a bridge mid-rebuild moves the addresses);
-- **no iSCSI session is logged in** (a restart drops every session). If one is, it logs an error and a QuLog
-  event and leaves the decision to a person;
-- the service is not already (re)loading, the boot's budget (3 restarts, 10 min apart) is not spent.
+- every target's portal query succeeded and listed a portal (a failed query is "cannot judge", never
+  "healthy");
+- the same picture showed on two consecutive runs (a bridge mid-rebuild moves the addresses); a run that
+  cannot judge (service loading, no addresses, no targets, a failed query) breaks the sequence;
+- **no iSCSI session is logged in** (a restart drops every session), read again right before the restart, and an
+  unparseable count counts as "some". If one is, it logs an error and a QuLog event and leaves the decision to
+  a person;
+- the boot's budget (3 restarts, 10 min apart) is not spent.
 
 It writes actions and refusals to syslog (tag `iscsi-portal-watchdog`), a QuLog event, and
 `/share/ZFS2_DATA/.iscsi-portal-watchdog/watchdog.log` (on the pool, so it survives the reboot it is for).

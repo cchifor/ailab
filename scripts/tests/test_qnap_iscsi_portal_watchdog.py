@@ -37,14 +37,26 @@ PORTALS_GOOD = "Allow portal = 10.55.0.254\nAllow portal = 127.0.0.1\n"
 PORTALS_STALE = "Allow portal = 169.254.6.247\nAllow portal = 127.0.0.1\n"
 
 STUBS = {
+    # get_target serves $FIX/targets, then swaps in $FIX/targets_next if present, so a test can change
+    # the answer between two calls of ONE run. get_allow_portal fails like the NAS does (exit 2 and
+    # "Target doesn't exist") without a portal file or with a noportal.<iqn> marker, and exits 1
+    # silently with $FIX/portal_fail.
     "iscsiadmin": """\
         #!/bin/sh
         case "$1" in
-          get_target) cat "$FIX/targets" 2>/dev/null ;;
+          get_target)
+            cat "$FIX/targets" 2>/dev/null
+            [ -f "$FIX/targets_next" ] && mv -f "$FIX/targets_next" "$FIX/targets"
+            exit 0 ;;
           get_allow_portal)
-            f="$FIX/portal.$(printf '%s' "$2" | tr ':' '_')"
+            [ -f "$FIX/portal_fail" ] && exit 1
+            k=$(printf '%s' "$2" | tr ':' '_')
+            f="$FIX/portal.$k"
             [ -f "$f" ] || f="$FIX/portals"
-            if [ -f "$f" ]; then cat "$f"; else echo "Get allow portal count fail, res = 0x2040102, Target doesn't exist"; fi ;;
+            if [ -f "$FIX/noportal.$k" ] || [ ! -f "$f" ]; then
+              echo "Get allow portal count fail, res = 0x2040102, Target doesn't exist"; exit 2
+            fi
+            cat "$f" ;;
         esac
         """,
     "ip": """\
@@ -97,15 +109,20 @@ class WatchdogTest(unittest.TestCase):
     def put(self, name, text):
         (self.fix / name).write_text(text, encoding="utf-8")
 
-    def targets(self, n=3, sessions=0, raw=None):
-        if raw is not None:
-            self.put("targets", raw)
-            return
+    @staticmethod
+    def targets_text(n=3, sessions=0):
         lines = []
         for i in range(1, n + 1):
             s = sessions if i == 1 else 0
             lines.append(f"target = {IQN.format(n=i)}, tid = {i}, sess_cnt = {s}, conn_cnt = {s}, target_enable = enable")
-        self.put("targets", "\n".join(lines) + "\n")
+        return "\n".join(lines) + "\n"
+
+    def targets(self, n=3, sessions=0, raw=None):
+        self.put("targets", raw if raw is not None else self.targets_text(n, sessions))
+
+    @staticmethod
+    def key(i):
+        return IQN.format(n=i).replace(":", "_")
 
     def healthy(self):
         self.put("ip", IP_GOOD)
@@ -243,7 +260,8 @@ class WatchdogTest(unittest.TestCase):
         for _ in range(3):
             self.run_wd()
         self.assertEqual(self.restarts(), [])
-        self.assertIn("cannot list local IPv4", self.log())
+        self.assertIn("no local IPv4 address could be listed", self.log())
+        self.assertEqual(self.log().count("cannot judge"), 1, "logged once, not every minute")
 
     def test_live_lock_holder_blocks_and_dead_one_is_reclaimed(self):
         self.cold_boot()
@@ -268,6 +286,69 @@ class WatchdogTest(unittest.TestCase):
         self.run_wd()  # third: reclaimed, first sighting
         self.run_wd()
         self.assertEqual(self.restarts(), ["restart"])
+
+    def test_session_login_during_the_scan_blocks_the_restart(self):
+        # The first get_target of the confirming run says 0; an initiator logs in to a reachable
+        # target while the portals are scanned, so the re-read right before the restart says 1.
+        self.cold_boot()
+        self.run_wd()
+        self.put("targets_next", self.targets_text(sessions=1))
+        self.run_wd()
+        self.assertEqual(self.restarts(), [])
+        self.assertIn("sessions=1", self.log())
+        self.assertIn("not restarting automatically", self.read("qulog"))
+
+    # --- a failed inspection is never "healthy", and always breaks the debounce -------------------
+    def test_failed_portal_query_is_cannot_judge_not_healthy(self):
+        for how in ("target-doesnt-exist", "silent-exit-1"):
+            with self.subTest(how=how):
+                self.setUp()
+                if how == "target-doesnt-exist":
+                    (self.fix / "portals").unlink()
+                else:
+                    self.put("portal_fail", "")
+                r = self.run_wd("--check")
+                self.assertEqual(r.returncode, 2, r.stdout)
+                self.assertIn("cannot judge", r.stdout)
+                # A restart happened earlier; a failed inspection must not report it as recovered.
+                self.state.mkdir(parents=True, exist_ok=True)
+                (self.state / "pending").write_text("", encoding="utf-8")
+                for _ in range(3):
+                    self.run_wd()
+                self.assertTrue((self.state / "pending").exists())
+                self.assertNotIn("recovered", self.log())
+                self.assertEqual(self.log().count("cannot judge"), 1, "logged once, not every minute")
+                self.assertEqual(self.restarts(), [])
+
+    def test_one_failed_target_blocks_action_on_the_others(self):
+        self.cold_boot()
+        self.put(f"noportal.{self.key(2)}", "")
+        for _ in range(3):
+            self.run_wd()
+        self.assertEqual(self.restarts(), [])
+        self.assertIn("1 of 3 targets", self.log())
+
+    def test_an_unjudgeable_run_breaks_the_debounce(self):
+        interruptions = {
+            "busy": lambda: self.put("ps_extra", "30206 admin 36336 S /usr/local/sbin/scst_util --load\n"),
+            "no-addresses": lambda: self.put("ip_fail", ""),
+            "no-targets": lambda: self.put("targets", ""),
+            "portal-failure": lambda: self.put("portal_fail", ""),
+        }
+        for name, interrupt in interruptions.items():
+            with self.subTest(interruption=name):
+                self.setUp()
+                self.cold_boot()
+                self.run_wd()                       # stale picture A, first sighting
+                interrupt()
+                self.run_wd()                       # cannot judge
+                for f in ("ps_extra", "ip_fail", "portal_fail"):
+                    (self.fix / f).unlink(missing_ok=True)
+                self.cold_boot()
+                self.run_wd()                       # A again, but not CONSECUTIVELY
+                self.assertEqual(self.restarts(), [], f"{name}: acted across an unjudged run")
+                self.run_wd()
+                self.assertEqual(self.restarts(), ["restart"])
 
     # --- the restart budget ---------------------------------------------------------------------
     def test_budget_caps_restarts_per_boot_and_reports_once(self):
