@@ -780,6 +780,31 @@ Readback after the roll (operator):
 - the owner, in the console: Status shows Health after Needs you, with the six tiles, their bars filling from the
   right, and a tile's Details opening under the grid.
 
+### H13. v0.11.5: the Status page as the board draws it, no migration
+
+Why: the console redesign's B5. Status becomes the board's page: Needs you, then Health, then the fleet as a tile map
+grouped by host, with its keyboard and pointer hold. Relay #654 (B5) with its review fixes (#656), and the health
+fixes of #653, released as v0.11.5 (#655, `34aeb51e`, run 148170), on top of v0.11.4 (live since 2026-11-24,
+ailab #1984, H12).
+
+No migration: schema stays 89, and the relay env is unchanged. No new settings.
+
+Change: this PR pins the v0.11.5 digest `f8e2acc8…30ba` in `migrate` and `relay`, with the annotations. `migrate` runs
+and finds nothing to apply. The merge rolls the hub once (Recreate, through Flux), with the pre-migration backup as
+every roll, outside the QNAP windows.
+
+Rollback: the schema is unchanged, so a reviewed PR re-pins v0.11.4 (`4f30750e…97c9`); no restore or fence. Below
+v0.11.4 the H12 chain applies.
+
+Readback after the roll (operator):
+
+- one Running Pod; source `34aeb51ebe037162145f3251b1a23178a42895df`, release `relay-0.11.5-release-148170`; the
+  `relay` container's image ID ends in `sha256:f8e2acc8ed4c4eaa6f38e907564a3435e6319aff44526c6de3131c9cb8da30ba`;
+- the backup and migrate init containers exited 0, and `schema_migrations` still reads `89|89`; the relay env is
+  identical to v0.11.4's;
+- health samples keep arriving each minute (H12's query);
+- the owner, in the console: Status shows Needs you, Health, then the fleet map grouped by host; a tile opens its agent.
+
 ## Enablement order at a glance
 
 > **Campaign rows are historical.** The owner retired the researcher qualification campaign and its
@@ -809,6 +834,7 @@ Readback after the roll (operator):
 | H10 | hub image → v0.10.25 (the Assistant's action registry, every Assistant tool on it, its cards, its brief and its routes; Fleet as designed); gates no step above | H9 live | v0.10.25 digest running, schema still 79, a host decided from the console and one from the Assistant both read `action: host.authorize`, an Assistant rename reads `action: conversation.rename`, and a host approved from the Needs you card reads `surface: assistant-card`, in Activity, and the agents, lanes, session and terminal cards show (the terminal text only on request), and the brief's Needs you matches Status |
 | H11 | hub image → v0.11.1 (schema 88: migrations 080-088; Terminals as designed; the new shell behind `?console=new`); `PGOPTIONS` lock timeout on `migrate`; gates no step above | H10 live; the operator's rehearsal of the published digest PASS | v0.11.1 digest running, `schema_migrations` `88\|88`, the backup generation recorded, the console's checks pass, the dev-workers reconnected |
 | H12 | hub image → v0.11.4 (schema 89: health samples; health tiles on Status); gates no step above | v0.11.3 live (ailab #1979); the operator's 88 → 89 check PASS | v0.11.4 digest running, `schema_migrations` `89\|89`, the backup generation recorded, health samples written each minute, the tiles on Status |
+| H13 | hub image → v0.11.5 (Status as the board draws it, the fleet map; no migration); gates no step above | H12 live | v0.11.5 digest running, `schema_migrations` still `89\|89`, Status shows Needs you, Health and the fleet map |
 
 ## Rollback: migrations are forward-only
 
@@ -840,6 +866,7 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
 - **H12 (schema 89):** as H11: never a bare re-pin. Restore the v0.11.4 rollout's **earliest** pre-migration
   generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
   v0.11.3 (`2c350aee…8a2b`); H11's cost applies.
+- **H13 (schema 89, no migration):** a reviewed PR re-pins v0.11.4 (`4f30750e…97c9`); no restore or fence.
 - **H8:** a reviewed PR re-pins v0.10.4 (`d1482bc1…57a7`); schema 79 is unchanged. A connection row or
   pool approved under v0.10.9 stays, and v0.10.4 accepts it (its check only reads the row).
 - **H7's candidate files:** the next run's PR replaces a run's values; before the canary one PR drops
