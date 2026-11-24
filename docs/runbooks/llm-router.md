@@ -4866,15 +4866,26 @@ reissue File B and configure the hub's worker-profiles file.
 1. **Merge = the roll.** Expect one Pod of image `a464b8d1…b3ec`, with the revision up by exactly 1 (the live one is
    117) and stable after Flux's next reconcile of `apps`.
 2. **Router readback:** `rlinks_ok` shows links 1, and `plugins` shows `worker-budget-authority` `active`.
-3. **Logs.** Run the #195 section's step 3 check unchanged: one `Worker budget authority available` line, and no
-   non-canonical budget-authority line. Then make sure no line printed since the roll carries a raw secret shape:
+3. **Logs.** First run the #195 section's step 3 check unchanged: one `Worker budget authority available` line, and no
+   non-canonical budget-authority line. Then check the fresh Pod's complete log, from its start, so nothing the roll
+   printed is outside the window. A failed read stops the step and never counts as clean:
 
    ```sh
-   kubectl --context admin@ai -n llm-router logs deploy/llm-router -c router --since=15m \
-     | grep -cE 'postgres(ql)?://[^ ]*:[^ ]*@|Bearer [A-Za-z0-9._-]{8,}|sk-[A-Za-z0-9_-]{8,}'
+   pod=$(kubectl --context admin@ai -n llm-router get pods -l app=llm-router -o jsonpath='{.items[0].metadata.name}')
+   kubectl --context admin@ai -n llm-router get pod "$pod" -o jsonpath='{.spec.containers[0].image}{"\n"}'   # a464b8d1…b3ec
+   log=$(kubectl --context admin@ai -n llm-router logs "$pod" -c router) || { echo "STOP: log read failed"; false; } &&
+   if printf '%s\n' "$log" | grep -qE 'postgres(ql)?://[^ ]*:[^ ]*@|Bearer [A-Za-z0-9._-]{8,}|sk-[A-Za-z0-9_-]{8,}'; then
+     echo "STOP: a secret-shaped string is in the Router log; roll back"; false
+   else echo "clean: no secret-shaped string in $(printf '%s\n' "$log" | wc -l) lines"; fi
    ```
 
-   Expect `0`.
+   Expect `clean: …` and exit status 0.
+
+   A healthy Router seldom hits the changed error paths, so a clean log does not by itself show that #197 is live. The
+   positive check is that the running Pod carries the release:
+   - its image is `a464b8d1…b3ec` (above), and that image's revision label is `dd020272` (verified at publication);
+   - `kubectl --context admin@ai -n llm-router exec "$pod" -c router -- ls dist/packages/kernel/safe-error.js` prints
+     the file, which no earlier release has.
 4. **Ledger and hub unchanged,** as in the #195 section's step 4: `rident` is unchanged, the hub's budget metrics are
    unchanged (the H6 state), and no `RelayWorkerBudget*` alert fires.
 5. **Release gate (router-ab)** on the live router. Then `validate-live` must show no new failure against the baseline,
