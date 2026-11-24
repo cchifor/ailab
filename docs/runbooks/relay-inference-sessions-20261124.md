@@ -2,10 +2,10 @@
 
 Status at 2026-11-24 16:21 UTC: router and Relay v0.11.3 deployed with successful
 post-roll readbacks. Managed Pi activation, router comparison reruns and paired
-live acceptance remain pending. Deployment completion requires the readbacks
-below, not merely the Git merge.
+live acceptance remain pending. The hub deployment was confirmed only after
+the readbacks below passed.
 
-## Coordinated release readback — 2026-11-24
+## Coordinated release readback — 2026-11-24 16:21 UTC
 
 Relay AILab #1979 merged and reconciled at `8cfb09844043a8c5abf2524b937db21bb2f51223`.
 The [v0.11.3 readback](relay-inference-v0113-20261124.md#deployment-evidence)
@@ -32,7 +32,7 @@ the release gate passing. Native Messages and warm activation remain pending.
 The sections below preserve earlier rollout checkpoints; their historical CLI,
 image and activation observations are superseded by this dated readback.
 
-## Router rollout readback — 2026-11-24
+## Historical initial router rollout readback — 2026-11-24 09:18–09:23 UTC
 
 Owner merged AILab #1967 at 09:14 UTC, commit
 `eb63210529ffc95849419acc9778cfd34b2909d7`. Flux `apps` reports this applied
