@@ -151,6 +151,14 @@
       - item.stat.checksum | default('') == item.item.sha
   loop: "{{ relay_holder_pins.results }}"
 
+- name: Verify the pinned connector version as the execution user
+  ansible.builtin.command:
+    argv: ["/opt/relay-holder/connectors/{{ relay_holder_connector_sha256 }}/relay-connector", --version]
+  become_user: "{{ relay_holder_user }}"
+  register: relay_holder_connector_version_check
+  changed_when: false
+  failed_when: relay_holder_connector_version_check.stdout | trim != 'relay-connector ' + relay_holder_connector_version
+
 - name: Write the upstream service renderer configuration
   ansible.builtin.copy:
     content: "{{ {'version': 1, 'binary': relay_holder_root + '/' + relay_holder_manifest + '/relay-holder-linux-amd64', 'binarySha256': relay_holder_binary_sha256, 'stateDirectory': relay_holder_state, 'profilesFile': relay_holder_config + '/profiles.json'} | to_nice_json }}\n"
