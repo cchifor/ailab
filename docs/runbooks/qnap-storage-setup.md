@@ -43,9 +43,28 @@ installs an **idempotent reconciler** on the persistent DOM and a cron entry:
 The IP self-heals within ~1 min of any QNAP reboot — this is the **NFS service IP** the whole
 cluster mounts.
 
-*Alternative (manual, also persistent):* Control Panel → Network & Virtual Switch → Interfaces →
-Thunderbolt → Static `10.55.0.254/255.255.255.0`, no gateway. If you set this, remove the cron
-reconciler to avoid duplication.
+**The reconciler alone comes too late at boot (found 2026-11-24).** QNAP's own config (`/etc/config/nm.conf`,
+`[tbtbr0]`) has the bridge as `ip4_type = DHCP`. Nothing serves DHCP on the Thunderbolt link, so the boot goes:
+
+| Uptime | Step | `tbtbr0` |
+|---|---|---|
+| ~86 s | `S45network` creates the bridge from `nm.conf` | link-local `169.254.x.x` |
+| 116-191 s | `S46iSCSItrgt` binds every target's portal to the bridge's address **once** | portals on `169.254.x.x` (§12) |
+| ~191 s+ | `S70crond`; the reconciler adds `10.55.0.254` | |
+| ~261 s | `S99nfs`, then `S99thunderbolt.sh` deletes and recreates the bridge with `brctl`, outside QNAP's network manager, with **no** address | the reconciler re-adds `10.55.0.254` within a minute |
+
+**Both layers are needed:**
+1. **Static IP in QNAP's config** (`ip4_type=STATIC ip=10.55.0.254 subnet_mask=255.255.255.0`, the same layout as
+   QNAP's static `lxcbr0`), so `S45network` gives the first bridge the service IP before iSCSI (and NFS) start.
+   `scripts/qnap-tbtbr0-static-ip.sh` writes it through QNAP's network CLI (`nacli setcfg`). It is config-only (it
+   takes effect at the next NAS boot), and `APPLY=1` refuses while any iSCSI session is logged in, because a live
+   re-apply could flush the address that carries the control-plane disks. **Status: prepared, not applied.** It waits
+   for its window, `plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`, which also rehearses the planned-NAS-outage
+   procedure.
+2. **The cron reconciler** stays, for the bridge that `S99thunderbolt.sh` recreates without an address.
+
+The UI route (Control Panel → Network & Virtual Switch → Interfaces → Thunderbolt → Static) writes the same keys.
+Do **not** remove the reconciler if you use it.
 
 ## 3. Optional cleanup of default datasets
 The factory left empty datasets (`ZFS1_DATA`, `ZFS530_DATA`, `Public`, `zfs1107`). They're harmless
@@ -541,10 +560,14 @@ databases, oauth2-proxy fails OIDC discovery, and the edge 502s. The Flux gitea 
 everything looks fine: the zpool is ONLINE, `iscsi-scstd` listens on 3260, and `iscsiadmin get_target` lists
 all targets `enable`. Yet SendTargets discovery answers "No portals found" from every initiator.
 
-**Mechanism:** the targets are bound to interfaces (`tbtbr0,lo`), and `scst_util --load` resolves each one to
-an IPv4 **once**, at boot (uptime ~190 s). On a cold boot `tbtbr0` still holds a link-local placeholder
-(`169.254.6.247`) at that moment. The Thunderbolt-net init then removes and rebuilds `tbtbr0` with
-`10.55.0.254` (~260-290 s), and nothing re-resolves the targets. Check it directly:
+**Mechanism:** the targets are bound to interfaces (`tbtbr0,lo`), and `scst_util --load` (`S46iSCSItrgt`, uptime
+~116-191 s) resolves each one to an IPv4 **once**. At that moment `tbtbr0` holds only the link-local address
+(`169.254.6.247`) that QNAP gives it: QNAP's own config has the bridge as DHCP, and `10.55.0.254` comes only from our
+cron reconciler (§2; crond is `S70`). `S99thunderbolt.sh` (~261 s) then deletes and recreates the bridge with no
+address, the reconciler adds `10.55.0.254`, and nothing re-resolves the targets. This happens on every boot. Whether
+it bites depends on timing (2026-11-01 came back clean four times). **Root-cause fix, prepared:** §2's static config,
+which puts `10.55.0.254` on the bridge at `S45network` (~86 s), before `S46`. It is pending its proving window,
+`plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`. Check the binding directly:
 
 ```bash
 python scripts/qnap-ssh.py --sudo 'iscsiadmin get_allow_portal "$(iscsiadmin get_target | sed -n "1s/^target = \([^,]*\),.*/\1/p")"'
