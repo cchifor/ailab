@@ -28,9 +28,11 @@ Its source/release annotations match `300856ff` and
 
 These bounded checks qualify existing-route behavior after the image roll, not
 the new Messages/session path. No live plugin configuration was changed by these
-checks. Native canary activation, packaged Relay/Pi acceptance and warm-to-cold
-rollback remain pending. Relay v0.11.3 release PR #648 also waits for recovery
-fix #650: first-turn tool interruption with only a pending admission receipt.
+checks. Subsequent Codex/Qwen native acceptance is recorded below; Claude native
+activation, packaged Relay/Pi acceptance and warm-to-cold rollback remain pending.
+Recovery fix #650 (first-turn tool interruption with only a pending admission
+receipt) merged as `a27afd8cbd91b9ab6a266247d6b1e40c160a1277` with both reviews
+and all CI checks passing. Relay v0.11.3 release PR #648 must incorporate it.
 
 ## Live Codex and Qwen session acceptance — 2026-11-24
 
