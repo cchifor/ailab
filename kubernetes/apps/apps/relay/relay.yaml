@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.11.4-release-147982
-        chifor.me/source-commit: 225b7747f8875da1ccc4e9badccae46c252e0abe
+        chifor.me/release: relay-0.11.5-release-148170
+        chifor.me/source-commit: 34aeb51ebe037162145f3251b1a23178a42895df
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -141,14 +141,15 @@ spec:
       # cost is H11's: every connector and agent key revoked, every session ended, the undelivered
       # outbox deleted, a new generation ConfigMap; writes after the backup are lost.
       # docs/runbooks/relay-researcher-hub-upgrade.md, H12 and H11, and "Rollback: migrations are
-      # forward-only". Further back: to v0.10.25 (d98c6ce7...) restore the v0.11.1 rollout's earliest
+      # forward-only". v0.11.5 adds no migration: back to v0.11.4 (4f30750e...) is a reviewed re-pin
+      # (H13). Further back: to v0.10.25 (d98c6ce7...) restore the v0.11.1 rollout's earliest
       # pre-migration generation, fence, re-pin (H11); below v0.10.2 restore the v0.10.2 rollout's
       # pre-migration generation 20261115T162747Z-119fcc01-b84d-4be5-a80c-ac5196caaf73 (else H1's),
       # fence, then a reviewed PR re-pins v0.9.1 (runbook "Rollback", the H2 mechanics).
-      # Relay v0.11.4, source 225b7747f8875da1ccc4e9badccae46c252e0abe (release/v0.11)
-      # release v0.11.4 / run 147982; schema 89 (migration 089: health_samples).
+      # Relay v0.11.5, source 34aeb51ebe037162145f3251b1a23178a42895df (release/v0.11)
+      # release v0.11.5 / run 148170; schema 89 (no migration; 089 came with v0.11.4).
       # Native Pi inference sessions; see relay-inference-v0113-20261124.md.
-      - image: registry.chifor.me/relay/control-plane@sha256:4f30750efe6715f86f7cb1028d20833cfd74788baafbe466e05f86dd78bb97c9
+      - image: registry.chifor.me/relay/control-plane@sha256:f8e2acc8ed4c4eaa6f38e907564a3435e6319aff44526c6de3131c9cb8da30ba
         workingDir: /app
         envFrom:
         - secretRef:
@@ -200,10 +201,10 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      # Relay v0.11.4, source 225b7747f8875da1ccc4e9badccae46c252e0abe (release/v0.11)
-      # release v0.11.4 / run 147982; schema 89 (migration 089: health_samples).
+      # Relay v0.11.5, source 34aeb51ebe037162145f3251b1a23178a42895df (release/v0.11)
+      # release v0.11.5 / run 148170; schema 89 (no migration; 089 came with v0.11.4).
       # Native Pi inference sessions; see relay-inference-v0113-20261124.md.
-      - image: registry.chifor.me/relay/control-plane@sha256:4f30750efe6715f86f7cb1028d20833cfd74788baafbe466e05f86dd78bb97c9
+      - image: registry.chifor.me/relay/control-plane@sha256:f8e2acc8ed4c4eaa6f38e907564a3435e6319aff44526c6de3131c9cb8da30ba
         workingDir: /app
         envFrom:
         - secretRef:
