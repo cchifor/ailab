@@ -172,6 +172,51 @@ class WorkerRole(unittest.TestCase):
         self.assertIn(f"/{binding['tenantId']}/{binding['hostId']}/*", policy)
         self.assertEqual(re.findall(r'capabilities = \[(.*?)\]', policy), ['"read"'])
 
+    def test_03b_anthropic_messages_staging_is_private_and_idempotent(self):
+        binding = {**self.variables['relay_router_bindings'][0],
+                   'protocol': 'anthropic-messages',
+                   'selection': dict(kind='model', model='canary-pi-claude')}
+        updates = dict(relay_router_bindings=[binding])
+        config_dir = Path(self.variables['relay_router_home']) / '.config/relay/router-managed'
+        try:
+            self.run_role(updates)
+            config_file = config_dir / (binding['bindingId'] + '.json')
+            self.assertEqual(json.loads(config_file.read_text())['router'], binding)
+            self.assertEqual(len(binding), 9)
+            self.assertEqual(config_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(config_file.stat().st_uid, os.getuid())
+            self.assertFalse(Path(binding['credentialFile']).exists())
+            self.assertRegex(self.run_role(updates), r"changed=0\s")
+        finally:
+            self.run_role()
+
+    def test_03c_anthropic_policy_rejections_preserve_staged_files(self):
+        binding = {**self.variables['relay_router_bindings'][0],
+                   'protocol': 'anthropic-messages',
+                   'selection': dict(kind='model', model='canary-pi-claude')}
+        home = Path(self.variables['relay_router_home'])
+        snapshot = {p: p.read_bytes() for p in home.rglob('*') if p.is_file()}
+        invalid = [
+            dict(protocol='unknown-protocol'),
+            dict(credentialMode='launcher-proxy-v1'),
+            dict(caFile='/tmp/router-ca.pem'),
+            dict(caSha256='a' * 64),
+            dict(adaptedResponses=dict(catalogModel='gpt-6-luna', maxOutputTokens=1024,
+                                       reasoningEffort='none')),
+            dict(selection=dict(kind='model', model='canary-pi-claude', route='extra')),
+            dict(tenantId=str(uuid.uuid4())),
+            dict(hostId=str(uuid.uuid4())),
+            dict(executionIdentity='another-user'),
+            dict(credentialFile='/tmp/elsewhere'),
+        ]
+        for update in invalid:
+            with self.subTest(update=update):
+                output = self.run_role(dict(relay_router_bindings=[{**binding, **update}]), success=False)
+                self.assertIn('Require complete identity-matched holder policies', output)
+                self.assertRegex(output, r"changed=0\s")
+                self.assertEqual(self.commands, [])
+                self.assertEqual(snapshot, {p: p.read_bytes() for p in home.rglob('*') if p.is_file()})
+
     def test_04_cross_identity_unsafe_path_and_route_rejected(self):
         for update in [dict(hostId=str(uuid.uuid4())), dict(executionIdentity='another-user'),
                        dict(credentialFile='/tmp/elsewhere'), dict(selection=dict(kind='route', alias='agent'))]:

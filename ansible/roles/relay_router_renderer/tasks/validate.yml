@@ -122,7 +122,7 @@
       - item.connectionId is match(relay_router_uuid_pattern)
       - item.origin is match(relay_router_origin_pattern)
       - item.credentialFile == relay_router_state_dir + '/' + item.bindingId + '/credential.json'
-      - item.protocol in ['openai-chat', 'openai-responses', 'codex-responses']
+      - item.protocol in ['openai-chat', 'openai-responses', 'codex-responses', 'anthropic-messages']
       - item.selection.kind in ['model', 'route']
       - item.selection.keys() | list | sort == (['kind', 'model'] if item.selection.kind == 'model' else ['alias', 'kind'])
       - item.selection.get('model', item.selection.get('alias', '')) | length > 0

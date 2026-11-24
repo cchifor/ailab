@@ -68,6 +68,11 @@ The same compiled image's `validateProfileReferences` also accepted all three
 model-alias selections with one-route binding fixtures and matching host/user/
 connection/channel references. This is a local validation of the hub code path;
 actual grant confinement at inference remains the Router's key-admission check.
+The renderer role now accepts `anthropic-messages` while retaining its exact
+nine-key policy contract. Its 11 Linux/Ansible integration tests passed, including
+private idempotent Claude staging and ten refusal cases that preserve staged
+files and invoke no service commands. These tests use disposable local fixtures;
+they do not establish live managed delivery.
 Run `python3 docs/runbooks/inference-canary-v0113/validate.py` from the checkout
 before using any file. CI also runs this check through
 `scripts/tests/test_inference_canary_inputs.py`. It checks the exact byte hash,
