@@ -691,11 +691,13 @@ and the reverse pairing works too. The dev-workers stay on the v0.10.11 pin.
 Change: this PR pins the v0.11.1 digest in `migrate` and `relay`, with the annotations. It also gives `migrate`
 `PGOPTIONS=-c lock_timeout=10s`, so a migration behind a lock fails (55P03) instead of waiting. Each migration commits
 in its own transaction, so the schema is then at the last migration that committed (read `schema_migrations`): in
-v0.11.0's rehearsal, 087 blocked and left 080-086 committed (schema 86). Recreate has already stopped the old Pod, so
-the roll stops at `migrate` with the backup taken. v0.10.25 does not support a partial schema either: recovery is to
-clear the lock and roll again (`migrate` resumes from the next migration), or the restore-based rollback below. The
-fence comment says what rollback really is (below). The merge itself rolls the hub once (Recreate, through Flux), with
-the pre-migration backup, outside the QNAP windows. No new settings.
+v0.11.0's rehearsal, 087 blocked and left 080-086 committed (schema 86). The kubelet retries the failed `migrate` with
+backoff, and each retry resumes from the next uncommitted migration: clearing the lock is enough, so do NOT force a
+second rollout. If the Pod is recreated instead, `backup-database` runs again and publishes a generation of the partly
+migrated schema; that is why a rollback restores this roll's EARLIEST generation. v0.10.25 does not support a partial
+schema either, so a rollback is the restore below, never a re-pin. The fence comment says what rollback really is. The
+merge itself rolls the hub once (Recreate, through Flux), with the pre-migration backup, outside the QNAP windows. No
+new settings.
 
 Rollback: forward-only from here. An older image is not refused: v0.10.25 starts against schema 88, so re-pinning it
 alone would run it on a schema it does not support. Rollback to v0.10.25 (`d98c6ce7…e22e`) takes four steps, in order:
