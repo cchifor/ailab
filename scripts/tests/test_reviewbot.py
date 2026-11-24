@@ -5496,7 +5496,7 @@ class OwnerApprovalMergeTest(unittest.TestCase):
         defaults = AllowlistDefaultsTest._strict_yaml(
             (role / "defaults" / "main.yml").read_text(encoding="utf-8"))
         expected = {"owner_approval_label": "owner-approval", "owner_approvers": [],
-                    "owner_approvers_by_repo": {"cchifor/workbricks": ["chifor"]}}
+                    "owner_approvers_by_repo": {"cchifor/workbricks": ["chifor"], "cchifor/ailab": ["chifor"]}}
         for key, value in expected.items():
             self.assertEqual(value, defaults["pr_reviewer_" + key])
         env = jinja2.Environment(undefined=jinja2.StrictUndefined)
@@ -6151,7 +6151,15 @@ class OwnerApprovalPathsTest(unittest.TestCase):
             self.assertIn(path, paths)
         for path in ("tests/locks.sha256", "tests/milestones/registry.json"):
             self.assertNotIn(path, paths)
-        self.assertEqual(["cchifor/workbricks"], list(defaults["pr_reviewer_owner_approval_paths_by_repo"]))
+        self.assertEqual(["cchifor/workbricks", "cchifor/ailab"], list(defaults["pr_reviewer_owner_approval_paths_by_repo"]))
+        # ailab #1963: the production pins fail closed, and so does the gate's own configuration
+        ailab = defaults["pr_reviewer_owner_approval_paths_by_repo"]["cchifor/ailab"]
+        for path in ("kubernetes/apps/apps/relay/relay.yaml", "kubernetes/apps/apps/llm-router/router.yaml",
+                     "ansible/roles/relay_connector/defaults/main.yml", "ansible/roles/pr_reviewer/defaults/main.yml",
+                     "ansible/roles/pr_reviewer/templates/config.json.j2"):
+            self.assertIn(path, ailab)
+            self.assertTrue((ROOT / path).is_file(), path)   # an exact path that names nothing would gate nothing
+        self.assertEqual(["chifor"], defaults["pr_reviewer_owner_approvers_by_repo"]["cchifor/ailab"])
         env = jinja2.Environment(undefined=jinja2.StrictUndefined)
         env.filters["to_json"] = json.dumps
         template = env.from_string((role / "templates" / "config.json.j2").read_text(encoding="utf-8"))
