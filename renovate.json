@@ -125,6 +125,11 @@
       "allowedVersions": "/^1\\.34\\./"
     },
     {
+      "description": "Hold ghcr.io/berriai/litellm at the v1.109 minor (patches still flow), v-prefixed tags only: the scheme upstream's own verify commands use. 1.110 is not a drop-in bump. Its chatgpt/ provider adds max_output_tokens to the Responses body it sends the ChatGPT subscription backend, and scripts/tests/integration/test_litellm_chatgpt_route_contract.py fails on it in all six cases (ailab #1968, run 147547). It also drops LiteLLM's accounting event tables (a one-way schema change in its database), makes the SpendLogs ledger the default accounting path, removes the experimental Redis/v2 caches, restricts client S3 bucket choice, ignores unmanaged stored general_settings keys and rescopes context-fallback precedence; 1.110.3 changes the MCP gateway's DCR opt-in. The litellm.yaml pin comment records the 1.109.0 audit only. Lift this bound in the change that redoes that audit, keeps the chatgpt/ route's body contract and bumps all three manifests together.",
+      "matchPackageNames": ["ghcr.io/berriai/litellm"],
+      "allowedVersions": "/^v1\\.109\\./"
+    },
+    {
       "description": "Hold the OpenBao provision-Job CLI images (quay.io/openbao/openbao) at the SERVER's minor, 2.6.x -- each Job's comment pins the CLI to the server's version. The server is the `openbao` Flux HelmRelease chart (0.29.4 = 2.6.2), and Renovate does NOT track it: the flux manager is not configured beyond its gotk-components default, so no chart PR has ever been opened. A group would therefore still produce a CLI-only bump (#938: 2.7.0 against a 2.6.2 server). Lift this bound in the same PR that bumps the chart (a human-scheduled restart of the single-replica secrets store).",
       "matchPackageNames": ["quay.io/openbao/openbao"],
       "allowedVersions": "/^2\\.6\\./"
