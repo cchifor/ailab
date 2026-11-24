@@ -1,6 +1,7 @@
 # Relay/Pi inference sessions rollout
 
-Status: source review and release preparation. No production deployment claimed.
+Status: router pin staged; Relay/Pi activation pending. Deployment completion
+requires the post-roll readbacks below, not merely the Git merge.
 
 Router source merged at `300856ff7881eba67d2081650fca9f66a7f26b66`.
 [Publication 147499](https://git.chifor.me/cchifor/relay/actions/runs/147499)
@@ -12,6 +13,15 @@ the publication receipt is attached to Relay v0.2.0 as
 image also emitted by that packaging workflow must not be used for this rollout.
 The router pin adds an init-container backup, after the Recreate writer stops,
 under `/data/backups/pre-inference-sessions-20261124`. Failure blocks startup.
+The [pinned backup script](https://git.chifor.me/cchifor/relay/src/commit/b0336729fbd9915379246df3e64b616197736642/deploy/ci/backup-router.mjs)
+verifies the existing `COMPLETE` manifest, file checksums and SQLite integrity on
+subsequent starts, then exits successfully without overwriting anything. Its
+[publication test](https://git.chifor.me/cchifor/relay/src/commit/b0336729fbd9915379246df3e64b616197736642/deploy/ci/test-backup.mjs)
+qualifies repeated runs, preservation of historical snapshots, and corruption
+refusal. Keep the completed snapshot while this init container is configured;
+remove the init block through a reviewed change before retiring that snapshot.
+This backup shares the live PVC. It protects against application-level corruption,
+not PVC loss; independent off-volume recovery remains the estate backup procedure.
 This first pin stages the router with native Messages and warm retention still
 disabled. It may roll before the paired Relay release; it does not activate the
 new profile or constitute end-to-end acceptance. Relay's pin follows separately
@@ -121,3 +131,10 @@ Any required restore must quarantine affected conversations and reconcile effect
 Reissue File B again if the rollback changes the router release digest. Relay
 migration rollback follows the rehearsal's recovery procedure; an old image alone
 does not undo database migrations.
+
+The router rollback must also remove `backup-before-inference-sessions` from
+`initContainers`, so no new-image backup process runs ahead of the old binary.
+Before starting that old binary, verify its schema compatibility on an isolated
+copy of the current database. If compatibility is unproven, keep launches stopped
+and recover forward; do not infer compatibility from the prior image being healthy
+before the upgrade. Preserve the completed backup when removing the init block.

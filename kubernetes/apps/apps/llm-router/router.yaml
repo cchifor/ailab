@@ -120,6 +120,8 @@ spec:
           type: RuntimeDefault
       terminationGracePeriodSeconds: 60 # the drain (ROUTER_DRAIN_MS + 17 s watchdog) fits inside
       # Recreate stops the previous writer before this consistent backup runs.
+      # The pinned script verifies an existing COMPLETE snapshot and exits 0;
+      # later restarts never overwrite it. Retain this backup while init is present.
       initContainers:
         - name: backup-before-inference-sessions
           image: registry.chifor.me/llm-router/router@sha256:370bf5bf7f03da92b728e92fcc62b06439f886730a8a670d13be0d84924f1909
