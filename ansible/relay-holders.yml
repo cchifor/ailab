@@ -1,0 +1,8 @@
+---
+# Explicit canary bootstrap only; not imported by fleet playbooks.
+- name: Install the reviewed Relay holder and Pi canary
+  hosts: dev_workers
+  become: true
+  gather_facts: false
+  roles:
+    - role: relay_holder

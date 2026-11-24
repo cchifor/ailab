@@ -1,0 +1,115 @@
+---
+- name: Require linger for the execution user's existing manager
+  ansible.builtin.command:
+    argv: [loginctl, show-user, "{{ relay_holder_user }}", --property=Linger, --value]
+  register: relay_holder_linger
+  changed_when: false
+  failed_when: relay_holder_linger.stdout | trim != 'yes'
+
+- name: Inspect the existing enrolled connector identity without reading it
+  ansible.builtin.stat:
+    path: "{{ relay_holder_connector_state }}"
+    follow: false
+    get_checksum: false
+  register: relay_holder_identity
+
+- name: Require a private regular execution-user identity
+  ansible.builtin.assert:
+    that:
+      - relay_holder_identity.stat.isreg | default(false)
+      - relay_holder_identity.stat.nlink | default(0) == 1
+      - relay_holder_identity.stat.uid | default(-1) | int == relay_holder_uid | int
+      - relay_holder_identity.stat.mode | default('') == '0600'
+
+- name: Create the user unit directory
+  ansible.builtin.file:
+    path: "{{ relay_holder_home }}/.config/systemd/user"
+    state: directory
+    owner: "{{ relay_holder_uid }}"
+    group: "{{ relay_holder_gid }}"
+    mode: "0755"
+
+- name: Define expected units
+  ansible.builtin.set_fact:
+    relay_holder_units:
+      - name: relay-holder.service
+        content: "{{ relay_holder_render.stdout }}\n"
+      - name: relay-holder-control-plane.service
+        content: "{{ lookup('ansible.builtin.template', 'control-plane.service.j2') }}"
+
+- name: Install only absent units
+  ansible.builtin.copy:
+    content: "{{ item.content }}"
+    dest: "{{ relay_holder_home }}/.config/systemd/user/{{ item.name }}"
+    owner: "{{ relay_holder_uid }}"
+    group: "{{ relay_holder_gid }}"
+    mode: "0644"
+    force: false
+  loop: "{{ relay_holder_units }}"
+
+- name: Read existing unit digests
+  ansible.builtin.stat:
+    path: "{{ relay_holder_home }}/.config/systemd/user/{{ item.name }}"
+    checksum_algorithm: sha256
+    follow: false
+  register: relay_holder_unit_pins
+  loop: "{{ relay_holder_units }}"
+
+- name: Refuse implicit service upgrades or replaced units
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - item.stat.nlink | default(0) == 1
+      - item.stat.checksum == item.item.content | hash('sha256')
+      - item.stat.uid | default(-1) | int == relay_holder_uid | int
+      - item.stat.mode | default('') == '0644'
+    fail_msg: Existing unit differs; use the reviewed holder maintenance and sealed upgrade process.
+  loop: "{{ relay_holder_unit_pins.results }}"
+
+- name: Validate both units in the execution user's manager
+  ansible.builtin.command:
+    argv: [systemd-analyze, --user, verify, "{{ relay_holder_home }}/.config/systemd/user/relay-holder.service", "{{ relay_holder_home }}/.config/systemd/user/relay-holder-control-plane.service"]
+  become_user: "{{ relay_holder_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_holder_uid }}"
+  changed_when: false
+
+- name: Reload the user manager for explicit activation
+  ansible.builtin.systemd_service:
+    scope: user
+    daemon_reload: true
+  become_user: "{{ relay_holder_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_holder_uid }}"
+  when: relay_holder_start | bool
+
+- name: Inspect effective service ownership
+  ansible.builtin.command:
+    argv: [systemctl, --user, show, "{{ item.name }}", --property=FragmentPath, --property=DropInPaths]
+  become_user: "{{ relay_holder_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_holder_uid }}"
+  register: relay_holder_effective
+  changed_when: false
+  loop: "{{ relay_holder_units }}"
+  when: relay_holder_start | bool
+
+- name: Reject shadowed units and unreviewed overrides
+  ansible.builtin.assert:
+    that:
+      - "('FragmentPath=' + relay_holder_home + '/.config/systemd/user/' + item.item.name) in item.stdout_lines"
+      - "'DropInPaths=' in item.stdout_lines"
+  loop: "{{ relay_holder_effective.results }}"
+  when: relay_holder_start | bool
+
+- name: Start the holder then its independent reconciliation client
+  ansible.builtin.systemd_service:
+    name: "{{ item.name }}"
+    scope: user
+    enabled: true
+    state: started
+  become_user: "{{ relay_holder_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_holder_uid }}"
+  loop: "{{ relay_holder_units }}"
+  when: relay_holder_start | bool

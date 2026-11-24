@@ -1,0 +1,245 @@
+---
+- name: Require exact release inputs before making changes
+  ansible.builtin.assert:
+    that:
+      - not ansible_check_mode
+      - relay_holder_image is match('^registry\.chifor\.me/relay/control-plane@sha256:[a-f0-9]{64}$')
+      - relay_holder_source_commit is match('^[a-f0-9]{40}$')
+      - relay_holder_user is match('^[a-z_][a-z0-9_-]{0,31}$')
+      - relay_holder_profiles_sha256 is match('^[a-f0-9]{64}$')
+      - relay_holder_binary_sha256 is match('^[a-f0-9]{64}$')
+      - relay_holder_connector_sha256 is match('^[a-f0-9]{64}$')
+      - relay_holder_connector_version is match('^0\.[0-9]+\.[0-9]+$')
+      - relay_holder_archives | map(attribute='component') | sort | list == ['holder', 'pi-linux-x64']
+    fail_msg: Explicit canary pins are required; check mode cannot authenticate installations.
+
+- name: Validate archive pins
+  ansible.builtin.assert:
+    that:
+      - item.sha256 is match('^[a-f0-9]{64}$')
+      - item.manifestSha256 is match('^[a-f0-9]{64}$')
+      - item.source is match('^/[A-Za-z0-9_./-]+$')
+  loop: "{{ relay_holder_archives }}"
+
+- name: Validate fixed local paths
+  ansible.builtin.assert:
+    that:
+      - item is match('^/[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*$')
+      - "'/../' not in item + '/' and '/./' not in item + '/'"
+  loop:
+    - "{{ relay_holder_home }}"
+    - "{{ relay_holder_transfer }}"
+    - "{{ relay_holder_root }}"
+    - "{{ relay_holder_pi_root }}"
+    - "{{ relay_holder_state }}"
+    - "{{ relay_holder_config }}"
+    - "{{ relay_holder_connector_state }}"
+    - "{{ relay_holder_profiles_source }}"
+    - "{{ relay_holder_connector_source }}"
+
+- name: Resolve the existing execution user
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ relay_holder_user }}"
+
+- name: Record user IDs and exact artifact paths
+  ansible.builtin.set_fact:
+    relay_holder_uid: "{{ ansible_facts.getent_passwd[relay_holder_user][1] }}"
+    relay_holder_gid: "{{ ansible_facts.getent_passwd[relay_holder_user][2] }}"
+    relay_holder_manifest: "{{ (relay_holder_archives | selectattr('component', 'equalto', 'holder') | first).manifestSha256 }}"
+
+- name: Require a non-root account with the declared home
+  ansible.builtin.assert:
+    that:
+      - relay_holder_uid | int > 0
+      - ansible_facts.getent_passwd[relay_holder_user][4] == relay_holder_home
+
+- name: Require cgroup v2
+  ansible.builtin.command: stat -fc %T /sys/fs/cgroup
+  register: relay_holder_cgroup
+  changed_when: false
+  failed_when: relay_holder_cgroup.stdout | trim != 'cgroup2fs'
+
+- name: Require the qualified Linux x64 architecture
+  ansible.builtin.command: uname -sm
+  register: relay_holder_platform
+  changed_when: false
+  failed_when: relay_holder_platform.stdout | trim != 'Linux x86_64'
+
+- name: Validate root-owned destination ancestry before writes
+  ansible.builtin.script:
+    cmd: "check_paths.py 0 {{ relay_holder_transfer }} {{ relay_holder_root }} {{ relay_holder_pi_root }} /opt/relay-holder/connectors/{{ relay_holder_connector_sha256 }}"
+    executable: python3
+  changed_when: false
+
+- name: Validate execution-user directory ancestry before writes
+  ansible.builtin.script:
+    cmd: "check_paths.py {{ relay_holder_uid }} {{ relay_holder_state }} {{ relay_holder_config }} {{ relay_holder_home }}/.config/systemd/user"
+    executable: python3
+  changed_when: false
+
+- name: Pull the reviewed immutable installer image
+  ansible.builtin.command:
+    argv: [docker, pull, "{{ relay_holder_image }}"]
+  register: relay_holder_pull
+  changed_when: "'Downloaded newer image' in relay_holder_pull.stdout"
+
+- name: Verify installer image provenance
+  ansible.builtin.command:
+    argv: [docker, run, --rm, --network=none, --read-only, --cap-drop=ALL, --security-opt=no-new-privileges, --entrypoint=cat, "{{ relay_holder_image }}", /app/SOURCE_COMMIT]
+  changed_when: false
+  register: relay_holder_image_source
+  failed_when: relay_holder_image_source.stdout | trim != relay_holder_source_commit
+
+- name: Create root-owned installation roots
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ relay_holder_transfer }}"
+    - "{{ relay_holder_root }}"
+    - "{{ relay_holder_pi_root }}"
+    - "/opt/relay-holder/connectors/{{ relay_holder_connector_sha256 }}"
+
+- name: Install the exact holder and Pi closures
+  ansible.builtin.include_tasks: archive.yml
+  loop: "{{ relay_holder_archives }}"
+  loop_control:
+    loop_var: archive
+
+- name: Create private execution-user directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ relay_holder_uid }}"
+    group: "{{ relay_holder_gid }}"
+    mode: "0700"
+  loop:
+    - "{{ relay_holder_state }}"
+    - "{{ relay_holder_config }}"
+
+- name: Preserve any existing profile and connector bytes
+  ansible.builtin.copy:
+    src: "{{ item.source }}"
+    dest: "{{ item.destination }}"
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+    force: false
+  loop:
+    - {source: "{{ relay_holder_profiles_source }}", destination: "{{ relay_holder_config }}/profiles.json", owner: "{{ relay_holder_uid }}", group: "{{ relay_holder_gid }}", mode: "0600"}
+    - {source: "{{ relay_holder_connector_source }}", destination: "/opt/relay-holder/connectors/{{ relay_holder_connector_sha256 }}/relay-connector", owner: "0", group: "0", mode: "0755"}
+
+- name: Check installed profile and connector pins
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    checksum_algorithm: sha256
+    follow: false
+  register: relay_holder_pins
+  loop:
+    - {path: "{{ relay_holder_config }}/profiles.json", sha: "{{ relay_holder_profiles_sha256 }}", uid: "{{ relay_holder_uid }}", mode: "0600"}
+    - {path: "/opt/relay-holder/connectors/{{ relay_holder_connector_sha256 }}/relay-connector", sha: "{{ relay_holder_connector_sha256 }}", uid: 0, mode: "0755"}
+
+- name: Refuse drift rather than replace profiles or executables
+  ansible.builtin.assert:
+    that:
+      - item.stat.isreg | default(false)
+      - item.stat.nlink | default(0) == 1
+      - item.stat.checksum | default('') == item.item.sha
+      - item.stat.uid | default(-1) | int == item.item.uid | int
+      - item.stat.mode | default('') == item.item.mode
+  loop: "{{ relay_holder_pins.results }}"
+
+- name: Verify the pinned connector version as the execution user
+  ansible.builtin.command:
+    argv: ["/opt/relay-holder/connectors/{{ relay_holder_connector_sha256 }}/relay-connector", --version]
+  become_user: "{{ relay_holder_user }}"
+  register: relay_holder_connector_version_check
+  changed_when: false
+  failed_when: relay_holder_connector_version_check.stdout | trim != 'relay-connector ' + relay_holder_connector_version
+
+- name: Read the approved nonsecret profile definitions
+  ansible.builtin.slurp:
+    src: "{{ relay_holder_config }}/profiles.json"
+  register: relay_holder_profile_bytes
+
+- name: Decode the exact approved profiles
+  ansible.builtin.set_fact:
+    relay_holder_profiles: "{{ relay_holder_profile_bytes.content | b64decode | from_json }}"
+
+- name: Bound the canary profile set
+  ansible.builtin.assert:
+    that:
+      - relay_holder_profiles is sequence and relay_holder_profiles is not mapping and relay_holder_profiles is not string
+      - relay_holder_profiles | length > 0 and relay_holder_profiles | length <= 3
+      - relay_holder_profiles | map(attribute='id') | unique | length == relay_holder_profiles | length
+
+- name: Require isolated Pi homes and workspace roots inside private holder state
+  ansible.builtin.assert:
+    that:
+      - item.id is match('^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$')
+      - item.executionUid | int == relay_holder_uid | int
+      - item.qualification == 'protocol-fixture'
+      - item.native.kind == 'pi'
+      - item.native.runtimeDirectory == relay_holder_pi_root + '/' + (relay_holder_archives | selectattr('component', 'equalto', 'pi-linux-x64') | first).manifestSha256
+      - item.credentialHome == relay_holder_state + '/native-homes/' + item.id
+      - item.roots == [relay_holder_state + '/workspaces/' + item.id]
+  loop: "{{ relay_holder_profiles }}"
+  loop_control:
+    label: "{{ item.id | default('invalid') }}"
+
+- name: Validate exact native home and workspace ancestry
+  ansible.builtin.script:
+    cmd: "check_paths.py {{ relay_holder_uid }} {{ item.credentialHome }} {{ item.roots[0] }}"
+    executable: python3
+  changed_when: false
+  loop: "{{ relay_holder_profiles }}"
+  loop_control:
+    label: "{{ item.id }}"
+
+- name: Create only the approved per-profile native home and workspace
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ relay_holder_uid }}"
+    group: "{{ relay_holder_gid }}"
+    mode: "0700"
+  loop: "{{ (relay_holder_profiles | map(attribute='credentialHome') | list) + (relay_holder_profiles | map(attribute='roots') | flatten) }}"
+
+- name: Write the upstream service renderer configuration
+  ansible.builtin.copy:
+    content: "{{ {'version': 1, 'binary': relay_holder_root + '/' + relay_holder_manifest + '/relay-holder-linux-amd64', 'binarySha256': relay_holder_binary_sha256, 'stateDirectory': relay_holder_state, 'profilesFile': relay_holder_config + '/profiles.json'} | to_nice_json }}\n"
+    dest: "{{ relay_holder_config }}/service.json"
+    owner: "{{ relay_holder_uid }}"
+    group: "{{ relay_holder_gid }}"
+    mode: "0600"
+
+- name: Render the service through the release's schema and artifact validators
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network=none
+      - --read-only
+      - --cap-drop=ALL
+      - --security-opt=no-new-privileges
+      - "--user={{ relay_holder_uid }}:{{ relay_holder_gid }}"
+      - --mount
+      - "type=bind,src={{ relay_holder_root }},dst={{ relay_holder_root }},readonly"
+      - --mount
+      - "type=bind,src={{ relay_holder_state }},dst={{ relay_holder_state }},readonly"
+      - --mount
+      - "type=bind,src={{ relay_holder_config }},dst={{ relay_holder_config }},readonly"
+      - --entrypoint=node
+      - "{{ relay_holder_image }}"
+      - dist/scripts/render-holder-service.js
+      - "{{ relay_holder_config }}/service.json"
+  register: relay_holder_render
+  changed_when: false
+
+- name: Stage and optionally activate initial user services
+  ansible.builtin.import_tasks: services.yml

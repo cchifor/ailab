@@ -1,0 +1,4 @@
+---
+- name: Reconcile only an explicitly selected holder
+  ansible.builtin.include_tasks: configure.yml
+  when: relay_holder_enabled | bool

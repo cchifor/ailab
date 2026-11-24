@@ -1,0 +1,24 @@
+---
+relay_holder_enabled: false
+relay_holder_start: false
+relay_holder_user: c4
+relay_holder_home: /home/c4
+# The published application image contains the compiled upstream installers.
+relay_holder_image: ""
+relay_holder_source_commit: ""
+relay_holder_transfer: /opt/relay-holder/transfer
+relay_holder_root: /opt/relay-holder/releases
+relay_holder_pi_root: /opt/relay-pi/releases
+relay_holder_state: "{{ relay_holder_home }}/.local/state/relay-holder"
+relay_holder_config: "{{ relay_holder_home }}/.config/relay-holder"
+# Controller-local, joined release archives and independently reviewed pins.
+relay_holder_archives: []
+# Exactly holder and pi-linux-x64, each with source, sha256, manifestSha256.
+relay_holder_profiles_source: ""
+relay_holder_profiles_sha256: ""
+relay_holder_binary_sha256: ""
+# The existing enrolled connector identity; never read into Ansible output.
+relay_holder_connector_state: "{{ relay_holder_home }}/.config/relay-connector/connector.json"
+relay_holder_connector_version: ""
+relay_holder_connector_sha256: ""
+relay_holder_connector_source: ""

@@ -1,0 +1,24 @@
+[Unit]
+Description=Relay canary holder reconciliation
+Requires=relay-holder.service
+After=relay-holder.service
+
+[Service]
+Type=simple
+ExecStart=/opt/relay-holder/connectors/{{ relay_holder_connector_sha256 }}/relay-connector --state {{ relay_holder_connector_state }} control-plane --holder-dir {{ relay_holder_state }}
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=yes
+MemoryMax=512M
+TasksMax=128
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=relay-holder-control-plane
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=20
+
+[Install]
+WantedBy=default.target
