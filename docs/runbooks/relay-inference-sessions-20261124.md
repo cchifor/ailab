@@ -1,7 +1,33 @@
 # Relay/Pi inference sessions rollout
 
-Status: router pin staged; Relay/Pi activation pending. Deployment completion
+Status: router deployed and baseline checks passed; Relay/Pi activation pending. Deployment completion
 requires the post-roll readbacks below, not merely the Git merge.
+
+## Router rollout readback — 2026-11-24
+
+Owner merged AILab #1967 at 09:14 UTC, commit
+`eb63210529ffc95849419acc9778cfd34b2909d7`. Flux `apps` reports this applied
+revision. The router Deployment runs the `370bf5bf` image digest recorded below;
+pod `llm-router-67bf4df5b7-brk5d` is ready (1/1), with zero restarts at readback.
+Its source/release annotations match `300856ff` and
+`router-0.1.0-20261124-inference-sessions`.
+
+- Init-container log: `Router SQLite backup and associated files verified:
+  pre-inference-sessions-20261124`.
+- Authenticated `/v1/routes` is byte-identical to the saved pre-roll baseline:
+  SHA-256 `cb9904a07f3a4627cbf849a60ad9396f544a4db9cb886c83ccae03ea6fa85afa`.
+- Anonymous `/v1/routes` and `/admin/v1/config` both return 401.
+- Existing native Codex Responses: 200, completed, 2,535 ms.
+- Existing Qwen Chat: 200, completed, 416 ms.
+- Existing Claude streaming Chat: 200, completed, 966 ms.
+
+These bounded checks qualify existing-route behavior after the image roll, not
+the new Messages/session path. No live plugin configuration was changed by these
+checks. Native canary activation, packaged Relay/Pi acceptance and warm-to-cold
+rollback remain pending. Relay v0.11.3 release PR #648 also waits for recovery
+fix #650: first-turn tool interruption with only a pending admission receipt.
+
+## Published router and backup qualification
 
 Router source merged at `300856ff7881eba67d2081650fca9f66a7f26b66`.
 [Publication 147499](https://git.chifor.me/cchifor/relay/actions/runs/147499)
