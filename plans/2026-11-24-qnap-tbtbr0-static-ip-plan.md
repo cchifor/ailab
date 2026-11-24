@@ -1,7 +1,8 @@
 # Give the QNAP Thunderbolt bridge its service IP at boot (static `tbtbr0`)
 
-Status: decided 2026-11-24 — written live (`APPLY=1 LIVE_WRITE=1`), no window; proven at the next NAS boot ·
-Created: 2026-11-24 · Script: `scripts/qnap-tbtbr0-static-ip.sh`
+Status: decided 2026-11-24, no window. To be written live (`APPLY=1 LIVE_WRITE=1`) once the live mode is on main,
+then proven at the next NAS boot. Record both results under "Results" below · Created: 2026-11-24 ·
+Script: `scripts/qnap-tbtbr0-static-ip.sh`
 Follows the 2026-11-24 power cut, the second outage of this kind. The first was 2026-10-30. Runbook:
 `docs/runbooks/qnap-storage-setup.md` §2 and §12. Backstop already live: the iSCSI portal watchdog (#1974).
 
@@ -65,10 +66,15 @@ address needs that.
 - **Proving:** the only proof is a NAS boot, which is a full-cluster outage. The NAS has had four unplanned boots in four
   weeks, and the watchdog covers iSCSI if the static setting does not, so the proof can come from the next natural boot.
 
-So the script gained `LIVE_WRITE=1`: a write with sessions logged in, followed by a 30 s check that the bridge keeps
-`10.55.0.254` (re-added at once if not) and that no session drops. An unknown session count still refuses. At the next
-NAS boot, run the step 4 checks below (`bootup.log` says `STATIC`, the portals are on `10.55.0.254` from boot, and
-`watchdog.log` shows no restart) and record the result here.
+So the script gained `LIVE_WRITE=1`: a write with sessions logged in. A 30 s check follows, immediately and then every
+5 s: the bridge must keep `10.55.0.254`, or the run fails and re-adds it at once. A lower session count is only
+reported, because counts lag a real flush and move for unrelated reasons. An unknown session count still refuses.
+
+## Results
+
+- **Live write:** pending. Record the `APPLY=1 LIVE_WRITE=1` output (the read-back, and the 30 s check lines) here.
+- **First NAS boot after it:** pending. Record the step 4 checks: `bootup.log` says `STATIC`, the portals are on
+  `10.55.0.254` from boot (`hero_iscsi_scst.log`), and `watchdog.log` shows no restart.
 
 The window procedure below is kept as the first written planned-NAS-outage procedure (for firmware updates or pool work),
 not as a precondition of this change. Its steps 3–4 apply to any planned NAS reboot.
