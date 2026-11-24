@@ -663,6 +663,73 @@ Readback after the roll (operator):
   - C1: Fleet shows one list of agents grouped by host, as `design/Fleet.html` draws it (four columns, one Open
     action, View with grouping, density and columns, the Needs you filter); on a phone a host's Review is in its ⋯.
 
+### H11. v0.11.1: the v0.11 line, schema 88
+
+Why: release/v0.10 stops at schema 79, and every console feature with a migration ships from main. v0.11.1 is main
+(159c8051) as the owner chose it over v0.11.0 as cut, released through Relay #638, #640 and #643 (merge parts) and
+#637 (bump), `3678b8ed`, run 147466:
+- migrations 080-088: the managed runtime's records (080-087) and 088, whose owner-rights guards refuse a blind
+  lookup under another tenant's context (with #635's review items);
+- the managed runtime work, D3 and D3b-1, release Phase A;
+- the console work already live in v0.10.25 (D4, Fleet as designed), plus Terminals as designed (C2) and the new shell
+  behind `?console=new` (F0a, with the top bar's tiers, #641). The kill switch's engager is looked up only while it is
+  engaged (#642).
+
+Rehearsal (operator, on the published digest `d0bbbc58…fbbc` against a fresh production restore), all PASS:
+- migrate 79→88 in 1.2 s;
+- 088's checks: 13 guarded writes refused without the tenant context, with identical outcomes when it is set;
+- the fence on seeded VM rows in 2 tenants (environments 2, no 23514);
+- `recovery:verify` before and after;
+- inert for 10 minutes with production's flags;
+- the console against v0.10.25;
+- a rollback drill to v0.10.25.
+
+v0.11.0's rehearsal also showed two things. With `lock_timeout=10s`, a blocked migration fails 55P03 in 11 s; that
+migration rolls back, and the ones before it stay committed. The fleet's v0.10.11 connectors work with a v0.11 hub,
+and the reverse pairing works too. The dev-workers stay on the v0.10.11 pin.
+
+Change: this PR pins the v0.11.1 digest in `migrate` and `relay`, with the annotations. It also gives `migrate`
+`PGOPTIONS=-c lock_timeout=10s`, so a migration behind a lock fails (55P03) instead of waiting. Each migration commits
+in its own transaction, so the schema is then at the last migration that committed (read `schema_migrations`): in
+v0.11.0's rehearsal, 087 blocked and left 080-086 committed (schema 86). The kubelet retries the failed `migrate` with
+backoff, and each retry resumes from the next uncommitted migration: clearing the lock is enough, so do NOT force a
+second rollout. If the Pod is recreated instead, `backup-database` runs again and publishes a generation of the partly
+migrated schema; that is why a rollback restores this roll's EARLIEST generation. v0.10.25 does not support a partial
+schema either, so a rollback is the restore below, never a re-pin. The fence comment says what rollback really is. The
+merge itself rolls the hub once (Recreate, through Flux), with the pre-migration backup, outside the QNAP windows. No
+new settings.
+
+Rollback: forward-only from here. An older image is not refused: v0.10.25 starts against schema 88, so re-pinning it
+alone would run it on a schema it does not support. Rollback to v0.10.25 (`d98c6ce7…e22e`) takes four steps, in order:
+1. Restore this roll's **earliest** pre-migration generation (the first `backup-database` log of the v0.11.1
+   rollout).
+2. Run `recovery:fence` with a **fresh** generation.
+3. Put that generation in `relay-restore-fencing`.
+4. A reviewed PR re-pins v0.10.25.
+
+The cost, measured in the rehearsal's drill:
+- every connector and agent key is revoked (4 and 8), so each host and agent enrolls again;
+- every session ends (49);
+- the undelivered outbox is deleted;
+- a new generation ConfigMap is written;
+- writes after the backup are lost.
+
+Readback after the roll (operator):
+
+- one Running Pod; source `3678b8ed882efc48c8ce8d75d043896d7d285eaa`, release `relay-0.11.1-release-147466`;
+  the `relay` container's image ID ends in
+  `sha256:d0bbbc58392ac75db0c1d08ed4cfb90aade846ae415898bdf209e40f31c8fbbc`;
+- the backup init container exited 0 (record its generation: it is the rollback's restore point), the migrate init
+  container exited 0 with `PGOPTIONS` set, and `schema_migrations` reads `88|88`;
+- the `relay` container's env is unchanged from H10;
+- the features' production checks (the owner, in the console):
+  - the classic console still works, with H10's checks;
+  - Status, Fleet and Terminals load; Terminals follows `design/Terminals.html` (one tile per terminal, Focus for
+    one);
+  - `?console=new` opens the new shell (sidebar, top bar), and every page in it works;
+  - Activity and the connectors are unaffected: the dev-workers' hosts reconnect on v0.10.11 and their agents show
+    observed states.
+
 ## Enablement order at a glance
 
 > **Campaign rows are historical.** The owner retired the researcher qualification campaign and its
@@ -690,6 +757,7 @@ Readback after the roll (operator):
 | H4b | HISTORICAL while the campaign is retired (needs its genuine approval): `RELAY_WORKER_PROFILES_FILE`/`_SHA256` (profile registry) | the genuine approval, the qualified `tokenPolicyDigests`, registry reviewed | file pin equal; no `profiles-unavailable`; budget still `started`. Before the bounded general lifecycle trial |
 | H9 | hub image → v0.10.16 (agent state, Claude Code's state, Activity table, Needs you, Fleet, Terminals); gates no step above | every dev-worker connector on v0.10.11 (ailab #1947, #1949, read back per worker); H8's state only (no new settings) | v0.10.16 digest running, schema still 79, agents show observed states and Claude Code's, Activity pages by scrolling, Needs you lists pending requests |
 | H10 | hub image → v0.10.25 (the Assistant's action registry, every Assistant tool on it, its cards, its brief and its routes; Fleet as designed); gates no step above | H9 live | v0.10.25 digest running, schema still 79, a host decided from the console and one from the Assistant both read `action: host.authorize`, an Assistant rename reads `action: conversation.rename`, and a host approved from the Needs you card reads `surface: assistant-card`, in Activity, and the agents, lanes, session and terminal cards show (the terminal text only on request), and the brief's Needs you matches Status |
+| H11 | hub image → v0.11.1 (schema 88: migrations 080-088; Terminals as designed; the new shell behind `?console=new`); `PGOPTIONS` lock timeout on `migrate`; gates no step above | H10 live; the operator's rehearsal of the published digest PASS | v0.11.1 digest running, `schema_migrations` `88\|88`, the backup generation recorded, the console's checks pass, the dev-workers reconnected |
 
 ## Rollback: migrations are forward-only
 
@@ -712,6 +780,12 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
   generation. That fence retires the restored database's connectors, keys, sessions and memberships:
   it is the cost of restoring, not of initializing.
 - **H4a, H6 and H4b:** revert that step's inclusion PR; nothing in the database changes.
+- **H11 (schema 88):** a bare re-pin is never a rollback: v0.10.25 starts against schema 88 and would run on a schema
+  it does not support. Restore the v0.11.1 rollout's **earliest** pre-migration generation (the first
+  `backup-database` log) with the H2 mechanics above, run `recovery:fence` with a **fresh** generation and keep it in
+  `relay-restore-fencing`, then a reviewed PR re-pins v0.10.25 (`d98c6ce7…e22e`). Cost, rehearsed: every connector
+  and agent key revoked (4 and 8), every session ended (49), the undelivered outbox deleted, a new generation
+  ConfigMap; writes after the backup are lost.
 - **H8:** a reviewed PR re-pins v0.10.4 (`d1482bc1…57a7`); schema 79 is unchanged. A connection row or
   pool approved under v0.10.9 stays, and v0.10.4 accepts it (its check only reads the row).
 - **H7's candidate files:** the next run's PR replaces a run's values; before the canary one PR drops
