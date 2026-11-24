@@ -47,8 +47,16 @@ What it does not change yet:
 - **The NFS re-export in the reconciler stays** until a boot shows whether the rw-rule race is gone. The timing fits
   the same root cause: `S99nfs` started NFS at 261 s while the bridge had only its link-local address, and the
   reconciler added `10.55.0.254` and re-exported at ~301 s. With the static config, NFS starts with the address in
-  place. At the next boot, check `exportfs -v` before ~300 s (or read the reconciler's flag time against the export
-  table) to see whether the rw rule is there without the re-export.
+  place. **But no observation available today can prove the re-export unnecessary.**
+  - The reconciler runs on the first cron minute after `crond` starts (anywhere ~1–60 s later), so no uptime is a
+    safe cutoff.
+  - An export table read later shows the state after the re-export, not before.
+
+  A valid test needs a timestamped `exportfs -v` snapshot taken after `S99nfs` and **immediately before** the
+  re-export, i.e. inside the reconciler. A boot without that snapshot, or one where the re-export flag already
+  existed, is inconclusive. Follow-up: add the snapshot to the reconciler and give it its own installer
+  (`qnap-setup.sh` also re-applies eth1 and the share, so it is not a safe way to redeploy it). Until a snapshot shows
+  the rw rule present before the re-export, the re-export stays.
 
 Measured before the window, on the live NAS:
 - Read-only: `nacli getcfg` reads the section (`now: ip4_type=DHCP ip= subnet_mask=255.255.0.0`).
@@ -223,7 +231,7 @@ Wait until uptime > 6 min.
 | The address held through S99 | `ip -4 addr show tbtbr0`; `brctl show tbtbr0`; `dmesg \| grep 'tbtbr0: port'` | `10.55.0.254/24`; `dummy0` is still port 1 |
 | The reconciler had nothing to do | `ps \| grep -E 'autoipd\|dhclient' \| grep tbtbr0` | neither runs (static config); then the reconciler's address line can go |
 | NFS | `exportfs -v \| grep pve-nfs`; from each host `findmnt /mnt/pve/qnap-nfs && ls /mnt/pve/qnap-nfs/images` | rw for `10.55.0.0/24` and `10.55.1.0/24`; listing answers |
-| NFS rw race (observation) | `exportfs -v` **before** the reconciler's first run, if you are fast | record whether the rw rule is present without the re-export |
+| NFS rw race | only the reconciler's pre-re-export snapshot can show it (follow-up above); a manual `exportfs -v` is not evidence | without that snapshot: inconclusive, and the re-export stays |
 | versitygw | `grep ' sdb$' /proc/partitions; netstat -lnt \| grep ':7070 '` | present, listening |
 | Clean shutdown | `nvme smart-log /dev/nvme0` … `unsafe_shutdowns` | unchanged from step 0 |
 
@@ -273,4 +281,5 @@ Close the rollout-freeze issue.
 - Record the results here (the step 4 table, timings, unsafe_shutdowns) and set the status line.
 - Update `qnap-storage-setup.md` §2/§12 from "pending the window" to the measured result.
 - Promote steps 1–6 into `node-maintenance.md` as the rehearsed planned-NAS-outage procedure, and close its open item.
-- If the NFS rw rule held without the re-export, a follow-up PR can drop the reconciler's `nfs restart`.
+- Drop the reconciler's `nfs restart` only after the reconciler's own pre-re-export snapshot (follow-up above) shows the
+  rw rule present at a boot with the static config.
