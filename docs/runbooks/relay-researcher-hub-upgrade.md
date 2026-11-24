@@ -747,8 +747,13 @@ Migration 089 (schema 88 → 89):
   holds SHARE on `agent_messages` for its duration; production's table is small, so expect well under a second;
 - `relay_app` gets SELECT, INSERT and DELETE on `health_samples`.
 
-Check before the merge (operator): migrate 88 → 89 on a copy of production; forced RLS and the grants on
-`health_samples`; the sampler writing a minute's samples.
+Check before the merge (operator), recorded on the PR (ailab #1984, the operator's check comment), PASS when all hold:
+- the published digest `4f30750e…97c9` (deployment-images-147982.json and the image's revision label) migrates the
+  latest production generation (here 20261124T162049Z-bfa30aad, schema 88) to schema 1..89, `migrate` exit 0, with
+  its time recorded (1.1 s);
+- `health_samples` has forced row security and its policy; grants: owner SIUD, app SID, backup S;
+- the `agent_messages_expiry` index built, with the table's row count recorded (1,665 rows);
+- the hub on that copy writes samples each minute (9 rows in 3 minutes).
 
 Change: this PR pins the v0.11.4 digest in `migrate` and `relay`, with the annotations, and moves the fence comment to
 schema 89. `migrate` keeps `PGOPTIONS=-c lock_timeout=10s` (H11). The merge itself rolls the hub once (Recreate,
@@ -768,8 +773,10 @@ Readback after the roll (operator):
   `sha256:4f30750efe6715f86f7cb1028d20833cfd74788baafbe466e05f86dd78bb97c9`;
 - the backup init container exited 0 (record its generation: the rollback's restore point), the migrate init container
   exited 0, and `schema_migrations` reads `89|89`; the `relay` container's env is unchanged from v0.11.3;
-- after two minutes, `health_samples` has a row per source in use for the minute (read with the tenant set: forced
-  row security reads empty without it);
+- after two minutes, `health_samples` has a row per source in use for the minute. Forced row security reads empty
+  without the tenant, so read it as the postgres superuser, or in one transaction:
+  `BEGIN; SET LOCAL relay.tenant_id = '00000000-0000-4000-8000-000000000001'; SELECT source, max(sampled_at) FROM
+  health_samples GROUP BY source; COMMIT;`;
 - the owner, in the console: Status shows Health after Needs you, with the six tiles, their bars filling from the
   right, and a tile's Details opening under the grid.
 
@@ -824,15 +831,15 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
   generation. That fence retires the restored database's connectors, keys, sessions and memberships:
   it is the cost of restoring, not of initializing.
 - **H4a, H6 and H4b:** revert that step's inclusion PR; nothing in the database changes.
-- **H12 (schema 89):** as H11: never a bare re-pin. Restore the v0.11.4 rollout's **earliest** pre-migration
-  generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
-  v0.11.3 (`2c350aee…8a2b`); H11's cost applies.
 - **H11 (schema 88):** a bare re-pin is never a rollback: v0.10.25 starts against schema 88 and would run on a schema
   it does not support. Restore the v0.11.1 rollout's **earliest** pre-migration generation (the first
   `backup-database` log) with the H2 mechanics above, run `recovery:fence` with a **fresh** generation and keep it in
   `relay-restore-fencing`, then a reviewed PR re-pins v0.10.25 (`d98c6ce7…e22e`). Cost, rehearsed: every connector
   and agent key revoked (4 and 8), every session ended (49), the undelivered outbox deleted, a new generation
   ConfigMap; writes after the backup are lost.
+- **H12 (schema 89):** as H11: never a bare re-pin. Restore the v0.11.4 rollout's **earliest** pre-migration
+  generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
+  v0.11.3 (`2c350aee…8a2b`); H11's cost applies.
 - **H8:** a reviewed PR re-pins v0.10.4 (`d1482bc1…57a7`); schema 79 is unchanged. A connection row or
   pool approved under v0.10.9 stays, and v0.10.4 accepts it (its check only reads the row).
 - **H7's candidate files:** the next run's PR replaces a run's values; before the canary one PR drops

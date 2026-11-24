@@ -141,8 +141,10 @@ spec:
       # cost is H11's: every connector and agent key revoked, every session ended, the undelivered
       # outbox deleted, a new generation ConfigMap; writes after the backup are lost.
       # docs/runbooks/relay-researcher-hub-upgrade.md, H12 and H11, and "Rollback: migrations are
-      # forward-only". Further back follows H11's comment (v0.10.25 by the v0.11.1 rollout's earliest
-      # generation; below v0.10.2 as before).
+      # forward-only". Further back: to v0.10.25 (d98c6ce7...) restore the v0.11.1 rollout's earliest
+      # pre-migration generation, fence, re-pin (H11); below v0.10.2 restore the v0.10.2 rollout's
+      # pre-migration generation 20261115T162747Z-119fcc01-b84d-4be5-a80c-ac5196caaf73 (else H1's),
+      # fence, then a reviewed PR re-pins v0.9.1 (runbook "Rollback", the H2 mechanics).
       # Relay v0.11.4, source 225b7747f8875da1ccc4e9badccae46c252e0abe (release/v0.11)
       # release v0.11.4 / run 147982; schema 89 (migration 089: health_samples).
       # Native Pi inference sessions; see relay-inference-v0113-20261124.md.
