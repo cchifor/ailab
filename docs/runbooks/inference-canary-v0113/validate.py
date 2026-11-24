@@ -42,6 +42,13 @@ def validate(root=Path(__file__).resolve().parent):
         require(profile["native"]["runtimeDirectory"] == runtime and
                 profile["artifacts"].get(runtime + "/manifest.json") == pi_pin,
                 "Pi archive and profile runtime pins differ")
+        require(profile["executable"] == runtime + "/node" and
+                profile["communication"]["executable"] == runtime + "/node" and
+                profile["communication"]["args"] == [runtime + "/relay-agent-tools.mjs"] and
+                set(profile["artifacts"]) == {runtime + "/" + name for name in
+                    ["relay-pi.mjs", "pi-worker.mjs", "relay-pi-policy.mjs",
+                     "relay-agent-tools.mjs", "bin/pi", "bin/npm", "manifest.json"]},
+                "Pi component paths differ from the pinned runtime")
         require(definition["holder"] == profile, "Hub and holder definitions differ")
         require(profile["router"] == policy, "Renderer and holder policies differ")
         require(request["name"] == definition["name"], "Binding name differs")
