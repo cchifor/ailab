@@ -1,5 +1,5 @@
 # Provisions the OpenBao side of the Relay Router connection (docs/runbooks/relay-router-connection.md;
-# kubernetes/apps/relay-router-connection/credentials/; owner approval cchifor/relay#277). Six vault
+# kubernetes/apps/relay-router-connection/credentials/; owner approval cchifor/relay#277). Eight vault
 # objects, owned declaratively the way relay-budget-provision-job.yaml owns its four:
 #   * policy `relay-router-escrow`       Relay's escrow WRITER (Relay credential-operations.md): create,
 #                                        read, update on KV data af/data/relay-router/escrow/<tenant>/+/+
@@ -20,6 +20,20 @@
 #                                        generator, every 24 h): an orphan service token carrying exactly
 #                                        policy relay-router-escrow (no `default`), not renewable, explicit
 #                                        max TTL 168h. Relay never renews it; the next mint replaces it.
+#   * policy `relay-router-reader-dev-worker-1`  the Pi canary's renderer READER on dev-worker-1
+#                                        (docs/runbooks/relay-router-workers.md, relay-pi-canary-holder.md):
+#                                        read on af/data/relay-router/escrow/<tenant>/<host>/* for the one
+#                                        tenant and dev-worker-1's approved connector b3b1be1a-... only --
+#                                        exactly the role's reader-policy.hcl.j2. No list, metadata, write,
+#                                        delete or destroy; never the escrow writer.
+#   * AppRole role `relay-router-reader-dev-worker-1`  that policy (+ default, for the agent's own token
+#                                        lifecycle), a 72h PERIODIC service token (the renewing bao agent
+#                                        never meets a max-TTL cliff), SecretIDs bounded to 720h (30 days;
+#                                        the issued SecretID's expiry date is written in the runbook and a
+#                                        new one is issued before it). The approle MOUNT is
+#                                        devworker-provision-job.yaml's: this Job refuses to run without it
+#                                        rather than become a second owner. SecretIDs are issued by the
+#                                        operator into SOPS, never here.
 #
 # IT CREATES NO KV DOCUMENT AND NO TOKEN. The signer keys and public keys are generated in the
 # operator's session, the escrow token is minted from the token role by ESO (relay-router-connection/
@@ -30,14 +44,16 @@
 # the scoped provisioner token cannot write policies, auth roles or token roles. `optional: false`.
 #
 # THE OWNERSHIP CONTRACT (relay-budget-provision-job.yaml's, extended to the token role):
-#   * GIT OWNS THE POLICIES AND ALL THREE ROLES WHOLE. `bao policy write` replaces a policy; each role
+#   * GIT OWNS THE POLICIES AND ALL FOUR ROLES WHOLE. `bao policy write` replaces a policy; each role
 #     write spells out every field that decides who may log in or what a token may carry, empty ones
 #     included. A grant or binding changed by hand is reverted on the next run, and a policy that
 #     matches neither reviewed form is REFUSED before anything is written.
 #   * THE KV CONTENTS ARE THE OPERATOR'S AND RELAY'S. This Job never reads, writes or deletes them.
 #   * A WIPE LOSES THE VALUES, the escrow and every token minted from the role: openbao-recovery.md,
 #     the RELAY ROUTER CONNECTION row, has the order.
-#   * REMOVING THIS FILE FROM GIT DOES NOT UNDO ITS WRITES, and does not revoke a minted token.
+#   * REMOVING THIS FILE FROM GIT DOES NOT UNDO ITS WRITES, and does not revoke a minted token. Retiring
+#     the reader: revoke its tokens (by accessor) and SecretIDs, then delete the AppRole role and the
+#     policy explicitly, in the same change that removes them here.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -59,6 +75,16 @@ data:
       echo "openbao unreachable/sealed or the breakglass token was rejected; aborting" >&2
       exit 1
     }
+    # The reader's AppRole needs the approle mount, which devworker-provision-job.yaml enables and owns.
+    # Checked before anything is written, so its absence leaves every policy and role untouched.
+    AUTH_LIST="$(bao auth list -format=json)" || {
+      echo "cannot list auth mounts; aborting rather than writing blind" >&2
+      exit 1
+    }
+    echo "$AUTH_LIST" | grep -q '"approle/"' || {
+      echo "the approle auth mount is absent (devworker-provision-job.yaml enables it); aborting before any write" >&2
+      exit 1
+    }
 
     # THE MAINTENANCE RULE (relay-budget-provision-job.yaml has the reasoning): on ANY policy change
     # here, edit the heredoc, set *_DESIRED to the new normalised form, and set *_BASELINE to the
@@ -72,11 +98,13 @@ data:
     RELAY_DESIRED='path"af/data/relay-router/relay/admin-signer"{capabilities=["read"]}path"af/data/relay-router/relay/reconciler-signer"{capabilities=["read"]}path"auth/token/create/relay-router-escrow"{capabilities=["update"]}'
     ROUTER_BASELINE='path"af/data/relay-router/router/trust"{capabilities=["read"]}'
     ROUTER_DESIRED='path"af/data/relay-router/router/trust"{capabilities=["read"]}'
+    READER_BASELINE='path"af/data/relay-router/escrow/00000000-0000-4000-8000-000000000001/b3b1be1a-275c-4a2e-b515-428b39c43171/*"{capabilities=["read"]}'
+    READER_DESIRED='path"af/data/relay-router/escrow/00000000-0000-4000-8000-000000000001/b3b1be1a-275c-4a2e-b515-428b39c43171/*"{capabilities=["read"]}'
 
-    # ---- 1. Drift guard for ALL THREE policies, BEFORE replacing anything -----------------------
+    # ---- 1. Drift guard for ALL FOUR policies, BEFORE replacing anything ------------------------
     # Whole-document comparison after stripping full-line comments and every whitespace character.
     # Absence is established from the policy LIST; once a policy is known to exist its read must
-    # succeed or the Job stops. All three are checked before any is written, so a refusal leaves
+    # succeed or the Job stops. All four are checked before any is written, so a refusal leaves
     # every policy and every role exactly as it was.
     POLICY_LIST="$(bao policy list -format=json)" || {
       echo "cannot list policies; aborting rather than writing blind" >&2
@@ -106,6 +134,7 @@ data:
     guard relay-router-escrow "$ESCROW_BASELINE" "$ESCROW_DESIRED"
     guard af-app-relay-router "$RELAY_BASELINE" "$RELAY_DESIRED"
     guard af-app-router-relay-keys "$ROUTER_BASELINE" "$ROUTER_DESIRED"
+    guard relay-router-reader-dev-worker-1 "$READER_BASELINE" "$READER_DESIRED"
 
     # ---- 2. The policies ------------------------------------------------------------------------
     # The escrow writer: Relay's BaoEscrow POSTs a new version with cas=0 (create; update covers a
@@ -128,6 +157,12 @@ data:
     bao policy write af-app-router-relay-keys - <<'EOF'
     path "af/data/relay-router/router/trust" { capabilities = ["read"] }
     EOF
+    # The Pi canary's renderer reader on dev-worker-1: its own host's escrow documents, read only (the
+    # renderer GETs data; it never lists, reads metadata or writes). Exactly the relay_router_renderer
+    # role's reader-policy.hcl.j2 for mount af, prefix relay-router/escrow, this tenant and host.
+    bao policy write relay-router-reader-dev-worker-1 - <<'EOF'
+    path "af/data/relay-router/escrow/00000000-0000-4000-8000-000000000001/b3b1be1a-275c-4a2e-b515-428b39c43171/*" { capabilities = ["read"] }
+    EOF
     [ "$(bao policy read relay-router-escrow | normalise)" = "$ESCROW_DESIRED" ] || {
       echo "policy relay-router-escrow is not the desired document after writing; aborting" >&2
       exit 1
@@ -140,7 +175,11 @@ data:
       echo "policy af-app-router-relay-keys is not the desired document after writing; aborting" >&2
       exit 1
     }
-    echo "policies relay-router-escrow, af-app-relay-router and af-app-router-relay-keys written and verified"
+    [ "$(bao policy read relay-router-reader-dev-worker-1 | normalise)" = "$READER_DESIRED" ] || {
+      echo "policy relay-router-reader-dev-worker-1 is not the desired document after writing; aborting" >&2
+      exit 1
+    }
+    echo "policies relay-router-escrow, af-app-relay-router, af-app-router-relay-keys and relay-router-reader-dev-worker-1 written and verified"
 
     # ---- 3. The two k8s auth roles, WRITTEN and OWNED WHOLE -------------------------------------
     # Exactly relay-budget-provision-job.yaml's write_role: the ServiceAccount's uid as the entity
@@ -237,11 +276,54 @@ data:
     done
     echo "$trole written: orphan, non-renewable, policy relay-router-escrow only, explicit max TTL 168h"
 
+    # ---- 4b. The renderer reader's AppRole, WRITTEN and OWNED WHOLE -----------------------------
+    # Every field that decides who may log in or what the token carries is written, empty ones
+    # included, and read back: a SecretID is required (no CIDR binding: the LAN NodePort SNATs the
+    # client away, devworker-provision-job.yaml), SecretIDs live 720h and are reusable within it, the
+    # token is a 72h PERIODIC service token with no max TTL and no use cap, carrying exactly the reader
+    # policy plus `default` (renew-self/lookup-self for the bao agent). No SecretID is issued here.
+    arole="auth/approle/role/relay-router-reader-dev-worker-1"
+    bao write "$arole" \
+      bind_secret_id=true \
+      secret_id_bound_cidrs="" \
+      secret_id_num_uses=0 \
+      secret_id_ttl=720h \
+      token_bound_cidrs="" \
+      token_policies="relay-router-reader-dev-worker-1" \
+      token_no_default_policy=false \
+      token_ttl=0 \
+      token_max_ttl=0 \
+      token_explicit_max_ttl=0 \
+      token_num_uses=0 \
+      token_period=72h \
+      token_type=service
+    AROLE_JSON="$(bao read -format=json "$arole" | tr -d '[:space:]')" || {
+      echo "cannot read back $arole; aborting" >&2
+      exit 1
+    }
+    for want in '"bind_secret_id":true' '"token_policies":\["relay-router-reader-dev-worker-1"\]' \
+                '"secret_id_ttl":2592000[,}]' '"token_period":259200[,}]' '"token_no_default_policy":false' \
+                '"token_type":"service"'; do
+      echo "$AROLE_JSON" | grep -q "$want" || {
+        echo "$arole does not read back $want after writing; aborting" >&2
+        exit 1
+      }
+    done
+    for unwanted in '"secret_id_num_uses":[1-9]' '"secret_id_bound_cidrs":\["' '"token_bound_cidrs":\["' \
+                    '"token_num_uses":[1-9]' '"token_ttl":[1-9]' '"token_max_ttl":[1-9]' \
+                    '"token_explicit_max_ttl":[1-9]' '"policies":\["[^]]*,'; do
+      if echo "$AROLE_JSON" | grep -q "$unwanted"; then
+        echo "$arole still carries $unwanted after writing; aborting" >&2
+        exit 1
+      fi
+    done
+    echo "$arole written: SecretID required (720h), 72h periodic service token, reader policy + default only"
+
     # ---- 5. No KV document, no token ------------------------------------------------------------
     # Deliberately nothing here. af/relay-router/{relay,router}/* are written by the operator, the
     # escrow token is minted by Relay's ESO generator from the role above, af/relay-router/escrow/* by
     # Relay.
-    echo "no KV document and no token written: af/relay-router/* is operator- and Relay-owned"
+    echo "no KV document, no token and no SecretID written: af/relay-router/* is operator- and Relay-owned"
 ---
 apiVersion: batch/v1
 kind: Job

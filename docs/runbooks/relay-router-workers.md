@@ -88,6 +88,25 @@ management identity or the legacy host-wide reader AppRole. Bootstrap access rem
 model-facing tool interface. Scope/capabilities must be checked using the resulting reader token,
 including negative reads across tenant/host, KV list/write/delete/destroy denials.
 
+**This estate's reader for dev-worker-1** (the Pi inference canary, [relay-pi-canary-holder.md](relay-pi-canary-holder.md))
+is owned by `kubernetes/apps/infrastructure/security/openbao/relay-router-provision-job.yaml`: policy and AppRole
+role `relay-router-reader-dev-worker-1`, read on
+`af/data/relay-router/escrow/00000000-0000-4000-8000-000000000001/b3b1be1a-275c-4a2e-b515-428b39c43171/*` only,
+a 72h periodic service token (policy plus `default`), SecretIDs bounded to 720h. The Job refuses to run without the
+`approle` mount (devworker-provision-job.yaml owns it) and issues no SecretID. The operator issues one after the
+Job has run:
+
+- `role_id` from `auth/approle/role/relay-router-reader-dev-worker-1/role-id`, and the SecretID from
+  `bao write -f -field=secret_id auth/approle/role/relay-router-reader-dev-worker-1/secret-id`. Both are piped
+  straight into the SOPS file below, never into argv, a log or the transcript.
+- Verify with a token from that login, using `bao token capabilities`, never by reading a value: its own host
+  path is `read`; another host, another tenant, metadata, list and destroy are `deny`. Then revoke that
+  verification token.
+- Write the SecretID's expiry (issue time + 720h) into the canary's release record, and issue a replacement
+  before it. A reboot or an auth-service restart after the expiry cannot log in again.
+- Retire: revoke the reader's tokens by accessor and destroy its SecretIDs, then remove the policy and role from
+  the Job and delete both in OpenBao, in the same change. Reverting the Job alone deletes nothing.
+
 Store the resulting identity in a separate SOPS file selected by `relay_router_secrets_file`:
 
 ```yaml
