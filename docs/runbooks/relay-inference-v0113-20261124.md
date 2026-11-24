@@ -1,7 +1,9 @@
 # Relay v0.11.3 inference deployment
 
-Status: published and locally qualified; production deployment and paired live
-Pi acceptance are pending. This pin does not enable a holder or a canary profile.
+Status at the 2026-11-24 pre-merge checkpoint: published and locally qualified;
+production deployment and paired live Pi acceptance are pending. This pin does
+not enable a holder or a canary profile. Record subsequent deployment evidence
+below without treating this historical checkpoint as current rollout state.
 
 ## Immutable provenance
 
@@ -76,6 +78,13 @@ is a separate release; it is not interchangeable with this qualified pin.
 8. Record actual evidence in the inference plan and rollout runbook before
    declaring the entire feature complete. Existing live Codex/Qwen router tests
    do not replace paired packaged Pi acceptance.
+
+## Deployment evidence
+
+Pending post-merge readback: record the observation time, merged Git/Flux revision,
+application and migration image/source, backup verification, migration completion,
+schema version and readiness here. Record paired Pi and warm/rollback acceptance
+separately; healthy hub deployment does not establish those outcomes.
 
 ## Rollback
 
