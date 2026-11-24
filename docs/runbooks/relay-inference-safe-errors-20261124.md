@@ -26,12 +26,25 @@ stream-timeout status assertion (`cancelled` instead of `failed`). Its entire
 52-test file passed separately, then the full verification passed without source
 changes or waived tests. Retain both runs as evidence; this is not a claim that
 the initial failure was fixed by the logging change.
+The unresolved classification race is tracked in
+[llm-router #198](https://git.chifor.me/cchifor/llm-router/issues/198), including
+the failed assertion, runtime, reproduction evidence and required investigation.
+Passing reruns do not establish its cause. The release owner must assess that
+record alongside the passing qualification before approving this pin.
 
 Relative to the deployed source `300856ff`, the only source delta is reviewed
 #197 (fixed error classifications and their tests). No schema, account, route or
 credential migration is introduced. The original backup init container retains
 its label and mount restrictions; the new image verifies the historical COMPLETE
 snapshot without overwriting it. Preserve that snapshot and all live receipts.
+The backup implementation, backup tests and publisher are unchanged between
+packaging commits `b0336729fbd9915379246df3e64b616197736642` (deployed image) and
+`b29fe37` (this image); an exact Git diff of those three files is empty.
+The backup script's Git blob is `021ead1128c3d0fe4688c893c810a9794f5216fb`
+in both. Both images already contain inference sessions; this is not a change
+from a pre-inference backup implementation to a post-inference one. Publication
+147708 again tested the same script at `/app/deploy/backup-router.mjs` inside
+the newly built image, including repeat verification of the historical snapshot.
 
 ## Rollout and acceptance
 
