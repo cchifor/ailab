@@ -16,15 +16,21 @@
 # (scripts/qnap-iscsi-portal-watchdog.sh) stays too, as the backstop.
 #
 # This WRITES CONFIG ONLY, through QNAP's network CLI (`nacli setcfg`). Nothing is applied to the
-# live bridge; the value takes effect at the next NAS boot. It is not known whether QNAP's network
-# daemon re-applies a written value live (and a live re-apply could flush 10.55.0.254, the address
-# that carries the control-plane disks over NFS). So APPLY refuses while any iSCSI session is
-# logged in, i.e. while the cluster is up: run it inside the planned window
-# (plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md), after every Talos node is shut down.
+# live bridge; the value takes effect at the next NAS boot. Measured 2026-11-24: QNAP's own log of
+# a setcfg call shows load through ncaas (the network config store), change one key, save, exit.
+# Applying is a separate command (`nacli setup_by_config` / `reconfig`). No process holds an inotify
+# watch on nm.conf that belongs to the network stack (only hda_monitor and qmmsd watch the config
+# directory), and nm.conf is not rewritten after boot.
 #
-#   bash scripts/qnap-tbtbr0-static-ip.sh            # read-only: current vs wanted (the default)
-#   APPLY=1 bash scripts/qnap-tbtbr0-static-ip.sh    # write STATIC 10.55.0.254/24 (window only)
-#   REVERT=1 bash scripts/qnap-tbtbr0-static-ip.sh   # back to QNAP's default (DHCP, link-local)
+# Still, a live re-apply would flush 10.55.0.254, the address that carries the control-plane disks
+# over NFS. So a write while iSCSI sessions are logged in needs the explicit LIVE_WRITE=1. A live
+# write is then followed by a 30 s check: the bridge must keep the address (it is re-added at once
+# and the run fails if it goes). A lower session count is reported, not failed on.
+#
+#   bash scripts/qnap-tbtbr0-static-ip.sh                      # read-only: current vs wanted (default)
+#   APPLY=1 LIVE_WRITE=1 bash scripts/qnap-tbtbr0-static-ip.sh  # write STATIC 10.55.0.254/24 now
+#   REVERT=1 LIVE_WRITE=1 bash scripts/qnap-tbtbr0-static-ip.sh # back to QNAP's default (DHCP)
+# (with the cluster down, i.e. sessions=0, LIVE_WRITE is not needed)
 #
 # Rehearsal on a scratch copy (no interlock; the copy is not what the network daemon reads):
 #   python scripts/qnap-ssh.py --sudo "cp /etc/config/nm.conf /tmp/nm.conf.rehearse"
@@ -40,8 +46,26 @@ cd "$(dirname "$0")/.."
 
 SVC_IP="${SVC_IP:-10.55.0.254}"
 NETMASK="${NETMASK:-255.255.255.0}"
+# Prefix length for the live re-add, derived from NETMASK (contiguous masks only).
+PREFIX=0
+ended=0   # after the first octet below 255, every later octet must be 0
+IFS=. read -r o1 o2 o3 o4 <<< "$NETMASK"
+for o in "$o1" "$o2" "$o3" "$o4"; do
+  case "$o" in
+    255|254|252|248|240|224|192|128|0) ;;
+    *) echo "NETMASK $NETMASK is not a valid mask" >&2; exit 2 ;;
+  esac
+  if [ "$ended" = 1 ] && [ "$o" != 0 ]; then echo "NETMASK $NETMASK is not contiguous" >&2; exit 2; fi
+  case "$o" in
+    255) PREFIX=$((PREFIX + 8)) ;; 254) PREFIX=$((PREFIX + 7)) ;; 252) PREFIX=$((PREFIX + 6)) ;;
+    248) PREFIX=$((PREFIX + 5)) ;; 240) PREFIX=$((PREFIX + 4)) ;; 224) PREFIX=$((PREFIX + 3)) ;;
+    192) PREFIX=$((PREFIX + 2)) ;; 128) PREFIX=$((PREFIX + 1)) ;;
+  esac
+  [ "$o" = 255 ] || ended=1
+done
 APPLY="${APPLY:-0}"
 REVERT="${REVERT:-0}"
+LIVE_WRITE="${LIVE_WRITE:-0}"
 LIVE_CONF=/etc/config/nm.conf
 NM_CONF="${NM_CONF:-$LIVE_CONF}"
 if [ "$APPLY" = 1 ] && [ "$REVERT" = 1 ]; then echo "APPLY and REVERT are exclusive" >&2; exit 2; fi
@@ -68,6 +92,13 @@ NACLI=/usr/local/bin/nacli
 grep -q '^\[tbtbr0\]' "\$CONF" || { echo "FATAL: no [tbtbr0] section in \$CONF"; exit 1; }
 get() { "\$NACLI" getcfg -f "\$CONF" tbtbr0 "\$1" 2>/dev/null; }
 live() { ip -4 -o addr show tbtbr0 2>/dev/null | awk '{ print \$4 }' | tr '\n' ' '; }
+# NAS-wide logged-in iSCSI sessions. A failed query or a target record without a parseable sess_cnt
+# is "unknown". A successful query with no target records (a fresh NAS) is 0.
+count_sessions() {
+  out=\$(iscsiadmin get_target 2>/dev/null) && rc=0 || rc=\$?
+  if [ "\$rc" != 0 ]; then echo unknown; return 0; fi
+  printf '%s\n' "\$out" | awk '/^target = / { n++; if (match(\$0, /sess_cnt = [0-9]+/)) { s += substr(\$0, RSTART + 11, RLENGTH - 11); k++ } } END { if (k == n) print s + 0; else print "unknown" }'
+}
 
 echo "== tbtbr0 in \$CONF =="
 echo "  now:  ip4_type=\$(get ip4_type) ip=\$(get ip) subnet_mask=\$(get subnet_mask)"
@@ -78,23 +109,21 @@ if [ "\$(get ip4_type)|\$(get ip)|\$(get subnet_mask)" = "$WANT_TYPE|$WANT_IP|$W
   exit 0
 fi
 if [ "$MODE" = show ]; then
-  echo "  read-only. APPLY=1 writes it, inside the window, with the cluster shut down."
+  echo "  read-only. APPLY=1 writes it (plus LIVE_WRITE=1 while the cluster is up)."
   exit 0
 fi
 
-# Interlock (live config only): zero logged-in iSCSI sessions NAS-wide, i.e. "the cluster is down".
-# A failed query or a target record without a parseable sess_cnt is "unknown" and refuses. A
-# successful query with no target records at all (a fresh NAS, before Trident made any LUN) counts as 0.
+# Interlock (live config only). With sessions logged in, a write needs LIVE_WRITE=1. An unknown count
+# always refuses: the post-write check could not tell a dropped session from a parse failure.
 if [ "\$CONF" = "$LIVE_CONF" ]; then
-  out=\$(iscsiadmin get_target 2>/dev/null) && rc=0 || rc=\$?
-  if [ "\$rc" != 0 ]; then
-    sessions=unknown
-  else
-    sessions=\$(printf '%s\n' "\$out" | awk '/^target = / { n++; if (match(\$0, /sess_cnt = [0-9]+/)) { s += substr(\$0, RSTART + 11, RLENGTH - 11); k++ } } END { if (k == n) print s + 0; else print "unknown" }')
-  fi
+  sessions=\$(count_sessions)
   echo "== interlock: NAS-wide iSCSI sessions=\$sessions =="
-  if [ "\$sessions" != 0 ]; then
-    echo "FATAL: sessions=\$sessions. Run this inside the window, after every Talos node is shut down."
+  if [ "\$sessions" = unknown ]; then
+    echo "FATAL: the session count is unknown; not writing."
+    exit 1
+  fi
+  if [ "\$sessions" != 0 ] && [ "$LIVE_WRITE" != 1 ]; then
+    echo "FATAL: sessions=\$sessions. Pass LIVE_WRITE=1 to write while the cluster is up (config-only; checked for 30 s after)."
     exit 1
   fi
 else
@@ -103,7 +132,7 @@ fi
 
 # Every write keeps its own pre-image. From the first write until the read-back is verified, an EXIT
 # trap puts it back on ANY abort (a failed setcfg, a failed getcfg under set -e, a mismatch): the
-# window reboots the NAS right after this step, so a half-written section must never survive.
+# next boot applies this file, so a half-written section must never survive.
 BAK="\$CONF.bak-tbtbr0-\$(date +%Y%m%d-%H%M%S)"
 cp -f "\$CONF" "\$BAK"
 echo "  pre-image: \$BAK"
@@ -119,7 +148,35 @@ if [ "\$got" != "$WANT_TYPE|$WANT_IP|$WANT_MASK" ]; then
 fi
 trap - EXIT
 echo "  written and read back: \$got"
-[ "\$CONF" = "$LIVE_CONF" ] && echo "  live: \$(live) (unchanged is expected: it takes effect at the next NAS boot)"
+[ "\$CONF" = "$LIVE_CONF" ] || exit 0
+
+# Live check: the write must not have touched the running bridge. The address is the guard: a live
+# re-apply would flush it at once, while target-side session counts lag (sessions linger until their
+# timeouts) and also move for unrelated reasons (a pod moving logs a session out). So a missing
+# address fails and is put back at once (the cron reconciler would within a minute); a lower session
+# count is only reported. Checked immediately, then every 5 s for 30 s.
+echo "== live check, 30 s: tbtbr0 must keep $SVC_IP (sessions before the write: \$sessions) =="
+bad=0
+for t in 0 5 10 15 20 25 30; do
+  [ "\$t" = 0 ] || sleep 5
+  l=\$(live)
+  case " \$l " in
+    *" $SVC_IP/"*) ;;
+    *) echo "  !! t+\${t}s: $SVC_IP missing (live: \$l); re-adding it now"
+       ip addr add $SVC_IP/$PREFIX dev tbtbr0 2>/dev/null || true
+       bad=1 ;;
+  esac
+  s2=\$(count_sessions)
+  note=""
+  if [ "\$s2" = unknown ] || [ "\$s2" -lt "\$sessions" ]; then note=" (lower than before: noted, not a failure)"; fi
+  echo "  t+\${t}s live: \$l sessions=\$s2\$note"
+done
+if [ "\$bad" != 0 ]; then
+  echo "FAIL: the live bridge lost $SVC_IP after the write (re-added above). The STATIC config was KEPT in \$CONF;"
+  echo "      to undo it: REVERT=1 LIVE_WRITE=1 bash scripts/qnap-tbtbr0-static-ip.sh, or cp \$BAK \$CONF."
+  exit 1
+fi
+echo "  OK: the live bridge kept its address. The static address takes effect at the next NAS boot."
 exit 0
 EOF
 )
