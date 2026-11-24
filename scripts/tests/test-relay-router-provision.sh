@@ -15,8 +15,14 @@
 #      capped at 168 h even when asked for more, and usable as the escrow writer. It cannot mint any
 #      other way (plain create, create-orphan, another role) or touch the role, and
 #      sys/leases/revoke-prefix on the role path revokes every minted token at once.
-#   4. drift on the two k8s-auth roles and on the token role is cleared by the next run.
-#   5. a policy changed by hand: REFUSED before ANY policy or role is rewritten.
+#   0. no approle auth mount (devworker-provision-job.yaml owns it): REFUSED before anything is written.
+#   3c. the Pi canary's renderer reader (dev-worker-1): a SecretID login yields a 72h periodic service
+#      token carrying the reader policy + default, which reads its own host's escrow and nothing else
+#      (another host, another tenant, metadata, list, write, delete, destroy, the signer documents).
+#   4. drift on the two k8s-auth roles, on the token role and on the reader's AppRole is cleared by the
+#      next run.
+#   5. a policy changed by hand (the escrow writer, then the reader): REFUSED before ANY policy or role is
+#      rewritten.
 # Requires docker. Exit non-zero on the first broken expectation.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -86,10 +92,42 @@ check_policies() {
 no_documents() {
   if bao kv list -mount=af relay-router >/dev/null 2>&1; then fail "a KV document exists under af/relay-router/"; fi
 }
+RHOST=b3b1be1a-275c-4a2e-b515-428b39c43171
+READER=relay-router-reader-dev-worker-1
+AROLE=auth/approle/role/$READER
+check_reader() {
+  [ "$(bao policy read $READER | grep -c 'path ')" = 1 ] || fail "reader policy carries other than one path"
+  bao policy read $READER | grep -qF "path \"af/data/relay-router/escrow/$TENANT/$RHOST/*\" { capabilities = [\"read\"] }" || fail "reader grant"
+  j="$(bao read -format=json $AROLE | tr -d '[:space:]')"
+  for want in '"bind_secret_id":true' "\"token_policies\":\\[\"$READER\"\\]" '"secret_id_ttl":2592000[,}]' \
+              '"token_period":259200[,}]' '"token_no_default_policy":false' '"token_type":"service"'; do
+    echo "$j" | grep -q "$want" || fail "reader AppRole: want $want in $j"
+  done
+  for unwanted in '"secret_id_num_uses":[1-9]' '"secret_id_bound_cidrs":\["' '"token_bound_cidrs":\["' '"token_num_uses":[1-9]' \
+                  '"token_ttl":[1-9]' '"token_max_ttl":[1-9]' '"token_explicit_max_ttl":[1-9]'; do
+    if echo "$j" | grep -q "$unwanted"; then fail "reader AppRole kept $unwanted: $j"; fi
+  done
+}
 denied() { # <description> <command...> -- the command must FAIL with the given token
   d="$1"; shift
   if "$@" >/tmp/denied.out 2>&1; then cat /tmp/denied.out >&2; fail "escrow writer was allowed to $d"; fi
 }
+
+# 0. no approle mount -> refused before anything is written
+if run; then fail "a run without the approle mount must be refused"; fi
+expect $N "the approle auth mount is absent"
+for p in relay-router-escrow af-app-relay-router af-app-router-relay-keys relay-router-reader-dev-worker-1; do
+  if bao policy list | grep -qx "$p"; then fail "a refused run wrote policy $p"; fi
+done
+if bao read $TROLE >/dev/null 2>&1; then fail "a refused run wrote the token role"; fi
+if bao read "$(role af-app-relay-router)" >/dev/null 2>&1; then fail "a refused run wrote a role"; fi
+bao auth enable -path=approle userpass >/dev/null
+if run; then fail "a run with another auth method at approle/ must be refused"; fi
+expect $N "the auth mount at approle/ is not of type approle"
+if bao policy list | grep -qx relay-router-reader-dev-worker-1; then fail "a refused run wrote the reader policy"; fi
+bao auth disable approle >/dev/null
+bao auth enable approle >/dev/null
+echo "0: no approle mount, or another auth method at approle/ -> refused, nothing written"
 
 # 1. first run
 before_tokens="$(accessors)"
@@ -97,14 +135,17 @@ run || { cat /tmp/run.$N >&2; fail "first run"; }
 expect $N "policy relay-router-escrow absent"
 expect $N "policy af-app-relay-router absent"
 expect $N "policy af-app-router-relay-keys absent"
-expect $N "no KV document and no token written"
+expect $N "policy $READER absent"
+expect $N "no KV document, no token and no SecretID written"
 check_policies
 check_role af-app-relay-router relay-router-eso relay
 check_role af-app-router-relay-keys router-relay-keys-eso llm-router
 check_token_role
+check_reader
 no_documents
 [ "$(accessors)" = "$before_tokens" ] || fail "the Job minted a token"
-echo "1: first run -> three policies, two k8s-auth roles, token role, no KV document, no token"
+bao list -format=json "$AROLE/secret-id" >/dev/null 2>&1 && fail "the Job issued a SecretID"
+echo "1: first run -> four policies, two k8s-auth roles, token role, reader AppRole, no KV document, no token, no SecretID"
 
 # 2. operator-written documents survive a run untouched
 printf '%s' "PRIVATE-ADMIN-PEM" | bao kv put -mount=af relay-router/relay/admin-signer private_key=- >/dev/null
@@ -117,6 +158,8 @@ run || { cat /tmp/run.$N >&2; fail "second run"; }
 expect $N "policy relay-router-escrow matches a reviewed form"
 expect $N "policy af-app-relay-router matches a reviewed form"
 expect $N "policy af-app-router-relay-keys matches a reviewed form"
+expect $N "policy $READER matches a reviewed form"
+check_reader
 [ "$before" = "$(snap)" ] || fail "a run wrote an operator-owned document"
 if grep -q "PRIVATE-" /tmp/run.$N; then fail "a secret appeared in the Job output"; fi
 echo "2: re-run -> operator documents untouched, nothing secret in the log"
@@ -196,6 +239,46 @@ done
 bao token lookup "$R" >/dev/null || fail "revoke-prefix revoked the minting identity's own token"
 echo "3b: Relay's ESO identity mints capped, escrow-only orphan tokens through the role only; revoke-prefix revokes them all"
 
+# 3c. the renderer reader, logging in the way the bao agent on dev-worker-1 does
+RCRED=2b3c4d5e-6f70-4a81-9b2c-3d4e5f607182
+ROWN="af/data/relay-router/escrow/$TENANT/$RHOST/$RCRED"
+printf '%s' '{"options":{"cas":0},"data":{"token":"router-token-reader-0123456789","router_key_id":"key_0123456789ab","operation_id":"op3"}}' \
+  | bao write "$ROWN" - >/dev/null
+RID="$(bao read -field=role_id "$AROLE/role-id")"
+SID="$(bao write -f -field=secret_id "$AROLE/secret-id")"
+SIDJ="$(bao write -format=json "$AROLE/secret-id/lookup" secret_id="$SID" | tr -d '[:space:]')"
+echo "$SIDJ" | grep -q '"secret_id_ttl":2592000[,}]' || fail "the SecretID is not bounded to 720h: $SIDJ"
+LJ="$(bao write -format=json auth/approle/login role_id="$RID" secret_id="$SID" | tr -d '[:space:]')"
+RT="$(echo "$LJ" | sed -n 's/.*"client_token":"\([^"]*\)".*/\1/p')"
+[ -n "$RT" ] || fail "the reader cannot log in"
+echo "$LJ" | grep -q "\"token_policies\":\\[\"default\",\"$READER\"\\]" || fail "reader token policies: $LJ"
+echo "$LJ" | grep -q '"renewable":true' || fail "reader token is not renewable"
+echo "$LJ" | grep -q '"lease_duration":259200[,}]' || fail "reader token is not the 72h period"
+TL="$(BAO_TOKEN="$RT" bao token lookup -format=json | tr -d '[:space:]')"
+echo "$TL" | grep -q '"period":259200[,}]' || fail "reader token is not periodic: $TL"
+echo "$TL" | grep -q '"explicit_max_ttl":0[,}]' || fail "reader token has an explicit max TTL"
+BAO_TOKEN="$RT" bao token renew >/dev/null || fail "reader token cannot renew itself"
+[ "$(BAO_TOKEN="$RT" bao token capabilities "$ROWN")" = "read" ] || fail "reader capabilities on its own escrow"
+BAO_TOKEN="$RT" bao read -field=data "$ROWN" | grep -q router-token-reader || fail "reader cannot read its own escrow"
+rdenied() { # <description> <path>
+  c="$(BAO_TOKEN="$RT" bao token capabilities "$2")"
+  [ "$c" = "deny" ] || fail "reader has '$c' on $1 ($2)"
+}
+rdenied "another host's escrow" "af/data/relay-router/escrow/$TENANT/$HOST/$CRED"
+rdenied "another tenant's escrow" "af/data/relay-router/escrow/$OTHER/$RHOST/$RCRED"
+rdenied "its host's escrow metadata" "af/metadata/relay-router/escrow/$TENANT/$RHOST/$RCRED"
+rdenied "its host's escrow list" "af/metadata/relay-router/escrow/$TENANT/$RHOST"
+rdenied "its host's escrow destroy" "af/destroy/relay-router/escrow/$TENANT/$RHOST/$RCRED"
+rdenied "the admin signer" "af/data/relay-router/relay/admin-signer"
+rdenied "the trust document" "af/data/relay-router/router/trust"
+rdenied "the escrow token role" "auth/token/create/relay-router-escrow"
+if printf '%s' '{"data":{"token":"x"}}' | BAO_TOKEN="$RT" bao write "$ROWN" - >/dev/null 2>&1; then fail "reader wrote its escrow"; fi
+if BAO_TOKEN="$RT" bao delete "$ROWN" >/dev/null 2>&1; then fail "reader deleted its escrow"; fi
+if BAO_TOKEN="$RT" bao write -f "$AROLE/secret-id" >/dev/null 2>&1; then fail "reader issued a SecretID"; fi
+bao write -f "$AROLE/secret-id/destroy" secret_id="$SID" >/dev/null
+bao token revoke "$RT" >/dev/null
+echo "3c: renderer reader -> 72h periodic token, reads only its host's escrow data; SecretID bounded to 720h"
+
 # 4. drift on the k8s-auth roles and on the token role is cleared
 for r in af-app-relay-router af-app-router-relay-keys; do
   bao write "$(role $r)" bound_service_account_names=relay-router-eso,intruder bound_service_account_namespace_selector='{"matchLabels":{"any":"ns"}}' \
@@ -204,7 +287,11 @@ done
 bao write $TROLE allowed_policies=relay-router-escrow,default allowed_policies_glob='*' orphan=false renewable=true \
   token_no_default_policy=false token_period=768h token_explicit_max_ttl=0 token_num_uses=5 token_bound_cidrs=10.0.0.0/8 \
   allowed_entity_aliases=intruder path_suffix=other >/dev/null
+bao write $AROLE token_policies=$READER,relay-router-escrow secret_id_ttl=0 secret_id_num_uses=5 token_period=0 token_ttl=12h \
+  token_max_ttl=24h token_explicit_max_ttl=48h token_num_uses=3 token_bound_cidrs=10.0.0.0/8 secret_id_bound_cidrs=10.0.0.0/8 \
+  token_no_default_policy=true >/dev/null
 run || { cat /tmp/run.$N >&2; fail "run after role drift"; }
+check_reader
 check_role af-app-relay-router relay-router-eso relay
 check_role af-app-router-relay-keys router-relay-keys-eso llm-router
 for r in af-app-relay-router af-app-router-relay-keys; do
@@ -212,7 +299,7 @@ for r in af-app-relay-router af-app-router-relay-keys; do
   bao read -field=token_bound_cidrs "$(role $r)" | grep -qx '\[\]' || fail "$r token_bound_cidrs survived a run"
 done
 check_token_role
-echo "4: k8s-auth role drift and token role drift (policy, glob, parent, renewal, period, TTL, uses, CIDRs) -> cleared"
+echo "4: k8s-auth role, token role and reader AppRole drift (policy, glob, parent, renewal, period, TTL, uses, CIDRs) -> cleared"
 
 # 5. a drifted policy -> refused before any policy or role is rewritten
 bao policy write relay-router-escrow - >/dev/null <<P
@@ -225,6 +312,21 @@ expect $N "REFUSING: policy relay-router-escrow"
 bao policy read relay-router-escrow | grep -q '"delete"' || fail "the drifted policy was rewritten anyway"
 bao read -field=bound_service_account_names "$(role af-app-relay-router)" | grep -qx '\[marker\]' || fail "a role was rewritten after a refusal"
 echo "5: drifted policy -> refused, nothing rewritten"
+
+# 5b. a drifted reader policy -> refused too (the escrow writer restored to its reviewed form first)
+bao policy write relay-router-escrow - >/dev/null <<P
+path "af/data/relay-router/escrow/$TENANT/+/+" { capabilities = ["create", "read", "update"] }
+path "af/destroy/relay-router/escrow/$TENANT/+/+" { capabilities = ["update"] }
+P
+bao policy write $READER - >/dev/null <<P
+path "af/data/relay-router/escrow/$TENANT/*" { capabilities = ["read"] }
+P
+bao write $AROLE token_policies=marker >/dev/null
+if run; then fail "a drifted reader policy must be refused"; fi
+expect $N "REFUSING: policy $READER"
+bao policy read $READER | grep -qF "escrow/$TENANT/*\"" || fail "the drifted reader policy was rewritten anyway"
+bao read -field=token_policies $AROLE | grep -qx '\[marker\]' || fail "the reader AppRole was rewritten after a refusal"
+echo "5b: drifted reader policy -> refused, nothing rewritten"
 echo "driver: all scenarios passed"
 DRIVER
 
@@ -232,4 +334,4 @@ HOSTWORK="$WORK"
 if command -v cygpath >/dev/null 2>&1; then HOSTWORK="$(cygpath -m "$WORK")"; export MSYS_NO_PATHCONV=1; fi
 chmod 755 "$WORK"; chmod 644 "$WORK/provision.sh" "$WORK/driver.sh"
 docker run --rm -u 100:1000 -v "$HOSTWORK:/w:ro" -e HOME=/tmp --entrypoint sh "$IMAGE" /w/driver.sh
-echo "test-relay-router-provision: OK (create, no KV, no token, escrow writer least privilege, role + token-role drift, policy drift refusal)"
+echo "test-relay-router-provision: OK (approle mount guard, create, no KV, no token, escrow writer and renderer reader least privilege, role + token-role + AppRole drift, policy drift refusal)"

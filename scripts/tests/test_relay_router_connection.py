@@ -417,7 +417,8 @@ class OpenBaoProvision(unittest.TestCase):
         self.assertIn(PROVISION.name, openbao["resources"])
 
     def test_escrow_writer_is_exactly_the_record_prefix_and_tenant(self):
-        self.assertEqual(set(self.heredocs), {"relay-router-escrow", "af-app-relay-router", "af-app-router-relay-keys"})
+        self.assertEqual(set(self.heredocs), {"relay-router-escrow", "af-app-relay-router", "af-app-router-relay-keys",
+                                              "relay-router-reader-dev-worker-1"})
         d = record()
         base = f"{d['baoPrefix']}/{TENANT}/+/+"
         want = (f'path "{d["baoMount"]}/data/{base}" {{ capabilities = ["create", "read", "update"] }}\n'
@@ -447,6 +448,47 @@ class OpenBaoProvision(unittest.TestCase):
         for field in ("orphan=true", "renewable=false", "token_no_default_policy=true",
                       "token_explicit_max_ttl=168h", "token_period=0", 'allowed_policies_glob=""'):
             self.assertIn(field, self.script)
+
+    def test_renderer_reader_is_the_role_template_for_dev_worker_1(self):
+        # The Pi canary's renderer reader (relay-router-workers.md, relay-pi-canary-holder.md): exactly the
+        # relay_router_renderer role's reader-policy.hcl.j2 for this estate's escrow (mount af, prefix
+        # relay-router/escrow), the one tenant and dev-worker-1's approved connector. Read only.
+        # The host the renderer on dev-worker-1 requests: its approved connector, from the inventory that
+        # every relay role on that host reads (relay_connector_host_id), never a third copied literal.
+        host_vars = yaml.safe_load((ROOT / "ansible/host_vars/dev-worker-1.yml").read_text(encoding="utf-8"))
+        host = host_vars["relay_connector_host_id"]
+        self.assertRegex(host, r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+        self.assertIn(host, self.script, "the Job's reader is for dev-worker-1's approved connector")
+        template = (ROOT / "ansible/roles/relay_router_renderer/templates/reader-policy.hcl.j2").read_text(encoding="utf-8")
+        rendered = (template.replace("{{ relay_router_bao_mount }}", "af")
+                    .replace("{{ relay_router_bao_prefix }}", "relay-router/escrow")
+                    .replace("{{ relay_router_tenant_id }}", TENANT)
+                    .replace("{{ relay_router_host_id }}", host))
+        self.assertNotIn("{{", rendered)
+        policy = self.heredocs["relay-router-reader-dev-worker-1"]
+        self.assertEqual(normalise(policy), normalise(rendered))
+        for label in ("READER_DESIRED", "READER_BASELINE"):
+            value = re.search(rf"^\s*{label}='([^']*)'", self.script, re.M).group(1)
+            self.assertEqual(value, normalise(rendered), label)
+        self.assertNotRegex(policy, r'"(create|update|delete|list|sudo|patch)"')
+        # Guarded with the others, BEFORE the first policy write; the approle mount checked before both.
+        guard = self.script.index('guard relay-router-reader-dev-worker-1 "$READER_BASELINE" "$READER_DESIRED"')
+        first_write = self.script.index("bao policy write ")
+        mount = self.script.index("""grep -q '"approle/"'""")
+        self.assertLess(mount, guard)
+        self.assertLess(guard, first_write)
+        self.assertNotIn("bao auth enable", self.script, "the approle mount is devworker-provision-job.yaml's")
+        # The AppRole, owned whole: every login-deciding field written, no SecretID issued here.
+        role = self.script.split('bao write "$arole"', 1)[1].split("AROLE_JSON=", 1)[0]
+        fields = dict(re.findall(r"^\s*([a-z_]+)=(\S+?)\s*(?:\\)?\s*$", role, re.M))
+        self.assertEqual(fields, {
+            "bind_secret_id": "true", "secret_id_bound_cidrs": '""', "secret_id_num_uses": "0",
+            "secret_id_ttl": "720h", "token_bound_cidrs": '""',
+            "token_policies": '"relay-router-reader-dev-worker-1"', "token_no_default_policy": "false",
+            "token_ttl": "0", "token_max_ttl": "0", "token_explicit_max_ttl": "0", "token_num_uses": "0",
+            "token_period": "72h", "token_type": "service"})
+        self.assertIn('arole="auth/approle/role/relay-router-reader-dev-worker-1"', self.script)
+        self.assertNotRegex(self.script, r"secret-id|secret_id_accessor|custom-secret-id")
 
 
 class InclusionGate(unittest.TestCase):
