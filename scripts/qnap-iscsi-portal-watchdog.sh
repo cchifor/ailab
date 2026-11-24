@@ -42,8 +42,13 @@ MIN_GAP_SECS="${MIN_GAP_SECS:-600}"
 TAG=iscsi-portal-watchdog
 RUNBOOK="runbook qnap-storage-setup.md section 12"
 
-MODE=run
-[ "${1:-}" = "--check" ] && MODE=check
+# Anything but no argument or exactly --check is refused: a typo in the read-only command must not
+# arm a live run.
+case "${1:-}" in
+  "") MODE=run ;;
+  --check) MODE=check ;;
+  *) echo "usage: $0 [--check]" >&2; exit 2 ;;
+esac
 
 # Persistent action log, next to the script on the pool. The NAS's /var/log does not survive the
 # reboot that this watchdog exists for. Only actions and refusals are written, never "healthy".

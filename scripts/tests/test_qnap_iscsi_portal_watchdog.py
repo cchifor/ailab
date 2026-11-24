@@ -364,6 +364,15 @@ class WatchdogTest(unittest.TestCase):
             self.run_wd(MIN_GAP_SECS=3600)
         self.assertEqual(self.restarts(), ["restart"])
 
+    def test_unknown_argument_is_refused_not_run(self):
+        self.cold_boot()
+        for _ in range(3):
+            r = self.run_wd("--chekc")
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("usage", r.stderr)
+        self.assertEqual(self.restarts(), [])
+        self.assertFalse(self.state.exists(), "a refused argument must not take the lock or write state")
+
     # --- --check ------------------------------------------------------------------------------
     def test_check_mode_reports_and_never_acts(self):
         r = self.run_wd("--check")

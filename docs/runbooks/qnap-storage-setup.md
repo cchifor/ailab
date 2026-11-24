@@ -591,7 +591,9 @@ MSYS_NO_PATHCONV=1 kubectl --context admin@ai -n trident exec <trident-node-linu
      echo "$mp" | busybox sed -n "s#.*kubernetes.io~csi/\(pvc-[^/]*\)/mount.*#\1#p" | busybox tr "\n" " "
      busybox dd if=$dev bs=1 skip=1288 count=4 2>/dev/null | busybox od -An -tu4; done | busybox sort -u'
 # prints "<pv> <mkfs epoch>"; an mkfs time after the boot, or long after the PV's creationTimestamp, is a reformat
-``` Then force-sync any ExternalSecret whose hourly refresh hit the OpenBao outage
+```
+
+Then force-sync any ExternalSecret whose hourly refresh hit the OpenBao outage
 (`kubectl annotate externalsecret <name> force-sync=$(date +%s) --overwrite`).
 
 ## Open items this audit did NOT close
