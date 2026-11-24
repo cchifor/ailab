@@ -33,6 +33,11 @@ export function createContext(opts) {
       const tar = spawnSync('tar', ['-C', localDir, '-cf', '-', '.'], { maxBuffer: 1 << 28 });
       return spawnSync('ssh', ['-o', 'BatchMode=yes', ctx.worker, `mkdir -p ${remoteDir} && tar -C ${remoteDir} -xf -`], { input: tar.stdout, encoding: 'utf8' });
     },
+    /** Runs a tar-producing command on the worker and unpacks its output into a local directory. */
+    pull(tarCmd, localDir) {
+      const t = spawnSync('ssh', ['-o', 'BatchMode=yes', ctx.worker, tarCmd], { maxBuffer: 1 << 28 });
+      spawnSync('tar', ['-C', localDir, '-xf', '-'], { input: t.stdout });
+    },
     /** Runs a node script inside the router pod with its own admin bearer (stdin = the script). */
     inPod(scriptPath, args = [], { timeout = 600_000 } = {}) {
       const kc = ['--context', ctx.kube, '-n', 'llm-router'];

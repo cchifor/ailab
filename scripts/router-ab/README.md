@@ -11,7 +11,7 @@ Run it after every router image roll, and before every config change that touche
 
 ```sh
 node scripts/router-ab/gate.mjs --plan                 # what would run
-node scripts/router-ab/gate.mjs --out gate.md          # everything: about 20 min
+RAB_CODEX_ACCOUNT=codex-2 node scripts/router-ab/gate.mjs --out gate.md   # everything: about 20 min (see Codex account pairing)
 node scripts/router-ab/gate.mjs --providers qwen --pairs 3
 RAB_CLAUDE_MODEL=fable node scripts/router-ab/gate.mjs --providers claude --tasks textkit-agentic --pairs 6
 ```
@@ -41,9 +41,11 @@ core/                          shared, provider-agnostic
   report.mjs                   the Markdown verdict table and the overall verdict
   context.mjs                  hosts (ssh, push, in-pod exec), secrets (never printed), temp dirs, teardown
   seats.mjs                    the pairing guard: which accounts a run's router requests reached
+  pairing.mjs                  Codex account pairing: first-request rule, unpaired pairs INVALID, slot-keeping schedule
 providers/                     one module per provider; discovered, never named by the core
   index.mjs                    discovery and the interface check
-  codex.mjs                    ChatGPT seat via the Codex CLI (direct: own login; router: dw-N key, native pass-through)
+  codex.mjs                    ChatGPT seat via the Codex CLI (direct: own login; router: dw-N key, native pass-through,
+                               runs placed on RAB_CODEX_ACCOUNT)
   codex-control.mjs            the same seat with the client held constant (direct: API mode through a plain forwarder)
   claude.mjs                   Claude seat via Claude Code (direct: own login; router: claude/<model>, sdk-resume)
   qwen.mjs, qwen-cloud3.mjs,   qwen3.8-27b, one provider per backend of the route (direct: its /v1/responses; router: pointer qwen-27b);
@@ -162,14 +164,42 @@ which a per-token figure would dilute.
 repeated:
 - a seat throttled (429), in either arm;
 - the router failed over between accounts mid-run, which breaks the pairing, or ran a Claude run on another seat than the
-  worker's login (`RAB_CLAUDE_ACCOUNT`, default `claude-2`);
+  worker's login (`RAB_CLAUDE_ACCOUNT`, default `claude-2`). A Codex run whose first request went to another account
+  makes its PAIR invalid, not the task (below);
 - the pairing cannot be verified: the run recorded no trajectory ids, or the router journal does not have them (the
   guard fails closed);
 - a route with several backends kept placing the run on another server than the direct arm's (qwen, after 8 tries);
 - a harness error.
 
-Codex is the one route that cannot be held to the direct seat: the pool places each session on any seat. The guard holds
-each run to one seat and prints it, and the seats serve the same model.
+**Codex account pairing (`RAB_CODEX_ACCOUNT`).** The Codex backend caches prompts per account, so a turn on an account
+that has not seen the conversation is mostly uncached (median 33 % cached against 99 % on the same account). The pool
+places each new conversation on any account and the router has no per-request way to pin one, so the router arm of
+`codex` and `codex-control` is held to the direct arm's account by discarding placements, and **only the run's first
+request decides**:
+- First request on another account: the run is discarded before it is graded and runs again, up to 8 times. That
+  placement is made before the model says anything, so discarding on it is a random draw, independent of what is measured.
+  Still elsewhere after 8 tries, the pair is **INVALID, "not paired: router served <accounts>"**: left out of every
+  metric, and its ABBA slot runs again with the same orientation (direct first or router first), at most `--pairs` more.
+  A verdict needs `--pairs` valid pairs; with fewer the task reads `INVALID (not paired; rerun)` and the gate INCOMPLETE.
+- First request on the account, a later one elsewhere (a failover, a spill): **kept** in every metric, because it is
+  router behaviour, and the verdict names it, e.g. `PASS (2 pairs moved accounts mid-run)`. Retrying such runs would
+  select on the outcome: a long, slow or failing session has more requests that can move, so the retries would keep the
+  fast, cached runs and could turn a FAIL into a PASS.
+- Every discarded first placement and every kept move is listed in the task's notes. The first placement is the
+  earliest attempt by the journal's `attempt.started` time, not the order the tap recorded the ids in; a journal that
+  does not time every attempt makes the run unverified (fail closed).
+- **Early stop.** Two consecutive unpaired pairs whose discarded runs never reached the account at all stop the task
+  (`INVALID (not paired; rerun)`) instead of spending up to `--pairs` x 2 pairs x 8 router sessions. The note says why:
+  either `RAB_CODEX_ACCOUNT` is wrong for the worker's login, or the account is drained or unavailable. The two look
+  identical from the gate; check the account's state and the mapping before a rerun.
+
+`RAB_CODEX_ACCOUNT` is **required**: it must be the router account of the ChatGPT login the gate's direct arm runs under,
+and `codex` and `codex-control` refuse to set up without it (their tasks read INVALID, the gate INCOMPLETE). There is no
+default, because a wrong value labels a cross-account comparison paired. The recorded mapping for dev-worker-1's login
+is `codex-2` (`plans/2026-11-05-router-transparency-and-planning-revalidation.md`); the operator confirms it for the
+worker they gate from. The report header records the accounts the arms were paired on (`Paired accounts:
+RAB_CODEX_ACCOUNT=codex-2, RAB_CLAUDE_ACCOUNT=claude-2`). The margins do not change. Before 2026-11-24 the `codex` arm was not held: on 2026-11-23 (ailab #1962) its six pairs ran on
+codex-3, codex-2, codex-3, codex-2, codex and codex-2 and read 1.49x uncached.
 
 **A route with several backends.** The router balances new conversations, and a client cannot pick the backend, so each
 qwen backend has its own provider. A router run placed on the other backend is discarded and run again. Placement is

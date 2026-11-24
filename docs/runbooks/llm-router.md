@@ -3831,6 +3831,16 @@ rules. For each provider (Codex seat, Claude seat, each qwen3.8-27b backend) it 
 - **For a change to the Claude seat transport:** also `--tasks textkit-agentic --pairs 6` with
   `RAB_CLAUDE_MODEL=fable`, on a seat with headroom. That is the acceptance test of the Claude real-session continuity
   design.
+- **When a matched parent-versus-release comparison is required** (owner decision 2026-11-24, ailab #1962 comment
+  140542). Roll the parent back and gate it against the release on the same day only when the release changes
+  forwarding, placement or request bodies, i.e. something that can change what an upstream receives or which account
+  serves it.
+  - A release that changes only logging, telemetry, admin read paths or documentation is gated once, after its roll.
+    The #195 and #194 releases are such.
+  - A Codex `code-edit` FAIL on uncached tokens alone, with every other metric inside its margin and the pairs paired
+    (see `RAB_CODEX_ACCOUNT`), is then read against the open cache-dip note below and recorded.
+  - Measuring that dip's same-image spread (three or more paired runs in a quiet window) comes before the 1.2x margin
+    is reconsidered.
 - **Mind the Claude seats.** Both Claude arms run on the same Max seat. Check its weekly use first (`/admin/v1/usage`,
   `limits.windows`). Close to the limit, run the Claude chat tasks only (`--tasks math,tool-choice,recall` plus the
   other providers' tasks), as the 2026-11-05 baseline did at 98 %.
@@ -3838,8 +3848,10 @@ rules. For each provider (Codex seat, Claude seat, each qwen3.8-27b backend) it 
 **How.** From the operator workstation, with `kubectl --context admin@ai` and ssh to dev-worker-1:
 
 ```sh
-node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
+RAB_CODEX_ACCOUNT=codex-2 node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
 ```
+
+`RAB_CODEX_ACCOUNT` is required (below); `codex-2` is dev-worker-1's recorded mapping, to be confirmed first.
 
 **Reading the verdict.**
 
@@ -3848,8 +3860,24 @@ node scripts/router-ab/gate.mjs --out gate-$(date -u +%Y%m%d-%H%M).md
 | PASS (exit 0) | Every Layer (a) check and every margin passed | Record the report with the release |
 | PASS (known deviation) (exit 0) | A margin is outside §9.6 but inside the looser bound of a known deviation in the task registry (the report prints the mechanism) | As PASS. If the report says the deviation no longer shows, retire the entry |
 | RERUN (exit 3) | Under 6 pairs, a metric is outside its margin (OUT) or within half a margin of it (NEAR). §9.6 takes 3 more pairs and decides on all 6 | Rerun that provider and task with `--providers p --tasks t --pairs 6`. The 6-pair run decides |
-| INCOMPLETE (exit 3) | A run was invalid: a seat throttled (429), the router failed over between accounts mid-run (the pairing is broken), the pairing could not be verified, or a harness error | Rerun later; never read it as a router result |
+| INCOMPLETE (exit 3) | A run was invalid: a seat throttled (429), for the Claude and qwen providers the router failed over between accounts mid-run (the pairing is broken; for the paired Codex arms a mid-run move is kept and named in the verdict instead, see "Account pairing" below), the pairing could not be verified, a harness error, or fewer valid Codex pairs than `--pairs` (`INVALID (not paired; rerun)`, below) | Rerun later; never read it as a router result |
 | FAIL (exit 1) | A Layer (a) check failed, a router error occurred, or at 6 pairs a metric is outside its margin | The diff names the mechanism. Treat it as a router defect until shown otherwise, and roll back |
+
+**Account pairing.** Both arms must run on the account of the worker's own login, or the comparison measures the
+account's prompt cache, not the router. Claude: `RAB_CLAUDE_ACCOUNT` (default `claude-2`); a run elsewhere is invalid.
+Codex (`codex`, `codex-control`): `RAB_CODEX_ACCOUNT`, **required**, the router account of the ChatGPT login the gate
+runs under. Without it the Codex providers refuse to set up. `codex-2` is the recorded dev-worker-1 mapping, to be
+confirmed by the operator for their worker; the report header records it (`Paired accounts: ...`). The router cannot
+pin a request to an account, so the gate decides on the **first router request of a run only** (the earliest attempt by
+the journal's start time), because that placement is made before any outcome. A run that starts elsewhere is discarded and redone (up to 8 times); still
+elsewhere, its pair is INVALID, "not paired: router served <accounts>", left out of every metric, and its ABBA slot runs
+again with the same orientation (at most `--pairs` more). Fewer than `--pairs` valid pairs gives no verdict
+(`INVALID (not paired; rerun)`). A run that starts on the account and moves later (a failover, a spill) is kept, since
+that is router behaviour, and the verdict says so (`PASS (2 pairs moved accounts mid-run)`). Discarding those instead would
+keep the fast, cached runs and could turn a FAIL into a PASS. The notes list every discarded first placement and every
+move. Two consecutive unpaired pairs that never reached the account at all stop the task early: `RAB_CODEX_ACCOUNT` is
+wrong, or the account is drained or unavailable. The two look identical from the gate, so check both before a rerun.
+The 1.2x margin is unchanged.
 
 **Safety.**
 - It creates no credential and prints none.
@@ -3874,7 +3902,10 @@ gate, provider `codex` (the `codex` arm via the router against its direct contro
 tokens read router 4,116 vs direct 10,287 (0.40x, 3 pairs, 20:10Z), then router 39,050 vs direct 20,642 (1.89x,
 6 pairs, 20:18Z) on the same image minutes apart, with Layer (a) identical (19,047 input tokens) and every other
 metric inside its margin. The FAIL was recorded and the release kept as a documented exception (#1910). A matched
-parent-versus-release comparison is still owed by the ailab operator session (the gate result and this open item are recorded in #1910); concurrent router traffic during the gate remains the only lead.
+parent-versus-release comparison was owed by the ailab operator session; on 2026-11-24 the owner closed it as not needed
+(ailab #1962 comment 140542; the rule is under "When a matched parent-versus-release comparison is required" above).
+Concurrent router traffic, and the router arm landing on other Codex accounts than the direct arm (now caught as "not
+paired"), remain the leads.
 
 **Open at rev 2247:** `qwen-cloud3` `code-edit` is FAIL on uncached tokens in 2 of 2 runs (1.29x, 1.20x), with Layer (a)
 clean and the model doing more work via the router (1.30x, 1.91x output tokens). cloud2 passes on the same day. On one

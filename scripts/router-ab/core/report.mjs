@@ -1,7 +1,10 @@
 // core/report.mjs - the verdict table (Markdown, so it can be pasted into a PR or a runbook record).
 
-export function render({ image, startedAt, providers }) {
-  const out = [`# Router release gate: ${startedAt}`, '', `Router image: \`${image ?? 'unknown'}\``, ''];
+/** pairing: [{ env, account }], the accounts the direct arms' logins are on (the router arms are held to them). */
+export function render({ image, startedAt, providers, pairing = [] }) {
+  const paired = pairing.length ? [`Paired accounts: ${pairing.map((x) => `${x.env}=${x.account ?? '(unset)'}`).join(', ')}`, ''] : [];
+  const out = [`# Router release gate: ${startedAt}`, '', `Router image: \`${image ?? 'unknown'}\``, '', ...paired];
+  const head = out.length;
   const summary = [];
   for (const p of providers) {
     out.push(`## ${p.name}`, '');
@@ -17,8 +20,8 @@ export function render({ image, startedAt, providers }) {
     }
     summary.push({ provider: p.name, task: 'Layer (a)', verdict: p.layerA.verdict });
   }
-  const overall = summary.some((s) => s.verdict === 'FAIL') ? 'FAIL' : summary.some((s) => s.verdict.startsWith('INVALID')) ? 'INCOMPLETE'
+  const overall = summary.some((s) => s.verdict.startsWith('FAIL')) ? 'FAIL' : summary.some((s) => s.verdict.startsWith('INVALID')) ? 'INCOMPLETE'
     : summary.some((s) => s.verdict.startsWith('RERUN')) ? 'RERUN' : 'PASS';
-  out.splice(4, 0, `**Overall: ${overall}**`, '', '| Provider | Check | Verdict |', '|---|---|---|', ...summary.map((s) => `| ${s.provider} | ${s.task} | ${s.verdict} |`), '');
+  out.splice(head, 0, `**Overall: ${overall}**`, '', '| Provider | Check | Verdict |', '|---|---|---|', ...summary.map((s) => `| ${s.provider} | ${s.task} | ${s.verdict} |`), '');
   return { text: out.join('\n'), overall };
 }

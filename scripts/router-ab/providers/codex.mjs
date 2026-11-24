@@ -7,12 +7,19 @@
 // skills), so the first request of a router-arm session misses the cross-conversation prefix cache. That is the client
 // (ailab plans/2026-11-05-router-transparency-and-planning-revalidation.md §1.4); the uncached margin is reported, and
 // read with that in mind.
-import { runCodexTask, sameBody } from './lib/codex-session.mjs';
+// Pairing: the backend caches prompts per account, so a router run on another account than the direct login's is mostly
+// uncached for that reason alone. The router arm is held to RAB_CODEX_ACCOUNT (required: the worker's login's account): the
+// router cannot be told to place a request there, so a run whose FIRST request was placed elsewhere runs again (up to 8
+// tries), and one still elsewhere leaves its pair INVALID, "not paired". A run that starts there and moves later is kept
+// and reported: only the first placement is independent of the outcome (core/pairing.mjs).
+import { CODEX_ACCOUNT, requireCodexAccount, runCodexTask, runPlaced, sameBody } from './lib/codex-session.mjs';
 
 const MODEL = 'gpt-6-astra';
 export default {
   name: 'codex',
-  describe: 'ChatGPT seat via Codex CLI 0.166 (direct: own login; router: dw-N key, native pass-through)',
+  describe: `ChatGPT seat via Codex CLI 0.166 (direct: own login; router: dw-N key, native pass-through, runs placed on ${CODEX_ACCOUNT ?? 'RAB_CODEX_ACCOUNT (unset)'})`,
+  pairing: { env: 'RAB_CODEX_ACCOUNT', account: CODEX_ACCOUNT },
+  async setup() { requireCodexAccount(); },
   kinds: ['codex-exec'],
   async layerA(ctx) {
     const r = sameBody(ctx, { target: 'chatgpt', run: 'layer-a-capture-codex', home: 'user', model: MODEL, directModel: MODEL, routerModel: MODEL, greedy: false, n: 2 });
@@ -25,6 +32,7 @@ export default {
     ];
   },
   async run(ctx, task, arm, runId) {
-    return runCodexTask(ctx, task, { target: arm === 'direct' ? 'chatgpt' : 'router', home: 'user', model: MODEL }, runId);
+    if (arm === 'direct') return runCodexTask(ctx, task, { target: 'chatgpt', home: 'user', model: MODEL }, runId);
+    return runPlaced(ctx, task, { target: 'router', home: 'user', model: MODEL, account: CODEX_ACCOUNT, paired: true }, runId);
   },
 };

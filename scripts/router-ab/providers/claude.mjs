@@ -41,6 +41,7 @@ export default {
   name: 'claude',
   describe: `Claude seat via Claude Code ${CC_VERSION}, model ${MODEL} (direct: own login; router: claude/${MODEL}, sdk-resume)`,
   kinds: ['chat', 'claude-agentic'],
+  pairing: { env: 'RAB_CLAUDE_ACCOUNT', account: ACCOUNT },
   async setup(ctx) {
     // the direct arm reads the worker's access token and cannot refresh it (only that worker's own CLI may)
     const login = ctx.ssh(`python3 -c 'import json,os;print(json.load(open(os.path.expanduser("~/.claude/.credentials.json")))["claudeAiOauth"]["expiresAt"])'`);
