@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.10.25-release-147163
-        chifor.me/source-commit: 175f916602526504a4542afa02847a22f69748ba
+        chifor.me/release: relay-0.11.1-release-147466
+        chifor.me/source-commit: 3678b8ed882efc48c8ce8d75d043896d7d285eaa
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -132,16 +132,20 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
-      # FORWARD-ONLY: schema 79 (migrations 057-079, applied by v0.10.2 on 2026-11-15); v0.10.3,
-      # v0.10.4 and v0.10.9 to v0.10.25 add none, so re-pinning v0.10.9 (1b0f2f72...), v0.10.4
-      # (d1482bc1...), v0.10.3 (a97437e4...) or v0.10.2 (994ecee1...) is a valid rollback. v0.9.1
-      # must never run against schema 79: going below v0.10.2 = restore the v0.10.2 rollout's
-      # pre-migration generation 20261115T162747Z-119fcc01-b84d-4be5-a80c-ac5196caaf73 (else H1's),
-      # then a reviewed PR re-pins v0.9.1: docs/runbooks/relay-researcher-hub-upgrade.md, "Rollback:
-      # migrations are forward-only".
-      # Relay v0.10.25, source 175f916602526504a4542afa02847a22f69748ba (release/v0.10)
-      # release v0.10.25 / run 147163.
-      - image: registry.chifor.me/relay/control-plane@sha256:d98c6ce7c5578f40057ac6873f07276dbcb4a7c4ca4d9b604d0a407337a2e22e
+      # FORWARD-ONLY: schema 88 (migrations 080-088, applied by v0.11.1). An older image is NOT
+      # refused: v0.10.25 starts against schema 88, so a bare re-pin would run it on a schema it does
+      # not support. Rollback to v0.10.25 (d98c6ce7...) = restore this roll's EARLIEST pre-migration
+      # generation (the first backup-database log of the v0.11.1 rollout), then recovery:fence with a
+      # FRESH generation (relay-restore-fencing carries it), then a reviewed PR re-pins v0.10.25; never
+      # a bare re-pin. Its cost (rehearsed): every connector and agent key revoked (4 and 8), every
+      # session ended (49), the undelivered outbox deleted, a new generation ConfigMap; writes after
+      # the backup are lost. docs/runbooks/relay-researcher-hub-upgrade.md, H11 and "Rollback:
+      # migrations are forward-only". Below v0.10.2: restore the v0.10.2 rollout's pre-migration
+      # generation 20261115T162747Z-119fcc01-b84d-4be5-a80c-ac5196caaf73 (else H1's), fence, then a
+      # reviewed PR re-pins v0.9.1.
+      # Relay v0.11.1, source 3678b8ed882efc48c8ce8d75d043896d7d285eaa (release/v0.11)
+      # release v0.11.1 / run 147466.
+      - image: registry.chifor.me/relay/control-plane@sha256:d0bbbc58392ac75db0c1d08ed4cfb90aade846ae415898bdf209e40f31c8fbbc
         workingDir: /app
         envFrom:
         - secretRef:
@@ -149,6 +153,11 @@ spec:
         env:
         - name: NODE_ENV
           value: production
+        # A migration blocked on a lock fails (55P03) after 10 s and rolls back whole, instead of
+        # waiting behind a straggler: rehearsed, it failed in 11 s with nothing applied. The roll then
+        # stops at this init container with the old Pod already gone (Recreate); the backup is taken.
+        - name: PGOPTIONS
+          value: "-c lock_timeout=10s"
         - name: RELAY_HOST
           value: 0.0.0.0
         - name: RELAY_PORT
@@ -185,9 +194,9 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      # Relay v0.10.25, source 175f916602526504a4542afa02847a22f69748ba (release/v0.10)
-      # release v0.10.25 / run 147163.
-      - image: registry.chifor.me/relay/control-plane@sha256:d98c6ce7c5578f40057ac6873f07276dbcb4a7c4ca4d9b604d0a407337a2e22e
+      # Relay v0.11.1, source 3678b8ed882efc48c8ce8d75d043896d7d285eaa (release/v0.11)
+      # release v0.11.1 / run 147466.
+      - image: registry.chifor.me/relay/control-plane@sha256:d0bbbc58392ac75db0c1d08ed4cfb90aade846ae415898bdf209e40f31c8fbbc
         workingDir: /app
         envFrom:
         - secretRef:
