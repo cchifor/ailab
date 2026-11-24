@@ -277,7 +277,9 @@ function codexWorld(sessions) {
     },
     inPod: (_script, ids) => ({ stdout: JSON.stringify(Object.fromEntries(ids.map((id) => { const [run, i] = id.split('#'); return [id, { accounts: sessions[run].requests[i] }]; }))) }),
     localDir: (name) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), `rab-test-${name}-`)); fs_.dirs = [...(fs_.dirs ?? []), d]; return d; },
-    pull(cmd, dir) { const run = /runs\/(\S+) /.exec(cmd)[1]; fs_.pulled.push(run); fs.writeFileSync(path.join(dir, 'last.md'), sessions[run].answer ?? 'ANSWER=1'); },
+    pull(cmd, dir) { const run = /runs\/(\S+) /.exec(cmd)[1]; fs_.pulled.push(run); const answer = sessions[run].answer ?? 'ANSWER=1';
+      // the provider grades the last of [last.md, last.2.md] (the final turn's answer): write both, as a real pull would
+      for (const f of ['last.md', 'last.2.md']) fs.writeFileSync(path.join(dir, f), answer); },
   };
   return { ctx, seen: fs_, cleanup: () => (fs_.dirs ?? []).forEach((d) => fs.rmSync(d, { recursive: true, force: true })) };
 }
@@ -297,6 +299,17 @@ test('pairing: a first request on another account is discarded and redone; its o
     assert.deepEqual(w.seen.pulled, ['r-p2']);
     const v = judgePairs([run('direct', 1, {}), { arm: 'router', pair: 1, metrics: m }], { want: 1 });
     assert.match(v.notes.join('\n'), /pair 1: 1 router run\(s\) discarded on their first request's account \(codex-3\)/);
+  } finally { w.cleanup(); }
+});
+
+test('pairing: a correct answer on the redone run grades PASS (the mock grader is live)', () => {
+  const w = codexWorld({
+    q: { summary: summary(5, 10), requests: [['codex']], answer: 'ANSWER=0' },
+    'q-p2': { summary: summary(20, 200), requests: [['codex-2']], answer: 'ANSWER=1' },
+  });
+  try {
+    const m = runPlaced(w.ctx, TASK, ARM, 'q', {}, 8);
+    assert.equal(m.pass, true); assert.equal(m.wall_s, 20); assert.deepEqual(w.seen.pulled, ['q-p2']);
   } finally { w.cleanup(); }
 });
 
