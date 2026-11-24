@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.11.1-release-147466
-        chifor.me/source-commit: 3678b8ed882efc48c8ce8d75d043896d7d285eaa
+        chifor.me/release: relay-0.11.3-release-147885
+        chifor.me/source-commit: aaad724607e2f9a97f64a40951142cf39815e7d4
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -143,9 +143,10 @@ spec:
       # migrations are forward-only". Below v0.10.2: restore the v0.10.2 rollout's pre-migration
       # generation 20261115T162747Z-119fcc01-b84d-4be5-a80c-ac5196caaf73 (else H1's), fence, then a
       # reviewed PR re-pins v0.9.1.
-      # Relay v0.11.1, source 3678b8ed882efc48c8ce8d75d043896d7d285eaa (release/v0.11)
-      # release v0.11.1 / run 147466.
-      - image: registry.chifor.me/relay/control-plane@sha256:d0bbbc58392ac75db0c1d08ed4cfb90aade846ae415898bdf209e40f31c8fbbc
+      # Relay v0.11.3, source aaad724607e2f9a97f64a40951142cf39815e7d4 (release/v0.11)
+      # release v0.11.3 / run 147885; unchanged schema 88.
+      # Native Pi inference sessions; see relay-inference-v0113-20261124.md.
+      - image: registry.chifor.me/relay/control-plane@sha256:2c350aeef49aaf0b7f596594cc4aa7b72d6d618c54ad5fb6317192bfcaca8a2b
         workingDir: /app
         envFrom:
         - secretRef:
@@ -197,9 +198,10 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      # Relay v0.11.1, source 3678b8ed882efc48c8ce8d75d043896d7d285eaa (release/v0.11)
-      # release v0.11.1 / run 147466.
-      - image: registry.chifor.me/relay/control-plane@sha256:d0bbbc58392ac75db0c1d08ed4cfb90aade846ae415898bdf209e40f31c8fbbc
+      # Relay v0.11.3, source aaad724607e2f9a97f64a40951142cf39815e7d4 (release/v0.11)
+      # release v0.11.3 / run 147885; unchanged schema 88.
+      # Native Pi inference sessions; see relay-inference-v0113-20261124.md.
+      - image: registry.chifor.me/relay/control-plane@sha256:2c350aeef49aaf0b7f596594cc4aa7b72d6d618c54ad5fb6317192bfcaca8a2b
         workingDir: /app
         envFrom:
         - secretRef:
