@@ -1,7 +1,75 @@
 # Relay/Pi inference sessions rollout
 
-Status: router pin staged; Relay/Pi activation pending. Deployment completion
+Status: router deployed and baseline checks passed; Relay/Pi activation pending. Deployment completion
 requires the post-roll readbacks below, not merely the Git merge.
+
+## Router rollout readback — 2026-11-24
+
+Owner merged AILab #1967 at 09:14 UTC, commit
+`eb63210529ffc95849419acc9778cfd34b2909d7`. Flux `apps` reports this applied
+revision. The router Deployment runs the `370bf5bf` image digest recorded below;
+pod `llm-router-67bf4df5b7-brk5d` is ready (1/1), with zero restarts at readback.
+Readbacks and bounded baseline requests were collected at 09:18–09:23 UTC.
+Its source/release annotations match `300856ff` and
+`router-0.1.0-20261124-inference-sessions`.
+
+- Init-container log: `Router SQLite backup and associated files verified:
+  pre-inference-sessions-20261124`.
+- Authenticated `/v1/routes` is byte-identical to the saved pre-roll baseline:
+  SHA-256 `cb9904a07f3a4627cbf849a60ad9396f544a4db9cb886c83ccae03ea6fa85afa`.
+  Baseline location: `/data/inference-rollout-20261124/routes-before.json` on
+  the router PVC (mode 0600). Compare the authenticated response inside the pod;
+  do not extract or log the administrator credential. This file is the pre-roll
+  listing and must not be overwritten by later canary route changes.
+- Anonymous `/v1/routes` and `/admin/v1/config` both return 401.
+- Existing native Codex Responses: 200, completed, 2,535 ms.
+- Existing Qwen Chat: 200, completed, 416 ms.
+- Existing Claude streaming Chat: 200, completed, 966 ms.
+
+These bounded checks qualify existing-route behavior after the image roll, not
+the new Messages/session path. No live plugin configuration was changed by these
+checks. Subsequent Codex/Qwen native acceptance is recorded below; Claude native
+activation, packaged Relay/Pi acceptance and warm-to-cold rollback remain pending.
+Recovery fix #650 (first-turn tool interruption with only a pending admission
+receipt) merged as `a27afd8cbd91b9ab6a266247d6b1e40c160a1277` with both reviews
+and all CI checks passing. Relay v0.11.3 release PR #648 must incorporate it.
+
+## Live Codex and Qwen session acceptance — 2026-11-24
+
+At 09:34:36–09:34:48 UTC, the published image's
+`/app/scripts/qualify-inference-sessions.mjs` passed against public HTTPS
+`https://router.chifor.me` using temporary single-deployment, fixed-model routes
+with `maxAttempts: 1`, no fallback, and disposable route-scoped keys.
+
+| Protocol | Fixed target | Result |
+| --- | --- | --- |
+| Responses | `codex-2`, `gpt-6-astra` | Seven calls, three generations, one marker effect; passed |
+| Chat | `lan-192.168.0.28-18020`, `qwen3.8-27b` | Seven calls, three generations, one marker effect; passed |
+
+Both paths passed native tool-result continuation, duplicate-operation refusal
+(409), durable completed receipt inspection, explicit branch retirement,
+retired-worker refusal (409), and reconstructed continuation (200). Both revoked
+keys then returned 401. Temporary routes `inference-canary-20261124-codex` and
+`inference-canary-20261124-qwen` were removed using the latest configuration
+revision; key files were removed. Durable receipts remain in the router database.
+The runner's only effect was recording its fixed marker in memory.
+
+Reports are retained on the router PVC under `/data/inference-rollout-20261124/`
+as `native-codex-qwen-report.json` and `native-codex-qwen-revocation.json`, mode
+0600. They contain controlled status/usage/receipt metadata, not credentials or
+provider output. Their respective SHA-256 values are
+`ba50615eed55c33b7b4f1403166af546ce2b4d2c4c439bd1c40557d5d1342737` and
+`c46a3b7cb7c51a67de39f56ed83817991f0ffed7c7844671525fa87ebe649baf`.
+This qualifies the router wire lifecycle for these two providers;
+it does not qualify the live Relay/Pi profile, which remains unassigned.
+
+Claude Messages remains pending. The configured CLI is still 2.1.281; native
+Messages requires 2.1.283. Subscription-login version changes apply on restart
+to retain a single sign-in/renewal owner, so the shared CLI change must accompany
+the coordinated router release. Messages stays disabled and warm retention off.
+The separate safe-errors release must retain the now-deployed inference source.
+
+## Published router and backup qualification
 
 Router source merged at `300856ff7881eba67d2081650fca9f66a7f26b66`.
 [Publication 147499](https://git.chifor.me/cchifor/relay/actions/runs/147499)
