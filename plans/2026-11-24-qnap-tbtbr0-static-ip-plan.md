@@ -84,8 +84,16 @@ pods go Pending: they do NOT re-attach their iSCSI volumes on another node, whic
 path.
 
 ```bash
-for n in talos-cp1 talos-cp2 talos-cp3 talos-agent-node-1 talos-agent-node-2 talos-agent-node-3 relay-worker-1; do $K cordon $n; done
-$T shutdown -n 192.168.0.47,192.168.0.48,192.168.0.49,192.168.0.52  # workers first; drain timeout 5 min
+NODES="talos-cp1 talos-cp2 talos-cp3 talos-agent-node-1 talos-agent-node-2 talos-agent-node-3 relay-worker-1"
+for n in $NODES; do $K cordon $n || { echo "STOP: cordon $n failed"; break; }; done
+# GATE: no shutdown until the cluster has exactly these 7 nodes and every one is unschedulable. One schedulable
+# node would receive the evicted pods and re-attach their volumes, which is what this step exists to prevent.
+total=$($K get nodes --no-headers | wc -l)
+cordoned=$($K get nodes -o jsonpath='{range .items[*]}{.spec.unschedulable}{"\n"}{end}' | grep -c '^true$')
+echo "cordoned $cordoned of $total"                                  # must read: cordoned 7 of 7
+[ "$total" = 7 ] && [ "$cordoned" = 7 ] \
+  && $T shutdown -n 192.168.0.47,192.168.0.48,192.168.0.49,192.168.0.52 \
+  || echo "STOP: not 7 of 7 cordoned; fix that before any shutdown"  # workers first; drain timeout 5 min
 # poll until stopped: 4301 on .2, 4302 on .3, 4303 + 4304 on .4
 python scripts/node-ssh.py 192.168.0.4 "for i in \$(seq 1 90); do qm status 4303 | grep -q stopped && qm status 4304 | grep -q stopped && break; sleep 5; done; qm status 4303; qm status 4304"
 $T shutdown -n 192.168.0.41,192.168.0.42,192.168.0.43               # then all three CPs

@@ -67,8 +67,15 @@ if [ "$MODE" = show ]; then
   exit 0
 fi
 
-# Interlock: zero logged-in iSCSI sessions NAS-wide, every count parsed. That is "the cluster is down".
-sessions=\$(iscsiadmin get_target 2>/dev/null | awk '/^target = / { n++; if (match(\$0, /sess_cnt = [0-9]+/)) { s += substr(\$0, RSTART + 11, RLENGTH - 11); k++ } } END { if (n > 0 && k == n) print s + 0; else print "unknown" }')
+# Interlock: zero logged-in iSCSI sessions NAS-wide. That is "the cluster is down". A failed query or
+# a target record without a parseable sess_cnt is "unknown" and refuses. A successful query with no
+# target records at all (a fresh NAS, before Trident made any LUN) counts as 0.
+out=\$(iscsiadmin get_target 2>/dev/null) && rc=0 || rc=\$?
+if [ "\$rc" != 0 ]; then
+  sessions=unknown
+else
+  sessions=\$(printf '%s\n' "\$out" | awk '/^target = / { n++; if (match(\$0, /sess_cnt = [0-9]+/)) { s += substr(\$0, RSTART + 11, RLENGTH - 11); k++ } } END { if (k == n) print s + 0; else print "unknown" }')
+fi
 echo "== interlock: NAS-wide iSCSI sessions=\$sessions =="
 if [ "\$sessions" != 0 ]; then
   echo "FATAL: sessions=\$sessions. Run this inside the window, after every Talos node is shut down."
