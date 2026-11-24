@@ -51,6 +51,7 @@ def validate(root=Path(__file__).resolve().parent):
                 "Pi component paths differ from the pinned runtime")
         require(definition["holder"] == profile, "Hub and holder definitions differ")
         require(profile["router"] == policy, "Renderer and holder policies differ")
+        require(definition["connectorId"] == policy["hostId"], "Connector differs")
         require(request["name"] == definition["name"], "Binding name differs")
         for key in ["bindingId", "connectionId", "hostId", "executionIdentity"]:
             require(request[key] == policy[key], "Binding authority differs: " + key)
@@ -66,6 +67,11 @@ def validate(root=Path(__file__).resolve().parent):
         session = definition["session"]
         require(session["id"] == profile["id"] and session["revision"] == profile["revision"],
                 "Session identity differs")
+        require(session["executionIdentity"] == policy["executionIdentity"] and
+                session["maxRequestSeconds"] == profile["maxRequestSeconds"] and
+                session["harness"] == profile["native"]["kind"] and
+                session["adapterDigest"] == profile["artifacts"][runtime + "/relay-pi.mjs"],
+                "Session runtime identity or deadline differs")
         require(session["inference"] == {"kind": "llm-router",
                 "connectionId": policy["connectionId"], "credentialBindingId": policy["bindingId"],
                 "protocol": policy["protocol"], "selection": policy["selection"]},
