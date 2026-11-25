@@ -118,6 +118,34 @@ Confirm credential ownership/mode and managed delivery receipts before startup.
 Keep the existing tmux connector running. Preserve installed immutable directories,
 profiles, receipts and native history on any failure.
 
+## Renderer staging (operator)
+
+The dedicated reader is live: policy and AppRole `relay-router-reader-dev-worker-1` (ailab #1988, created by
+the provision Job 2026-11-24 17:23Z). Its SecretID was issued 2026-11-25 09:17:28Z inside `openbao-0` (the
+breakglass token on stdin, nothing in argv) and piped straight into `ansible/secrets/relay-router.sops.yaml`
+(`relay_router_credentials.dev-worker-1`, both leaves `ENC[`, decrypt round-trip checked). Accessor
+`2600514a-4ab8-b2d7-f3e0-c5d0eb73ae6f`, TTL 720h: it **expires 2026-12-25 09:17Z**. Issue a replacement
+before then. A reboot or auth-service restart after expiry cannot log in. Verified at issue with a token from
+that login, `bao token capabilities` only: `read` on its own host's escrow data; `deny` on another host,
+another tenant, metadata, list, destroy, the signer and trust documents and the escrow token role. The token
+was periodic 72h with `default` + the reader policy, and was revoked afterwards.
+
+`renderer-inputs.json` holds the non-secret staging vars, with `relay_router_manage_services: false`.
+Evidence layout on the controller (all verified before use):
+- `/evidence/v0.11.3/holder/relay-credential-renderer-linux-amd64`: extracted from the release's holder
+  archive (`670f510d…`, recorded in `control-plane-manifest.json`), checked against the archive's own
+  `SHA256SUMS`, SHA-256 `ff328ccc…`;
+- `/evidence/openbao-2.5.5/bao`: from the upstream `bao_2.5.5_Linux_x86_64.tar.gz` (archive `2c557770…`),
+  binary `4e7e04cc…`, both the pins in relay-router-workers.md.
+
+Run from `/repo/ansible`, after `--list-hosts` shows exactly `dev-worker-1`:
+
+```sh
+ansible-playbook relay-router-workers.yml --limit dev-worker-1 \
+  -e @/repo/docs/runbooks/inference-canary-v0113/renderer-inputs.json \
+  -e @/repo/docs/runbooks/inference-canary-v0113/renderer-bindings.json
+```
+
 ## Activation and acceptance
 
 The owner must see and approve these exact definitions before any profile is

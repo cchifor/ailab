@@ -40,6 +40,13 @@ creation_rules:
   - path_regex: ansible[/\\]secrets[/\\]gitea-runner\.sops\.ya?ml$
     encrypted_regex: ^(gitea_runner_registration_token)$
     age: age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t
+  # Relay router credential renderer readers (ansible/relay-router-workers.yml, relay_router_secrets_file):
+  # one dedicated AppRole pair per host under relay_router_credentials. Same reason as dev-worker above —
+  # MUST precede the generic ansible/secrets rule, which would leave role_id/secret_id PLAINTEXT. The map
+  # key and both leaf names are listed (belt-and-braces, as the dev-worker rule explains).
+  - path_regex: ansible[/\\]secrets[/\\]relay-router\.sops\.ya?ml$
+    encrypted_regex: ^(relay_router_credentials|role_id|secret_id)$
+    age: age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t
   # Ansible secrets (host-side vars, not k8s Secrets): encrypt only the private-key value. The App
   # ID + installation ID are non-secret and live in group_vars. First match wins, so this is listed
   # before the generic rule below.
