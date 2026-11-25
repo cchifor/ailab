@@ -39,7 +39,7 @@ class Restage(unittest.TestCase):
         self.operation = str(uuid.uuid4())
 
     def status(self, name):
-        return {'Id': name, 'ActiveState': 'inactive', 'SubState': 'dead', 'MainPID': '0',
+        return {'Id': name, 'LoadState': 'loaded', 'ActiveState': 'inactive', 'SubState': 'dead', 'MainPID': '0',
                 'ControlGroup': '', 'UnitFileState': 'disabled', 'DropInPaths': '',
                 'FragmentPath': str(self.home / '.config/systemd/user' / name)}
 
@@ -97,6 +97,54 @@ class Restage(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'SHA mismatch'):
             self.prepare()
         self.assertFalse((self.state / 'holder.lock').exists())
+
+    def test_unit_metadata_changes_after_fragment_move(self):
+        def status(name):
+            row = self.status(name)
+            if not (self.home / '.config/systemd/user' / name).exists():
+                row.update(UnitFileState='bad' if name == restage.UNITS[0] else '',
+                           FragmentPath='', LoadState='not-found')
+            return row
+        self.assertEqual(self.prepare(status=status)['state'], 'prepared-stopped')
+
+    def test_missing_metadata_not_allowed_before_our_move(self):
+        def status(name):
+            return {**self.status(name), 'UnitFileState': '', 'LoadState': 'not-found'}
+        with self.assertRaisesRegex(ValueError, 'stopped'):
+            self.prepare(status=status)
+
+    def test_moved_unit_cannot_become_active_or_enabled(self):
+        for field, value in [('ActiveState', 'active'), ('UnitFileState', 'enabled')]:
+            with self.subTest(field=field):
+                path = self.home / '.config/systemd/user' / restage.UNITS[0]
+                path.rename(path.with_suffix('.backup'))
+                try:
+                    def status(name):
+                        return {**self.status(name), field: value}
+                    with self.assertRaises(ValueError):
+                        restage.stopped(self.home, status, {restage.UNITS[0]})
+                finally:
+                    path.with_suffix('.backup').rename(path)
+
+    def test_placeholder_inode_replacement_refused(self):
+        path = self.state / 'native-homes' / restage.PROFILES[0]
+        def move(src, dst):
+            restage.rename_noreplace(src, dst)
+            if src.name == 'profiles.json':
+                path.rename(self.home / 'original-placeholder')
+                path.mkdir(mode=0o700)
+        with self.assertRaisesRegex(ValueError, 'Placeholder identity changed'):
+            self.prepare(move=move)
+
+    def test_parent_inode_replacement_refused(self):
+        root = self.state / 'native-homes'
+        def move(src, dst):
+            restage.rename_noreplace(src, dst)
+            if src.name == 'profiles.json':
+                root.rename(self.state / 'original-native-homes')
+                root.mkdir(mode=0o700)
+        with self.assertRaisesRegex(ValueError, 'Parent directory changed'):
+            self.prepare(move=move)
 
     def test_symlink_file_refused(self):
         path = self.home / restage.FILES['profiles'][0]

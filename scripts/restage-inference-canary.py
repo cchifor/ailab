@@ -54,19 +54,40 @@ def inspect_file(path, uid, mode, digest):
 
 def unit_status(name):
     result = subprocess.run(['systemctl', '--user', 'show', name,
-                             '--property=Id,ActiveState,SubState,MainPID,ControlGroup,UnitFileState,FragmentPath,DropInPaths'],
-                            check=True, capture_output=True, text=True, timeout=10,
+                             '--property=Id,LoadState,ActiveState,SubState,MainPID,ControlGroup,UnitFileState,FragmentPath,DropInPaths'],
+                            check=False, capture_output=True, text=True, timeout=10,
                             env={**os.environ, 'XDG_RUNTIME_DIR': '/run/user/1000'})
-    return dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    row = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    require(result.returncode == 0 or (result.returncode in (1, 4)
+            and row.get('LoadState') == 'not-found' and row.get('Id') == name),
+            'Cannot inspect user service: ' + name)
+    return row
 
 
-def stopped(home, status):
+def stopped(home, status, moved_units=()):
     for name in UNITS:
         row = status(name)
-        expected = {'Id': name, 'ActiveState': 'inactive', 'SubState': 'dead',
+        fragment = home / '.config/systemd/user' / name
+        expected = {'Id': name, 'ActiveState': 'inactive',
                     'MainPID': '0', 'ControlGroup': '', 'UnitFileState': 'disabled',
-                    'FragmentPath': str(home / '.config/systemd/user' / name), 'DropInPaths': ''}
+                    'FragmentPath': str(fragment), 'DropInPaths': '',
+                    'LoadState': 'loaded', 'SubState': 'dead'}
+        if name in moved_units:
+            require(not os.path.lexists(fragment) and fragment.parent.resolve() == fragment.parent,
+                    'Moved unit destination reappeared or changed: ' + name)
+            require(row.get('UnitFileState') in ('disabled', '', 'bad')
+                    and row.get('FragmentPath') in ('', str(fragment))
+                    and row.get('LoadState') in ('loaded', 'not-found')
+                    and row.get('SubState') in ('dead', 'not-found'),
+                    'Unexpected moved-unit metadata: ' + name)
+            for field in ('UnitFileState', 'FragmentPath', 'LoadState', 'SubState'):
+                expected.pop(field)
         require(all(row.get(k) == v for k, v in expected.items()), 'Service is not cleanly stopped: ' + name)
+
+
+def directory_identity(path, uid, private=False):
+    s = directory(path, uid, private)
+    return (s.st_dev, s.st_ino, s.st_uid, stat.S_IMODE(s.st_mode))
 
 
 def rename_noreplace(source, destination):
@@ -112,6 +133,7 @@ def prepare(operation, expected, *, home=HOME, uid=1000, status=unit_status, mov
     directory(state, uid, True)
     require({p.name for p in state.iterdir()} == {'native-homes', 'workspaces'},
             'State is not never-used (journal/socket/lock/unknown entry)')
+    placeholders = {}
     for root in (state / 'native-homes', state / 'workspaces'):
         directory(root, uid, True)
         require({p.name for p in root.iterdir()} == set(PROFILES), 'Unexpected profile directory set')
@@ -119,9 +141,13 @@ def prepare(operation, expected, *, home=HOME, uid=1000, status=unit_status, mov
             child = root / profile
             directory(child, uid, True)
             require(not any(child.iterdir()), 'Profile directory is not empty: ' + str(child))
+            if root.name == 'native-homes':
+                placeholders[child] = directory_identity(child, uid, True)
     stopped(home, status)
     records = {key: inspect_file(home / rel, uid, mode, expected[key])
                for key, (rel, mode) in FILES.items()}
+    parents = {path: directory_identity(path, uid) for path in
+               {state, state / 'native-homes', *( (home / rel).parent for rel, _ in FILES.values())}}
     backup_root = home / '.config/relay-holder/restaging'
     if backup_root.exists():
         directory(backup_root, uid, True)
@@ -146,25 +172,32 @@ def prepare(operation, expected, *, home=HOME, uid=1000, status=unit_status, mov
         directory(backup_root, uid, True)
         require(backup_root.stat().st_dev == device, 'Backup must share filesystem')
         backup.mkdir(mode=0o700)  # exclusive operation claim
+        parents[backup] = directory_identity(backup, uid, True)
         sync_dir(backup_root)
         plan = [(home / rel, backup / key, key) for key, (rel, _) in FILES.items()]
         plan += [(state / 'native-homes' / p, backup / ('placeholder-' + p), None) for p in PROFILES]
         receipt(backup / '00-prepared.json', {'operation': operation, 'files': records,
                 'moves': [{'source': str(src), 'backup': str(dst)} for src, dst, _ in plan]})
+        moved_units = set()
         for index, (src, dst, key) in enumerate(plan, 1):
-            stopped(home, status)
+            stopped(home, status, moved_units)
+            for parent, identity in parents.items():
+                require(directory_identity(parent, uid) == identity, 'Parent directory changed since preflight')
             if key:
                 require(inspect_file(src, uid, FILES[key][1], expected[key]) == records[key],
                         'File changed since preflight')
             else:
-                directory(src, uid, True)
+                require(directory_identity(src, uid, True) == placeholders[src],
+                        'Placeholder identity changed since preflight')
                 require(not any(src.iterdir()), 'Placeholder changed since preflight')
             move(src, dst)
+            if key in UNITS:
+                moved_units.add(key)
             sync_dir(src.parent)
             sync_dir(backup)
             receipt(backup / ('%02d-moved.json' % index), {'source': str(src), 'backup': str(dst)})
         require(not any((state / 'native-homes').iterdir()), 'Native root changed during preparation')
-        stopped(home, status)
+        stopped(home, status, moved_units)
         receipt(backup / 'complete.json', {'operation': operation, 'state': 'prepared-stopped',
                 'next': 'Reviewed role rerun with start:false; no activation authorized'})
         return {'operation': operation, 'state': 'prepared-stopped', 'backup': str(backup)}

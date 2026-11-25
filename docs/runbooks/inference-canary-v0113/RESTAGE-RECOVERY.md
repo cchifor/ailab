@@ -20,7 +20,7 @@ source/image/archive/manifest/binary digests, matching holder/Pi artifacts and
 exact approved new profile revisions. Staged v0.11.3 artifacts cannot qualify the
 new path. Preserve the current hub until that coordinated release is ready.
 
-The parent read-only 2026-11-25 snapshots
+Read-only operator observations from 2026-11-25 in
 `pi-stopped-holder-metadata-20261125.json` and
 `pi-native-home-metadata-20261125.json` in the operator-local
 `.data/inference-release-evidence` report stopped services, no journal/socket,
@@ -52,7 +52,7 @@ unchanged profiles; never start the old canary merely to satisfy it.
 ## Reviewed preparation command
 
 Prepare a controller-reviewed JSON file with exactly these keys. These are the
-**old installed** SHA256 values reported by the parent's nonsecret hash-only
+**old installed** SHA256 values reported by the nonsecret hash-only
 snapshot `pi-staged-config-hashes-20261125.json`, not new release hashes. The staged
 v0.11.3 inputs pin source `aaad724607e2f9a97f64a40951142cf39815e7d4`.
 Review that evidence against the original approved artifacts before use; the
@@ -86,6 +86,15 @@ that backup. Linux `renameat2(RENAME_NOREPLACE)` enforces no clobber; there is n
 non-atomic fallback. File bytes/modes and placeholder directories are preserved;
 each completed move has a flushed receipt. No credential/enrollment file,
 immutable release closure, workspace or native history is moved or read.
+
+After this operation moves a unit, systemd may retain its cached fragment or
+report it missing. Only for that tracked unit, and only while its canonical source
+path remains absent, the helper accepts missing fragment metadata or an empty/
+`bad` UnitFileState. It still requires inactive, zero PID, no cgroup/drop-ins and
+never accepts enabled/active state. Unmoved units must retain their original
+loaded/disabled metadata. Parent-directory and placeholder inode identities are
+rechecked before moves; replacing an empty placeholder is not accepted as the
+original staged directory.
 
 Success writes `complete.json` and prints only operation/state/backup metadata.
 Profiles and both unit files are then absent, `native-homes` is empty, workspaces
@@ -131,3 +140,6 @@ readback; these are internal test seams, not CLI options. Tests execute only
 temporary-file moves and verify byte preservation after partial failure, active/
 enabled/PID/drop-in/hash/link refusals, no-clobber behavior and the actual flock
 held during every move. No live host or provider is required.
+Dynamic fixtures also change systemd metadata when fragment files disappear and
+verify refusal of untracked missing units or replaced directory inodes. These
+fixtures do not constitute a real systemd-manager integration test.
