@@ -10,6 +10,33 @@ router-ab gate with route changes or new inference qualification workloads.
 
 ## Fixed scope
 
+**Deployment hold:** the revision2 definitions below correct profile-home layout;
+their runtime pins still identify v0.11.3 and are not the pending owned-recovery
+release. Keep this change held until the matching reviewed hub/holder/Pi release
+pins are integrated and the owner approves the final exact bytes. Do not activate
+the old runtime first: creating Pi history would introduce a holder-restart fence
+before the planned upgrade. The earlier revision1 approval/hash does not approve
+these revised definitions.
+
+Profile `credentialHome` is now `state/profile-homes/<profileId>`; workspaces stay
+at `state/workspaces/<profileId>`. Reserve `state/native-homes` exclusively for
+holder-created session UUID homes. The holder intentionally reports
+`nativeStateReady:false` whenever that directory is nonempty at startup. The old
+revision1 layout precreated three profile directories there and triggered that
+fence even without a session. The role now rejects that layout before creating
+profile directories; it never removes or migrates existing native state.
+
+An existing staged host needs a separate operator-reviewed disposition of its
+old directories and exact installed profile bytes, with services stopped and
+ownership/emptiness evidence preserved. The role's immutable-file check refuses
+an old installed profile hash; it does not silently replace it. Do not clear a
+native-state fence or discard histories to make startup pass. Directory emptiness
+alone is not proof of process containment. Renew exact-profile approval only
+after final artifact pins and the layout migration plan are reviewed.
+The bounded [stopped-stage restaging procedure](RESTAGE-RECOVERY.md) preserves
+the old profile directories as evidence and does not start services; it requires
+its own final review before operator execution.
+
 Host `dev-worker-1`, connector `b3b1be1a-275c-4a2e-b515-428b39c43171`, execution
 user `c4`/UID 1000. Tenant `00000000-0000-4000-8000-000000000001`, router connection
 `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`, workspace communication channel
@@ -58,7 +85,7 @@ only by Relay's existing router-credential flow; no token is present here.
   this explicit staging run; `relay_holder_start: false` prevents service startup.
   No fleet inventory includes this file.
 
-The three profile and launch-definition schemas, credential requests and renderer
+The earlier revision1 profile and launch-definition schemas, credential requests and renderer
 policies were validated using the compiled contracts in the exact published
 v0.11.3 application image, with network disabled and read-only inputs. Cross-file
 identities, routes and the profile-file hash match. The Pi manifest bytes were
@@ -73,11 +100,20 @@ nine-key policy contract. Its 11 Linux/Ansible integration tests passed, includi
 private idempotent Claude staging and ten refusal cases that preserve staged
 files and invoke no service commands. These tests use disposable local fixtures;
 they do not establish live managed delivery.
-Independent offline validation also installed and reverified the complete published
+Earlier independent offline validation installed and reverified the complete published
 holder/Pi archives and loaded all three exact profiles in the packaged Rust holder
-as UID 1000, with networking disabled. IPC `hello` reported `nativeStateReady: true`,
+as UID 1000, with networking disabled, but used a separate qualification state
+directory rather than the role's actual state root. IPC `hello` reported `nativeStateReady: true`,
 the three expected profile IDs and zero sessions. This proves artifact integrity
-and profile admission, not live inference. The Pi installer must execute using
+and profile admission, not correctness of the old staged home layout or live inference.
+A subsequent offline A/B check used the exact v0.11.3 image and verified archives,
+the actual `/home/c4/.local/state/relay-holder` state root, and UID1000. With the
+revision1 profile directories under `native-homes`, IPC hello reported
+`nativeStateReady:false`; the revision2 `profile-homes` layout reported
+`nativeStateReady:true` with an empty native root. Both loaded all three profiles,
+with zero sessions, no holder children and no credentials. This is a layout
+regression check, not evidence for the pending recovery release or a live rollout.
+The Pi installer must execute using
 the verified Node 22.23.2 shipped in its archive, pinned as `nodeVersion` beside
 `manifestSha256` in the Pi entry of `holder-inputs.json`. The role requires this
 version to match the authenticated manifest's `node` field before execution;
@@ -152,6 +188,16 @@ The held [Codex/Qwen-only activation procedure](ACTIVATE-CODEX-QWEN.md) supplies
 separate service-start overlays while retaining this exact three-profile array
 and all three renderer policies. Use its explicit two-binding service selection;
 the renderer role's compatible default starts every defined binding.
+Its original revision1 hash and v0.11.3 staging references are historical inputs,
+not approval to activate the revision2 definitions. The deployment hold above
+also applies to that workflow. Before publishing the final activation change,
+integrate the updated layout branch with matching release pins and align the
+activation procedure's exact-profile references with the final reviewed bytes.
+
+Use [the paired live acceptance procedure](LIVE-ACCEPTANCE.md) for exact normal-hub
+request bodies, bounded prompts, permission decisions and marker evidence. It
+records the deployed Pi recovery limitation separately from the runnable checks;
+staging or a passing marker observation does not establish full acceptance.
 
 The owner must see and approve these exact definitions before any profile is
 enabled. Staging all three does not authorize launching all three immediately.

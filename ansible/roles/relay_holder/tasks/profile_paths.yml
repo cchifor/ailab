@@ -1,0 +1,34 @@
+---
+# native-homes belongs exclusively to holder-created session UUIDs.
+- name: Require isolated Pi profile homes and workspace roots inside private holder state
+  ansible.builtin.assert:
+    that:
+      - item.id is match('^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$')
+      - item.executionUid | int == relay_holder_uid | int
+      - item.qualification == 'protocol-fixture'
+      - item.native.kind == 'pi'
+      - item.native.runtimeDirectory == relay_holder_pi_root + '/' + (relay_holder_archives | selectattr('component', 'equalto', 'pi-linux-x64') | first).manifestSha256
+      - item.credentialHome == relay_holder_state + '/profile-homes/' + item.id
+      - item.roots == [relay_holder_state + '/workspaces/' + item.id]
+  loop: "{{ relay_holder_profiles }}"
+  loop_control:
+    label: "{{ item.id | default('invalid') }}"
+
+- name: Validate exact profile home and workspace ancestry
+  ansible.builtin.script:
+    cmd: "check_paths.py {{ relay_holder_uid }} {{ item.credentialHome }} {{ item.roots[0] }}"
+    executable: python3
+  changed_when: false
+  loop: "{{ relay_holder_profiles }}"
+  loop_control:
+    label: "{{ item.id }}"
+
+- name: Create only the approved per-profile credential home and workspace
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ relay_holder_uid }}"
+    group: "{{ relay_holder_gid }}"
+    mode: "0700"
+  loop: "{{ (relay_holder_profiles | map(attribute='credentialHome') | list) + (relay_holder_profiles | map(attribute='roots') | flatten) }}"
+

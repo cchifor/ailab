@@ -45,6 +45,11 @@ def validate(root=Path(__file__).resolve().parent):
         for value in values:
             uuid.UUID(value[key])
     for profile, definition, request, policy in zip(profiles, definitions, requests, policies):
+        state = "/home/c4/.local/state/relay-holder"
+        require(profile["credentialHome"] == state + "/profile-homes/" + profile["id"],
+                "Profile credential homes must be outside holder native-homes")
+        require(profile["roots"] == [state + "/workspaces/" + profile["id"]],
+                "Profile workspace differs")
         require(profile["native"]["runtimeDirectory"] == runtime and
                 profile["artifacts"].get(runtime + "/manifest.json") == pi_pin,
                 "Pi archive and profile runtime pins differ")
