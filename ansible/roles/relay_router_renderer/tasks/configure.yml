@@ -168,11 +168,20 @@
   register: relay_router_binding_units
   notify: relay router renderers changed
 
+- name: Reload managed router units once before service changes
+  ansible.builtin.systemd_service:
+    scope: user
+    daemon_reload: true
+  become: true
+  become_user: "{{ relay_router_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_router_uid }}"
+  when: relay_router_manage_services | bool
+
 - name: Keep unselected renderer services stopped and disabled
   ansible.builtin.systemd_service:
     name: "relay-router-render-{{ item }}.service"
     scope: user
-    daemon_reload: true
     enabled: false
     state: stopped
   become: true
@@ -197,7 +206,6 @@
   ansible.builtin.systemd_service:
     name: "{{ item }}"
     scope: user
-    daemon_reload: true
     enabled: true
     state: started
   become: true

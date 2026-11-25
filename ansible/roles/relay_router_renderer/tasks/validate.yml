@@ -26,9 +26,10 @@
   ansible.builtin.assert:
     that:
       - relay_router_active_binding_ids is sequence and relay_router_active_binding_ids is not string and relay_router_active_binding_ids is not mapping
+      - relay_router_active_binding_ids | length > 0
       - relay_router_active_binding_ids | unique | length == relay_router_active_binding_ids | length
       - relay_router_active_binding_ids | difference(relay_router_bindings | map(attribute='bindingId') | list) | length == 0
-    fail_msg: Active renderer IDs must be a unique list drawn from the complete binding definitions; do not remove staged policies to defer activation.
+    fail_msg: Active renderer IDs must be a nonempty unique list drawn from the complete binding definitions; do not remove staged policies to defer activation.
     quiet: true
 
 - name: Reject unsafe systemd and filesystem paths

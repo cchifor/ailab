@@ -52,6 +52,9 @@ selects services without removing policies. With service management enabled,
 unselected renderer units are stopped/disabled; handlers restart only selected
 renderers, including after shared binary or CA changes. Without this explicit
 selection the compatible default remains all defined bindings.
+An empty selection is refused before any service command; this activation input
+is not a bulk-stop control. Managed convergence reloads the user manager once
+after staging units, before stop/start operations and restart handlers.
 
 Require `relay-router-auth.service` and only the Codex/Qwen renderer services
 active/enabled. Claude unit
@@ -72,7 +75,17 @@ ansible-playbook relay-holders.yml --limit dev-worker-1 \
   -e @/repo/docs/runbooks/inference-canary-v0113/holder-activate-codex-qwen.json
 ```
 
-The complete three-profile array stays byte-identical. Holder startup validates
+The complete three-profile array stays byte-identical. Before startup, the holder
+role validates the installed byte pin before any service-start task: its
+[configure.yml](../../../ansible/roles/relay_holder/tasks/configure.yml) task
+`Check installed profile and connector pins` computes SHA-256, then
+`Refuse drift rather than replace profiles or executables` requires
+`item.stat.checksum | default('') == item.item.sha`, where the profile's expected SHA is
+`relay_holder_profiles_sha256`. This happens before importing `services.yml`;
+the overlay is an enforced pin, not only a documentation value. The role also
+checks owner, single-link regular-file status and mode `0600`.
+
+Holder startup validates
 all three profiles but does not launch inference or require Claude's credential
 file; its already-staged private parent directory must exist. This overlay is not
 a two-profile holder filter. It starts the holder and its independent reconciliation

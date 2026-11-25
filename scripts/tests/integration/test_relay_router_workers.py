@@ -25,7 +25,7 @@ SECRET = "relay_fixture_secret_id_never_log"
 TOKEN = "relay_fixture_connector_token_never_log"
 
 
-class WorkerRole(unittest.TestCase):
+class RoleFixture:
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix="relay-router-iac-")
@@ -124,6 +124,11 @@ class WorkerRole(unittest.TestCase):
         self.commands = [json.loads(line) for line in self.command_log.read_text().splitlines()]
         if not values['relay_router_manage_services']:
             self.assertTrue(all(c[0] == 'list-units' for c in self.commands), self.commands)
+        elif success:
+            self.assertEqual(self.commands.count(['daemon-reload']), 1, self.commands)
+            for index, command in enumerate(self.commands):
+                if command[0] in ('start', 'stop', 'restart', 'enable', 'disable'):
+                    self.assertLess(self.commands.index(['daemon-reload']), index)
         return output
 
     def restarted(self):
@@ -134,6 +139,8 @@ class WorkerRole(unittest.TestCase):
         binding['credentialFile'] = str(Path(binding['credentialFile']).parent.parent / binding['bindingId'] / 'credential.json')
         return binding
 
+class WorkerRole(RoleFixture, unittest.TestCase):
+    # The existing zero-padded sequence deliberately exercises a cumulative fixture.
     def test_01_disabled_role_has_no_side_effects(self):
         output = self.run_role(dict(relay_router_enabled=False, relay_router_renderer_sha256="invalid"))
         self.assertRegex(output, r"changed=0\s")
@@ -322,6 +329,9 @@ class WorkerRole(unittest.TestCase):
         self.run_role(updates)
         self.assertCountEqual(self.restarted(), ['relay-router-auth.service', *renders])
 
+class SelectedWorkerRole(RoleFixture, unittest.TestCase):
+    # Separate temporary root, state and cleanup: lexical class ordering cannot
+    # leak staged subset policies or unit states into the existing role tests.
     def test_10_subset_activation_preserves_three_policies_and_never_starts_third(self):
         config_dir = Path(self.variables['relay_router_home']) / '.config/relay/router-managed'
         if not (config_dir / 'bindings.json').exists():
@@ -367,7 +377,7 @@ class WorkerRole(unittest.TestCase):
 
     def test_11_invalid_service_selection_refuses_before_service_commands(self):
         first = self.variables['relay_router_bindings'][0]['bindingId']
-        for selected in [[str(uuid.uuid4())], [first, first], first, {'id': first}]:
+        for selected in [[], [str(uuid.uuid4())], [first, first], first, {'id': first}]:
             with self.subTest(selected=selected):
                 self.run_role(dict(relay_router_manage_services=True,
                                    relay_router_active_binding_ids=selected), success=False)
