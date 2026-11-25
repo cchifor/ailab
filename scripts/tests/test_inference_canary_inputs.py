@@ -1,5 +1,6 @@
 """Keep reviewed canary definitions and their pinned installed bytes consistent."""
 from pathlib import Path
+import hashlib
 import json
 import runpy
 import shutil
@@ -8,6 +9,25 @@ import unittest
 
 
 class CanaryInputs(unittest.TestCase):
+    def test_native_session_root_cannot_be_used_for_profile_homes(self):
+        root = Path(__file__).resolve().parents[2] / "docs/runbooks/inference-canary-v0113"
+        validate = runpy.run_path(str(root / "validate.py"))["validate"]
+        with tempfile.TemporaryDirectory() as temporary:
+            copy = Path(temporary)
+            for path in root.glob("*.json"):
+                shutil.copyfile(path, copy / path.name)
+            # Keep duplicated definitions and byte pin consistent: layout itself
+            # must be refused, rather than relying on an unrelated hash mismatch.
+            for name in ["profiles.json", "launch-definitions.json"]:
+                path = copy / name
+                path.write_bytes(path.read_bytes().replace(b"/profile-homes/", b"/native-homes/"))
+            path = copy / "holder-inputs.json"
+            inputs = json.loads(path.read_text())
+            inputs["relay_holder_profiles_sha256"] = hashlib.sha256((copy / "profiles.json").read_bytes()).hexdigest()
+            path.write_text(json.dumps(inputs))
+            with self.assertRaisesRegex(ValueError, "outside holder native-homes"):
+                validate(copy)
+
     def test_committed_inputs_match(self):
         script = Path(__file__).resolve().parents[2] / "docs/runbooks/inference-canary-v0113/validate.py"
         self.assertTrue(runpy.run_path(str(script))["validate"]())

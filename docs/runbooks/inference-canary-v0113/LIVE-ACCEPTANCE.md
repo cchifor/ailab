@@ -10,7 +10,7 @@ Use the existing authenticated `relay_session` browser session at `https://relay
 
 Before each provider:
 
-1. Record owner acceptance window and operator gate, deployed router/hub source and digest, exact profile revision, holder/artifact identity, trust and health. Staged/disabled is not active. Preserve operator KEEP exceptions and do not change production pools to make a test pass.
+1. Record owner acceptance window and operator gate, deployed router/hub source and digest, exact profile revision, holder/artifact identity, trust and health. The checked-in revision2 profiles correct `credentialHome` to `state/profile-homes/<profileId>` and remain held pending final matching owned-recovery release pins and renewed exact-byte approval. Do not run this procedure on the old release while waiting for that upgrade. Require `nativeStateReady:true` from the actual holder state root; `state/native-homes` belongs only to holder-created session homes, not precreated profile homes. Existing directory/profile disposition is a separate reviewed operator step, never automatic cleanup. Staged/disabled is not active. Preserve operator KEEP exceptions and do not change production pools to make a test pass.
 2. Confirm dedicated route exists, has the intended protocol/provider, one enabled target, `maxAttempts:1` and no fallback; confirm one-route managed grant. Model selection must be `{ "kind":"model", "model":"canary-pi-<provider>" }`, never a direct provider model or `x-router-route`. Qwen has its own local-provider readiness gate.
 3. For Claude, establish cold route, trust and Messages prerequisites, including the agreed `warm:false` condition, **before credential issuance**. Do not issue Claude credentials until the owner acceptance window. Do not turn direct qualification into a warmup or reuse a historical report path.
 4. Inspect profile admission: these checked-in definitions use `qualification:"protocol-fixture"`. Pinned `server/release-admission.ts` refuses fixture profiles when `releaseApprovalFile` or `releaseApprovalSha256` is set (409, `Release mode refuses fixture profiles`). If enabled, stop and resolve the approved profile/admission path with the owner; do not disable release mode or relabel the fixture.
@@ -21,7 +21,7 @@ Run providers sequentially. Allocate a fresh canonical lowercase run UUID per pr
 
 ## Fixed profile and sandbox mapping
 
-All revisions are 1, connector `b3b1be1a-275c-4a2e-b515-428b39c43171`, execution identity `c4` (UID1000). `ROOT` is `/home/c4/.local/state/relay-holder/workspaces/` plus the profile UUID. Use the matching exact object in [launch-definitions.json](launch-definitions.json).
+All proposed revisions are 2, connector `b3b1be1a-275c-4a2e-b515-428b39c43171`, execution identity `c4` (UID1000). `ROOT` is `/home/c4/.local/state/relay-holder/workspaces/` plus the profile UUID. Use the matching exact object in [launch-definitions.json](launch-definitions.json) only after the deployment hold above is resolved.
 
 | Provider | Profile name / UUID | Binding UUID | Protocol / model alias |
 | --- | --- | --- | --- |
@@ -50,7 +50,7 @@ Read `GET /api/agent-profiles`. Reuse the enabled matching revision and definiti
 `POST /api/agent-launches`:
 
 ```json
-{"operationId":"<O>","profileId":"<P>","revision":1,"cwd":"<ROOT>"}
+{"operationId":"<O>","profileId":"<P>","revision":2,"cwd":"<ROOT>"}
 ```
 
 Expect 202; inspect `GET /api/agent-launches` (latest 100) for that launch ID/operation and its `session_id`. There is no assumed GET-by-launch-ID endpoint. Pending launch expiry is bounded to two minutes; stop on refusal/withdrawal/expiry rather than relaunch. Read `GET /api/agent-sessions/<S>` and `GET /api/agent-sessions/<S>/router`; verify profile, connector, current generation, no rebinding, open session and router readiness. The session ID is not the profile UUID.
@@ -147,4 +147,4 @@ Save one minimized evidence manifest per provider/run: source/digests; profile a
 
 At the pinned Relay commit, request shapes come from `packages/contracts/{launch-profiles,session-control,agent-sessions,router-management}.ts`; registered routes and admission from `server/agent-sessions/{profiles,control,routes,native-recovery}.ts`, `server/router-credentials/routes.ts` and `server/release-admission.ts`. Pi commands and history semantics come from `packages/pi-launcher/main.ts` and `packages/pi-policy/session.ts`; minimized permission presentation comes from `holder/src/runtime.rs`.
 
-Offline validation on 2026-11-25 passed 28 positive and five negative schema cases using the pinned image's compiled contracts with `--network none`: all three checked-in definitions/grant bodies, representative launch/lease/prompt/cancel/close/permission/revoke bodies, and six concrete denied/effects append prompts. Negative cases reject cancel/close with an epoch, prompt without an epoch, invented `maxTurns`, and selected permission without an option ID. The existing `validate.py` also passed profile/binding/renderer/byte-pin checks. Resume's local request schema was source-inspected, not exercised against a hub. Runtime admission, provider behavior and resume eligibility are not established by schema parsing. Existing packaged synthetic-provider tests and the observer's local tests also do not establish live acceptance.
+Before the revision2 layout correction, offline validation on 2026-11-25 passed 28 positive and five negative schema cases using the pinned image's compiled contracts with `--network none`: all three revision1 definitions/grant bodies, representative launch/lease/prompt/cancel/close/permission/revoke bodies, and six concrete denied/effects append prompts. Negative cases reject cancel/close with an epoch, prompt without an epoch, invented `maxTurns`, and selected permission without an option ID. The existing `validate.py` also passed profile/binding/renderer/byte-pin checks. Revalidate the final revision2 bytes after the matching release pins are filled. Resume's local request schema was source-inspected, not exercised against a hub. Runtime admission, provider behavior and resume eligibility are not established by schema parsing. Existing packaged synthetic-provider tests and the observer's local tests also do not establish live acceptance.

@@ -5,7 +5,7 @@
     "holder": {
       "version": 1,
       "id": "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
-      "revision": 1,
+      "revision": 2,
       "executable": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/node",
       "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
       "artifacts": {
@@ -20,7 +20,7 @@
       "args": [],
       "environment": {},
       "executionUid": 1000,
-      "credentialHome": "/home/c4/.local/state/relay-holder/native-homes/1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
+      "credentialHome": "/home/c4/.local/state/relay-holder/profile-homes/1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
       "roots": [
         "/home/c4/.local/state/relay-holder/workspaces/1d9a7d6e-4b26-49fd-9053-7b0a22e1baae"
       ],
@@ -56,7 +56,7 @@
     },
     "session": {
       "id": "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
-      "revision": 1,
+      "revision": 2,
       "adapterDigest": "5800a10cda63edce53419995536c82dad8683b5214a900b74193e0d9dcad787f",
       "harness": "pi",
       "executionIdentity": "c4",
@@ -87,7 +87,7 @@
     "holder": {
       "version": 1,
       "id": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
-      "revision": 1,
+      "revision": 2,
       "executable": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/node",
       "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
       "artifacts": {
@@ -102,7 +102,7 @@
       "args": [],
       "environment": {},
       "executionUid": 1000,
-      "credentialHome": "/home/c4/.local/state/relay-holder/native-homes/f25c187b-1e50-4c7c-860e-52947bfdf39e",
+      "credentialHome": "/home/c4/.local/state/relay-holder/profile-homes/f25c187b-1e50-4c7c-860e-52947bfdf39e",
       "roots": [
         "/home/c4/.local/state/relay-holder/workspaces/f25c187b-1e50-4c7c-860e-52947bfdf39e"
       ],
@@ -138,7 +138,7 @@
     },
     "session": {
       "id": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
-      "revision": 1,
+      "revision": 2,
       "adapterDigest": "5800a10cda63edce53419995536c82dad8683b5214a900b74193e0d9dcad787f",
       "harness": "pi",
       "executionIdentity": "c4",
@@ -169,7 +169,7 @@
     "holder": {
       "version": 1,
       "id": "fdb56ca5-908b-40ee-94b3-aac735dd8622",
-      "revision": 1,
+      "revision": 2,
       "executable": "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/node",
       "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
       "artifacts": {
@@ -184,7 +184,7 @@
       "args": [],
       "environment": {},
       "executionUid": 1000,
-      "credentialHome": "/home/c4/.local/state/relay-holder/native-homes/fdb56ca5-908b-40ee-94b3-aac735dd8622",
+      "credentialHome": "/home/c4/.local/state/relay-holder/profile-homes/fdb56ca5-908b-40ee-94b3-aac735dd8622",
       "roots": [
         "/home/c4/.local/state/relay-holder/workspaces/fdb56ca5-908b-40ee-94b3-aac735dd8622"
       ],
@@ -220,7 +220,7 @@
     },
     "session": {
       "id": "fdb56ca5-908b-40ee-94b3-aac735dd8622",
-      "revision": 1,
+      "revision": 2,
       "adapterDigest": "5800a10cda63edce53419995536c82dad8683b5214a900b74193e0d9dcad787f",
       "harness": "pi",
       "executionIdentity": "c4",

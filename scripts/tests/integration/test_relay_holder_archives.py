@@ -181,5 +181,63 @@ print(json.dumps(dict(changed=changed, directory=str(receipt.parent))))
         self.run_tasks(success=False)
 
 
+class HolderProfileHomes(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='holder-profile-homes-', dir=Path.home())
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / 'state'
+        self.state.mkdir(mode=0o700)
+        self.native = self.state / 'native-homes'
+        self.native.mkdir(mode=0o700)
+        profile_id = '1d9a7d6e-4b26-49fd-9053-7b0a22e1baae'
+        self.home = self.state / 'profile-homes' / profile_id
+        self.workspace = self.state / 'workspaces' / profile_id
+        self.values = dict(relay_holder_state=str(self.state), relay_holder_uid=os.getuid(),
+            relay_holder_gid=os.getgid(), relay_holder_pi_root='/opt/fixture',
+            relay_holder_archives=[dict(component='pi-linux-x64', manifestSha256='a'*64)],
+            relay_holder_profiles=[dict(id=profile_id, executionUid=os.getuid(),
+                qualification='protocol-fixture', native=dict(kind='pi', runtimeDirectory='/opt/fixture/'+'a'*64),
+                credentialHome=str(self.home), roots=[str(self.workspace)])])
+        self.play = self.root / 'play.yml'
+        self.play.write_text(yaml.safe_dump([dict(hosts='localhost', gather_facts=False,
+            tasks=[{'ansible.builtin.include_role': dict(name=str(ROLE), tasks_from='profile_paths')}])]))
+        self.cfg = self.root / 'ansible.cfg'
+        self.cfg.write_text('[defaults]\nretry_files_enabled=False\n')
+
+    def run_paths(self, success=True):
+        variables = self.root / 'vars.json'
+        variables.write_text(json.dumps(self.values))
+        result = subprocess.run(['ansible-playbook', '-i', 'localhost,', '-c', 'local',
+            str(self.play), '-e', '@' + str(variables)], capture_output=True, text=True, timeout=60,
+            env={**os.environ, 'ANSIBLE_CONFIG': str(self.cfg), 'ANSIBLE_NOCOLOR': '1',
+                 'ANSIBLE_LOCAL_TEMP': str(self.root / 'ansible-tmp'),
+                 'ANSIBLE_PYTHON_INTERPRETER': sys.executable})
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode == 0, success, output[-6000:])
+        return output
+
+    def test_profile_staging_leaves_native_root_empty_and_is_idempotent(self):
+        self.run_paths()
+        for path in [self.home, self.workspace]:
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(path.stat().st_uid, os.getuid())
+        self.assertEqual(list(self.native.iterdir()), [])
+        self.assertRegex(self.run_paths(), r'changed=0\s')
+
+    def test_existing_native_evidence_is_preserved(self):
+        retained = self.native / 'retained-evidence'
+        retained.write_bytes(b'do not clear the holder fence')
+        self.run_paths()
+        self.assertEqual(retained.read_bytes(), b'do not clear the holder fence')
+
+    def test_old_profile_layout_is_refused_before_directory_creation(self):
+        self.values['relay_holder_profiles'][0]['credentialHome'] = str(self.native / self.home.name)
+        self.run_paths(success=False)
+        self.assertEqual(list(self.native.iterdir()), [])
+        self.assertFalse(self.home.exists())
+        self.assertFalse(self.workspace.exists())
+
+
 if __name__ == '__main__':
     unittest.main()
