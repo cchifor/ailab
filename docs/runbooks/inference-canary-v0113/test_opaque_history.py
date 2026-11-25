@@ -220,14 +220,20 @@ class OpaqueHistoryTest(unittest.TestCase):
             self.observe()
 
     def test_cli_never_prints_private_exception_contents(self):
-        output = io.StringIO()
-        with patch.object(sys,"argv",["opaque-history.py","snapshot","claude",SOURCE,NATIVE]), \
-             patch.object(observer.os,"getuid",return_value=1000), \
-             patch.object(observer,"observe",side_effect=ValueError("PRIVATE CIPHERTEXT")), \
-             contextlib.redirect_stdout(output):
-            self.assertEqual(observer.main(),1)
-        self.assertEqual(json.loads(output.getvalue())["status"],"REFUSED")
-        self.assertNotIn("PRIVATE",output.getvalue())
+        for error in (ValueError("PRIVATE CIPHERTEXT"), RuntimeError("PRIVATE UNEXPECTED")):
+            with self.subTest(error=type(error).__name__):
+                output, errors = io.StringIO(), io.StringIO()
+                with patch.object(sys,"argv",["opaque-history.py","snapshot","claude",SOURCE,NATIVE]), \
+                     patch.object(observer.os,"getuid",return_value=1000), \
+                     patch.object(observer,"observe",side_effect=error), \
+                     contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                    self.assertEqual(observer.main(),1)
+                self.assertEqual(json.loads(output.getvalue()), {
+                    "version":1, "status":"REFUSED", "scope":observer.SCOPE,
+                    "upstreamReplayProven":False})
+                self.assertEqual(errors.getvalue(), "")
+                self.assertNotIn("PRIVATE",output.getvalue())
+                self.assertNotIn("Traceback",output.getvalue())
 
 
 if __name__ == "__main__":

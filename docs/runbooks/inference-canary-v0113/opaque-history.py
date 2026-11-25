@@ -224,6 +224,9 @@ def source_evidence(tree, provider, source, native_id):
     receipt = decode(receipt_bytes)
     require(exact(receipt, "version admission containment home metadata") and receipt["version"] == 1 and
             receipt["admission"] == "blocked" and receipt["containment"] == "owned-process-group-only")
+    # native.rs retained_receipt serializes numeric home IDs; recovery metadata/
+    # descriptors use decimal strings. history.ts retainedReceipt checks this same
+    # numeric-to-string identity boundary; do not relax either on-disk format.
     require(receipt["home"] == {key: int(identity[key]) for key in ("device", "inode", "uid")})
     metadata = receipt["metadata"]
     require(exact(metadata, "sessionId profileDigest nativeSessionId workspace outcome history") and
@@ -322,8 +325,9 @@ def main():
     try:
         require(os.getuid() == 1000)
         report = observe(ROOT, 1000, args.provider, args.source, args.native, getattr(args, "replacement", None))
-    except (Refused, OSError, ValueError, TypeError, KeyError, RecursionError, UnicodeError):
-        # Never print exception text: JSON parse errors and paths can contain content.
+    except Exception:
+        # Sanitize even unexpected failures at the CLI boundary: exception text and
+        # tracebacks can contain private content. Internal checks still fail closed.
         report = {"version": 1, "status": "REFUSED", "scope": SCOPE, "upstreamReplayProven": False}
     print(json.dumps(report, sort_keys=True))
     return 0 if report["status"] in ("OBSERVED", "PRESERVED") else 1
