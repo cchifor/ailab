@@ -200,6 +200,15 @@ process reuse, idle expiry, permission-boundary release, capacity and active
 warm-to-cold rollback evidence; the settings affect all router-managed Claude
 accounts and are not enabled by these inputs.
 
+The read-only [opaque history observer](opaque-history.py) compares selected
+opaque-field hashes between a retained source and its exact imported prefix.
+Supply source/replacement Relay IDs and the native UUID from completed hub
+receipts, run as UID1000 while quiescent, and keep sanitized output outside holder
+state. It refuses unsafe or inconsistent files and reports `NOT_EXERCISED` when
+the required opaque blocks are absent. `PRESERVED` proves local import equality;
+it explicitly does not prove that a provider received those blocks. Its fourteen
+offline tests use only private synthetic fixtures.
+
 The owner must see and approve these exact definitions before any profile is
 enabled. Staging all three does not authorize launching all three immediately.
 Claude CLI 2.1.283 is already active in the deployed router, but native Messages
