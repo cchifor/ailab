@@ -934,8 +934,9 @@ Why: the console redesign's A2b, and the hub half of the termination fix. Relay 
 SIGTERM: a bounded close, and the health sampler ends its tick), #671 and #672 (A2b: Activity grouped by actor,
 category, result, day or host, with counted filter values), and the release-review fixes #674, #676 and #678's
 commits, released as v0.12.2 (#673 and #677, `e1d9a366`, run 149268) on top of v0.12.1 (live since 2026-11-25,
-ailab #1996, H16). Together with ailab #1997 (the backup-holder's SIGTERM handler, live), it is the first roll where
-both containers of the outgoing pod exit promptly.
+ailab #1996, H16). The hub half shows only when a v0.12.2 pod terminates, i.e. at the NEXT hub roll after this one:
+this roll's outgoing pod runs v0.12.1, which carries only ailab #1997's backup-holder half (the SIGTERM handler, live
+since 2026-11-25 05:54Z), so its termination is the baseline for that half.
 
 No migration: schema stays 92, and the relay env is unchanged. **Grouping and counted filters stay off** until the
 operator grants `temp_file_limit` to `relay_app` (`GRANT SET ON PARAMETER temp_file_limit TO relay_app`, staging
@@ -953,8 +954,10 @@ Readback after the roll (operator):
   `relay` container's image ID ends in `sha256:ea1caf3fef442af50fdfa1d689eb8345495b451a94aa73851826dbeb54fc4cb3`;
 - the backup and migrate init containers exited 0, and `schema_migrations` still reads `92|92`; the relay env is
   identical to v0.12.1's;
-- the OUTGOING pod's termination: both containers end promptly after "Killing" (well under the 45 s grace period),
-  with no Error; record the time from "Killing" to termination;
+- the OUTGOING (v0.12.1) pod's termination, the baseline for #1997's half: the backup-holder container ends promptly
+  after "Killing" with no Error, while the v0.12.1 `relay` container may still use the grace period; record the time
+  from "Killing" to termination for each container. #670's hub half is timed at the next roll, when a v0.12.2 pod
+  terminates (both containers then end well under the 45 s grace period);
 - health samples keep arriving each minute (H12's query);
 - the owner, in the console: Activity lists events as before (flat); with grouping not yet enabled, choosing Group
   by says it is unavailable rather than failing.
@@ -992,7 +995,7 @@ Readback after the roll (operator):
 | H14 | hub image → v0.11.6 (the single-agent page; no migration); gates no step above | H13 live | v0.11.6 digest running, `schema_migrations` still `89\|89`, an agent's page opens from Status with Terminal first |
 | H15 | hub image → v0.12.0 (schema 91: migrations 090-091; the console preference per person; Needs you message problems); gates no step above | H14 live; the operator's 89 → 91 check PASS | v0.12.0 digest running, `schema_migrations` `91\|91`, the backup generation recorded, the console preference follows the owner across devices, a withheld message shows in Needs you |
 | H16 | hub image → v0.12.1 (schema 92: migration 092; Buses in Fleet); gates no step above | H15 live; the operator's 91 → 92 check PASS | v0.12.1 digest running, `schema_migrations` `92\|92`, the backup generation recorded, a bus created and a member paused and resumed from Fleet → Buses |
-| H17 | hub image → v0.12.2 (Activity grouping, off until the temp_file_limit grant; prompt SIGTERM exit; no migration); gates no step above | H16 live | v0.12.2 digest running, `schema_migrations` still `92\|92`, the outgoing pod's containers exit promptly, flat Activity unchanged |
+| H17 | hub image → v0.12.2 (Activity grouping, off until the temp_file_limit grant; prompt SIGTERM exit; no migration); gates no step above | H16 live | v0.12.2 digest running, `schema_migrations` still `92\|92`, the outgoing (v0.12.1) pod's backup holder exits promptly (#670's hub exit is timed at the next roll), flat Activity unchanged |
 
 ## Rollback: migrations are forward-only
 
