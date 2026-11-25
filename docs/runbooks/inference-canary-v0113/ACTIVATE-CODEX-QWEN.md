@@ -52,6 +52,9 @@ selects services without removing policies. With service management enabled,
 unselected renderer units are stopped/disabled; handlers restart only selected
 renderers, including after shared binary or CA changes. Without this explicit
 selection the compatible default remains all defined bindings.
+The role already requires at least one binding in its initial validation task
+(`relay_router_bindings | length > 0`), including staging runs with service
+management disabled; zero-binding/auth-only convergence was already refused.
 An empty selection is refused before any service command; this activation input
 is not a bulk-stop control. Managed convergence reloads the user manager once
 after staging units, before stop/start operations and restart handlers.

@@ -375,6 +375,16 @@ class SelectedWorkerRole(RoleFixture, unittest.TestCase):
         self.assertCountEqual(self.restarted(), ['relay-router-auth.service', *units[:2]])
         self.assertEqual(json.loads(states_path.read_text())[units[2]], dict(active=False, enabled=False))
 
+    def test_12_zero_bindings_refused_by_existing_validation(self):
+        for managed in (False, True):
+            with self.subTest(manage_services=managed):
+                output = self.run_role(dict(relay_router_manage_services=managed,
+                                            relay_router_bindings=[]), success=False)
+                self.assertIn('Require bounded explicit artifacts, identities and paths', output)
+                self.assertIn('relay_router_bindings | length > 0', output)
+                self.assertNotIn('Require an explicit valid subset of defined renderer services', output)
+                self.assertEqual(self.commands, [])
+
     def test_11_invalid_service_selection_refuses_before_service_commands(self):
         first = self.variables['relay_router_bindings'][0]['bindingId']
         for selected in [[], [str(uuid.uuid4())], [first, first], first, {'id': first}]:
