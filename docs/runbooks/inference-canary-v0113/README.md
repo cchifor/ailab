@@ -148,6 +148,11 @@ ansible-playbook relay-router-workers.yml --limit dev-worker-1 \
 
 ## Activation and acceptance
 
+Use [the paired live acceptance procedure](LIVE-ACCEPTANCE.md) for exact normal-hub
+request bodies, bounded prompts, permission decisions and marker evidence. It
+records the deployed Pi recovery limitation separately from the runnable checks;
+staging or a passing marker observation does not establish full acceptance.
+
 The owner must see and approve these exact definitions before any profile is
 enabled. Staging all three does not authorize launching all three immediately.
 Claude CLI 2.1.283 is already active in the deployed router, but native Messages
