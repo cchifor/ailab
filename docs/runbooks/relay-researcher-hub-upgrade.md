@@ -928,6 +928,37 @@ Readback after the roll (operator):
 - the owner, in the console (C3a's done-when): Fleet → Buses lists `workspace`; create a bus "Operations", add a keyed
   agent, pause it and resume it; the detail shows the change with its time and who made it.
 
+### H17. v0.12.2: Activity grouping and a prompt SIGTERM exit, no migration
+
+Why: the console redesign's A2b, and the hub half of the termination fix. Relay #670 (the hub exits within 8 s of
+SIGTERM: a bounded close, and the health sampler ends its tick), #671 and #672 (A2b: Activity grouped by actor,
+category, result, day or host, with counted filter values), and the release-review fixes #674, #676 and #678's
+commits, released as v0.12.2 (#673 and #677, `e1d9a366`, run 149268) on top of v0.12.1 (live since 2026-11-25,
+ailab #1996, H16). Together with ailab #1997 (the backup-holder's SIGTERM handler, live), it is the first roll where
+both containers of the outgoing pod exit promptly.
+
+No migration: schema stays 92, and the relay env is unchanged. **Grouping and counted filters stay off** until the
+operator grants `temp_file_limit` to `relay_app` (`GRANT SET ON PARAMETER temp_file_limit TO relay_app`, staging
+first) and sets `RELAY_ACTIVITY_TEMP_FILE_LIMIT_MB` in a later change; until then flat Activity reads as before A2b
+(Relay's `docs/plans/2026-11-22-console-redesign/activity-a2b-operations.md`).
+
+Change: this PR pins the v0.12.2 digest `ea1caf3f…4cb3` in `migrate` and `relay`, with the annotations. The merge
+rolls the hub once (Recreate, through Flux), with the pre-migration backup as every roll, outside the QNAP windows.
+
+Rollback: a reviewed PR re-pins v0.12.1 (`177c1af2…a350f`); no restore or fence. Below v0.12.1 the H16 chain applies.
+
+Readback after the roll (operator):
+
+- one Running Pod; source `e1d9a3667e8425e8b279fc6e1533c26b366bceaf`, release `relay-0.12.2-release-149268`; the
+  `relay` container's image ID ends in `sha256:ea1caf3fef442af50fdfa1d689eb8345495b451a94aa73851826dbeb54fc4cb3`;
+- the backup and migrate init containers exited 0, and `schema_migrations` still reads `92|92`; the relay env is
+  identical to v0.12.1's;
+- the OUTGOING pod's termination: both containers end promptly after "Killing" (well under the 45 s grace period),
+  with no Error; record the time from "Killing" to termination;
+- health samples keep arriving each minute (H12's query);
+- the owner, in the console: Activity lists events as before (flat); with grouping not yet enabled, choosing Group
+  by says it is unavailable rather than failing.
+
 ## Enablement order at a glance
 
 > **Campaign rows are historical.** The owner retired the researcher qualification campaign and its
@@ -961,6 +992,7 @@ Readback after the roll (operator):
 | H14 | hub image → v0.11.6 (the single-agent page; no migration); gates no step above | H13 live | v0.11.6 digest running, `schema_migrations` still `89\|89`, an agent's page opens from Status with Terminal first |
 | H15 | hub image → v0.12.0 (schema 91: migrations 090-091; the console preference per person; Needs you message problems); gates no step above | H14 live; the operator's 89 → 91 check PASS | v0.12.0 digest running, `schema_migrations` `91\|91`, the backup generation recorded, the console preference follows the owner across devices, a withheld message shows in Needs you |
 | H16 | hub image → v0.12.1 (schema 92: migration 092; Buses in Fleet); gates no step above | H15 live; the operator's 91 → 92 check PASS | v0.12.1 digest running, `schema_migrations` `92\|92`, the backup generation recorded, a bus created and a member paused and resumed from Fleet → Buses |
+| H17 | hub image → v0.12.2 (Activity grouping, off until the temp_file_limit grant; prompt SIGTERM exit; no migration); gates no step above | H16 live | v0.12.2 digest running, `schema_migrations` still `92\|92`, the outgoing pod's containers exit promptly, flat Activity unchanged |
 
 ## Rollback: migrations are forward-only
 
@@ -989,6 +1021,7 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
   `relay-restore-fencing`, then a reviewed PR re-pins v0.10.25 (`d98c6ce7…e22e`). Cost, rehearsed: every connector
   and agent key revoked (4 and 8), every session ended (49), the undelivered outbox deleted, a new generation
   ConfigMap; writes after the backup are lost.
+- **H17 (schema 92, no migration):** a reviewed PR re-pins v0.12.1 (`177c1af2…a350f`); no restore or fence.
 - **H16 (schema 92):** as H15: never a bare re-pin. Restore the v0.12.1 rollout's **earliest** pre-migration
   generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
   v0.12.0 (`e63d533f…c364`); H11's cost applies. No bus or membership changes while an older image runs on schema 92.
