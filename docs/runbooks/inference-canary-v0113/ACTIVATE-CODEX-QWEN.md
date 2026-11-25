@@ -1,0 +1,103 @@
+# Held Codex/Qwen service activation
+
+Prepared from AILab main `3c5590713666d277201aa0d26b2d1ad9bb60323e`.
+This is a proposed operator procedure, not approval or evidence of activation.
+Keep the activation PR held with `no-automerge` until the parent/operator confirms
+the gates below. Merging these opt-in inputs does not run either playbook; no
+inventory imports them. This change starts no service and creates no key itself.
+
+[AILab #1999 staging evidence](https://git.chifor.me/cchifor/ailab/pulls/1999#issuecomment-142077)
+records holder and renderer installation on dev-worker-1 with all managed services
+disabled/inactive and no credential files. The existing tmux connector remains
+active. The operator subsequently reported #1998's owner-approved router rollout
+to `c35fc2225b787a041799cd2c638d129c349d2718d6a090040aca1f84c9181516`.
+Refresh those readbacks before activation; this preparation made no host requests.
+
+## Gates before either activation converge
+
+1. Record the owner's explicit approval of the exact `profiles.json` bytes:
+   SHA-256 `c1c937fca19a95e46fd0178a37ab973237b1af48549bec18959b3200f5c93809`.
+   This approval is pending; source PR reviews and staging are not substitutes.
+2. The owner creates only the Codex and Qwen bindings from the existing
+   `binding-requests.json`, in their own authorized Relay session, just before
+   activation. Required binding IDs are `a0f57684-747f-4c3e-8d90-e684b7262590`
+   and `d2871eec-8f5a-4afe-a917-014f0ae8e14d`. Issuance is pending. Do not issue a
+   substitute key, change IDs, or issue the Claude request in this batch.
+3. Parent/operator approves these concrete service selections and the activation
+   window. Confirm scoped Codex/Qwen grants, existing routes, dedicated reader
+   validity and trust. Use the verified artifacts and SOPS controller setup from
+   #1999. Do not expose credential contents in output or command arguments.
+
+Claude remains pending its route, trust and native Messages prerequisites. Do not
+enable Messages, create a Claude route/binding, or register/enable its launch
+definition as part of this procedure. Worker-budget use remains unqualified;
+File B requalification is required before future worker-budget use, not here.
+
+## Renderer activation first
+
+From `/repo/ansible`, first run the following with `--list-hosts` and require
+exactly `dev-worker-1`. Execute only after the gates above are recorded:
+
+```sh
+ansible-playbook relay-router-workers.yml --limit dev-worker-1 \
+  -e @/repo/docs/runbooks/inference-canary-v0113/renderer-inputs.json \
+  -e @/repo/docs/runbooks/inference-canary-v0113/renderer-bindings.json \
+  -e @/repo/docs/runbooks/inference-canary-v0113/renderer-activate-codex-qwen.json
+```
+
+The final extra-vars file intentionally overrides the staging service flag.
+Retain all three binding definitions, directories, units and `bindings.json`.
+The role rejects removing a staged binding; the new `relay_router_active_binding_ids`
+selects services without removing policies. With service management enabled,
+unselected renderer units are stopped/disabled; handlers restart only selected
+renderers, including after shared binary or CA changes. Without this explicit
+selection the compatible default remains all defined bindings.
+
+Require `relay-router-auth.service` and only the Codex/Qwen renderer services
+active/enabled. Claude unit
+`relay-router-render-a8f6211c-d7e2-4ffd-824d-b158e349a8d4.service` must remain
+inactive/disabled, with no credential file. Check the two delivered credentials'
+ownership/mode and managed delivery/ready receipts without reading tokens into
+logs. Stop before holder activation if delivery or readiness is incomplete.
+The existing retirement procedure still governs revocation; disabling a service
+does not revoke a key or erase credentials/history.
+
+## Holder activation after delivery
+
+Again require `--list-hosts` to show exactly `dev-worker-1`, then use:
+
+```sh
+ansible-playbook relay-holders.yml --limit dev-worker-1 \
+  -e @/repo/docs/runbooks/inference-canary-v0113/holder-inputs.json \
+  -e @/repo/docs/runbooks/inference-canary-v0113/holder-activate-codex-qwen.json
+```
+
+The complete three-profile array stays byte-identical. Holder startup validates
+all three profiles but does not launch inference or require Claude's credential
+file; its already-staged private parent directory must exist. This overlay is not
+a two-profile holder filter. It starts the holder and its independent reconciliation
+client; only the Codex/Qwen launch definitions may subsequently be enabled through
+the separately approved hub flow. Preserve the current hub version and the tmux
+connector; no hub configuration or image changes belong here.
+
+Allow at most 120 seconds for execution-user IPC `hello` on the holder socket.
+Require the same three profile IDs, `nativeStateReady: true`, zero sessions and
+the exact installed profile hash. Check both holder services, managed delivery
+and reconciliation without exposing secrets. If any gate fails, stop acceptance,
+retain state and receipts, and coordinate recovery with the operator. Do not
+overwrite immutable profiles/units, rotate credentials blindly or start Claude.
+
+Service readiness is not inference acceptance. Any Codex/Qwen inference, tool
+effects, history, cancellation or rollback exercises need their separate reviewed
+acceptance window. No inference is performed by these inputs or this preparation.
+
+## Offline validation of this preparation
+
+The real Ansible renderer-role suite passed 13 tests in a disposable container
+with networking disabled, capabilities dropped and a read-only checkout. Service
+commands used a strict local fixture, never a host user manager. Coverage includes
+two selected renderers becoming active/enabled, the third stopped/disabled with
+all policies retained, repeat idempotence, shared-change handlers excluding the
+third, and invalid selections rejected before service commands. Eight input and
+staging tests also passed, including the unchanged exact three-profile byte hash.
+These results do not establish owner approval, credential delivery or live readiness.

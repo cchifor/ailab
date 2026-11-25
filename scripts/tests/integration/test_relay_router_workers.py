@@ -73,16 +73,22 @@ class WorkerRole(unittest.TestCase):
             "import json, pathlib, sys\n" +
             f"root = pathlib.Path({str(cls.root)!r})\n" +
             "args = [x for x in sys.argv[1:] if x not in ('--user', '-l')]\n" +
+            "states_file = root/'unit-states.json'\n" +
+            "states = json.loads(states_file.read_text()) if states_file.exists() else {}\n" +
+            "unit = states.get(args[-1], dict(active=True, enabled=True))\n" +
             "with (root/'commands.jsonl').open('a') as log: log.write(json.dumps(args)+'\\n')\n" +
             "if args == ['list-units', '--all', '--type=service', '--output=json', '--no-pager', 'relay-router-*.service']:\n" +
             "    state = (root/'service-state.json').read_text()\n" +
             "    if state == 'unreachable': sys.exit(1)\n" +
             "    print(state)\n" +
             "elif args[0] == 'show' and args[-1].startswith('relay-router-'):\n" +
-            "    print('LoadState=loaded\\nActiveState=active\\nUnitFileState=enabled')\n" +
-            "elif args[0] == 'is-enabled' and args[-1].startswith('relay-router-'): print('enabled')\n" +
+            "    print('LoadState=loaded\\nActiveState='+('active' if unit['active'] else 'inactive')+'\\nUnitFileState='+('enabled' if unit['enabled'] else 'disabled'))\n" +
+            "elif args[0] == 'is-enabled' and args[-1].startswith('relay-router-'):\n" +
+            "    print('enabled' if unit['enabled'] else 'disabled'); sys.exit(0 if unit['enabled'] else 1)\n" +
             "elif args == ['daemon-reload']: pass\n" +
-            "elif args[0] == 'restart' and args[-1].startswith('relay-router-'): pass\n" +
+            "elif args[0] in ('restart', 'start', 'stop', 'enable', 'disable') and args[-1].startswith('relay-router-'):\n" +
+            "    unit['enabled' if args[0] in ('enable','disable') else 'active'] = args[0] not in ('stop','disable')\n" +
+            "    states[args[-1]] = unit; states_file.write_text(json.dumps(states))\n" +
             "else: sys.exit('unexpected systemctl call: '+repr(args))\n")
         systemctl.chmod(0o755)
         loginctl = commands / "loginctl"
@@ -315,6 +321,57 @@ class WorkerRole(unittest.TestCase):
         updates['relay_router_ca_source'] = str(ca)
         self.run_role(updates)
         self.assertCountEqual(self.restarted(), ['relay-router-auth.service', *renders])
+
+    def test_10_subset_activation_preserves_three_policies_and_never_starts_third(self):
+        config_dir = Path(self.variables['relay_router_home']) / '.config/relay/router-managed'
+        if not (config_dir / 'bindings.json').exists():
+            self.run_role()
+        bindings = [json.loads((config_dir / (bid + '.json')).read_text())['router']
+                    for bid in json.loads((config_dir / 'bindings.json').read_text())]
+        while len(bindings) < 3:
+            bindings.append(self.new_binding())
+        bindings[2]['protocol'] = 'anthropic-messages'
+        bindings[2]['selection'] = dict(kind='model', model='canary-pi-claude')
+        ids = [b['bindingId'] for b in bindings]
+        updates = dict(relay_router_bindings=bindings, relay_router_active_binding_ids=ids[:2])
+        self.run_role(updates)  # Stage all three, without service operations.
+        units = ['relay-router-render-' + bid + '.service' for bid in ids]
+        states_path = self.root / 'unit-states.json'
+        states_path.write_text(json.dumps({
+            'relay-router-auth.service': dict(active=False, enabled=False),
+            units[0]: dict(active=False, enabled=False),
+            units[1]: dict(active=False, enabled=False),
+            units[2]: dict(active=True, enabled=True),
+        }))
+        updates['relay_router_manage_services'] = True
+        self.run_role(updates)
+        states = json.loads(states_path.read_text())
+        for unit in ['relay-router-auth.service', *units[:2]]:
+            self.assertEqual(states[unit], dict(active=True, enabled=True))
+        self.assertEqual(states[units[2]], dict(active=False, enabled=False))
+        self.assertFalse(any(c[0] in ('start', 'restart', 'enable') and c[-1] == units[2]
+                             for c in self.commands))
+        self.assertEqual(set(json.loads((config_dir / 'bindings.json').read_text())), set(ids))
+        for binding in bindings:
+            self.assertTrue((config_dir / (binding['bindingId'] + '.json')).exists())
+            self.assertFalse(Path(binding['credentialFile']).exists())
+        self.assertRegex(self.run_role(updates), r'changed=0\s')
+        # Shared and third-only changes must not sneak the deferred unit into handlers.
+        ca = self.root / 'subset-ca'
+        ca.write_bytes((ROLE.parent / 'openbao_agent/files/ailab-root-ca.crt').read_bytes() + b'\n')
+        bindings[2]['selection']['model'] = 'still-deferred'
+        updates['relay_router_ca_source'] = str(ca)
+        self.run_role(updates)
+        self.assertCountEqual(self.restarted(), ['relay-router-auth.service', *units[:2]])
+        self.assertEqual(json.loads(states_path.read_text())[units[2]], dict(active=False, enabled=False))
+
+    def test_11_invalid_service_selection_refuses_before_service_commands(self):
+        first = self.variables['relay_router_bindings'][0]['bindingId']
+        for selected in [[str(uuid.uuid4())], [first, first], first, {'id': first}]:
+            with self.subTest(selected=selected):
+                self.run_role(dict(relay_router_manage_services=True,
+                                   relay_router_active_binding_ids=selected), success=False)
+                self.assertEqual(self.commands, [])
 
 
 if __name__ == '__main__':

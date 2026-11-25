@@ -148,6 +148,11 @@ ansible-playbook relay-router-workers.yml --limit dev-worker-1 \
 
 ## Activation and acceptance
 
+The held [Codex/Qwen-only activation procedure](ACTIVATE-CODEX-QWEN.md) supplies
+separate service-start overlays while retaining this exact three-profile array
+and all three renderer policies. Use its explicit two-binding service selection;
+the renderer role's compatible default starts every defined binding.
+
 The owner must see and approve these exact definitions before any profile is
 enabled. Staging all three does not authorize launching all three immediately.
 Claude CLI 2.1.283 is already active in the deployed router, but native Messages
