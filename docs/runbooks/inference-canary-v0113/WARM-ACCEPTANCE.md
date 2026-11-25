@@ -10,7 +10,7 @@ retention phase.
 
 The published v0.13.0 candidate and current qualification/deployment holds are
 recorded in [README.md](README.md). Exact-artifact root/profile proof passed
-offline; five wire/replay cases remain pending. Warm acceptance remains held until
+offline; all five published-Pi wire/replay cases passed offline (zero skipped). Warm acceptance remains held until
 the preceding cold/lifecycle gates pass. Opaque replay uses the operator-selected
 paired live/synthetic evidence method; final outbound effort/cap fields and opaque
 bytes remain unproven live.

@@ -16,13 +16,21 @@ bounded Claude/Codex effort control. Publication succeeded in
 [run149439](https://git.chifor.me/cchifor/relay/actions/runs/149439), attempt2,
 job781668; see the [deployment receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.13.0/deployment-images-149439.json).
 The candidate profile SHA256 is `665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e`.
-Exact published-runtime root/profile proof passed offline; five wire/replay cases
-remain **pending**. Keep execution held for those results, operator hub/schema93
-rollout and stopped restaging, final exact-profile owner approval, late managed
+Exact published-runtime root/profile proof passed offline; all five published-Pi wire/replay cases passed offline (zero skipped). Keep execution held for operator hub/schema93
+rollout and stopped restaging, operator verification of the covered final diff, late managed
 bindings and readiness. Publication is not deployment or live acceptance.
 The current hub remains v0.12.1/source `dfc739a492217ea5a8dfaf2471aead43b2ea646c`;
 keep canary services off through the coordinated upgrade. Earlier revision1 and
-layout/pins-only preapproval do not approve the effort capability.
+layout/pins-only preapproval did not cover effort. Operator bus1861 relays the
+owner's 15:30 decision **Covered**, extending that approval to Claude/Codex
+`off/low/high`. Before apply, the operator must verify the complete diff from
+original profile SHA256 `c1c937fca19a95e46fd0178a37ab973237b1af48549bec18959b3200f5c93809`
+to the final exact bytes contains **only home-layout changes, artifact pins and
+those Claude/Codex choices** (with matching administrative revision metadata).
+Record that verification and readbacks; this is existing conditional approval,
+not a requirement to ask again for the same covered scope. Other changes are
+not covered. No routes, grants, identities, output/time budgets or Qwen effort
+capability may be added under this decision.
 
 Published candidate pins (the JSON inputs remain authoritative):
 
@@ -45,11 +53,28 @@ Compiled-image profile/control schema checks passed 31 positive and five negativ
 cases. These results establish offline installation/profile readiness and schema
 validation, not owner authority, managed delivery, live inference or recovery.
 
+Published-Pi wire/replay qualification passed **5/5, zero skipped, in 63.10s**
+on 2026-11-25. It used the published Pi manifest above and packaged Node22.23.2
+(SHA256 `3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327`),
+against exact router TypeScript source `b60fb03b23ce52548f49513d45466f4670f5a369`
+under Node24.22.2 with synthetic upstreams and external networking disabled.
+Source/runtime mounts were read-only; neither runtime nor test source was rebuilt
+or modified. Controller evidence in the Relay workspace is
+`.data/inference-release-evidence/published-pi-wire-e843-20261125-r4/`:
+`qualification-summary.json`, `wire-provenance.json` and `vitest-results.json`.
+Installer/repeat evidence remains in the sibling `published-pi-wire-e843-20261125-r2/`;
+earlier driver/bootstrap failures are preserved and distinguished in the summary.
+This proves published Pi/ACP/policy/tools behavior against that router source,
+**not the published router OCI/runtime, real subscription CLI, live wire, or
+holder/hub lifecycle**. Final outbound effort/cap fields and opaque bytes remain
+unproven live; retain the operator-selected paired evidence limitation.
+
 Claude and Codex now propose exactly
 `settings:{modes:[],config:{thought_level:["off","low","high"]}}`.
 `off` means provider default; it does not disable provider reasoning. Qwen has no
-effort capability. This addition is outside the earlier layout/pins-only
-preapproval and must be included in the final exact-profile owner approval.
+effort capability. This addition exceeded the earlier layout/pins-only
+preapproval; bus1861's Covered decision includes it subject to the exact-diff
+verification above.
 It requires the release containing PR680 and the router containing PR201; the
 historical v0.11.3 qualification below did not exercise these settings. Keep
 the existing request/output limits, grants and route policies unchanged.
@@ -67,8 +92,8 @@ old directories and exact installed profile bytes, with services stopped and
 ownership/emptiness evidence preserved. The role's immutable-file check refuses
 an old installed profile hash; it does not silently replace it. Do not clear a
 native-state fence or discard histories to make startup pass. Directory emptiness
-alone is not proof of process containment. Renew exact-profile approval only
-after final artifact pins and the layout migration plan are reviewed.
+alone is not proof of process containment. Verify final artifact pins and the
+layout plan against the existing covered scope before execution.
 The bounded [stopped-stage restaging procedure](RESTAGE-RECOVERY.md) preserves
 the old profile directories as evidence and does not start services; it requires
 its own final review before operator execution.
@@ -232,7 +257,7 @@ Its original revision1 hash and v0.11.3 staging references are historical inputs
 not approval to activate the revision2 definitions. The deployment hold above
 also applies to that workflow. Before publishing the final activation change,
 verify the integrated published pins and activation procedure's exact-profile
-references against the final reviewed bytes and record pending qualification results.
+references against the final reviewed bytes and record the completed offline qualification and remaining live gates.
 
 Use [the paired live acceptance procedure](LIVE-ACCEPTANCE.md) for exact normal-hub
 request bodies, bounded prompts, permission decisions and marker evidence. It
@@ -240,8 +265,8 @@ records the deployed Pi recovery limitation separately from the runnable checks;
 staging or a passing marker observation does not establish full acceptance.
 
 Use the separate [bounded effort acceptance procedure](EFFORT-ACCEPTANCE.md) for
-fresh Claude/Codex sessions after qualified releases and owner approval of the
-new opt-in settings capability. Its four-prompt budget is separate from lifecycle
+fresh Claude/Codex sessions after qualified releases and operator verification
+of the conditionally covered settings/profile diff. Its four-prompt budget is separate from lifecycle
 acceptance; it changes no profile pins here and excludes Qwen.
 
 Use [bounded warm acceptance and rollback](WARM-ACCEPTANCE.md) only after cold
@@ -268,8 +293,9 @@ the required opaque blocks are absent. `PRESERVED` proves local import equality;
 it explicitly does not prove that a provider received those blocks. Its fourteen
 offline tests use only private synthetic fixtures.
 
-The owner must see and approve these exact definitions before any profile is
-enabled. Staging all three does not authorize launching all three immediately.
+The operator must verify these exact definitions against the owner's Covered
+decision before any profile is enabled. Staging all three does not authorize
+launching all three immediately.
 Claude CLI 2.1.283 is already active in the deployed router, but native Messages
 must be enabled with warm retention false and cold acceptance must pass before
 issuing the Claude request or launching its profile. Do not submit all three

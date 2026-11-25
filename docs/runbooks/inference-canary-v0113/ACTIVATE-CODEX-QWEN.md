@@ -10,12 +10,14 @@ inventory imports them. This change starts no service and creates no key itself.
 and propose bounded Claude/Codex effort choices with published v0.13.0 pins
 from source `e843921b7cff76406b7da0b5b35cf653c7e458c5`. The activation overlay
 matches the current candidate byte hash. Publication149439 and offline exact
-published-runtime root/profile proof passed; five wire/replay cases remain pending.
+published-runtime root/profile proof passed; all five published-Pi wire/replay cases passed offline (zero skipped).
 Use the [published pin table and common evidence mount](README.md).
 Complete qualification and verify the operator's approved final diff before
-execution. The new effort capability exceeds the
-earlier home-layout/artifact-only preapproval and requires explicit owner review
-of the final profiles. Follow
+execution. The effort capability exceeded the earlier home-layout/artifact-only
+preapproval; operator bus1861 now records the owner's 15:30 **Covered** decision
+for home layout, pins and Claude/Codex `off/low/high` only. Verify the full
+original-c1c937fc-to-final diff under [that decision](README.md); no new request
+for the same covered scope is needed. Follow
 [stopped restaging](RESTAGE-RECOVERY.md), including hub/schema-first ordering and
 matching-holder readiness. Keep the canary services off through that window.
 
@@ -28,7 +30,7 @@ Refresh those readbacks before activation; this preparation made no host request
 
 ## Gates before either activation converge
 
-1. Record the owner's explicit approval of the exact `profiles.json` bytes:
+1. Record the existing Covered decision and operator verification of the exact `profiles.json` diff:
    Current revision2 SHA-256 `665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e`.
    This published-artifact candidate is not an approval. The operator must verify
    the final diff against the owner's approved scope; source PR reviews and

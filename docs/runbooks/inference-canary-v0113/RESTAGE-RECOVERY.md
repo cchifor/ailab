@@ -15,8 +15,7 @@ credential homes, leaving `native-homes` to the holder. Do not weaken that fence
 
 Published v0.13.0 candidate pins and controller evidence paths are recorded in
 [README.md](README.md), source `e843921b7cff76406b7da0b5b35cf653c7e458c5`.
-Exact published-runtime root/profile proof passed offline; five wire/replay cases
-remain pending. Old installed placeholders and hashes below remain
+Exact published-runtime root/profile proof passed offline; all five published-Pi wire/replay cases passed offline (zero skipped). Old installed placeholders and hashes below remain
 preservation evidence; do not substitute the new candidate hashes for them.
 
 For recovery v2, deploy and verify the qualified newer hub and schema migration
