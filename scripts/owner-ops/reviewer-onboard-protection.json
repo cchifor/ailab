@@ -1,0 +1,19 @@
+{
+  "rule_name": "main",
+  "enable_push": false,
+  "enable_force_push": false,
+  "enable_merge_whitelist": true,
+  "merge_whitelist_usernames": ["reviewer-claude", "reviewer-codex", "chifor"],
+  "enable_status_check": true,
+  "status_check_contexts": ["CI / verify (pull_request)"],
+  "required_approvals": 2,
+  "enable_approvals_whitelist": true,
+  "approvals_whitelist_username": ["reviewer-claude", "reviewer-codex"],
+  "block_on_rejected_reviews": true,
+  "block_on_official_review_requests": false,
+  "block_on_outdated_branch": true,
+  "dismiss_stale_approvals": true,
+  "ignore_stale_approvals": false,
+  "require_signed_commits": false,
+  "block_admin_merge_override": false
+}

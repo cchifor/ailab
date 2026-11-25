@@ -80,6 +80,11 @@ pr_reviewer_repos:
   # for apps ("Where business Apps live: Separate repo"). Same two-persona review, same bots-only
   # main protection as cchifor/workbricks; same runbook.
   - cchifor/workbricks-apps
+  # SpecPulse (owner request, 2026-11-25: "add support to include cchifor/specpulse in the reviewers
+  # list, so they can review and merge"). Same two-persona review and the same bots-only main rule as
+  # cchifor/workbricks-apps, applied by scripts/owner-ops/reviewer-onboard.ops. Its PRs come from
+  # workstation-bot, already a merge author. Record: docs/runbooks/specpulse-reviewer-onboarding.md.
+  - cchifor/specpulse
 # PRs authored by the reviewer identities are never reviewed (no bot->bot trigger loops).
 pr_reviewer_ignore_authors:
   - reviewer-claude
