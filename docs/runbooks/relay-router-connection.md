@@ -276,6 +276,16 @@ and accounts. Refuse to overwrite an existing alias whose definition differs.
  "timeoutMs": 90000, "idleTimeoutMs": 90000, "maxDurationMs": 120000, "models": ["sonnet"], "placement": "conversation"}
 ```
 
+The pinned Router's [configuration schema](https://git.chifor.me/cchifor/llm-router/src/commit/2ad086a9002311ff4eaa61ff26dacc56d121cbeb/packages/runtime/config.ts#L60)
+admits `affinity:"none"` and `placement:"conversation"`; `strategy` is a plugin
+identifier, not a schema enumeration. Its
+[`validateConfig`](https://git.chifor.me/cchifor/llm-router/src/commit/2ad086a9002311ff4eaa61ff26dacc56d121cbeb/packages/runtime/config.ts#L95)
+also checks account references and placement/affinity compatibility and runs the
+registered plugin validators. Require the config API to accept the complete
+document against the running plugins, then read the saved policy back exactly.
+On any validation or revision conflict, stop and reread; do not bypass validation
+or assume this example alone proves the live configuration is valid.
+
 Read back the exact target, route and account `subscription` access, no fallback,
 and one attempt before the trust change. Merging the trust PR updates the ESO
 template and eventually the Secret; the mounted subPath and plugin retain their
