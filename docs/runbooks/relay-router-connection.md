@@ -112,7 +112,7 @@ public keys:
 - issuer `relay.chifor.me`; key `relay-admin-2026-11` with roles `[admin]`, key
   `relay-reconciler-2026-11` with roles `[reconciler]`;
 - tenant `00000000-0000-4000-8000-000000000001`, Router namespace `default` (every live route and key);
-- `routes: ["relay-researcher-luna", "canary-pi-codex", "canary-pi-qwen"]`, `access: ["api", "subscription", "local"]`, `maxLifetimeSeconds: 86400`, `maxKeys: 8`. The two `canary-pi-*` routes and the `subscription`/`local` access are the Pi inference canary's (2026-11-24, [relay-pi-canary-holder.md](relay-pi-canary-holder.md)), one one-route binding each. A wider ceiling does not widen reach: the Router serves a target only when the account's access is in both the key's and the route's access (llm-router `usableTarget`), and each of the three routes has one access kind and one deployment. Ending the canary is ordered, because the Router reads trust once at startup and narrowing it under live keys strands them: (1) drain canary launches and revoke both canary bindings in Relay; (2) wait until each credential reports `revoked` with cleanup done; (3) revert the trust change and apply it with a deliberate Router restart; (4) delete the two routes through the Router config API. `maxKeys` counts per issuer and tenant, so it went from 4 to 8 with them;
+- `routes: ["relay-researcher-luna", "canary-pi-codex", "canary-pi-qwen", "canary-pi-claude"]`, `access: ["api", "subscription", "local"]`, `maxLifetimeSeconds: 86400`, `maxKeys: 8`. The three `canary-pi-*` routes use one one-route binding each ([relay-pi-canary-holder.md](relay-pi-canary-holder.md)). The Router serves a target only when the account's access is in both the key's and the route's access (llm-router `usableTarget`), and each of the four routes has one access kind and one deployment. Ending the canary is ordered, because the Router reads trust once at startup and narrowing it under live keys strands them: (1) drain canary launches and revoke all issued canary bindings in Relay; (2) wait until each credential reports `revoked` with cleanup done; (3) revert the trust change and apply it with a deliberate Router restart; (4) delete the three routes through the Router config API. `maxKeys` remains 8;
 - `workerBudgets: {maxTokens: 8 × (I + 8192), maxAuthoritySeconds: 120, maxRequests: 8}` (comment
   120818 D), set to `maxTokens: 7441536`: I = 922,000, the gpt-6-luna input bound the owner accepted
   (comment 122095), so 8 × (922,000 + 8,192). It is per allocation; the Router schema allows up to
@@ -122,7 +122,8 @@ public keys:
   placeholder string.
 
 `maxLifetimeSeconds` 86400 and `maxKeys` 8 are conservative ceilings for one researcher worker and the
-two canary bindings, each with a rotation overlap: review them against the researcher pool's lifetime before step 6. The pool
+three canary bindings, each with one rotation overlap. This fills the ceiling: inspect existing key occupancy
+before issuance or rotation; do not enlarge it implicitly. Review these bounds against the researcher pool's lifetime before step 6. The pool
 inference policy's grant (`routes`, `access`, `lifetimeSeconds`) must be a subset of this ceiling.
 
 ### Route precondition (stop until the route exists)
@@ -228,6 +229,42 @@ Readback before the trust restart (and again before any binding is created), fro
 
 The two accounts' own `access` must still read `subscription` and `local`. If any of these differs, stop: do
 not restart the Router with the widened trust, and do not create a binding.
+
+### Claude canary addition (cold acceptance required)
+
+The final canary route uses the existing `claude` subscription account and `sonnet`,
+with its own one-route binding from [the exact inputs](inference-canary-v0113/README.md).
+This addition is prepared for operator review; it is not evidence of a live Claude
+route, trust restart, credential or profile activation.
+
+After the current post-roll gate finishes, the operator creates this route using
+the latest configuration and its `If-Match` revision, preserving all existing routes
+and accounts. Refuse to overwrite an existing alias whose definition differs.
+
+```json
+{"alias": "canary-pi-claude", "namespace": "default",
+ "deployments": [{"id": "canary-pi-claude:fixed", "accountId": "claude", "model": "sonnet", "enabled": true, "weight": 1}],
+ "strategy": "smart", "affinity": "none", "access": ["subscription"], "maxAttempts": 1, "fallbackAliases": [],
+ "timeoutMs": 90000, "idleTimeoutMs": 90000, "maxDurationMs": 120000, "models": ["sonnet"], "placement": "conversation"}
+```
+
+Read back the exact target, route and account `subscription` access, no fallback,
+and one attempt before the trust change. Merging the trust PR updates the ESO
+template and eventually the Secret; the mounted subPath and plugin retain their
+old trust until a deliberate operator-controlled restart. Compare the mounted
+trust SHA with the Secret after restart and require the existing grants plus
+`canary-pi-claude`, with all other ceilings unchanged. The restart must be scheduled
+outside other provider gates and followed by the normal post-roll gate.
+
+Before issuing the Claude credential, require Claude Code 2.1.283 active with no
+pending change, `sdk-resume`, `warmSessions:false`, and active inference sessions.
+Enable Messages through the normal plugin configuration flow, verify managed
+capabilities `nativeAnthropic:true`/`routeSelectors:false` and the exact route's
+`anthropicMessages:true` catalog flag, then complete the operator's cold Messages
+acceptance. Only then may the owner create the late Claude binding and approve
+its profile launch. Warm retention, live Pi acceptance and active warm-to-cold
+rollback remain subsequent gates. No credential issuance, service start or plugin
+enablement is performed by this trust manifest.
 
 ## OpenBao documents the operator fills
 

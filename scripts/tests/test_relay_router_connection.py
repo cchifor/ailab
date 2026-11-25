@@ -286,14 +286,14 @@ class RouterTrust(unittest.TestCase):
         self.assertEqual(ceiling["namespace"], "default")
         # Selection {kind: model, model: relay-researcher-luna}, no route: the requested model IS the
         # route alias, the dedicated adapted route (relay#277 comment 121330), never the shared one.
-        # Plus the Pi inference canary's two dedicated routes (2026-11-24, relay-pi-canary-holder.md),
+        # Plus the Pi inference canary's three dedicated routes (relay-pi-canary-holder.md),
         # each granted by its own one-route binding; remove them when the canary ends.
-        self.assertEqual(ceiling["routes"], ["relay-researcher-luna", "canary-pi-codex", "canary-pi-qwen"])
+        self.assertEqual(ceiling["routes"], ["relay-researcher-luna", "canary-pi-codex", "canary-pi-qwen", "canary-pi-claude"])
         # api: the researcher (the worker budget refuses subscription transports); subscription: the
-        # canary's codex-2 route; local: its LAN qwen route. Nothing else.
+        # canary's codex-2 and claude routes; local: its LAN qwen route. Nothing else.
         self.assertEqual(ceiling["access"], ["api", "subscription", "local"])
         self.assertEqual(ceiling["maxLifetimeSeconds"], 86400)
-        # Per issuer and tenant: the researcher plus two canary bindings, each with a rotation overlap.
+        # Per issuer and tenant: the researcher plus three canary bindings, each with a rotation overlap.
         self.assertEqual(ceiling["maxKeys"], 8)
         budgets = ceiling["workerBudgets"]
         self.assertEqual(set(budgets), {"maxTokens", "maxAuthoritySeconds", "maxRequests"})
