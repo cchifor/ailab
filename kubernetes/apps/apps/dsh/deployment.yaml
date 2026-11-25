@@ -121,7 +121,7 @@ spec:
         # TAG@digest, not a bare digest: with no tag Renovate tracks `latest`, which is how this
         # one container drifted to Node 26 (6d2c7d5) outside the dsh Node 24 hold.
         - name: build-command-ui-fix
-          image: mirror.gcr.io/library/node:24@sha256:6b33b0be1647d1a577f9cebb6c8fc2587cc02c98c9956af8d0289df1791a3d10
+          image: mirror.gcr.io/library/node:24@sha256:49f7adaf9f1574bc45c20ea317139b39a59d7e758d0e93745e112fd85cb42623
           command: [node, /ui-fix-source/build-command-ui-fix.mjs, /app, /ui-client-fix/client.js]
           env:
             - { name: DSH_VERSION, value: "0.1.5-alpha.2" }
