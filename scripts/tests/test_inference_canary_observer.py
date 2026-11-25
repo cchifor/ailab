@@ -18,7 +18,7 @@ class MarkerObserver(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.root.chmod(0o700)
         self.run = str(uuid.uuid4())
         self.marker = ("relay-pi-qwen-" + self.run + "\n").encode()
@@ -89,7 +89,22 @@ class MarkerObserver(unittest.TestCase):
 
     def test_workspace_must_be_private(self):
         self.root.chmod(0o755)
-        self.assertFalse(self.read("baseline")["phaseChecksPass"])
+        result = self.read("baseline")
+        self.assertFalse(result["phaseChecksPass"])
+        self.assertNotIn("commands", result)
+
+    def test_unsafe_or_unavailable_workspace_has_no_commands(self):
+        for root in (self.root / "quote'path", self.root / "line\nbreak", self.root / "missing"):
+            with self.subTest(root=root):
+                result = observer.observe(root, "qwen", self.run, "baseline", os.getuid())
+                self.assertFalse(result["phaseChecksPass"])
+                self.assertNotIn("commands", result)
+
+    def test_invalid_run_api_raises_value_error(self):
+        for run in ("not-a-uuid", self.run.upper(), self.run.replace("-", "")):
+            with self.subTest(run=run):
+                with self.assertRaisesRegex(ValueError, "Invalid observation selection"):
+                    observer.observe(self.root, "qwen", run, "baseline", os.getuid())
 
 
 if __name__ == "__main__":

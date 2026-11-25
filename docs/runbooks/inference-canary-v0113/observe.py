@@ -52,15 +52,17 @@ def file_evidence(directory_fd, name, expected, uid):
 
 def observe(root, provider, run, phase, uid):
     """root/uid are injectable for offline tests; CLI fixes both to the canary."""
-    if provider not in PROFILES or phase not in PHASES or run_id(run) != run:
+    try:
+        run_id(run)
+    except argparse.ArgumentTypeError as exc:
+        raise ValueError("Invalid observation selection") from exc
+    if provider not in PROFILES or phase not in PHASES:
         raise ValueError("Invalid observation selection")
     marker = "relay-pi-" + provider + "-" + run
     names = {"denied": "acceptance-" + run + ".denied", "effects": "acceptance-" + run + ".effects"}
     report = {"version": 1, "observedUtc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "provider": provider, "profileId": PROFILES[provider], "runId": run, "phase": phase,
-              "marker": marker, "commands": {
-                  k: "umask 077; printf '%s\\n' '" + marker + "' >> '" + str(root / name) + "'"
-                  for k, name in names.items()},
+              "marker": marker,
               "scope": "Local marker effects only; verify hub permissions, router receipts and native history separately."}
     # Fixed CLI roots contain no shell metacharacters; refuse substituted paths too.
     if not root.is_absolute() or root.resolve() != root or any(c in str(root) for c in "'\n\r"):
@@ -79,6 +81,9 @@ def observe(root, provider, run, phase, uid):
         files = {k: file_evidence(fd, name, (marker + "\n").encode(), uid) for k, name in names.items()}
     finally:
         os.close(fd)
+    report["commands"] = {
+        k: "umask 077; printf '%s\\n' '" + marker + "' >> '" + str(root / name) + "'"
+        for k, name in names.items()}
     expected_effect = files["effects"]["state"] == "absent" if phase in ("baseline", "denied") else files["effects"].get("exactlyOneMarker") is True
     report.update(state="observed", files=files,
                   phaseChecksPass=files["denied"]["state"] == "absent" and expected_effect)
