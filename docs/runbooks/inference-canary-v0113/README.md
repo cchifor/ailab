@@ -189,6 +189,11 @@ request bodies, bounded prompts, permission decisions and marker evidence. It
 records the deployed Pi recovery limitation separately from the runnable checks;
 staging or a passing marker observation does not establish full acceptance.
 
+Use the separate [bounded effort acceptance procedure](EFFORT-ACCEPTANCE.md) for
+fresh Claude/Codex sessions after qualified releases and owner approval of the
+new opt-in settings capability. Its four-prompt budget is separate from lifecycle
+acceptance; it changes no profile pins here and excludes Qwen.
+
 The owner must see and approve these exact definitions before any profile is
 enabled. Staging all three does not authorize launching all three immediately.
 Claude CLI 2.1.283 is already active in the deployed router, but native Messages
