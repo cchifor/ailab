@@ -124,7 +124,16 @@ Short history may refuse compaction; record it as unexercised, not successful. D
 
 This shape is valid, but **native Pi restart/resume is unsupported through this pinned normal hub path**. `server/agent-sessions/native-recovery.ts` requires an ended root session, approved `holder.persistent.kind === "dsh"`, recovery version 1, journal ownership and a fresh matching holder. An open session reports `Only an ended root session can be resumed`; these Pi profiles, once ended, fail the supported ownership/profile check. Do not POST resume merely to force it, substitute a dsh profile, launch a fresh session and label it recovery, or restart the shared holder/hub as part of this recipe.
 
-Record paired Pi restart acceptance as **blocked pending a supported normal recovery path**. If that path is subsequently delivered, re-pin/revalidate this procedure first. Then require continuity of the intended native history, new valid generation/lease, stale generation rejection, no replay of either append command, completed recovery receipts and quiescence before `python3 observe.py PROVIDER RUN_UUID recovered`. That observer phase alone cannot establish restart or hub recovery.
+Record paired Pi restart acceptance as **blocked for the deployed v0.11.3 Pi artifacts with the pinned v0.12.1 hub**. The launch, permission, branch, compact, cancel and reconcile checks above remain independently usable subject to their gates; report their individual outcomes without claiming recovery passed.
+
+As of 2026-11-25, the replacement owned-history recovery path is being implemented in Relay worktree `relay-pi-owned-recovery-20261125`: durable Rust holder/launcher history ownership, hub recovery capability v2, persisted acknowledgements and API tests. This is implementation in progress, not a qualified release or deployed capability. Before adding a live recovery phase, require:
+
+1. Reviewed new source commits and passing holder/launcher and hub API recovery tests, including ownership, durable acknowledgement, stale-generation and replay fencing.
+2. Release qualification of the matching hub, holder and Pi artifacts; record exact source commits, image/artifact digests and approved profile revisions. Existing v0.11.3 artifact qualification does not qualify the new recovery path.
+3. Owner/operator-approved deployment and fresh capability/ownership readback from the actual paired components. Re-pin this runbook and validate the final request/response schemas against that release; do not assume the in-progress capability or the old resume body establishes eligibility.
+4. An agreed bounded recovery exercise using the normal API, with continuity of the intended native history, valid generation/lease, stale-generation rejection, no replay of either append command, completed recovery receipts and quiescence before `python3 observe.py PROVIDER RUN_UUID recovered`.
+
+The observer's `recovered` phase alone cannot establish restart or hub recovery. Until these prerequisites are met, retain the explicit blocked result; do not manufacture a `/resume` pass.
 
 ## Cleanup, revocation and evidence
 
