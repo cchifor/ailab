@@ -134,7 +134,7 @@ was periodic 72h with `default` + the reader policy, and was revoked afterwards.
 Evidence layout on the controller (all verified before use):
 - `/evidence/v0.11.3/holder/relay-credential-renderer-linux-amd64`: extracted from the release's holder
   archive (`670f510d…`, recorded in `control-plane-manifest.json`), checked against the archive's own
-  `SHA256SUMS`, SHA-256 `ff328ccc…`;
+  `SHA256SUMS`, SHA-256 `ff328ccc456cd8bf92443b5f0548c74d1c32b1d70d7c02a7669e2ba22754c04d`;
 - `/evidence/openbao-2.5.5/bao`: from the upstream `bao_2.5.5_Linux_x86_64.tar.gz` (archive `2c557770…`),
   binary `4e7e04cc…`, both the pins in relay-router-workers.md.
 
