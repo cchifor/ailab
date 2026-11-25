@@ -126,6 +126,23 @@ three canary bindings, each with one rotation overlap. This fills the ceiling: i
 before issuance or rotation; do not enlarge it implicitly. Review these bounds against the researcher pool's lifetime before step 6. The pool
 inference policy's grant (`routes`, `access`, `lifetimeSeconds`) must be a subset of this ceiling.
 
+At capacity the Router rejects managed creation with HTTP 409 `KEY_LIMIT` and
+`Relay managed key limit reached.` The [deployed count predicate](https://git.chifor.me/cchifor/llm-router/src/commit/2ad086a9002311ff4eaa61ff26dacc56d121cbeb/packages/plugins/relay-keys/service.ts#L192)
+counts this issuer/tenant's non-revoked, unexpired keys that are acknowledged or
+still inside their delivery window. A durably revoked Router key is excluded even
+if Relay escrow cleanup remains pending; a revocation that has not reached the
+Router can still consume a slot. Do not infer occupancy from the number of profiles.
+Use the existing authenticated Relay management `list`/`inspect` flow to check
+key IDs, delivery status, expiry and revocation metadata without exposing tokens.
+Serialize new issuance and rotations, and confirm the preceding delivery and old
+key revocation before starting another. On `KEY_LIMIT`, stop new issuance, reconcile
+existing operations through their normal lifecycle, then recheck occupancy; do not
+mint substitute keys. Keep the cleanup requirement before removing a route from
+trust even though confirmed revocation already frees its key slot.
+If an owner approves a higher ceiling instead, change it in Git and verify the
+mounted trust after a Router restart; editing the Secret alone does not change the
+running plugin's limit. Freeing a slot by normal revocation needs no restart.
+
 ### Route precondition (stop until the route exists)
 
 The owner chose a dedicated route ([relay#277 comment 121330](https://git.chifor.me/cchifor/relay/issues/277#issuecomment-121330)):
@@ -229,6 +246,8 @@ Readback before the trust restart (and again before any binding is created), fro
 
 The two accounts' own `access` must still read `subscription` and `local`. If any of these differs, stop: do
 not restart the Router with the widened trust, and do not create a binding.
+Before applying the Claude addition below, also require the `claude` account's
+access to be `subscription` and `canary-pi-claude.access` to equal `["subscription"]`.
 
 ### Claude canary addition (cold acceptance required)
 
@@ -251,13 +270,18 @@ and accounts. Refuse to overwrite an existing alias whose definition differs.
 Read back the exact target, route and account `subscription` access, no fallback,
 and one attempt before the trust change. Merging the trust PR updates the ESO
 template and eventually the Secret; the mounted subPath and plugin retain their
-old trust until a deliberate operator-controlled restart. Compare the mounted
-trust SHA with the Secret after restart and require the existing grants plus
+old trust only until the next restart. An eviction, node drain, OOM or unrelated
+image rollout can load the widened trust just as a scheduled restart can. After
+any restart, compare the mounted trust SHA with the Secret and read back the grants
+before relying on either old or new trust. Require the existing grants plus
 `canary-pi-claude`, with all other ceilings unchanged. The restart must be scheduled
 outside other provider gates and followed by the normal post-roll gate.
 
 Before issuing the Claude credential, require Claude Code 2.1.283 active with no
-pending change, `sdk-resume`, `warmSessions:false`, and active inference sessions.
+pending change, `sdk-resume`, `warmSessions:false`, and the `inference-sessions`
+plugin in state `active` from `GET /admin/v1/plugins`. This checks the plugin,
+not the existence of a running conversation; begin the isolated canary with zero
+active canary turns and no prior retained canary process.
 Enable Messages through the normal plugin configuration flow, verify managed
 capabilities `nativeAnthropic:true`/`routeSelectors:false` and the exact route's
 `anthropicMessages:true` catalog flag, then complete the operator's cold Messages
