@@ -132,6 +132,8 @@ spec:
           readOnly: true
         - name: tmp
           mountPath: /tmp
+      # Earlier schema history: 080-088 by v0.11.1, 089 by v0.11.4, 090-091 by v0.12.0, 092 by v0.12.1.
+      # See relay-researcher-hub-upgrade.md H11/H12/H15/H16 for schema-matching recovery releases.
       # FORWARD-ONLY: schema 93 (093 by v0.13.0: native recovery versions 1/2 and explicit acknowledgement
       # of unknown tool effects on a resume). Older images may start on unsupported newer schemas, and
       # recovery:fence/initialize demand exactly 1..CURRENT_SCHEMA_VERSION, so a bare re-pin is never a
@@ -140,7 +142,7 @@ spec:
       # generation (relay-restore-fencing carries it), then a
       # reviewed PR re-pins v0.12.1. Its cost is H11's: every connector and agent key revoked, every session
       # ended, the undelivered outbox deleted, a new generation ConfigMap; writes after the backup are lost.
-      # docs/runbooks/relay-pi-v0130-20261125.md: owner-held until the production-copy 093 rehearsal passes;
+      # docs/runbooks/relay-pi-v0130-20261125.md: production-copy 093 rehearsal passed; owner hold remains;
       # never downgrade beneath connected holder-v2 sessions. Earlier rollback boundaries remain in
       # relay-researcher-hub-upgrade.md, H16/H15/H12/H11 and "Rollback: migrations are forward-only".
       # Further back: restore the matching rollout's earliest pre-migration generation, fence, re-pin
