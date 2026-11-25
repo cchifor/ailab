@@ -12,6 +12,9 @@ configuration, trust, credentials, storage, backup label and service topology.
   `264424352e97d7e71658ca4669bdcd086adaacaa` passed
   [CI149389](https://git.chifor.me/cchifor/llm-router/actions/runs/149389), including
   PostgreSQL auth integration, pinned real-CLI fixtures and browser checks.
+  The reviewed and merged commits have the identical Git tree
+  `16307ce6b6dbee7ac64f771354692f89d512b299`; the merge introduced no untested
+  source differences.
 - Archive `router-0.1.0-20261125-native-effort.tar.gz`, 28,588,506 bytes, SHA-256
   `6e2198f4627568bf0f66b1690b647d2ef2b7aea35b9adf1ffc075eee63b1d80e`.
   A fresh Node24.22.2/pnpm10.32.1 frozen production install passed smoke checks
@@ -25,7 +28,15 @@ configuration, trust, credentials, storage, backup label and service topology.
   `registry.chifor.me/llm-router/router@sha256:0d4fa1318f2c03d192a28f6d5eee8fca6b8e62b5ce3d9c3e770d21f42d8050a6`.
   Runtime base remains
   `docker.io/library/node@sha256:a723b54c35a76e947095a20a67d39585bb09c862e6b1adeb8a9f518f95e34fb0`.
-  Build-time Node24 qualification is separate from the unchanged image runtime.
+  The publisher copies the frozen archive dependencies; it does not reinstall
+  them under Node26. SQLite uses built-in `node:sqlite`. The archive contains
+  one `.node` file, `node-addon-require-builtin-linux-x64-gnu@0.1.6`'s
+  `linux-x64-gnu-napi-v9.node`, SHA-256
+  `ec78b442caffcce311c6a6cbbc4fead6d59a4b8cae5b5206c6c84994d68d5667`.
+  This inventory is not a claim that every addon path was exercised. The final
+  Node26.10.0 image passed the production SPA/authenticated Responses/SQLite
+  worker/MCP smoke and live-WAL backup checks in publication149400; those are
+  the runtime checks, in addition to the Node24 archive checks.
 
 The published image was pulled by digest and checked offline as UID1000 with
 networking disabled: `/app/SOURCE_COMMIT` matches the merged source and the image
@@ -43,6 +54,15 @@ source `2ad086a9002311ff4eaa61ff26dacc56d121cbeb`. Keep the completed
 `pre-inference-sessions-20261124` backup; the idempotent helper verifies it and
 must not overwrite it.
 
+The backup helper is injected from Relay packaging, not Router PR201. Packaging
+commits `fff67dd` and `0524cb5` have identical `deploy/ci/backup-router.mjs`
+Git blob `021ead1128c3d0fe4688c893c810a9794f5216fb`; its test is unchanged too.
+Offline reads of both published images confirm the helper SHA-256 is
+`63be6a39b3ce7e58a0206aff443ee8bd3a042fb254989730974d127588bfbd58`.
+The helper and the snapshot format it verifies therefore have no code change.
+Publication149400 also passed repeat verification, default/custom labels,
+invalid-label/corruption rejection and unchanged-source checks under Node26.
+
 ## Behavior and existing conversations
 
 Native Responses admission now fingerprints the entire `reasoning` object and
@@ -55,6 +75,43 @@ new branch, rotate credentials to transfer authority or delete receipts. This
 upgrade boundary applies to existing native Codex conversations as well as the
 canary. Chat, Messages and native requests without those fields retain their
 previous fingerprints, verified by literal hashes from the old implementation.
+
+Before approving merge, the operator records a client-owned inventory for this
+boundary. Admission KV records cannot enumerate the affected requests: their
+keys hash principal/conversation/branch, and their `configuration` values are
+hashes, not stored protocol, effort or output controls. Do not invent a query
+that recovers these fields or extract credentials/history to build one.
+
+1. Identify every client owner using coordinated native Responses, including
+   resumable idle conversations and clients outside Relay. Use existing client
+   session records and the normal Relay session/launch views. Trajectory counts
+   alone cannot establish a complete inventory. Each owner records the original
+   principal identifier, conversation/branch identifiers and whether that client
+   is paused, draining or has outstanding/uncertain work; record no key material.
+2. Treat every such existing branch as potentially affected unless the owner
+   already has exact request-control records proving that both `reasoning` and
+   `max_output_tokens` were absent at admission. An unknown control set remains
+   affected. Record affected counts per owner and the owner responsible for
+   inspecting effects and explicitly reconstructing before continuation.
+3. Through each client's existing authenticated path, use the original principal
+   to inspect its known branch with the existing reconciliation `action:inspect`
+   operation. Record returned epoch, operation, state and successor. It performs
+   no reconstruction and cannot reveal the old controls. Admin credentials do
+   not substitute for the original principal. If a client cannot inspect its
+   branch, keep its continuation paused and record it as unresolved.
+4. Agree a window, pause new affected work through normal client controls, and
+   drain active turns. Recheck the inventory immediately before merge. Running
+   or uncertain operations need owner assessment; a stopped UI is not proof of
+   a settled router operation. After rollout, perform only explicitly selected
+   reconstruction under the original principal after reviewing effects. Do not
+   reconstruct in bulk or infer permission from this inventory.
+
+The pre-merge receipt records the scope of covered clients, affected/unknown
+counts, drained-state evidence, owners and their explicit continuation plan.
+An unaccounted client or unavailable safe window keeps the deployment held.
+This conservative procedure sizes the work without pretending hashed receipts
+provide an exhaustive request-field query. No live inventory has been performed
+as part of this publication preparation.
 
 When a client stops reading, retirement now aborts unfinished upstream work before
 closing its iterator. This covers the race where the transport observes the
@@ -106,5 +163,9 @@ The paired Pi lifecycle/recovery, effort and warm procedures remain separate
 bounded acceptance phases after the matching Relay release and profile approval.
 Source tests and published-image smoke checks do not establish live subscription
 acceptance. Existing trajectory metadata proves recorded attempts and outcomes;
-it does not expose final Claude/Codex wire effort or opaque-block replay. Keep
-that observation limitation explicit in the operator's evidence plan.
+it does not expose final Claude/Codex wire effort or opaque-block replay. The
+operator selected paired evidence (Relay bus1839, 2026-11-25): normal live receipts
+and attempt metadata plus synthetic wire/replay qualification on the exact
+pinned binaries. No new live capture surface is authorized. Record final outbound
+effort/cap and opaque replay bytes as not observed live; synthetic qualification
+must remain separately identified and cannot be described as live payload proof.
