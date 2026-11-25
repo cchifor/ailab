@@ -194,6 +194,12 @@ fresh Claude/Codex sessions after qualified releases and owner approval of the
 new opt-in settings capability. Its four-prompt budget is separate from lifecycle
 acceptance; it changes no profile pins here and excludes Qwen.
 
+Use [bounded warm acceptance and rollback](WARM-ACCEPTANCE.md) only after cold
+native acceptance, in an operator-selected exclusive Claude window. It separates
+process reuse, idle expiry, permission-boundary release, capacity and active
+warm-to-cold rollback evidence; the settings affect all router-managed Claude
+accounts and are not enabled by these inputs.
+
 The owner must see and approve these exact definitions before any profile is
 enabled. Staging all three does not authorize launching all three immediately.
 Claude CLI 2.1.283 is already active in the deployed router, but native Messages
