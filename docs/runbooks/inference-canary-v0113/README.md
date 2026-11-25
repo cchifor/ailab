@@ -220,7 +220,16 @@ process reuse, idle expiry, permission-boundary release, capacity and active
 warm-to-cold rollback evidence; the settings affect all router-managed Claude
 accounts and are not enabled by these inputs.
 
-The read-only [opaque history observer](opaque-history.py) compares selected
+Operator bus1839 selects normal live receipts/attempt metadata paired with
+passing real pinned-binary synthetic wire/replay qualification, as specified in
+[LIVE-ACCEPTANCE.md](LIVE-ACCEPTANCE.md) and
+[EFFORT-ACCEPTANCE.md](EFFORT-ACCEPTANCE.md). No new live capture or live opaque
+observer run is required by this method. Final outbound effort/cap fields and
+opaque bytes remain **unproven live**; record synthetic and live results separately.
+This choice does not claim acceptance or relax any budget, control or release gate.
+
+The read-only [opaque history observer](opaque-history.py) remains an offline
+utility, not a step in the selected live evidence method. It compares selected
 opaque-field hashes between a retained source and its exact imported prefix.
 Supply source/replacement Relay IDs and the native UUID from completed hub
 receipts, run as UID1000 while quiescent, and keep sanitized output outside holder
