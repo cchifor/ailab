@@ -7,11 +7,14 @@ the gates below. Merging these opt-in inputs does not run either playbook; no
 inventory imports them. This change starts no service and creates no key itself.
 
 **Final-release hold:** the integrated revision2 profiles correct the home layout
-but still carry v0.11.3 artifact pins. The activation overlay now matches their
+and propose bounded Claude/Codex effort choices, but still carry v0.11.3 artifact
+pins. The activation overlay now matches their
 current byte hash; this is consistency preparation, not permission to start the
 old artifacts. Merge the updated layout/release branch, repin the final qualified
 artifacts and both staging/activation profile hashes, and verify the operator's
-approved home-layout/artifact-only diff before execution. Follow
+approved final diff before execution. The new effort capability exceeds the
+earlier home-layout/artifact-only preapproval and requires explicit owner review
+of the final profiles. Follow
 [stopped restaging](RESTAGE-RECOVERY.md), including hub/schema-first ordering and
 matching-holder readiness. Keep the canary services off through that window.
 
@@ -25,7 +28,7 @@ Refresh those readbacks before activation; this preparation made no host request
 ## Gates before either activation converge
 
 1. Record the owner's explicit approval of the exact `profiles.json` bytes:
-   Current revision2 SHA-256 `90939ec382578d6a06f50b295a7f6fd246ed83b31d098d1a551facd412d5c3ad`.
+   Current revision2 SHA-256 `c96c00bd7c84624d1059d052a4d5a5e011b5e70f82fa7950502f8b3b18281d21`.
    This must be repinned again with the final release. The operator must verify
    the final diff against the owner's approved scope; source PR reviews and
    staging do not substitute for that exact-byte verification.
@@ -40,7 +43,9 @@ Refresh those readbacks before activation; this preparation made no host request
    controller setup, with fresh readiness readbacks. Do not expose credential
    contents in output or command arguments.
 
-Claude remains pending its route, trust and native Messages prerequisites. Do not
+Claude activation is separate from this two-binding procedure. Its route and
+Messages capability were reported ready at configuration2522; refresh those
+readbacks for its separately approved binding and activation. Do not
 enable Messages, create a Claude route/binding, or register/enable its launch
 definition as part of this procedure. Worker-budget use remains unqualified;
 File B requalification is required before future worker-budget use, not here.
