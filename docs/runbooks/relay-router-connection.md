@@ -126,6 +126,15 @@ three canary bindings, each with one rotation overlap. This fills the ceiling: i
 before issuance or rotation; do not enlarge it implicitly. Review these bounds against the researcher pool's lifetime before step 6. The pool
 inference policy's grant (`routes`, `access`, `lifetimeSeconds`) must be a subset of this ceiling.
 
+For this canary, first verify the running Router image is
+`registry.chifor.me/llm-router/router@sha256:c35fc2225b787a041799cd2c638d129c349d2718d6a090040aca1f84c9181516`
+and its `/app/SOURCE_COMMIT` is `2ad086a9002311ff4eaa61ff26dacc56d121cbeb`, with
+`relay-keys` active in `GET /admin/v1/plugins`. These are the reviewed image/source
+pins in [the rollout record](relay-router-messages-20261125.md). If identity differs
+or cannot be confirmed, stop new issuance and requalify the count semantics for the
+running release; conservatively treat pending-cleanup keys as occupied meanwhile.
+Do not infer code identity from an active plugin state alone.
+
 At capacity the Router rejects managed creation with HTTP 409 `KEY_LIMIT` and
 `Relay managed key limit reached.` The [deployed count predicate](https://git.chifor.me/cchifor/llm-router/src/commit/2ad086a9002311ff4eaa61ff26dacc56d121cbeb/packages/plugins/relay-keys/service.ts#L192)
 counts this issuer/tenant's non-revoked, unexpired keys that are acknowledged or
