@@ -20,6 +20,16 @@ source/image/archive/manifest/binary digests, matching holder/Pi artifacts and
 exact approved new profile revisions. Staged v0.11.3 artifacts cannot qualify the
 new path. Preserve the current hub until that coordinated release is ready.
 
+Keep Pi launches held throughout the hub-first/matching-holder upgrade window.
+The schema093 hub requires Pi completion receipt version 2; an older Pi holder
+can otherwise receive a fresh launch and have its completion rejected with 409
+before the holder upgrade. As part of the existing operator sequence, inventory
+all old Pi holders and keep their Pi launches held while upgrading the paired
+components. Verify matching holder capability, completion-receipt compatibility
+and readiness before enabling Pi launches. The current dev-worker canary holder,
+control-plane client and renderer services remain off throughout preparation;
+hub readiness alone does not release that hold.
+
 Read-only operator observations from 2026-11-25 in
 `pi-stopped-holder-metadata-20261125.json` and
 `pi-native-home-metadata-20261125.json` in the operator-local
