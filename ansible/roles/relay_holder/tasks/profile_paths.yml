@@ -31,4 +31,3 @@
     group: "{{ relay_holder_gid }}"
     mode: "0700"
   loop: "{{ (relay_holder_profiles | map(attribute='credentialHome') | list) + (relay_holder_profiles | map(attribute='roots') | flatten) }}"
-
