@@ -8,6 +8,13 @@ retention phase.
 
 ## Scope, identity and observations
 
+The published v0.13.0 candidate and current qualification/deployment holds are
+recorded in [README.md](README.md). Exact-artifact root/profile proof passed
+offline; five wire/replay cases remain pending. Warm acceptance remains held until
+the preceding cold/lifecycle gates pass. Opaque replay uses the operator-selected
+paired live/synthetic evidence method; final outbound effort/cap fields and opaque
+bytes remain unproven live.
+
 The router's `provider-claude` settings apply to **all router-managed Claude
 accounts**, not just the canary route. The operator must select an exclusive,
 drained maintenance window or an already isolated instance with deliberate seat

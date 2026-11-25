@@ -10,14 +10,40 @@ router-ab gate with route changes or new inference qualification workloads.
 
 ## Fixed scope
 
-**Deployment hold:** the revision2 definitions below correct profile-home layout and
-opt Claude/Codex into the bounded effort control;
-their runtime pins still identify v0.11.3 and are not the pending owned-recovery
-release. Keep this change held until the matching reviewed hub/holder/Pi release
-pins are integrated and the owner approves the final exact bytes. Do not activate
-the old runtime first: creating Pi history would introduce a holder-restart fence
-before the planned upgrade. The earlier revision1 approval/hash does not approve
-these revised definitions.
+**Deployment hold:** the revision2 definitions now pin published v0.13.0 holder/Pi
+artifacts from source `e843921b7cff76406b7da0b5b35cf653c7e458c5` and propose the
+bounded Claude/Codex effort control. Publication succeeded in
+[run149439](https://git.chifor.me/cchifor/relay/actions/runs/149439), attempt2,
+job781668; see the [deployment receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.13.0/deployment-images-149439.json).
+The candidate profile SHA256 is `665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e`.
+Exact published-runtime root/profile proof passed offline; five wire/replay cases
+remain **pending**. Keep execution held for those results, operator hub/schema93
+rollout and stopped restaging, final exact-profile owner approval, late managed
+bindings and readiness. Publication is not deployment or live acceptance.
+The current hub remains v0.12.1/source `dfc739a492217ea5a8dfaf2471aead43b2ea646c`;
+keep canary services off through the coordinated upgrade. Earlier revision1 and
+layout/pins-only preapproval do not approve the effort capability.
+
+Published candidate pins (the JSON inputs remain authoritative):
+
+| Item | Exact value |
+| --- | --- |
+| Application/installer image | `registry.chifor.me/relay/control-plane@sha256:021a8fbed305c338dc46022abc992f3e0b2c538c6c491fd2aa9f0b279dbccdd8` |
+| Control-plane manifest SHA256 | `4a6f09dd297cf2ee3c1ad249348886ff09ed7e0fbc0ef279d08d22b8c0d6df95` |
+| Holder archive SHA256 | `3ee727c19dcaf5221510e3b22c88dcde50d1b917d7ccba19fd1296d7041c4a70` |
+| Holder manifest SHA256 | `ec9ee0fc8a525e758408c5398997180d5d1379eb771b31487de1030653935369` |
+| Holder binary SHA256 | `f70a471bb00b3f61675768666802e9b3ac9ea02b59dbf554191c198bd88d7909` |
+| Pi archive SHA256 | `b12de9f54aeab0704b71d1fdde97c663faedc96e4791ac12151c8d9d00a7669d` |
+| Pi manifest SHA256 | `7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f` |
+
+Offline proof used this exact published image, holder/Pi archives and candidate
+profile bytes at the actual state/home paths as UID1000. Both installer modes
+passed; hello reported `nativeRecovery:2`, `nativeStateReady:true`, all three
+profiles, zero sessions and zero children, with no credentials. The private lock
+inode was retained. The old connector hash was verified without executing it.
+Compiled-image profile/control schema checks passed 31 positive and five negative
+cases. These results establish offline installation/profile readiness and schema
+validation, not owner authority, managed delivery, live inference or recovery.
 
 Claude and Codex now propose exactly
 `settings:{modes:[],config:{thought_level:["off","low","high"]}}`.
@@ -90,7 +116,8 @@ only by Relay's existing router-credential flow; no token is present here.
 - `renderer-bindings.json`: the same router policies as Ansible extra-vars for
   `relay_router_bindings`. The renderer needs its own approved OpenBao reader;
   these policies do not provision that identity or provide a credential.
-- `holder-inputs.json`: exact v0.11.3 image/source, holder/connector hashes and
+- `holder-inputs.json`: published v0.13.0 image/source and holder/Pi hashes,
+  the unchanged v0.11.3 connector pin, and
   independently pinned holder/Pi archives. `relay_holder_enabled: true` selects
   this explicit staging run; `relay_holder_start: false` prevents service startup.
   No fleet inventory includes this file.
@@ -122,7 +149,7 @@ revision1 profile directories under `native-homes`, IPC hello reported
 `nativeStateReady:false`; the revision2 `profile-homes` layout reported
 `nativeStateReady:true` with an empty native root. Both loaded all three profiles,
 with zero sessions, no holder children and no credentials. This is a layout
-regression check, not evidence for the pending recovery release or a live rollout.
+regression check, not evidence for the published v0.13.0 artifacts or a live rollout.
 The Pi installer must execute using
 the verified Node 22.23.2 shipped in its archive, pinned as `nodeVersion` beside
 `manifestSha256` in the Pi entry of `holder-inputs.json`. The role requires this
@@ -140,8 +167,11 @@ names and route grants together. Any edit requires this check to pass again.
 ## Controller layout and staging
 
 Use a Linux Ansible controller with this checkout at `/repo` and verified release
-assets at `/evidence/v0.11.3`. Mount the operator's local verified-evidence
-directory for v0.11.3 read-only at `/evidence/v0.11.3` when using a container.
+assets under a common read-only `/evidence` mount when using a container.
+Include `/evidence/v0.13.0` for the new holder/Pi archives, `/evidence/v0.11.3`
+for the unchanged connector and credential renderer, and `/evidence/openbao-2.5.5`
+for Bao. Mounting only the new release directory hides required old paths.
+Do not repin the connector or renderer merely to make controller paths resolve.
 The holder role validates its own archive hashes and upstream inventories again.
 
 After the definitions are reviewed and the operator stages the dedicated renderer
@@ -201,8 +231,8 @@ the renderer role's compatible default starts every defined binding.
 Its original revision1 hash and v0.11.3 staging references are historical inputs,
 not approval to activate the revision2 definitions. The deployment hold above
 also applies to that workflow. Before publishing the final activation change,
-integrate the updated layout branch with matching release pins and align the
-activation procedure's exact-profile references with the final reviewed bytes.
+verify the integrated published pins and activation procedure's exact-profile
+references against the final reviewed bytes and record pending qualification results.
 
 Use [the paired live acceptance procedure](LIVE-ACCEPTANCE.md) for exact normal-hub
 request bodies, bounded prompts, permission decisions and marker evidence. It

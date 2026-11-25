@@ -7,12 +7,13 @@ the gates below. Merging these opt-in inputs does not run either playbook; no
 inventory imports them. This change starts no service and creates no key itself.
 
 **Final-release hold:** the integrated revision2 profiles correct the home layout
-and propose bounded Claude/Codex effort choices, but still carry v0.11.3 artifact
-pins. The activation overlay now matches their
-current byte hash; this is consistency preparation, not permission to start the
-old artifacts. Merge the updated layout/release branch, repin the final qualified
-artifacts and both staging/activation profile hashes, and verify the operator's
-approved final diff before execution. The new effort capability exceeds the
+and propose bounded Claude/Codex effort choices with published v0.13.0 pins
+from source `e843921b7cff76406b7da0b5b35cf653c7e458c5`. The activation overlay
+matches the current candidate byte hash. Publication149439 and offline exact
+published-runtime root/profile proof passed; five wire/replay cases remain pending.
+Use the [published pin table and common evidence mount](README.md).
+Complete qualification and verify the operator's approved final diff before
+execution. The new effort capability exceeds the
 earlier home-layout/artifact-only preapproval and requires explicit owner review
 of the final profiles. Follow
 [stopped restaging](RESTAGE-RECOVERY.md), including hub/schema-first ordering and
@@ -28,8 +29,8 @@ Refresh those readbacks before activation; this preparation made no host request
 ## Gates before either activation converge
 
 1. Record the owner's explicit approval of the exact `profiles.json` bytes:
-   Current revision2 SHA-256 `c96c00bd7c84624d1059d052a4d5a5e011b5e70f82fa7950502f8b3b18281d21`.
-   This must be repinned again with the final release. The operator must verify
+   Current revision2 SHA-256 `665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e`.
+   This published-artifact candidate is not an approval. The operator must verify
    the final diff against the owner's approved scope; source PR reviews and
    staging do not substitute for that exact-byte verification.
 2. The owner creates only the Codex and Qwen bindings from the existing
