@@ -79,7 +79,8 @@ class RendererStaging(unittest.TestCase):
         profiles_bytes = (root / 'profiles.json').read_bytes()
         profiles = json.loads(profiles_bytes)
         self.assertEqual(len(profiles), 3)
-        expected_sha = 'c1c937fca19a95e46fd0178a37ab973237b1af48549bec18959b3200f5c93809'
+        expected_sha = json.loads((root / 'holder-inputs.json').read_text())['relay_holder_profiles_sha256']
+        self.assertRegex(expected_sha, '^' + SHA + '$')
         self.assertEqual(hashlib.sha256(profiles_bytes).hexdigest(), expected_sha)
         renderer = json.loads((root / 'renderer-activate-codex-qwen.json').read_text())
         self.assertEqual(renderer, dict(relay_router_manage_services=True,

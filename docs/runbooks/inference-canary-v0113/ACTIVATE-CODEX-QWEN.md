@@ -6,6 +6,15 @@ Keep the activation PR held with `no-automerge` until the operator confirms
 the gates below. Merging these opt-in inputs does not run either playbook; no
 inventory imports them. This change starts no service and creates no key itself.
 
+**Final-release hold:** the integrated revision2 profiles correct the home layout
+but still carry v0.11.3 artifact pins. The activation overlay now matches their
+current byte hash; this is consistency preparation, not permission to start the
+old artifacts. Merge the updated layout/release branch, repin the final qualified
+artifacts and both staging/activation profile hashes, and verify the operator's
+approved home-layout/artifact-only diff before execution. Follow
+[stopped restaging](RESTAGE-RECOVERY.md), including hub/schema-first ordering and
+matching-holder readiness. Keep the canary services off through that window.
+
 [AILab #1999 staging evidence](https://git.chifor.me/cchifor/ailab/pulls/1999#issuecomment-142077)
 records holder and renderer installation on dev-worker-1 with all managed services
 disabled/inactive and no credential files. The existing tmux connector remains
@@ -16,8 +25,10 @@ Refresh those readbacks before activation; this preparation made no host request
 ## Gates before either activation converge
 
 1. Record the owner's explicit approval of the exact `profiles.json` bytes:
-   SHA-256 `c1c937fca19a95e46fd0178a37ab973237b1af48549bec18959b3200f5c93809`.
-   This approval is pending; source PR reviews and staging are not substitutes.
+   Current revision2 SHA-256 `90939ec382578d6a06f50b295a7f6fd246ed83b31d098d1a551facd412d5c3ad`.
+   This must be repinned again with the final release. The operator must verify
+   the final diff against the owner's approved scope; source PR reviews and
+   staging do not substitute for that exact-byte verification.
 2. The owner creates only the Codex and Qwen bindings from the existing
    `binding-requests.json`, in their own authorized Relay session, just before
    activation. Required binding IDs are `a0f57684-747f-4c3e-8d90-e684b7262590`
@@ -25,8 +36,9 @@ Refresh those readbacks before activation; this preparation made no host request
    substitute key, change IDs, or issue the Claude request in this batch.
 3. The operator approves these concrete service selections and the activation
    window. Confirm scoped Codex/Qwen grants, existing routes, dedicated reader
-   validity and trust. Use the verified artifacts and SOPS controller setup from
-   #1999. Do not expose credential contents in output or command arguments.
+   validity and trust. Use the final qualified artifacts and the existing SOPS
+   controller setup, with fresh readiness readbacks. Do not expose credential
+   contents in output or command arguments.
 
 Claude remains pending its route, trust and native Messages prerequisites. Do not
 enable Messages, create a Claude route/binding, or register/enable its launch
@@ -93,8 +105,9 @@ all three profiles but does not launch inference or require Claude's credential
 file; its already-staged private parent directory must exist. This overlay is not
 a two-profile holder filter. It starts the holder and its independent reconciliation
 client; only the Codex/Qwen launch definitions may subsequently be enabled through
-the separately approved hub flow. Preserve the current hub version and the tmux
-connector; no hub configuration or image changes belong here.
+the separately approved hub flow. The coordinated hub/schema upgrade must already
+be verified before connecting the upgraded holder; these activation commands do
+not change the hub image/configuration. Preserve the existing tmux connector.
 
 Allow at most 120 seconds for execution-user IPC `hello` on the holder socket.
 Require the same three profile IDs, `nativeStateReady: true`, zero sessions and
@@ -107,13 +120,20 @@ Service readiness is not inference acceptance. Any Codex/Qwen inference, tool
 effects, history, cancellation or rollback exercises need their separate reviewed
 acceptance window. No inference is performed by these inputs or this preparation.
 
-## Offline validation of this preparation
+## Historical offline validation of revision1 preparation
 
-The real Ansible renderer-role suite passed 13 tests in a disposable container
+Before the revision2 integration, the real Ansible renderer-role suite passed 13 tests in a disposable container
 with networking disabled, capabilities dropped and a read-only checkout. Service
 commands used a strict local fixture, never a host user manager. Coverage includes
 two selected renderers becoming active/enabled, the third stopped/disabled with
 all policies retained, repeat idempotence, shared-change handlers excluding the
 third, and invalid selections rejected before service commands. Eight input and
-staging tests also passed, including the unchanged exact three-profile byte hash.
+staging tests also passed, including the then-current exact three-profile byte hash.
 These results do not establish owner approval, credential delivery or live readiness.
+
+The combined revision2 integration subsequently passed 12 canary-input,
+renderer-staging and profile-home checks plus all 14 renderer-role integration
+tests in the cached `ailab-relay-tests:local` image, with network disabled and
+source mounted read-only. The temporary fixture mount explicitly allowed execution
+of local fake service commands. The activation overlay now matches the staging
+profile pin and actual bytes; the final-release hold still applies.
