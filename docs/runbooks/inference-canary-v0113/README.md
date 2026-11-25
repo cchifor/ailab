@@ -199,6 +199,26 @@ request bodies, bounded prompts, permission decisions and marker evidence. It
 records the deployed Pi recovery limitation separately from the runnable checks;
 staging or a passing marker observation does not establish full acceptance.
 
+Use the separate [bounded effort acceptance procedure](EFFORT-ACCEPTANCE.md) for
+fresh Claude/Codex sessions after qualified releases and owner approval of the
+new opt-in settings capability. Its four-prompt budget is separate from lifecycle
+acceptance; it changes no profile pins here and excludes Qwen.
+
+Use [bounded warm acceptance and rollback](WARM-ACCEPTANCE.md) only after cold
+native acceptance, in an operator-selected exclusive Claude window. It separates
+process reuse, idle expiry, permission-boundary release, capacity and active
+warm-to-cold rollback evidence; the settings affect all router-managed Claude
+accounts and are not enabled by these inputs.
+
+The read-only [opaque history observer](opaque-history.py) compares selected
+opaque-field hashes between a retained source and its exact imported prefix.
+Supply source/replacement Relay IDs and the native UUID from completed hub
+receipts, run as UID1000 while quiescent, and keep sanitized output outside holder
+state. It refuses unsafe or inconsistent files and reports `NOT_EXERCISED` when
+the required opaque blocks are absent. `PRESERVED` proves local import equality;
+it explicitly does not prove that a provider received those blocks. Its fourteen
+offline tests use only private synthetic fixtures.
+
 The owner must see and approve these exact definitions before any profile is
 enabled. Staging all three does not authorize launching all three immediately.
 Claude CLI 2.1.283 is already active in the deployed router, but native Messages
