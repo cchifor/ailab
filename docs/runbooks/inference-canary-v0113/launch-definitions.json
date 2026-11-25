@@ -52,6 +52,16 @@
           "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-agent-tools.mjs"
         ],
         "origin": "https://relay.chifor.me"
+      },
+      "settings": {
+        "modes": [],
+        "config": {
+          "thought_level": [
+            "off",
+            "low",
+            "high"
+          ]
+        }
       }
     },
     "session": {
@@ -216,6 +226,16 @@
           "/opt/relay-pi/releases/a2f10547d5885989b399765dfde815088efea8406cbb9f6b2f5bd2643a3829f7/relay-agent-tools.mjs"
         ],
         "origin": "https://relay.chifor.me"
+      },
+      "settings": {
+        "modes": [],
+        "config": {
+          "thought_level": [
+            "off",
+            "low",
+            "high"
+          ]
+        }
       }
     },
     "session": {
