@@ -2,6 +2,7 @@
 import importlib.util
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 import uuid
@@ -45,6 +46,14 @@ class MarkerObserver(unittest.TestCase):
         result = self.read("recovered")
         self.assertFalse(result["phaseChecksPass"])
         self.assertEqual(result["files"]["effects"]["markerOccurrences"], 2)
+
+    def test_printed_command_creates_one_private_effect_and_exposes_replay(self):
+        # Only the reader's fixed fixture command runs, never model-selected input.
+        command = self.read("baseline")["commands"]["effects"]
+        subprocess.run(["/bin/sh", "-c", command], check=True, timeout=5)
+        self.assertTrue(self.read("approved")["phaseChecksPass"])
+        subprocess.run(["/bin/sh", "-c", command], check=True, timeout=5)
+        self.assertFalse(self.read("recovered")["phaseChecksPass"])
 
     def test_denied_effect_is_always_failure(self):
         self.write(self.denied, self.marker)
