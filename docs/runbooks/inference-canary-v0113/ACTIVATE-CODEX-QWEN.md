@@ -2,7 +2,7 @@
 
 Prepared from AILab main `3c5590713666d277201aa0d26b2d1ad9bb60323e`.
 This is a proposed operator procedure, not approval or evidence of activation.
-Keep the activation PR held with `no-automerge` until the parent/operator confirms
+Keep the activation PR held with `no-automerge` until the operator confirms
 the gates below. Merging these opt-in inputs does not run either playbook; no
 inventory imports them. This change starts no service and creates no key itself.
 
@@ -23,7 +23,7 @@ Refresh those readbacks before activation; this preparation made no host request
    activation. Required binding IDs are `a0f57684-747f-4c3e-8d90-e684b7262590`
    and `d2871eec-8f5a-4afe-a917-014f0ae8e14d`. Issuance is pending. Do not issue a
    substitute key, change IDs, or issue the Claude request in this batch.
-3. Parent/operator approves these concrete service selections and the activation
+3. The operator approves these concrete service selections and the activation
    window. Confirm scoped Codex/Qwen grants, existing routes, dedicated reader
    validity and trust. Use the verified artifacts and SOPS controller setup from
    #1999. Do not expose credential contents in output or command arguments.
