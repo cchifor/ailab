@@ -109,7 +109,7 @@ Perform each control serially while idle and within the same bounds. The followi
 | Compact | `/relay-compact` | Actual successful compaction, then independent inference branch on the next prompt. |
 | Compact probe | `Reply exactly COMPACT_OK. Do not use tools, repeat earlier commands, or modify files.` | Completed turn and compacted-history evidence; effects still once. |
 | Cancellation target | `Without using tools or modifying files, count upward from 1, one integer per line, until 500.` | Submit cancel while generation is observed active; record both operations and cancellation outcome. |
-| Reconcile | `/relay-reconcile confirmed` | Only after cancel settles and possible effects have been inspected: previous branch retired, reconstructed branch acknowledged, no tool repeated. |
+| Reconcile | `/relay-reconcile confirmed` | Only while idle, after any cancel settles and possible effects have been inspected: authenticated router inspection/reconstruction, previous branch retired, new branch acknowledged, no provider or tool invoked. |
 | Reconcile probe | `Reply exactly RECONCILE_OK. Do not use tools, repeat earlier commands, or modify files.` | Completed turn on reconstructed branch, no repeated marker. |
 
 Short history may refuse compaction; record it as unexercised, not successful. Do not pad history indefinitely. Cancellation can lose the race to completion: `cancelSent:true` alone does not prove an interrupted turn, and a completed target before cancel is inconclusive for cancellation. Do not manufacture uncertainty by killing production services. Reconciliation internally inspects and reconstructs `/v1/inference/sessions/reconcile`; use the Pi command, not a manually extracted credential. A successful settled reconciliation does not prove interrupted-tool recovery. Re-read marker effects after settled controls with the `approved` observer phase; they must still be exactly once.
@@ -134,6 +134,18 @@ As of 2026-11-25, the replacement owned-history recovery path is being implement
 4. An agreed bounded recovery exercise using the normal API, with continuity of the intended native history, valid generation/lease, stale-generation rejection, no replay of either append command, completed recovery receipts and quiescence before `python3 observe.py PROVIDER RUN_UUID recovered`.
 
 The observer's `recovered` phase alone cannot establish restart or hub recovery. Until these prerequisites are met, retain the explicit blocked result; do not manufacture a `/resume` pass.
+
+### Continuation after a future qualified owned-history import
+
+Keep this phase blocked until the release and deployment gates above are met. A successful native import/open receipt does not prove router continuation is admissible. Even clean, settled history can retain an admitted branch whose configuration fingerprint differs because the replacement's fresh Relay communication principal appears in regenerated system instructions. Pi uses strict recovery headers; the actual router can refuse that continuation before provider execution.
+
+Inspect the prior effects and confirm continuity of the original **router principal**, which is separate from the new Relay communication identity. A new installation or credential rotation does not transfer router sessions/receipts between principals. If the original principal or receipts are unavailable, record a blocked result; do not extract credentials or invent a replacement identity to bypass it.
+
+For the retained branch requiring reconstruction, the operator explicitly submits `/relay-reconcile confirmed` as prompt text through the replacement's normal control path, using its new session ID, current generation/control epoch and owned lease. Require idle state and settle any cancellation first. Record the command's authenticated router `inspect` and `reconstruct` outcome, the observed operation/epoch and resulting branch, zero provider/tool calls during reconciliation, and unchanged effect markers. Then submit one bounded probe: `Reply exactly RECOVERED_OK. Do not use tools, repeat earlier commands, or modify files.` Require a completed turn on the reconstructed branch and unchanged append-only markers before recording recovery acceptance. A refusal remains a block, not permission for an automatic retry or reconciliation.
+
+The optional future resume field `acknowledgeUnknownToolEffects:true` and its unchecked-by-default checkbox permit importing interrupted tool outcomes as unknown error results after inspection. They do not perform router reconciliation, approve future tools or establish that effects were absent. Do not select the checkbox or run reconciliation automatically. A new/explicitly branched history or an already reconstructed, never-admitted branch need not reconcile again solely because it was imported; inspect the branch state rather than force a refusal first.
+
+Current packaged evidence distinguishes these paths: Codex tests clean-import refusal followed by explicit reconstruction; stateless tests explicit branching after clean import plus cancellation/crash reconciliation. Messages tests approval and branching, without a recovered-worker import case. Require provider-specific recovery evidence before claiming all three passed.
 
 ## Cleanup, revocation and evidence
 
