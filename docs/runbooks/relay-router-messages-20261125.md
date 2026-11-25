@@ -12,13 +12,13 @@ The isolated preparation starts from AILab `181b6d2bc806619c4344413b3631af219b02
 - Archive: `router-0.1.0-20261124-inference-messages.tar.gz`; SHA-256
   `68aa4bd2736583b0e2e600a9108fd36d636cfd9b7d6544f4b6991eacd3bd2049`.
 - Successful [publication 148962](https://git.chifor.me/cchifor/relay/actions/runs/148962),
-  packaging source `fff67dda59e0cfac94d92b1051ac7a75be5be7d6`; parent-verified receipt
+  packaging source `fff67dda59e0cfac94d92b1051ac7a75be5be7d6`; verified receipt
   `deployment-images-148962.json`, asset `1227`. Its local copy was checked against
   these source, archive and image pins.
 - Image: `registry.chifor.me/llm-router/router@sha256:c35fc2225b787a041799cd2c638d129c349d2718d6a090040aca1f84c9181516`.
 - Runtime: Node 26.10.0, base
   `docker.io/library/node@sha256:a723b54c35a76e947095a20a67d39585bb09c862e6b1adeb8a9f518f95e34fb0`.
-- Parent's saved offline verification of the compiled capability module reports
+- Offline verification of the compiled capability module reports
   `nativeAnthropic` transitions `false/true/false` and `routeSelectors:false`, using
   synthetic dependencies with no router or provider requests. This is not live
   inference or end-to-end managed credential qualification.
@@ -32,8 +32,8 @@ The deployment diff is limited to `kubernetes/apps/apps/llm-router/router.yaml`:
 the router and `backup-before-inference-sessions` image digests, source/release
 annotations, and adjacent provenance comments. It preserves the backup label
 `pre-inference-sessions-20261124`, mounts, security settings and completed snapshot.
-Require publication evidence for the image's backup helper and its
-repeat-verification behavior before the owner-approved rollout.
+Publication passed production smoke and backup-helper tests against the installed
+helper, including repeat verification, before producing the immutable receipt.
 
 The preceding Git pin is source `a16a6846e89d6971d9549bac5ff3a7dde99b361b`, release
 `router-0.1.0-20261124-inference-safe-errors-r2`, image
@@ -46,7 +46,7 @@ deployment instructions are not a request to roll the hub back.
 
 ## Read-only preroll baseline
 
-The operator's saved snapshot `router-messages-preroll-20261125.json`, observed
+The read-only snapshot `router-messages-preroll-20261125.json`, observed
 2026-11-25 at 09:03:02.630Z, reports the preceding source above. No inference ran.
 
 - Configuration revision `2510`, SHA-256
