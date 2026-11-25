@@ -219,7 +219,7 @@ class HolderProfileHomes(unittest.TestCase):
 
     def test_profile_staging_leaves_native_root_empty_and_is_idempotent(self):
         self.run_paths()
-        for path in [self.home, self.workspace]:
+        for path in [self.home.parent, self.home, self.workspace.parent, self.workspace]:
             self.assertEqual(path.stat().st_mode & 0o777, 0o700)
             self.assertEqual(path.stat().st_uid, os.getuid())
         self.assertEqual(list(self.native.iterdir()), [])
