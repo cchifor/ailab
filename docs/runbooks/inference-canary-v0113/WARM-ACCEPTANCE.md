@@ -68,13 +68,15 @@ epoch and lease values; every logical command has a distinct operation UUID.
 | 3 | After observing that worker gone at idle expiry, within 20 seconds of the previous completion: `Reply exactly AFTER_IDLE_OK. Do not use tools or modify files.` | No retained worker after expiry; successful continuation in a new process. Record elapsed idle time and RSS after release. If reaping is unresolved, stop. |
 | 4 | `Request permission to run the shell command pwd once. Do not run any other command or modify files.` | When the normal shell permission is visible, verify the producing Claude process is gone. Hold the decision for 15 seconds, exceeding the configured idle timeout, then **deny** within the existing 30-second permission bound. Require no shell execution and no parked Claude process during the wait; record bounded model continuation after denial. |
 | 5 | `Without using tools or modifying files, count upward from 1, one integer per line, until 500.` | Once this generation is observed active, the operator commits `warmSessions:false` through the same normal workflow, retaining sdk-resume, Messages and all other settings. Record config revision/time and completion or cancellation of the old generation. Do not force a restart. |
-| 6 | Only after prompt 5 settles and warm:false is read back: `Reply exactly COLD_ROLLBACK_OK. Do not use tools or modify files.` | Successful cold continuation of the same conversation/native history, with the old provider generation drained and its retained processes released. Record latency, RSS and the final zero retained-worker observation. |
+| 6 | Only after prompt 5 completes successfully with a complete router receipt and warm:false is read back: `Reply exactly COLD_ROLLBACK_OK. Do not use tools or modify files.` | Successful cold continuation of the same conversation/native history, with the old provider generation drained and its retained processes released. Record latency, RSS and the final zero retained-worker observation. |
 
 `pwd` requests only the selected session workspace and is always denied. An
 unexpected tool, command, missing permission or early process loss stops that
 row; do not substitute an arbitrary model-selected command. If prompt 5 finishes
 before the configuration change, the active-generation rollback claim is
-unexercised, even if prompt 6 succeeds. Do not restart or repeat to force overlap.
+unexercised, even if prompt 6 succeeds. Cancellation or an uncertain router
+receipt stops the phase; settled cancellation does not authorize prompt 6.
+Reconstruction is outside this six-prompt budget. Do not restart or repeat to force overlap.
 If the configuration update fails or work becomes uncertain, inspect the normal
 receipt and preserve history; do not silently reconcile or downgrade transport.
 
@@ -89,23 +91,31 @@ Capacity qualification must name the exact limit it exercises. Account admission
 pod run slots and the two-worker warm pool are different gates. The same-session
 busy check is not a pool-capacity test. Do not saturate shared production slots.
 
-Only in the operator's exclusive scope, use the current documented account or
-pool limit and at most two fresh managed canary sessions, three prompt commands,
+Only in the operator's exclusive scope, use the current documented account
+admission limit and at most two fresh managed canary sessions, four prompt commands,
 three observed upstream generations and five minutes. Do not raise account
 concurrency or lower a shared pod limit merely to manufacture refusal. If the
-existing limit cannot be reached within this bounded scope, leave live capacity
+existing account limit cannot be reached within this bounded scope, leave live capacity
 unexercised and retain the existing isolated automated capacity evidence.
 
 Start a bounded no-tools counting prompt on session A. While it is observed
 active, submit one text-only `Reply exactly CAPACITY_PROBE. Do not use tools or
 modify files.` prompt on session B. Require the expected configured-capacity
 refusal, identified by its actual status/code and settled router outcome, with no
-additional upstream attempt or Claude child. A queued request or a completed
-first request is not a refusal proof. Cancel A through normal Relay control if
-still active and require settled cancellation/reaping. After capacity release,
+additional upstream execution or Claude child. Observe the scoped trajectory
+attempt delta separately. A pod-slot timeout or warm-pool refusal occurs after
+the router records an attempt and does not qualify this pre-provider account
+admission check. A queued request or a completed first request is not a refusal
+proof. Cancel A through normal Relay control if still active and require settled
+cancellation/reaping. Inspect B's router outcome: a refused request can leave its
+coordinated branch uncertain even without upstream execution. After inspecting
+effects, the operator may explicitly submit `/relay-reconcile confirmed` on idle B
+as the third prompt, recording inspection/reconstruction and no upstream execution.
+Only with a complete or explicitly reconstructed branch after capacity release,
 one `Reply exactly CAPACITY_RELEASED_OK. Do not use tools or modify files.` prompt
-on B must succeed. Do not automatically reconcile an uncertain branch or retry a
-refused prompt. The bounded phase supplies no recipe to occupy three warm slots;
+on B must succeed (fourth prompt when reconciliation was needed). Do not
+automatically reconcile or retry a refused generation. The bounded phase supplies
+no recipe to occupy three warm slots;
 do not claim that specific pool limit passed from a different admission refusal.
 
 ## Close, restore and record
