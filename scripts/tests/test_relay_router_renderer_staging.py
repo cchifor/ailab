@@ -4,6 +4,7 @@ and the dedicated reader identities' SOPS file (ansible/secrets/relay-router.sop
 The SOPS rule must precede the generic ansible/secrets rule, or role_id/secret_id would be committed in PLAINTEXT
 (that rule encrypts only github_app_private_key); every committed credential leaf, for every host, must be ENC[...]."""
 import json
+import hashlib
 import re
 import unittest
 from pathlib import Path
@@ -72,6 +73,26 @@ class RendererStaging(unittest.TestCase):
         readme = (INPUTS.parent / "README.md").read_text(encoding="utf-8")
         renderer = re.search(r"relay-credential-renderer-linux-amd64`.*?SHA-256 `(%s)`" % SHA, readme, re.S).group(1)
         self.assertEqual(d["relay_router_renderer_sha256"], renderer)
+
+    def test_activation_overlays_keep_profiles_and_all_policies_but_select_only_codex_qwen(self):
+        root = INPUTS.parent
+        profiles_bytes = (root / 'profiles.json').read_bytes()
+        profiles = json.loads(profiles_bytes)
+        self.assertEqual(len(profiles), 3)
+        expected_sha = json.loads((root / 'holder-inputs.json').read_text())['relay_holder_profiles_sha256']
+        self.assertRegex(expected_sha, '^' + SHA + '$')
+        self.assertEqual(hashlib.sha256(profiles_bytes).hexdigest(), expected_sha)
+        renderer = json.loads((root / 'renderer-activate-codex-qwen.json').read_text())
+        self.assertEqual(renderer, dict(relay_router_manage_services=True,
+            relay_router_active_binding_ids=[p['router']['bindingId'] for p in profiles[:2]]))
+        self.assertEqual([p['router']['selection']['model'] for p in profiles[:2]],
+                         ['canary-pi-codex', 'canary-pi-qwen'])
+        self.assertEqual(json.loads((root / 'holder-activate-codex-qwen.json').read_text()),
+                         dict(relay_holder_start=True, relay_holder_profiles_sha256=expected_sha))
+        self.assertEqual(json.loads((root / 'renderer-bindings.json').read_text())['relay_router_bindings'],
+                         [p['router'] for p in profiles])
+        self.assertIs(json.loads((root / 'holder-inputs.json').read_text())['relay_holder_start'], False)
+        self.assertIs(json.loads(INPUTS.read_text())['relay_router_manage_services'], False)
 
 
 if __name__ == "__main__":

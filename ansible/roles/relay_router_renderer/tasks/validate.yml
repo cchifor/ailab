@@ -22,6 +22,16 @@
     relay_router_uuid_pattern: '^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$'
     relay_router_origin_pattern: '^https://[a-z0-9][a-z0-9.-]*(?::[1-9][0-9]{0,4})?$'
 
+- name: Require an explicit valid subset of defined renderer services
+  ansible.builtin.assert:
+    that:
+      - relay_router_active_binding_ids is sequence and relay_router_active_binding_ids is not string and relay_router_active_binding_ids is not mapping
+      - relay_router_active_binding_ids | length > 0
+      - relay_router_active_binding_ids | unique | length == relay_router_active_binding_ids | length
+      - relay_router_active_binding_ids | difference(relay_router_bindings | map(attribute='bindingId') | list) | length == 0
+    fail_msg: Active renderer IDs must be a nonempty unique list drawn from the complete binding definitions; do not remove staged policies to defer activation.
+    quiet: true
+
 - name: Reject unsafe systemd and filesystem paths
   ansible.builtin.assert:
     that:

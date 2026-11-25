@@ -10,6 +10,94 @@ router-ab gate with route changes or new inference qualification workloads.
 
 ## Fixed scope
 
+**Deployment hold:** the revision2 definitions now pin published v0.13.0 holder/Pi
+artifacts from source `e843921b7cff76406b7da0b5b35cf653c7e458c5` and propose the
+bounded Claude/Codex effort control. Publication succeeded in
+[run149439](https://git.chifor.me/cchifor/relay/actions/runs/149439), attempt2,
+job781668; see the [deployment receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.13.0/deployment-images-149439.json).
+The candidate profile SHA256 is `665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e`.
+Exact published-runtime root/profile proof passed offline; all five published-Pi wire/replay cases passed offline (zero skipped). Keep execution held for operator hub/schema93
+rollout and stopped restaging, operator verification of the covered final diff, late managed
+bindings and readiness. Publication is not deployment or live acceptance.
+The current hub remains v0.12.1/source `dfc739a492217ea5a8dfaf2471aead43b2ea646c`;
+keep canary services off through the coordinated upgrade. Earlier revision1 and
+layout/pins-only preapproval did not cover effort. Operator bus1861 relays the
+owner's 15:30 decision **Covered**, extending that approval to Claude/Codex
+`off/low/high`. Before apply, the operator must verify the complete diff from
+original profile SHA256 `c1c937fca19a95e46fd0178a37ab973237b1af48549bec18959b3200f5c93809`
+to the final exact bytes contains **only home-layout changes, artifact pins and
+those Claude/Codex choices** (with matching administrative revision metadata).
+Record that verification and readbacks; this is existing conditional approval,
+not a requirement to ask again for the same covered scope. Other changes are
+not covered. No routes, grants, identities, output/time budgets or Qwen effort
+capability may be added under this decision.
+
+Published candidate pins (the JSON inputs remain authoritative):
+
+| Item | Exact value |
+| --- | --- |
+| Application/installer image | `registry.chifor.me/relay/control-plane@sha256:021a8fbed305c338dc46022abc992f3e0b2c538c6c491fd2aa9f0b279dbccdd8` |
+| Control-plane manifest SHA256 | `4a6f09dd297cf2ee3c1ad249348886ff09ed7e0fbc0ef279d08d22b8c0d6df95` |
+| Holder archive SHA256 | `3ee727c19dcaf5221510e3b22c88dcde50d1b917d7ccba19fd1296d7041c4a70` |
+| Holder manifest SHA256 | `ec9ee0fc8a525e758408c5398997180d5d1379eb771b31487de1030653935369` |
+| Holder binary SHA256 | `f70a471bb00b3f61675768666802e9b3ac9ea02b59dbf554191c198bd88d7909` |
+| Pi archive SHA256 | `b12de9f54aeab0704b71d1fdde97c663faedc96e4791ac12151c8d9d00a7669d` |
+| Pi manifest SHA256 | `7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f` |
+
+Offline proof used this exact published image, holder/Pi archives and candidate
+profile bytes at the actual state/home paths as UID1000. Both installer modes
+passed; hello reported `nativeRecovery:2`, `nativeStateReady:true`, all three
+profiles, zero sessions and zero children, with no credentials. The private lock
+inode was retained. The old connector hash was verified without executing it.
+Compiled-image profile/control schema checks passed 31 positive and five negative
+cases. These results establish offline installation/profile readiness and schema
+validation, not owner authority, managed delivery, live inference or recovery.
+
+Published-Pi wire/replay qualification passed **5/5, zero skipped, in 63.10s**
+on 2026-11-25. It used the published Pi manifest above and packaged Node22.23.2
+(SHA256 `3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327`),
+against exact router TypeScript source `b60fb03b23ce52548f49513d45466f4670f5a369`
+under Node24.22.2 with synthetic upstreams and external networking disabled.
+Source/runtime mounts were read-only; neither runtime nor test source was rebuilt
+or modified. Controller evidence in the Relay workspace is
+`.data/inference-release-evidence/published-pi-wire-e843-20261125-r4/`:
+`qualification-summary.json`, `wire-provenance.json` and `vitest-results.json`.
+Installer/repeat evidence remains in the sibling `published-pi-wire-e843-20261125-r2/`;
+earlier driver/bootstrap failures are preserved and distinguished in the summary.
+This proves published Pi/ACP/policy/tools behavior against that router source,
+**not the published router OCI/runtime, real subscription CLI, live wire, or
+holder/hub lifecycle**. Final outbound effort/cap fields and opaque bytes remain
+unproven live; retain the operator-selected paired evidence limitation.
+
+Claude and Codex now propose exactly
+`settings:{modes:[],config:{thought_level:["off","low","high"]}}`.
+`off` means provider default; it does not disable provider reasoning. Qwen has no
+effort capability. This addition exceeded the earlier layout/pins-only
+preapproval; bus1861's Covered decision includes it subject to the exact-diff
+verification above.
+It requires the release containing PR680 and the router containing PR201; the
+historical v0.11.3 qualification below did not exercise these settings. Keep
+the existing request/output limits, grants and route policies unchanged.
+
+Profile `credentialHome` is now `state/profile-homes/<profileId>`; workspaces stay
+at `state/workspaces/<profileId>`. Reserve `state/native-homes` exclusively for
+holder-created session UUID homes. The holder intentionally reports
+`nativeStateReady:false` whenever that directory is nonempty at startup. The old
+revision1 layout precreated three profile directories there and triggered that
+fence even without a session. The role now rejects that layout before creating
+profile directories; it never removes or migrates existing native state.
+
+An existing staged host needs a separate operator-reviewed disposition of its
+old directories and exact installed profile bytes, with services stopped and
+ownership/emptiness evidence preserved. The role's immutable-file check refuses
+an old installed profile hash; it does not silently replace it. Do not clear a
+native-state fence or discard histories to make startup pass. Directory emptiness
+alone is not proof of process containment. Verify final artifact pins and the
+layout plan against the existing covered scope before execution.
+The bounded [stopped-stage restaging procedure](RESTAGE-RECOVERY.md) preserves
+the old profile directories as evidence and does not start services; it requires
+its own final review before operator execution.
+
 Host `dev-worker-1`, connector `b3b1be1a-275c-4a2e-b515-428b39c43171`, execution
 user `c4`/UID 1000. Tenant `00000000-0000-4000-8000-000000000001`, router connection
 `babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8`, workspace communication channel
@@ -53,12 +141,13 @@ only by Relay's existing router-credential flow; no token is present here.
 - `renderer-bindings.json`: the same router policies as Ansible extra-vars for
   `relay_router_bindings`. The renderer needs its own approved OpenBao reader;
   these policies do not provision that identity or provide a credential.
-- `holder-inputs.json`: exact v0.11.3 image/source, holder/connector hashes and
+- `holder-inputs.json`: published v0.13.0 image/source and holder/Pi hashes,
+  the unchanged v0.11.3 connector pin, and
   independently pinned holder/Pi archives. `relay_holder_enabled: true` selects
   this explicit staging run; `relay_holder_start: false` prevents service startup.
   No fleet inventory includes this file.
 
-The three profile and launch-definition schemas, credential requests and renderer
+The earlier revision1 profile and launch-definition schemas, credential requests and renderer
 policies were validated using the compiled contracts in the exact published
 v0.11.3 application image, with network disabled and read-only inputs. Cross-file
 identities, routes and the profile-file hash match. The Pi manifest bytes were
@@ -73,11 +162,20 @@ nine-key policy contract. Its 11 Linux/Ansible integration tests passed, includi
 private idempotent Claude staging and ten refusal cases that preserve staged
 files and invoke no service commands. These tests use disposable local fixtures;
 they do not establish live managed delivery.
-Independent offline validation also installed and reverified the complete published
+Earlier independent offline validation installed and reverified the complete published
 holder/Pi archives and loaded all three exact profiles in the packaged Rust holder
-as UID 1000, with networking disabled. IPC `hello` reported `nativeStateReady: true`,
+as UID 1000, with networking disabled, but used a separate qualification state
+directory rather than the role's actual state root. IPC `hello` reported `nativeStateReady: true`,
 the three expected profile IDs and zero sessions. This proves artifact integrity
-and profile admission, not live inference. The Pi installer must execute using
+and profile admission, not correctness of the old staged home layout or live inference.
+A subsequent offline A/B check used the exact v0.11.3 image and verified archives,
+the actual `/home/c4/.local/state/relay-holder` state root, and UID1000. With the
+revision1 profile directories under `native-homes`, IPC hello reported
+`nativeStateReady:false`; the revision2 `profile-homes` layout reported
+`nativeStateReady:true` with an empty native root. Both loaded all three profiles,
+with zero sessions, no holder children and no credentials. This is a layout
+regression check, not evidence for the published v0.13.0 artifacts or a live rollout.
+The Pi installer must execute using
 the verified Node 22.23.2 shipped in its archive, pinned as `nodeVersion` beside
 `manifestSha256` in the Pi entry of `holder-inputs.json`. The role requires this
 version to match the authenticated manifest's `node` field before execution;
@@ -94,8 +192,11 @@ names and route grants together. Any edit requires this check to pass again.
 ## Controller layout and staging
 
 Use a Linux Ansible controller with this checkout at `/repo` and verified release
-assets at `/evidence/v0.11.3`. Mount the operator's local verified-evidence
-directory for v0.11.3 read-only at `/evidence/v0.11.3` when using a container.
+assets under a common read-only `/evidence` mount when using a container.
+Include `/evidence/v0.13.0` for the new holder/Pi archives, `/evidence/v0.11.3`
+for the unchanged connector and credential renderer, and `/evidence/openbao-2.5.5`
+for Bao. Mounting only the new release directory hides required old paths.
+Do not repin the connector or renderer merely to make controller paths resolve.
 The holder role validates its own archive hashes and upstream inventories again.
 
 After the definitions are reviewed and the operator stages the dedicated renderer
@@ -148,13 +249,53 @@ ansible-playbook relay-router-workers.yml --limit dev-worker-1 \
 
 ## Activation and acceptance
 
+The held [Codex/Qwen-only activation procedure](ACTIVATE-CODEX-QWEN.md) supplies
+separate service-start overlays while retaining this exact three-profile array
+and all three renderer policies. Use its explicit two-binding service selection;
+the renderer role's compatible default starts every defined binding.
+Its original revision1 hash and v0.11.3 staging references are historical inputs,
+not approval to activate the revision2 definitions. The deployment hold above
+also applies to that workflow. Before publishing the final activation change,
+verify the integrated published pins and activation procedure's exact-profile
+references against the final reviewed bytes and record the completed offline qualification and remaining live gates.
+
 Use [the paired live acceptance procedure](LIVE-ACCEPTANCE.md) for exact normal-hub
 request bodies, bounded prompts, permission decisions and marker evidence. It
 records the deployed Pi recovery limitation separately from the runnable checks;
 staging or a passing marker observation does not establish full acceptance.
 
-The owner must see and approve these exact definitions before any profile is
-enabled. Staging all three does not authorize launching all three immediately.
+Use the separate [bounded effort acceptance procedure](EFFORT-ACCEPTANCE.md) for
+fresh Claude/Codex sessions after qualified releases and operator verification
+of the conditionally covered settings/profile diff. Its four-prompt budget is separate from lifecycle
+acceptance; it changes no profile pins here and excludes Qwen.
+
+Use [bounded warm acceptance and rollback](WARM-ACCEPTANCE.md) only after cold
+native acceptance, in an operator-selected exclusive Claude window. It separates
+process reuse, idle expiry, permission-boundary release, capacity and active
+warm-to-cold rollback evidence; the settings affect all router-managed Claude
+accounts and are not enabled by these inputs.
+
+Operator bus1839 selects normal live receipts/attempt metadata paired with
+passing real pinned-binary synthetic wire/replay qualification, as specified in
+[LIVE-ACCEPTANCE.md](LIVE-ACCEPTANCE.md) and
+[EFFORT-ACCEPTANCE.md](EFFORT-ACCEPTANCE.md). No new live capture or live opaque
+observer run is required by this method. Final outbound effort/cap fields and
+opaque bytes remain **unproven live**; record synthetic and live results separately.
+This choice does not claim acceptance or relax any budget, control or release gate.
+
+The read-only [opaque history observer](opaque-history.py) remains an offline
+utility, not a step in the selected live evidence method. It compares selected
+opaque-field hashes between a retained source and its exact imported prefix.
+Supply source/replacement Relay IDs and the native UUID from completed hub
+receipts, run as UID1000 while quiescent, and keep sanitized output outside holder
+state. It refuses unsafe or inconsistent files and reports `NOT_EXERCISED` when
+the required opaque blocks are absent. `PRESERVED` proves local import equality;
+it explicitly does not prove that a provider received those blocks. Its fourteen
+offline tests use only private synthetic fixtures.
+
+The operator must verify these exact definitions against the owner's Covered
+decision before any profile is enabled. Staging all three does not authorize
+launching all three immediately.
 Claude CLI 2.1.283 is already active in the deployed router, but native Messages
 must be enabled with warm retention false and cold acceptance must pass before
 issuing the Claude request or launching its profile. Do not submit all three

@@ -33,3 +33,6 @@ relay_router_secret_id: "{{ relay_router_credentials.get(inventory_hostname, {})
 # Full, administrator-approved HolderRouterPolicy objects. credentialFile must
 # be <relay_router_state_dir>/<bindingId>/credential.json. No raw router tokens.
 relay_router_bindings: []
+# Keep every staged policy in bindings; optionally activate only a reviewed subset.
+# With service management enabled, other defined renderers are stopped/disabled.
+relay_router_active_binding_ids: "{{ relay_router_bindings | map(attribute='bindingId') | list }}"
