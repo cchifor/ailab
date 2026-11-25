@@ -34,12 +34,17 @@ only. There is no new persona, author exception or merge-gate exception.
 
 ## Activation
 
+**Access comes before the allowlist.** The allowlist entry takes effect on ANY reviewer-host converge after this
+change merges, not only the one in step 3. The repository is private, so if the entry is live before the reviewers
+have access, both personas poll a repository they cannot see. Step 2 therefore runs before this change merges, as
+it did for `cchifor/workbricks-apps`.
+
 1. **CI first.** A SpecPulse pull request adds `.gitea/workflows/ci.yml`:
    - workflow `CI`, job `verify`, on the organization's `self-hosted-hv` runners, giving the context
      `CI / verify (pull_request)`;
    - it runs `bash scripts/test.sh` in a pinned `python:3.13` container after `pip install -e ".[dev]"`;
    - it also fixes the `I001` import order.
-2. **Access and protection**, an owner operation from the workstation:
+2. **Access and protection, before the allowlist change merges.** An owner operation from the workstation:
    ```bash
    scripts/gitea-owner-op.sh scripts/owner-ops/reviewer-onboard.ops --var REPO=specpulse             # dry run
    scripts/gitea-owner-op.sh scripts/owner-ops/reviewer-onboard.ops --var REPO=specpulse --execute
@@ -53,6 +58,18 @@ only. There is no new persona, author exception or merge-gate exception.
      credentials, so check the presence of the name only, never print the file.
 4. **Observe the first pull request,** the CI one from step 1: a green `CI / verify (pull_request)`, both
    personas' verdicts at its current head, and a merge by a reviewer identity.
+
+## Activation record (2026-11-25)
+
+- **Step 1:** [specpulse#5](https://git.chifor.me/cchifor/specpulse/pulls/5). Its exact command was run first on a
+  clean archive of its head `860ede2`, with a `.git` as the checkout leaves it: 346 passed, 2 deselected, ruff clean.
+- **Step 2:** applied at 20:58:55Z, before this change merged, from the preset at this change's reviewed head:
+  `gitea-owner-op.sh scripts/owner-ops/reviewer-onboard.ops --var REPO=specpulse --execute`.
+  - Results: 204, 204, 201. The token was deleted, its next use answered 401, and `chifor` holds no token.
+  - Read-back as `workstation-bot`: `protected=true`, `required_approvals=2`,
+    `status_check_contexts=["CI / verify (pull_request)"]`, `user_can_push=false`, `user_can_merge=false`.
+  - The `protected_branch` row is identical, field for field, to `cchifor/workbricks-apps`'s.
+  - Collaborators: `reviewer-claude` and `reviewer-codex`, mode 2 (write), and no one else.
 
 Rollback, in this order:
 1. remove the allowlist entry through review;

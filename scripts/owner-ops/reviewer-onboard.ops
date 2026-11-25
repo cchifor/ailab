@@ -4,8 +4,11 @@
 #   scripts/gitea-owner-op.sh scripts/owner-ops/reviewer-onboard.ops --var REPO=<repository> --execute
 # Collaborators and branch protection need repository admin, which the routine identities do not hold: an owner
 # operation. The rule requires the context `CI / verify (pull_request)`: the repository needs a workflow `CI` with a
-# job `verify`, or nothing can merge (reviewbot also merges only on a combined status of success). The allowlist
-# entry in ansible/roles/pr_reviewer/defaults/main.yml and a reviewer-host converge complete the admission.
+# job `verify`, or nothing can merge (reviewbot also merges only on a combined status of success). The context is
+# fixed in the body because a --var value allows only [A-Za-z0-9._-]: a repository with another workflow or job name
+# needs its own body. Run this BEFORE the allowlist entry in ansible/roles/pr_reviewer/defaults/main.yml merges: any
+# reviewer-host converge after that merge activates the entry, and a private repository is invisible to the reviewers
+# until this grants them access. That entry and a reviewer-host converge complete the admission.
 # The POST answers 403 on a repository that already has a `main` rule: read it first and edit it deliberately.
 # scopes: write:repository
 PUT /repos/cchifor/${REPO}/collaborators/reviewer-claude reviewer-onboard-collaborator.json 204
