@@ -286,6 +286,15 @@ before relying on either old or new trust. Require the existing grants plus
 `canary-pi-claude`, with all other ceilings unchanged. The restart must be scheduled
 outside other provider gates and followed by the normal post-roll gate.
 
+On the pinned Router release, a trust alias absent from the route catalog does
+not fail startup: `readTrust` validates the trust schema, mapping uniqueness and
+Ed25519 public keys, not configured routes. Managed key creation calls
+[`checkRoutes`](https://git.chifor.me/cchifor/llm-router/src/commit/2ad086a9002311ff4eaa61ff26dacc56d121cbeb/packages/plugins/api-keys/keys.ts#L54)
+and refuses a missing alias with HTTP 400 `INVALID_REQUEST` (`No such route`).
+Thus an early restart loads an unused grant ceiling, not a usable missing route.
+Still follow the route-before-trust order above, verify after any restart, and
+recheck these semantics when changing the pinned Router release.
+
 Before issuing the Claude credential, require Claude Code 2.1.283 active with no
 pending change, `sdk-resume`, `warmSessions:false`, and the `inference-sessions`
 plugin in state `active` from `GET /admin/v1/plugins`. This checks the plugin,
