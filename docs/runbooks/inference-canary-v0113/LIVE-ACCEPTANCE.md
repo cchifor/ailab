@@ -145,7 +145,7 @@ For the retained branch requiring reconstruction, the operator explicitly submit
 
 The optional future resume field `acknowledgeUnknownToolEffects:true` and its unchecked-by-default checkbox permit importing interrupted tool outcomes as unknown error results after inspection. They do not perform router reconciliation, approve future tools or establish that effects were absent. Do not select the checkbox or run reconciliation automatically. A new/explicitly branched history or an already reconstructed, never-admitted branch need not reconcile again solely because it was imported; inspect the branch state rather than force a refusal first.
 
-Current packaged evidence distinguishes these paths: Codex tests clean-import refusal followed by explicit reconstruction; stateless tests explicit branching after clean import plus cancellation/crash reconciliation. Messages tests approval and branching, without a recovered-worker import case. Require provider-specific recovery evidence before claiming all three passed.
+Current packaged evidence distinguishes these paths: Codex and Messages test clean-import refusal followed by explicit reconstruction; stateless tests explicit branching after clean import plus cancellation/crash reconciliation. The Messages fixture uses the real router and packaged Pi with a synthetic Claude upstream, verifies the fresh communication identity and unchanged append-only effect, and makes no provider/tool calls during import or reconciliation. These launcher/router fixtures do not establish deployed normal-API recovery or live subscription acceptance. Require the actual provider-specific live receipts before claiming all three passed.
 
 ## Cleanup, revocation and evidence
 
