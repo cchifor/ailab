@@ -1,7 +1,8 @@
 # Managed Relay Messages capability release
 
-Status: published; production pin prepared for owner review, not deployed by this
-change. This is a preparation record, not deployment or activation evidence.
+Status: published; production pin prepared for owner review. Merging the pin PR
+triggers the Flux rollout. This document records preparation evidence; post-roll
+and activation acceptance remain pending.
 The isolated preparation starts from AILab `181b6d2bc806619c4344413b3631af219b024ec0`.
 
 ## Immutable provenance
@@ -38,7 +39,8 @@ helper, including repeat verification, before producing the immutable receipt.
 The preceding Git pin is source `a16a6846e89d6971d9549bac5ff3a7dde99b361b`, release
 `router-0.1.0-20261124-inference-safe-errors-r2`, image
 `registry.chifor.me/llm-router/router@sha256:1d3eaf5671cb85be3720eab7a65a87acc1aa3a33f283ef88a21580ea78fb8167`.
-The operator reports #1987 deployed the same image at 02:05Z on 2026-11-25.
+The operator reports [AILab PR #1987](https://git.chifor.me/cchifor/ailab/pulls/1987)
+deployed the same image at 02:05Z on 2026-11-25.
 Retain that trust configuration; do not replay or replace its changes.
 No hub pin or migration belongs in this router update: current main already has
 Relay v0.12.1 and subsequent backup-holder shutdown changes. Historical v0.11.3
@@ -73,7 +75,8 @@ acceptance work; neither this pin nor the offline verification establishes them.
 The router manifest is an owner-protected production path under
 `ansible/roles/pr_reviewer/defaults/main.yml`. Its pin PR needs `chifor`'s approval
 at the exact head (or the owner's own merge), green CI and both reviewer personas.
-`no-automerge` remains an absolute hold while present. PR #1986's merge and its
+`no-automerge` remains an absolute hold while present.
+[AILab PR #1986](https://git.chifor.me/cchifor/ailab/pulls/1986)'s merge and its
 reviews do not grant owner approval of these production pins or the exact profiles.
 Owner profile approval, credential issuance and renderer delivery remain separate
 prerequisites in [the canary inputs](inference-canary-v0113/README.md).
@@ -84,6 +87,12 @@ merge is the rollout; do not add a manual deployment restart or second writer.
 Require one ready pod on the exact digest/source, successful backup verification,
 Flux convergence, unchanged routes, and the existing safe-error/log checks in
 [the preceding release runbook](relay-inference-safe-errors-20261124.md).
+Refresh managed-key capability discovery through the existing authenticated Relay
+router connection flow and record `nativeAnthropic:false` and `routeSelectors:false`
+while `api-anthropic` remains disabled. After the separately authorized cold
+Messages activation, repeat that check and require `nativeAnthropic:true` with
+`routeSelectors:false`, plus `anthropicMessages:true` for the exact scoped Claude
+alias in `/v1/routes`. Do not enable Messages solely for the image-roll check.
 Coordinate any live acceptance with the operator; this preparation authorizes no
 live configuration changes, router-ab run or inference.
 
