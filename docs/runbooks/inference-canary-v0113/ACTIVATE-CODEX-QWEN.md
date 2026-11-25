@@ -221,8 +221,16 @@ before that session's first prompt:
   credential-scope handoff before its first acceptance prompt. Obtain the fresh
   marker baseline immediately before the launch as the live procedure requires
   and retain that report. After Open, run the `baseline` observation again with
-  the **same run UUID and file names**; both files must still be absent, matching
-  the retained pre-launch report. Preserve both reports. A marker appearing
+  the **same run UUID and observed marker filenames**; both marker files must
+  still be absent, matching the retained pre-launch report. The observer prints
+  JSON to stdout and does not choose or write an evidence file. Capture its two
+  outputs separately as `PROVIDER-RUN_UUID-pre-launch.json` and
+  `PROVIDER-RUN_UUID-post-open.json` in the operator's evidence directory, refusing
+  an existing destination; never redirect both runs to the same report path.
+  Require exit0 and `phaseChecksPass:true` for both, with the same provider,
+  profile, run UUID and marker commands; only observation timestamps may differ.
+  Follow the same check in [live precondition6](LIVE-ACCEPTANCE.md#preconditions-and-limits).
+  A marker appearing
   during launch is a failure: do not absorb it into a replacement baseline,
   delete it or select a new run UUID to hide it. No launch step is allowed to
   write either marker.
