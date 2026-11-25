@@ -33,6 +33,9 @@ an old installed profile hash; it does not silently replace it. Do not clear a
 native-state fence or discard histories to make startup pass. Directory emptiness
 alone is not proof of process containment. Renew exact-profile approval only
 after final artifact pins and the layout migration plan are reviewed.
+The bounded [stopped-stage restaging procedure](RESTAGE-RECOVERY.md) preserves
+the old profile directories as evidence and does not start services; it requires
+its own final review before operator execution.
 
 Host `dev-worker-1`, connector `b3b1be1a-275c-4a2e-b515-428b39c43171`, execution
 user `c4`/UID 1000. Tenant `00000000-0000-4000-8000-000000000001`, router connection
