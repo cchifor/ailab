@@ -1,0 +1,46 @@
+{
+  "relay_router_bindings": [
+    {
+      "tenantId": "00000000-0000-4000-8000-000000000001",
+      "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+      "executionIdentity": "c4",
+      "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+      "bindingId": "a0f57684-747f-4c3e-8d90-e684b7262590",
+      "origin": "https://router.chifor.me",
+      "credentialFile": "/home/c4/.local/state/relay/router-managed/a0f57684-747f-4c3e-8d90-e684b7262590/credential.json",
+      "protocol": "openai-responses",
+      "selection": {
+        "kind": "model",
+        "model": "canary-pi-codex"
+      }
+    },
+    {
+      "tenantId": "00000000-0000-4000-8000-000000000001",
+      "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+      "executionIdentity": "c4",
+      "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+      "bindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+      "origin": "https://router.chifor.me",
+      "credentialFile": "/home/c4/.local/state/relay/router-managed/d2871eec-8f5a-4afe-a917-014f0ae8e14d/credential.json",
+      "protocol": "openai-chat",
+      "selection": {
+        "kind": "model",
+        "model": "canary-pi-qwen"
+      }
+    },
+    {
+      "tenantId": "00000000-0000-4000-8000-000000000001",
+      "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+      "executionIdentity": "c4",
+      "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+      "bindingId": "a8f6211c-d7e2-4ffd-824d-b158e349a8d4",
+      "origin": "https://router.chifor.me",
+      "credentialFile": "/home/c4/.local/state/relay/router-managed/a8f6211c-d7e2-4ffd-824d-b158e349a8d4/credential.json",
+      "protocol": "anthropic-messages",
+      "selection": {
+        "kind": "model",
+        "model": "canary-pi-claude"
+      }
+    }
+  ]
+}
