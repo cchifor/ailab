@@ -347,3 +347,6 @@ sessions before the first acceptance launch. Service-active status alone does no
 prove profile admission has finished. If readiness times out, stop acceptance and
 inspect the holder journal without replacing its state. This startup allowance is
 separate from each profile's inference request deadline.
+The pinned holder advertises recovery capability version2 for this canary's
+owned-history recovery, separately from its current native-state readiness;
+the [activation procedure](ACTIVATE-CODEX-QWEN.md) links the exact source contract.

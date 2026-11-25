@@ -158,6 +158,10 @@ Require the same three profile IDs, `nativeRecovery: 2`, `nativeStateReady: true
 zero sessions and the exact installed profile hash. Check both holder services
 and reconciliation without exposing secrets. This hello precedes the first
 launch; it does not assert that either managed credential has been delivered.
+The pinned e843 holder's
+[`hello` builder](https://git.chifor.me/cchifor/relay/src/commit/e843921b7cff76406b7da0b5b35cf653c7e458c5/holder/src/runtime.rs)
+advertises `nativeRecovery: 2`. This capability is required for this canary's v2
+owned-recovery checks; `nativeStateReady` separately reports current state safety.
 The operator can now hand off service/hello readiness to the owner for the first
 launch. Delivery evidence follows that launch, so a combined pre-launch handoff
 requiring both credential files would recreate the circular gate.
@@ -179,6 +183,22 @@ not creating a replacement launch. Pending launch expiry is bounded to two
 minutes, so have the holder, connector and renderer polling ready first. Do not
 extend that deadline or send a prompt yet.
 
+Confirm that the selected renderer units use the approved
+[`--watch` service template](../../../ansible/roles/relay_router_renderer/templates/renderer.service.j2)
+and are polling successfully before launching. The qualified renderer's
+[`watch` loop](https://git.chifor.me/cchifor/relay/src/commit/e843921b7cff76406b7da0b5b35cf653c7e458c5/holder/src/bin/relay-credential-renderer.rs)
+polls immediately, completes the poll, then sleeps two seconds; the retained
+connector's [agent-control loop](https://git.chifor.me/cchifor/relay/src/commit/e843921b7cff76406b7da0b5b35cf653c7e458c5/connector/src/agent_control.rs)
+also sleeps two seconds after a completed cycle. The source/input equivalence
+was checked when retaining their existing pins; this does not request an upgrade.
+These are delays between cycles, not delivery deadlines. HTTP/IPC operations
+have their own ten-second bounds, and sequential work and scheduling add time.
+`RestartSec=2s` in the unit is a process-restart delay, not its poll interval.
+Require render/install/Open completion before the **actual** launch expiry,
+which can be shorter than two minutes when admission authority expires sooner.
+Slow or failing polling is a reason to stop and inspect, not to widen expiry or
+start a retry loop.
+
 For each selected binding, the normal
 [`launch-transport`](https://git.chifor.me/cchifor/relay/src/commit/e843921b7cff76406b7da0b5b35cf653c7e458c5/server/agent-sessions/launch-transport.ts)
 sequence is `await-router-render` → `install-router` → `open`. The connector sends
@@ -199,9 +219,13 @@ before that session's first prompt:
   requires, and acquire the new session's normal control lease.
 - The operator supplies that provider's delivery/readiness and nonsecret
   credential-scope handoff before its first acceptance prompt. Obtain the fresh
-  marker baseline immediately before the launch as the live procedure requires;
-  if it must be refreshed before prompting, keep the same run UUID and marker
-  commands. No launch step is allowed to write either marker.
+  marker baseline immediately before the launch as the live procedure requires
+  and retain that report. After Open, run the `baseline` observation again with
+  the **same run UUID and file names**; both files must still be absent, matching
+  the retained pre-launch report. Preserve both reports. A marker appearing
+  during launch is a failure: do not absorb it into a replacement baseline,
+  delete it or select a new run UUID to hide it. No launch step is allowed to
+  write either marker.
 
 Keep the existing Codex-then-Qwen acceptance sequence and check each provider at
 its own first launch. Do not require Qwen delivery before the first Codex launch
