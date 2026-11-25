@@ -387,11 +387,20 @@ class SelectedWorkerRole(RoleFixture, unittest.TestCase):
 
     def test_11_invalid_service_selection_refuses_before_service_commands(self):
         first = self.variables['relay_router_bindings'][0]['bindingId']
+        home = Path(self.variables['relay_router_home'])
+        snapshot = {p: p.read_bytes() for p in home.rglob('*') if p.is_file()}
         for selected in [[], [str(uuid.uuid4())], [first, first], first, {'id': first}]:
             with self.subTest(selected=selected):
-                self.run_role(dict(relay_router_manage_services=True,
-                                   relay_router_active_binding_ids=selected), success=False)
+                output = self.run_role(dict(relay_router_manage_services=True,
+                                           relay_router_active_binding_ids=selected), success=False)
+                # test_10 leaves three staged bindings while this request defines one.
+                # Prove the subset guard refuses before the removed-binding guard.
+                self.assertIn('Require an explicit valid subset of defined renderer services', output)
+                self.assertIn('Active renderer IDs must be a nonempty unique list', output)
+                self.assertNotIn('Revoke/drain removed bindings', output)
+                self.assertRegex(output, r'changed=0\s')
                 self.assertEqual(self.commands, [])
+                self.assertEqual(snapshot, {p: p.read_bytes() for p in home.rglob('*') if p.is_file()})
 
 
 if __name__ == '__main__':
