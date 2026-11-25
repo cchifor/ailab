@@ -1,0 +1,15 @@
+{
+  "relay_router_enabled": true,
+  "relay_router_manage_services": false,
+  "relay_router_user": "c4",
+  "relay_router_tenant_id": "00000000-0000-4000-8000-000000000001",
+  "relay_router_host_id": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+  "relay_router_connector_state_file": "/home/c4/.config/relay-connector/connector.json",
+  "relay_router_renderer_source": "/evidence/v0.11.3/holder/relay-credential-renderer-linux-amd64",
+  "relay_router_renderer_sha256": "ff328ccc456cd8bf92443b5f0548c74d1c32b1d70d7c02a7669e2ba22754c04d",
+  "relay_router_bao_source": "/evidence/openbao-2.5.5/bao",
+  "relay_router_bao_sha256": "4e7e04cc5d13043b9d67850d875242a42fae5c5f01aaff226a6ebba77ccc27bb",
+  "relay_router_bao_mount": "af",
+  "relay_router_bao_prefix": "relay-router/escrow",
+  "relay_router_secrets_file": "/repo/ansible/secrets/relay-router.sops.yaml"
+}
