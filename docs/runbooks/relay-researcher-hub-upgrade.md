@@ -883,6 +883,51 @@ Readback after the roll (operator):
   the new shell on another after a reload (F0b's done-when). Needs you lists a withheld message within 25 s plus query
   time, made with a short-lived test key that is then revoked, and opens its thread (B3b's done-when).
 
+### H16. v0.12.1: Buses, schema 92
+
+Why: the console redesign's C3a. Fleet gets a Buses tab: the list, the detail, Create bus (general buses), and member
+management (add, pause, resume, remove, change default bus, replace key, revoke). Pausing a parent on a bus, or
+turning a bus off, pauses the parent's open sub-agents on that bus with it, so the 60 s sweep no longer retires them.
+The 13 bus actions are registered for the Assistant with their risk tiers. Relay #663, with the release-review fixes
+#665, #667, #668 and #669, released as v0.12.1 (#664 and #666, `dfc739a4`, run 148784) on top of v0.12.0 (live since
+2026-11-24, ailab #1993, H15).
+
+Migration 092 (schema 91 → 92):
+- `agent_channels`: `type` (NOT NULL, default `general`) and `description` (NOT NULL, default empty);
+- `agent_channel_members`: `changed_at`, `changed_by` and `paused_with`, nullable. No constraint ties `paused_with` to
+  `enabled` (deliberate: the previous image's Resume must not fail on a rollback);
+- no rows written; row security and grants unchanged.
+
+Check before the merge (operator), recorded on the operator's message of 2026-11-25 03:28Z, PASS:
+- the published digest `177c1af2…a350f` (deployment-images-148784.json and the image's revision label) migrates the
+  nightly generation 20261125T001502Z-a93067e5 (schema 91) to schema 1..92 contiguous; `migrate` and bootstrap rc 0 in
+  1.14 s including the container start;
+- `agent_channels.type` and `description` present, with both existing rows reading `general` and empty;
+  `agent_channel_members.changed_at`, `changed_by` and `paused_with` present and NULL on all 8 rows;
+- the CHECKs as written; row security forced on both tables, unchanged; 137 tables, all owned by the migrator;
+- the v0.12.1 hub on that copy answered `/ready` 200 in about 4 s, and the sampler wrote.
+
+Change: this PR pins the v0.12.1 digest in `migrate` and `relay`, with the annotations, and moves the fence comment to
+schema 92. `migrate` keeps `PGOPTIONS=-c lock_timeout=10s` (H11). The merge rolls the hub once (Recreate, through
+Flux), with the pre-migration backup, outside the QNAP windows. No new settings.
+
+Rollback: forward-only, as H15. Restore this roll's **earliest** pre-migration generation (the first
+`backup-database` log of the v0.12.1 rollout), `recovery:fence` with a **fresh** generation kept in
+`relay-restore-fencing`, then a reviewed PR re-pins v0.12.0 (`e63d533f…c364`); H11's cost applies. If the previous
+image is ever run against schema 92 before that restore, make **no bus or membership changes** (pause, resume, turn
+off) until the roll-forward: it has no sub-agent cascade, so a parent's pause would retire its sub-agents again.
+
+Readback after the roll (operator):
+
+- one Running Pod; source `dfc739a492217ea5a8dfaf2471aead43b2ea646c`, release `relay-0.12.1-release-148784`; the
+  `relay` container's image ID ends in
+  `sha256:177c1af20e5708af2ceb01e4e6360bd0b08a4859f50edad3784257ef74ea350f`;
+- the backup init container exited 0 (record its generation: the rollback's restore point), the migrate init container
+  exited 0, and `schema_migrations` reads `92|92`; the `relay` container's env is unchanged from v0.12.0;
+- health samples keep arriving each minute (H12's query);
+- the owner, in the console (C3a's done-when): Fleet → Buses lists `workspace`; create a bus "Operations", add a keyed
+  agent, pause it and resume it; the detail shows the change with its time and who made it.
+
 ## Enablement order at a glance
 
 > **Campaign rows are historical.** The owner retired the researcher qualification campaign and its
@@ -915,6 +960,7 @@ Readback after the roll (operator):
 | H13 | hub image → v0.11.5 (Status as the board draws it, the fleet map; no migration); gates no step above | H12 live | v0.11.5 digest running, `schema_migrations` still `89\|89`, Status shows Needs you, Health and the fleet map |
 | H14 | hub image → v0.11.6 (the single-agent page; no migration); gates no step above | H13 live | v0.11.6 digest running, `schema_migrations` still `89\|89`, an agent's page opens from Status with Terminal first |
 | H15 | hub image → v0.12.0 (schema 91: migrations 090-091; the console preference per person; Needs you message problems); gates no step above | H14 live; the operator's 89 → 91 check PASS | v0.12.0 digest running, `schema_migrations` `91\|91`, the backup generation recorded, the console preference follows the owner across devices, a withheld message shows in Needs you |
+| H16 | hub image → v0.12.1 (schema 92: migration 092; Buses in Fleet); gates no step above | H15 live; the operator's 91 → 92 check PASS | v0.12.1 digest running, `schema_migrations` `92\|92`, the backup generation recorded, a bus created and a member paused and resumed from Fleet → Buses |
 
 ## Rollback: migrations are forward-only
 
@@ -943,6 +989,9 @@ its own: never run v0.9.1 against schema N. "Rollback" therefore means one of th
   `relay-restore-fencing`, then a reviewed PR re-pins v0.10.25 (`d98c6ce7…e22e`). Cost, rehearsed: every connector
   and agent key revoked (4 and 8), every session ended (49), the undelivered outbox deleted, a new generation
   ConfigMap; writes after the backup are lost.
+- **H16 (schema 92):** as H15: never a bare re-pin. Restore the v0.12.1 rollout's **earliest** pre-migration
+  generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
+  v0.12.0 (`e63d533f…c364`); H11's cost applies. No bus or membership changes while an older image runs on schema 92.
 - **H15 (schema 91):** as H12: never a bare re-pin. Restore the v0.12.0 rollout's **earliest** pre-migration
   generation, `recovery:fence` with a **fresh** generation kept in `relay-restore-fencing`, then a reviewed PR re-pins
   v0.11.6 (`8adca17a…0b8e`); H11's cost applies.
