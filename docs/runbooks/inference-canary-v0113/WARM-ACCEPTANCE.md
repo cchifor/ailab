@@ -30,11 +30,14 @@ existing `maxRunning` and all other settings. Submit it through the existing
 reviewed operator configuration workflow; this document is not a config mutation
 or approval. Verify the committed revision and effective settings before prompts.
 
-At the inspected router source (PR201 based on `2ad086a`), each provider pool has
-maximum two retained workers, a 300000-ms maximum worker age and a 32-turn reuse
-limit. Idle retention is configurable from 1000 to 300000 ms. These are distinct
-from the pod-wide `maxRunning` and account admission limits. Recheck the final
-published source; do not invent configurable age, turn or pool-size fields.
+At published router source
+[`b60fb03b23ce52548f49513d45466f4670f5a369`](https://git.chifor.me/cchifor/llm-router/src/commit/b60fb03b23ce52548f49513d45466f4670f5a369/packages/adapters/claude-sdk/warm.ts#L149),
+each provider pool has maximum two retained workers. At the next reuse attempt,
+a worker aged >=300000 ms or with >=32 completed turns is retired instead of
+reused; these checks are not an active-generation kill deadline. The separate idle
+timer starts after a reusable turn settles; idle retention is configurable from
+1000 to 300000 ms. These bounds are distinct from the pod-wide `maxRunning` and
+account admission limits. Do not invent configurable age, turn or pool-size fields.
 
 Use a fresh normal Relay Claude session and its existing managed binding, then
 the owned lease and command/permission receipts described in
