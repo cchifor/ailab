@@ -1176,7 +1176,7 @@ spec:
           # 1.109.0 notes' action-required items (the disk cache backend removed, string fallback
           # targets rejected, the deployment rpm pre-call filter, Gemini sampling params, DALL-E)
           # touch nothing this config uses: its one fallback target is a list.
-          image: ghcr.io/berriai/litellm:v1.109.4@sha256:028c2b2e096e785efaaf05eee6de598f0035a71be4c37c47500359ec39d4bc00
+          image: ghcr.io/berriai/litellm:v1.109.5@sha256:42b5e476d542061cefd5989ec7ef1b742feafb0774b535ded0b3b74a943a7fdb
           command: ["litellm"]
           args: ["--config", "/etc/litellm/config.yaml", "--port", "4000", "--num_workers", "1"]
           ports:
