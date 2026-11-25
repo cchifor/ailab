@@ -10,13 +10,23 @@ router-ab gate with route changes or new inference qualification workloads.
 
 ## Fixed scope
 
-**Deployment hold:** the revision2 definitions below correct profile-home layout;
+**Deployment hold:** the revision2 definitions below correct profile-home layout and
+opt Claude/Codex into the bounded effort control;
 their runtime pins still identify v0.11.3 and are not the pending owned-recovery
 release. Keep this change held until the matching reviewed hub/holder/Pi release
 pins are integrated and the owner approves the final exact bytes. Do not activate
 the old runtime first: creating Pi history would introduce a holder-restart fence
 before the planned upgrade. The earlier revision1 approval/hash does not approve
 these revised definitions.
+
+Claude and Codex now propose exactly
+`settings:{modes:[],config:{thought_level:["off","low","high"]}}`.
+`off` means provider default; it does not disable provider reasoning. Qwen has no
+effort capability. This addition is outside the earlier layout/pins-only
+preapproval and must be included in the final exact-profile owner approval.
+It requires the release containing PR680 and the router containing PR201; the
+historical v0.11.3 qualification below did not exercise these settings. Keep
+the existing request/output limits, grants and route policies unchanged.
 
 Profile `credentialHome` is now `state/profile-homes/<profileId>`; workspaces stay
 at `state/workspaces/<profileId>`. Reserve `state/native-homes` exclusively for
