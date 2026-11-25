@@ -105,8 +105,8 @@ spec:
       labels:
         app: llm-router
       annotations:
-        chifor.me/source-commit: a16a6846e89d6971d9549bac5ff3a7dde99b361b
-        chifor.me/release: router-0.1.0-20261124-inference-safe-errors-r2
+        chifor.me/source-commit: 2ad086a9002311ff4eaa61ff26dacc56d121cbeb
+        chifor.me/release: router-0.1.0-20261124-inference-messages
     spec:
       automountServiceAccountToken: false # the router needs no API access
       tolerations:
@@ -124,7 +124,7 @@ spec:
       # later restarts never overwrite it. Retain this backup while init is present.
       initContainers:
         - name: backup-before-inference-sessions
-          image: registry.chifor.me/llm-router/router@sha256:1d3eaf5671cb85be3720eab7a65a87acc1aa3a33f283ef88a21580ea78fb8167
+          image: registry.chifor.me/llm-router/router@sha256:c35fc2225b787a041799cd2c638d129c349d2718d6a090040aca1f84c9181516
           command: [node, /app/deploy/backup-router.mjs]
           env:
             - {name: ROUTER_BACKUP_LABEL, value: pre-inference-sessions-20261124}
@@ -140,10 +140,10 @@ spec:
             - {name: tmp, mountPath: /tmp}
       containers:
         - name: router
-          # Merged llm-router #196 + #197 + #199: inference, safe errors and timeout classification.
-          # Relay publication 147751; archive sha256:187ee75d73b75bd87ece82ef164fb9aea43c0551e8538bf3d5ec77f03ea031d6.
-          # Retains native inference; see relay-inference-safe-errors-20261124.md.
-          image: registry.chifor.me/llm-router/router@sha256:1d3eaf5671cb85be3720eab7a65a87acc1aa3a33f283ef88a21580ea78fb8167
+          # Merged llm-router #200: managed-key capability follows active Messages ingress.
+          # Relay publication 148962; archive sha256:68aa4bd2736583b0e2e600a9108fd36d636cfd9b7d6544f4b6991eacd3bd2049.
+          # Retains inference and safe-error fixes; see relay-router-messages-20261125.md.
+          image: registry.chifor.me/llm-router/router@sha256:c35fc2225b787a041799cd2c638d129c349d2718d6a090040aca1f84c9181516
           imagePullPolicy: IfNotPresent
           workingDir: /app
           command: [node, dist/apps/router/main.js]
