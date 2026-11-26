@@ -5,8 +5,8 @@
 
 # Handlers run in the order defined here. `restart zot` notifies both: zot restarts first, then THIS play's
 # unproven-apply marker (files/zot-config-apply.py) is cleared, under the helper's lock and only if it still holds
-# this play's token, because the restarted zot loaded the file this play wrote. Restarts for other reasons (htpasswd,
-# binary) clear nothing; an overlapping play's marker survives. If the restart fails, Ansible stops the handlers
+# this play's token, because the restarted zot loaded the file this play wrote. Restarts for other reasons (binary,
+# certs, sync credentials, unit; htpasswd only via registry_zot_config_allow_restart) clear nothing; an overlapping play's marker survives. If the restart fails, Ansible stops the handlers
 # and the marker stays, so the next run re-proves the config instead of reporting it unchanged.
 - name: restart zot
   ansible.builtin.systemd:
