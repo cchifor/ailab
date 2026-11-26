@@ -21,6 +21,16 @@ stopped configuration handoff. No role behavior is changed.
 
 ## Review the successor before stopping
 
+The current successor source is reviewed v0.13.1
+`2604c41b69c5d9c50a3324545a51f0bfa38435a0`
+([Relay PR705](https://git.chifor.me/cchifor/relay/pulls/705)). Publication pins,
+successor profile bytes and exact-artifact qualification are pending in
+[README.md](README.md); do not stop the current idle holder merely because the
+source merged. The hub stays at e843/schema93. The required Router correction
+source is 4af66b8, with actual deployment/readiness verified separately.
+Operator bus1967's idle/no-launch report selects this procedure; the helper must
+still prove the complete journal and all filesystem/service conditions below.
+
 Have the reviewed successor's published holder/Pi archives, control-plane
 manifest, immutable installer image receipt and exact profile definitions ready.
 Verify their source and hashes through the existing release process. Keep the

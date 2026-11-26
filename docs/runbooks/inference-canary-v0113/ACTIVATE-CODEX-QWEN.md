@@ -1,32 +1,34 @@
 # Held Codex/Qwen service activation
 
-Prepared from AILab main `3c5590713666d277201aa0d26b2d1ad9bb60323e`.
+Successor preparation from AILab main `b1c98cccc222db4e6d35d5cd9356871c40c9029a`.
 This is a proposed operator procedure, not approval or evidence of activation.
 Keep the activation PR held with `no-automerge` until the operator confirms
 the gates below. Merging these opt-in inputs does not run either playbook; no
 inventory imports them. This change starts no service and creates no key itself.
 
-**Final-release hold:** the integrated revision2 profiles correct the home layout
-and propose bounded Claude/Codex effort choices with published v0.13.0 pins
-from source `e843921b7cff76406b7da0b5b35cf653c7e458c5`. The activation overlay
-matches the current candidate byte hash. Publication149439 and offline exact
-published-runtime root/profile proof passed; all five published-Pi wire/replay cases passed offline (zero skipped).
-Use the [published pin table and common evidence mount](README.md).
-Complete qualification and verify the operator's approved final diff before
+**Successor hold:** reviewed holder/Pi v0.13.1 source
+`2604c41b69c5d9c50a3324545a51f0bfa38435a0` replaces the historical v0.13.0 runtime.
+Final published pins, successor profile bytes and qualification results are
+pending in [README.md](README.md). The existing revision2 activation hash and
+publication149439 proofs do not qualify that replacement. The hub stays at
+e843/schema93; the required Router correction source is 4af66b8. Verify actual
+Router deployment separately. Complete qualification and verify the approved final diff before
 execution. The effort capability exceeded the earlier home-layout/artifact-only
 preapproval; operator bus1861 now records the owner's 15:30 **Covered** decision
 for home layout, pins and Claude/Codex `off/low/high` only. Verify the full
 original-c1c937fc-to-final diff under [that decision](README.md); no new request
 for the same covered scope is needed. Follow
-[stopped restaging](RESTAGE-RECOVERY.md), including hub/schema-first ordering and
-matching-holder readiness. Keep the canary services off through that window.
+[the sealed idle upgrade](UPGRADE-IDLE.md) for this already-started,
+never-launched holder. Keep both holder services stopped during replacement;
+preserve the existing renderer selections, journal, homes and credentials.
 
-[AILab #1999 staging evidence](https://git.chifor.me/cchifor/ailab/pulls/1999#issuecomment-142077)
+Historical [AILab #1999 staging evidence](https://git.chifor.me/cchifor/ailab/pulls/1999#issuecomment-142077)
 records holder and renderer installation on dev-worker-1 with all managed services
 disabled/inactive and no credential files. The existing tmux connector remains
 active. The operator subsequently reported #1998's owner-approved router rollout
 to `c35fc2225b787a041799cd2c638d129c349d2718d6a090040aca1f84c9181516`.
-Refresh those readbacks before activation; this preparation made no host requests.
+Later operator bus1945/1967 reports the holder started and idle with no launches.
+Refresh readiness before the successor upgrade; this preparation made no host requests.
 
 ## First delivery is scheduled by a launch
 
@@ -54,8 +56,8 @@ prompt**. Do not pre-render a token manually, forge a receipt, force a binding t
 ## Gates before either activation converge
 
 1. Record the existing Covered decision and operator verification of the exact `profiles.json` diff:
-   Current revision2 SHA-256 `665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e`.
-   This published-artifact candidate is not an approval. The operator must verify
+   The historical revision2 SHA-256 is `665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e`;
+   the successor byte hash remains pending. The operator must verify
    the final diff against the owner's approved scope; source PR reviews and
    staging do not substitute for that exact-byte verification.
 2. The owner creates only the Codex and Qwen bindings from the existing
@@ -70,11 +72,10 @@ prompt**. Do not pre-render a token manually, forge a receipt, force a binding t
    validity and trust. Use the final qualified artifacts and the existing SOPS
    controller setup, with fresh readiness readbacks. Do not expose credential
    contents in output or command arguments.
-   Bus1928 also records a pending owner decision about holder startup and
-   same-UID exposure on dev-worker-1; the operator starts nothing until that
-   decision is recorded. Private modes protect against other UIDs, not other
-   processes running as `c4`/UID1000. This ordering correction does not resolve
-   or override that decision.
+   Preserve the owner decision governing startup and same-UID exposure on
+   dev-worker-1; the subsequently reported idle startup is not approval of the
+   successor inputs. Private modes protect against other UIDs, not other
+   processes running as `c4`/UID1000.
 
 Claude activation is separate from this two-binding procedure. Its route and
 Messages capability were reported ready at configuration2522; refresh those
@@ -144,7 +145,7 @@ checks owner, single-link regular-file status and mode `0600`.
 Holder startup validates
 all three profiles but does not launch inference or require any of the three
 managed credential files; their already-staged private parent directories must
-exist. [`inference.rs::validate`](https://git.chifor.me/cchifor/relay/src/commit/e843921b7cff76406b7da0b5b35cf653c7e458c5/holder/src/inference.rs)
+exist. [`inference.rs::validate`](https://git.chifor.me/cchifor/relay/src/commit/2604c41b69c5d9c50a3324545a51f0bfa38435a0/holder/src/inference.rs)
 explicitly permits a file not yet produced by the renderer at profile-admission
 time. File validation still occurs during the later managed installation. This overlay is not
 a two-profile holder filter. It starts the holder and its independent reconciliation
@@ -158,12 +159,15 @@ Require the same three profile IDs, `nativeRecovery: 2`, `nativeStateReady: true
 zero sessions and the exact installed profile hash. Check both holder services
 and reconciliation without exposing secrets. This hello precedes the first
 launch; it does not assert that either managed credential has been delivered.
-The pinned e843 holder's
-[`hello` builder](https://git.chifor.me/cchifor/relay/src/commit/e843921b7cff76406b7da0b5b35cf653c7e458c5/holder/src/runtime.rs)
+The successor 2604c41 holder's
+[`hello` builder](https://git.chifor.me/cchifor/relay/src/commit/2604c41b69c5d9c50a3324545a51f0bfa38435a0/holder/src/runtime.rs)
 advertises `nativeRecovery: 2`. This capability is required for this canary's v2
 owned-recovery checks; `nativeStateReady` separately reports current state safety.
-The operator can now hand off service/hello readiness to the owner for the first
-launch. Delivery evidence follows that launch, so a combined pre-launch handoff
+For the sealed idle upgrade, verify the preserved pause/seal and original journal,
+then explicitly release the seal and resume as [UPGRADE-IDLE.md](UPGRADE-IDLE.md)
+requires. A fresh holder incarnation is expected; a readiness failure must not
+be cleared by deleting state. The operator can then hand off readiness for the
+first launch. Delivery evidence follows that launch, so a combined pre-launch handoff
 requiring both credential files would recreate the circular gate.
 If any gate fails, stop acceptance,
 retain state and receipts, and coordinate recovery with the operator. Do not

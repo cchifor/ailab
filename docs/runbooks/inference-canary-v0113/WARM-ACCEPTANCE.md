@@ -8,9 +8,13 @@ retention phase.
 
 ## Scope, identity and observations
 
-The published v0.13.0 candidate and current qualification/deployment holds are
-recorded in [README.md](README.md). Exact-artifact root/profile proof passed
-offline; all five published-Pi wire/replay cases passed offline (zero skipped). Warm acceptance remains held until
+The reviewed holder/Pi successor is v0.13.1 source
+`2604c41b69c5d9c50a3324545a51f0bfa38435a0`; the required Router source is
+`4af66b8c7c3cc83ddd10e326c554ad728caad72e`, while the hub stays e843/schema93.
+Final published pins, exact-artifact qualification and upgrade/readiness results
+remain pending in [README.md](README.md). The v0.13.0 root and five-case wire
+proofs there are historical. Use [UPGRADE-IDLE.md](UPGRADE-IDLE.md) for the
+started, never-launched canary before new acceptance. Warm acceptance remains held until
 the preceding cold/lifecycle gates pass. Opaque replay uses the operator-selected
 paired live/synthetic evidence method; final outbound effort/cap fields and opaque
 bytes remain unproven live.
@@ -30,15 +34,15 @@ existing `maxRunning` and all other settings. Submit it through the existing
 reviewed operator configuration workflow; this document is not a config mutation
 or approval. Verify the committed revision and effective settings before prompts.
 
-At published router source
-[`b60fb03b23ce52548f49513d45466f4670f5a369`](https://git.chifor.me/cchifor/llm-router/src/commit/b60fb03b23ce52548f49513d45466f4670f5a369/packages/adapters/claude-sdk/warm.ts#L149),
+At required router source
+[`4af66b8c7c3cc83ddd10e326c554ad728caad72e`](https://git.chifor.me/cchifor/llm-router/src/commit/4af66b8c7c3cc83ddd10e326c554ad728caad72e/packages/adapters/claude-sdk/warm.ts#L149),
 each provider pool has maximum two retained workers. Age is measured from
-[Worker creation, before process startup](https://git.chifor.me/cchifor/llm-router/src/commit/b60fb03b23ce52548f49513d45466f4670f5a369/packages/adapters/claude-sdk/warm.ts#L19).
+[Worker creation, before process startup](https://git.chifor.me/cchifor/llm-router/src/commit/4af66b8c7c3cc83ddd10e326c554ad728caad72e/packages/adapters/claude-sdk/warm.ts#L19).
 At the next reuse attempt, a worker aged >=300000 ms or with >=32 completed turns
-is [retired instead of reused](https://git.chifor.me/cchifor/llm-router/src/commit/b60fb03b23ce52548f49513d45466f4670f5a369/packages/adapters/claude-sdk/warm.ts#L168);
+is [retired instead of reused](https://git.chifor.me/cchifor/llm-router/src/commit/4af66b8c7c3cc83ddd10e326c554ad728caad72e/packages/adapters/claude-sdk/warm.ts#L168);
 these checks are not an active-generation kill deadline. The separate idle timer
 starts after a reusable turn settles; [idle retention is configurable from 1000
-to 300000 ms](https://git.chifor.me/cchifor/llm-router/src/commit/b60fb03b23ce52548f49513d45466f4670f5a369/packages/plugins/provider-claude/index.ts#L25).
+to 300000 ms](https://git.chifor.me/cchifor/llm-router/src/commit/4af66b8c7c3cc83ddd10e326c554ad728caad72e/packages/plugins/provider-claude/index.ts#L25).
 These bounds are distinct from the pod-wide `maxRunning` and account admission
 limits. Do not invent configurable age, turn or pool-size fields.
 
