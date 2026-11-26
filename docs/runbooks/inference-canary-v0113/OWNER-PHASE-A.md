@@ -16,16 +16,13 @@ not live subscription acceptance. Evidence is recorded in [README](README.md).
 `QUALIFIED_INPUTS = true` enables this qualified correction after normal packet
 review/merge and installation; it does not perform profile approval or authorize
 live work by itself. The previously installed revision-3 profile hash is rejected.
-Empty API profile history requires the first approval at revision 1; do not
-invent prior approvals or create dummy revisions.
-This is conditional on a fresh check for each exact profile ID in the same
-hub tenant: there must be no prior revision, including disabled or revoked
-history. The 14:26 readback is evidence for that observation time, not a permanent
-absence guarantee. A full 200-row `/api/agent-profiles` response cannot prove
-absence; use the operator's existing exact scoped read when the listing is
-capped. If any prior revision appears, stop and resolve the history before
-approval. Do not downgrade, bootstrap or create dummy revision chains. Profile
-approval remains a separate normal owner/API action, outside this driver.
+The empty-history requirement and the 14:26 absence readback belonged to the
+historical first-registration stage. Codex and Qwen were subsequently approved
+at revision 1. The current replacement must verify those existing exact enabled
+revision-1 definitions and normalized digests in [README](README.md), in the same
+hub tenant. It must not demand empty history, reapprove the profiles, downgrade
+revisions or invent an approval chain. Missing, disabled or drifted definitions
+stop the driver; approval remains a separate owner/API action outside it.
 Start still requires the operator's fresh installed-hash
 handoff and router rollout below. Do not run it against the old e843 holder,
 which drops Pi's tool-input description.
@@ -62,27 +59,32 @@ new 4e4 baseline or a cross-source delta.
 
 ## Before Start
 
-After normal packet review and merge, the operator must complete
-[the stopped-idle upgrade](UPGRADE-IDLE.md), stage the revision-1 profiles and
-verify the new holder. Router [PR2029](https://git.chifor.me/cchifor/ailab/pulls/2029)
-must be deployed and read back at source
+The [stopped-idle upgrade](UPGRADE-IDLE.md) and revision-1 staging were completed
+before the original run. That helper requires a journal with no command or
+session ever; this holder has now run commands and is ineligible. Do not repeat
+the helper, restage profiles, restart the holder or erase its journal for the
+replacement. After normal packet review and merge, verify the current holder
+and existing exact enabled Codex/Qwen definitions. Router
+[PR2029](https://git.chifor.me/cchifor/ailab/pulls/2029) must be deployed and read back at source
 `4e4bb34e2f968f9450aabe9cf228d3e70c8bab71` before any reviewed replacement Start;
 its source merge and published image alone do not prove deployment. The
 operator-controlled rollout comes first, after prior Phase A work has settled.
 It does not restart that run or assign the replacement window.
 The operator must provide the
-current deployment, holder and route handoff from
-[activation](ACTIVATE-CODEX-QWEN.md). The holder starts with no sessions; its hello
-precedes the first real launch. Credential rendering and installation occur
-after the launch is offered and must complete before the first prompt. There is
-no probe launch. Missing or drifted profile definitions stop the driver; it does
-not approve or replace a profile.
+current deployment, holder and route handoff using the readback requirements in
+[activation](ACTIVATE-CODEX-QWEN.md), with the previous session closed and no work
+in flight. The original empty-holder startup preceded that first launch; it is
+not a request to run activation again. Credential rendering and installation for
+the replacement occur after its launch is offered and must complete before its
+first prompt. There is no probe launch. Missing or drifted profile definitions
+stop the driver; it does not approve or replace a profile.
 
 After replacement review, the patched-holder checkpoint separately records the
 current holder incarnation and journal ID. A stopped upgrade changes the incarnation while the
 journal can survive; never copy the historical incarnation into both fields.
 The operator must verify `nativeRecovery: 2`, `nativeStateReady: true`, the
-qualified v0.13.1 release and explicit maintenance-seal release before Start.
+qualified v0.13.1 release and current resumed admission with the maintenance seal
+already released before Start. This is a readback, not a new maintenance cycle.
 The handoff must also include `profilesSha256` and `holderBinarySha256`, measured
 from the installed profile file and holder binary. The driver compares both to
 the exact values in [holder-inputs.json](holder-inputs.json) before any new launch;
