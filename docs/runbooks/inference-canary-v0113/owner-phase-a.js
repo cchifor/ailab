@@ -1446,7 +1446,39 @@
           });
           return;
         }
-        if (!this.session || !this.lease) return;
+        if (!this.session || !this.lease) {
+          const closed = new Set(
+            this.state.evidence
+              .filter((e) => e.kind === "closed")
+              .map((e) => e.sessionId),
+          );
+          const settled = new Set(
+            this.state.evidence
+              .filter((e) => e.kind === "launch" && closed.has(e.sessionId))
+              .map((e) => e.operationId),
+          );
+          const launches = this.state.operations.filter(
+            (op) =>
+              !settled.has(op.body.operationId) &&
+              (op.path === "/api/agent-launches" ||
+                /^\/api\/agent-sessions\/[^/]+\/resume$/.test(op.path)),
+          );
+          if ((this.session && !closed.has(this.session.id)) || launches.length)
+            this.record("cleanup", {
+              status: this.session
+                ? "open-session-without-lease; operator-close-required"
+                : "uncertain-launch; operator-inspection-and-close-required",
+              sessionId: this.session?.id || null,
+              generation: this.session?.generation || null,
+              launchId: this.state.activeLaunch?.id || null,
+              operations: launches.map((op) => ({
+                path: op.path,
+                operationId: op.body.operationId,
+                status: op.status,
+              })),
+            });
+          return;
+        }
         const path = "/api/agent-sessions/" + this.session.id;
         const s = await this.api(path),
           lease = await this.api(path + "/control");
@@ -1643,7 +1675,34 @@
       }
       return targets;
     }
-    async revokeFinal() {
+    runExclusive(action) {
+      need(!this.activeOperation, "Another owner action is still running");
+      const task = Promise.resolve().then(action);
+      this.activeOperation = task;
+      return task.finally(() => {
+        if (this.activeOperation === task) this.activeOperation = null;
+      });
+    }
+    stop() {
+      this.stopped = true;
+      this.env.cancelCheckpoint?.();
+      if (!this.stopPromise) {
+        const active = this.activeOperation;
+        this.stopPromise = (async () => {
+          try {
+            await active;
+          } catch {
+            /* Original action records its failure. */
+          }
+          await this.cleanup();
+        })();
+      }
+      return this.stopPromise;
+    }
+    revokeFinal() {
+      return this.runExclusive(() => this.revokeFinalRun());
+    }
+    async revokeFinalRun() {
       need(
         this.env.origin === ORIGIN &&
           !this.stopped &&
@@ -1665,7 +1724,7 @@
         "All three phase-A runs must pass before final owner revocation",
       );
       need(
-        !this.state.finalRevocation,
+        !this.state.finalRevocation?.intents.length,
         "Revocation already attempted; inspect saved operations, never restart",
       );
       this.check();
@@ -1719,7 +1778,9 @@
           const deadline = Math.min(this.now() + 120000, EXPIRES);
           let confirmed = false;
           while (this.now() < deadline) {
-            this.check();
+            // Stop forbids the next binding mutation, but retain bounded readback
+            // of the immutable request already sent before cleanup can begin.
+            need(this.now() < EXPIRES, "Credential window expired");
             let settled = true;
             for (const c of target.generations) {
               const v = await this.api("/api/router-credentials/keys/" + c.id);
@@ -1904,14 +1965,20 @@
         this.state.completed = false; // Claude, warm and overall plan evidence remain separate.
         this.save();
       } catch (e) {
-        this.state.finalRevocation.status =
-          "unresolved-owner-inspection-required";
+        this.state.finalRevocation.status = this.state.finalRevocation.intents
+          .length
+          ? "unresolved-owner-inspection-required"
+          : "declined-before-dispatch";
+        this.state.finalRevocation.reason = String(e.message).slice(0, 300);
         this.state.completed = false;
         this.save();
         throw e;
       }
     }
-    async start() {
+    start() {
+      return this.runExclusive(() => this.startRun());
+    }
+    async startRun() {
       need(
         this.env.origin === ORIGIN,
         "Run only in the owner session at " + ORIGIN,
@@ -2032,6 +2099,9 @@
       fetch: win.fetch.bind(win),
       now: Date.now,
       load: read,
+      cancelCheckpoint: () => {
+        if (waiting) waiting.reject(new Error("Owner stopped"));
+      },
       save: (state) => win.localStorage.setItem(STORE, JSON.stringify(state)),
       ask: (name, text, validate, timeout) =>
         new Promise((resolve, reject) => {
@@ -2099,9 +2169,7 @@
       }
     };
     stop.onclick = async () => {
-      runner.stopped = true;
-      if (waiting) waiting.reject(new Error("Owner stopped"));
-      await runner.cleanup();
+      await runner.stop();
       status.textContent = "Stopped; inspect cleanup in report.";
     };
     revoke.onclick = async () => {
@@ -2119,6 +2187,8 @@
           ". Inspect saved operation IDs; no automatic resend.";
       } finally {
         active = false;
+        revoke.disabled =
+          runner.stopped || !!runner.state.finalRevocation?.intents.length;
       }
     };
     download.onclick = () => {

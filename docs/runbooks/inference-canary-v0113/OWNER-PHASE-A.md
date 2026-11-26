@@ -102,7 +102,12 @@ acknowledgement is never inferred or sent.
 
 ## Failure, evidence and cleanup
 
-Stop prevents further prompts. Cleanup cancels pending permissions and an active
+Stop rejects the active checkpoint and prevents further prompts. It waits for
+the one active start or revocation action to settle before cleanup, so a late
+launch response or prompt POST cannot race a stale cleanup snapshot. An open
+session without an owned lease, or an uncertain launch, is explicitly recorded
+for operator inspection and Close; cleanup never acquires or adopts a lease.
+Cleanup cancels pending permissions and an active
 turn, waits for the original operation outcome, then requests Close and verifies
 session closure. It releases only its own lease; a lease already retired by a
 verified Close is recorded correctly. Unknown dispatches retain their original
@@ -138,7 +143,10 @@ binding, within the existing credential window. It requires all generations to
 be revoked, escrow cleanup complete, the binding disabled at the expected
 revision, and the exact operation confirmed. An unresolved outcome stops this
 action and leaves its original IDs for owner inspection. A second click/reload
-cannot restart revocation. Use [live acceptance](LIVE-ACCEPTANCE.md) for a
+cannot restart revocation after any intent has been saved. A declined confirmation
+or inventory refusal before the first intent is recorded as
+`declined-before-dispatch` and permits a fresh inventory and owner review; no
+POST was sent. Stop still prevents another action. Use [live acceptance](LIVE-ACCEPTANCE.md) for a
 reviewed manual continuation when needed.
 
 `cleanupPending:false` describes secure escrow cleanup, **not host renderer

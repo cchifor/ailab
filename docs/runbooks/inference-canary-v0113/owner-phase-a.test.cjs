@@ -1875,3 +1875,225 @@ test("stopped or incomplete phases cannot trigger final grant revocation", async
   assert.equal(h.calls.length, 0);
   assert.equal(h.runner.state.finalRevocation, undefined);
 });
+
+test("pre-dispatch decline or active consumer permits a fresh exact revocation review", async () => {
+  for (const flag of ["decline", "activeConsumer"]) {
+    const options = { [flag]: true };
+    const h = finalRevocationServer(options);
+    await assert.rejects(h.runner.revokeFinal());
+    assert.equal(
+      h.runner.state.finalRevocation.status,
+      "declined-before-dispatch",
+    );
+    assert.deepEqual(h.runner.state.finalRevocation.intents, []);
+    assert.equal(h.calls.filter((c) => c.method === "POST").length, 0);
+    options[flag] = false;
+    await h.runner.revokeFinal();
+    assert.equal(h.runner.state.finalRevocation.status, "confirmed");
+    assert.equal(h.calls.filter((c) => c.method === "POST").length, 2);
+  }
+});
+
+test("cleanup records open session identity without taking or adopting control", async () => {
+  const h = harness();
+  h.runner.session = session();
+  await h.runner.cleanup();
+  assert.equal(h.calls.length, 0);
+  assert.deepEqual(h.runner.state.evidence.at(-1), {
+    at: date(NOW),
+    kind: "cleanup",
+    status: "open-session-without-lease; operator-close-required",
+    sessionId: SID,
+    generation: 1,
+    launchId: null,
+    operations: [],
+  });
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+test("Stop waits for a dispatched launch response and records its late identity once", async () => {
+  const arrived = deferred(),
+    response = deferred();
+  const h = harness(async (c) => {
+    assert.equal(c.path, "/api/agent-launches");
+    assert.equal(c.method, "POST");
+    arrived.resolve();
+    return response.promise;
+  });
+  h.runner.run = { provider: "codex", deadline: NOW + 120000 };
+  const action = h.runner.runExclusive(() => h.runner.launch());
+  const failed = assert.rejects(action, /Stopped/);
+  await arrived.promise;
+  const stop = h.runner.stop();
+  assert.equal(h.runner.stop(), stop);
+  assert.equal(h.runner.cleanupAttempted, undefined);
+  response.resolve({ id: OTHER, expires_at: date(NOW + 120000) });
+  await failed;
+  await stop;
+  assert.equal(h.calls.length, 1);
+  const entries = h.runner.state.evidence.filter((e) => e.kind === "cleanup");
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].launchId, OTHER);
+  assert.equal(
+    entries[0].status,
+    "uncertain-launch; operator-inspection-and-close-required",
+  );
+  assert.equal(
+    entries[0].operations[0].operationId,
+    h.calls[0].body.operationId,
+  );
+});
+
+test("Stop waits for prompt POST before original-operation cancel and Close", async () => {
+  const arrived = deferred(),
+    response = deferred(),
+    commands = new Map();
+  let closed = false;
+  const h = harness(async (c) => {
+    if (c.path.endsWith("/control"))
+      return {
+        lease: closed ? null : { id: LEASE, owned: true, generation: 1 },
+      };
+    if (c.path.endsWith("/permissions")) return [];
+    if (c.path.endsWith("/commands")) {
+      commands.set(c.body.operationId, c.body);
+      if (c.body.kind === "prompt") {
+        arrived.resolve();
+        return response.promise;
+      }
+      if (c.body.kind === "close") closed = true;
+      return { id: c.body.operationId };
+    }
+    if (c.path.includes("/operations/")) {
+      const body = commands.get(c.path.split("/").at(-1));
+      assert(body);
+      return {
+        command: {
+          operation_id: body.operationId,
+          session_id: SID,
+          generation: 1,
+          kind: body.kind,
+          state: "completed",
+          receipt: {
+            status: "completed",
+            result:
+              body.kind === "prompt"
+                ? { stopReason: "cancelled" }
+                : { cancelSent: true, execution: "unknown" },
+          },
+        },
+      };
+    }
+    return session({ state: closed ? "closed" : "open" });
+  });
+  h.runner.session = session();
+  h.runner.lease = { id: LEASE, expires_at: date(NOW + 60000) };
+  const action = h.runner.runExclusive(() =>
+    h.runner.command("prompt", { text: "READY" }),
+  );
+  const failed = assert.rejects(action, /lost response/);
+  await arrived.promise;
+  const stop = h.runner.stop();
+  assert.equal(h.runner.cleanupAttempted, undefined);
+  assert.deepEqual(
+    [...commands.values()].map((c) => c.kind),
+    ["prompt"],
+  );
+  response.reject(Error("lost response"));
+  await failed;
+  await stop;
+  assert.deepEqual(
+    [...commands.values()].map((c) => c.kind),
+    ["prompt", "cancel", "close"],
+  );
+  assert.equal(h.runner.state.evidence.at(-1).status, "closed-and-released");
+  assert.equal(
+    h.runner.state.evidence.filter((e) => e.kind === "cleanup").length,
+    1,
+  );
+});
+
+test("Stop rejects a checkpoint then waits for the active action before cleanup", async () => {
+  const checkpoint = deferred(),
+    arrived = deferred();
+  const h = harness();
+  h.runner.env.ask = () => {
+    arrived.resolve();
+    return checkpoint.promise;
+  };
+  h.runner.env.cancelCheckpoint = () =>
+    checkpoint.reject(Error("Owner stopped"));
+  const action = h.runner.runExclusive(() =>
+    h.runner.ask("owner review", "confirm"),
+  );
+  const failed = assert.rejects(action, /Owner stopped/);
+  await arrived.promise;
+  await h.runner.stop();
+  await failed;
+  assert.equal(h.runner.cleanupAttempted, true);
+  assert.equal(h.calls.length, 0);
+});
+
+test("Stop settles a sent revocation and never sends the second binding", async () => {
+  const h = finalRevocationServer();
+  const arrived = deferred(),
+    response = deferred();
+  const fetch = h.runner.env.fetch;
+  h.runner.env.fetch = async (path, init) => {
+    const result = await fetch(path, init);
+    if (init.method === "POST") {
+      arrived.resolve();
+      await response.promise;
+    }
+    return result;
+  };
+  const action = h.runner.revokeFinal();
+  const failed = assert.rejects(action, /Stopped/);
+  await arrived.promise;
+  const intent = clone(h.runner.state.finalRevocation.intents[0]);
+  const stop = h.runner.stop();
+  assert.equal(h.runner.cleanupAttempted, undefined);
+  response.resolve();
+  await failed;
+  await stop;
+  assert.equal(h.calls.filter((c) => c.method === "POST").length, 1);
+  assert.equal(
+    h.runner.state.finalRevocation.intents[0].status,
+    "router-revoked-and-escrow-cleaned",
+  );
+  assert.deepEqual(h.runner.state.finalRevocation.intents[0].body, intent.body);
+  assert.equal(
+    h.runner.state.finalRevocation.status,
+    "unresolved-owner-inspection-required",
+  );
+  assert.equal(h.rendererChecks(), 0);
+  const count = h.calls.length;
+  await assert.rejects(h.runner.revokeFinal());
+  assert.equal(h.calls.length, count);
+});
+
+test("Stop after verified closure does not mislabel historical launches unresolved", async () => {
+  const h = harness();
+  h.runner.state.operations.push({
+    path: "/api/agent-launches",
+    body: { operationId: OP },
+    status: "received",
+  });
+  h.runner.state.activeLaunch = { id: OTHER, operationId: OP };
+  h.runner.record("launch", { id: OTHER, operationId: OP, sessionId: SID });
+  h.runner.record("closed", { sessionId: SID });
+  await h.runner.stop();
+  assert.equal(h.calls.length, 0);
+  assert.equal(
+    h.runner.state.evidence.filter((e) => e.kind === "cleanup").length,
+    0,
+  );
+});
