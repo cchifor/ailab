@@ -215,7 +215,11 @@ before executing it. Do not use this file with fleet-wide playbooks.
 
 The renderer converge follows its existing playbook and approved secret delivery;
 do not place its AppRole secret or a router token in these files or command arguments.
-Confirm credential ownership/mode and managed delivery receipts before startup.
+Before startup, confirm the selected renderer services authenticate/poll and the
+owner-approved bindings have valid scope/expiry. Initial credential delivery is
+scheduled by the first normal launch after holder startup, not by issuance alone.
+Confirm file ownership/mode and managed rendering/installation receipts before
+that session's first prompt, using the [corrected activation order](ACTIVATE-CODEX-QWEN.md).
 Keep the existing tmux connector running. Preserve installed immutable directories,
 profiles, receipts and native history on any failure.
 
@@ -253,6 +257,13 @@ The held [Codex/Qwen-only activation procedure](ACTIVATE-CODEX-QWEN.md) supplies
 separate service-start overlays while retaining this exact three-profile array
 and all three renderer policies. Use its explicit two-binding service selection;
 the renderer role's compatible default starts every defined binding.
+The first-delivery order is **renderers → holder startup/empty-session hello →
+owner launch → rendering/installation/Open → verified delivery/readiness → first
+prompt**. An `installing` binding with no launch has no renderer task yet; waiting
+for its credential file before starting the holder is circular. Operator bus1928
+reported this pause after owner issuance at 21:27:37 UTC on 2026-11-25. The
+operator's pending owner decision about holder startup and shared UID1000
+exposure remains in force; this documentation correction does not start services.
 Its original revision1 hash and v0.11.3 staging references are historical inputs,
 not approval to activate the revision2 definitions. The deployment hold above
 also applies to that workflow. Before publishing the final activation change,
@@ -312,8 +323,13 @@ resuming. Reusing the original CreateCredential operation only retries the origi
 issuance; it does not renew its expiry. A failed/revoked/pending binding must be
 reconciled through its normal retry/revocation flow before rotation is allowed.
 Initial issuance is `installing`, not `ready`; staged services alone do not make
-it rotatable. The owner should issue late, then start the reviewed renderer for
-delivery and confirm readiness before attempting any rotation or Pi launch.
+it rotatable. Issue late, start the reviewed renderers and holder under the
+operator's decision, verify the empty-session hello, then request the first
+approved normal launch. That launch schedules rendering and managed installation;
+the binding becomes ready after the validated install receipt. Require delivery
+and readiness before its first prompt. Readiness remains a prerequisite for
+rotation; it is not a prerequisite that can precede the initial launch. No direct
+token placement, synthetic receipt or extra probe launch is part of this flow.
 Do not force state changes. If it cannot return to a rotatable state, replacement
 requires new binding IDs, revised files/pins and renewed exact-profile approval.
 
@@ -326,8 +342,11 @@ one effect, native history, branch/compact, cancellation, reconciliation, restar
 warm measurement and active warm-to-cold rollback. Preserve all durable receipts.
 After startup, allow at most 120 seconds for a successful holder IPC `hello` on
 its state directory's `control.sock`, as the execution user. Require
-`nativeStateReady: true` and exactly the three IDs in `profiles.json`; require zero
+`nativeRecovery: 2`, `nativeStateReady: true` and exactly the three IDs in `profiles.json`; require zero
 sessions before the first acceptance launch. Service-active status alone does not
 prove profile admission has finished. If readiness times out, stop acceptance and
 inspect the holder journal without replacing its state. This startup allowance is
 separate from each profile's inference request deadline.
+The pinned holder advertises recovery capability version2 for this canary's
+owned-history recovery, separately from its current native-state readiness;
+the [activation procedure](ACTIVATE-CODEX-QWEN.md) links the exact source contract.
