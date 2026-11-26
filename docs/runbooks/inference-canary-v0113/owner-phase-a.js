@@ -10,12 +10,14 @@
 })(typeof window === "object" ? window : globalThis, function () {
   "use strict";
   const SOURCE = "e843921b7cff76406b7da0b5b35cf653c7e458c5";
-  const ROUTER = "4af66b8c7c3cc83ddd10e326c554ad728caad72e";
+  const ROUTER = "4e4bb34e2f968f9450aabe9cf228d3e70c8bab71";
   const ORIGIN = "https://relay.chifor.me";
   const EXPIRES = Date.parse("2026-11-26T21:27:37Z");
   const CLOCK_SKEW_MS = 5000;
   const HOLDER = "bbe0a6fb-25ea-44f8-8c21-5cba89f07aeb";
   const APPROVED_PROFILE_REVISION = 1;
+  const COMMUNICATION_CHANNEL = "b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1";
+  const COMMUNICATION_TOOL = "mcp__relay__relay_messages_read";
   const PROFILES_SHA256 =
     "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4";
   const HOLDER_BINARY_SHA256 =
@@ -28,6 +30,9 @@
     "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used.";
   const HOST = "b3b1be1a-275c-4a2e-b515-428b39c43171";
   const STORE = "relay-pi-phase-a-20261126-v1";
+  const STOPPED_SOURCE = "4af66b8c7c3cc83ddd10e326c554ad728caad72e";
+  const STOPPED_SESSION = "45724087-335a-4c55-ad0f-cb278afe608a";
+  const STOPPED_PERMISSION = "70fb1b8e-f7cc-4cc3-b98f-66f83e46d1ab";
   const PROFILES = {
     codex: {
       id: "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
@@ -177,11 +182,11 @@
       "Open changed the retained marker baseline",
     );
   }
-  function snapshot(v, provider) {
+  function snapshot(v, provider, expectedSource = ROUTER) {
     const p = PROFILES[provider];
     need(
       v?.version === 1 &&
-        v.source === ROUTER &&
+        v.source === expectedSource &&
         v.origin === "http://127.0.0.1:8787" &&
         v.scope?.namespace === "default" &&
         v.scope.principal === "key:" + p.key &&
@@ -244,7 +249,7 @@
     ];
     return {
       version: 1,
-      source: ROUTER,
+      source: expectedSource,
       origin: v.origin,
       scope: {
         namespace: "default",
@@ -306,6 +311,122 @@
     need(row.receipt?.status === "completed", "Missing native receipt");
     return true;
   }
+  function stoppedPredecessor(raw) {
+    need(
+      typeof raw === "string" && raw.length <= 1024 * 1024,
+      "Original stopped report required; do not clear storage",
+    );
+    const report = JSON.parse(raw);
+    need(
+      report?.version === 1 &&
+        report.relay === SOURCE &&
+        report.router === STOPPED_SOURCE &&
+        report.status === "stopped" &&
+        report.reason === "Unexpected tool permission" &&
+        report.completed === false &&
+        !report.predecessor &&
+        !report.phaseACompleted &&
+        !report.finalRevocation &&
+        Array.isArray(report.runs) &&
+        report.runs.length === 1 &&
+        Array.isArray(report.operations) &&
+        Array.isArray(report.evidence),
+      "This replacement only covers the known stopped first Codex prompt",
+    );
+    const run = report.runs[0];
+    need(
+      run.provider === "codex" &&
+        run.runId === PROFILES.codex.run &&
+        run.effort === false &&
+        run.prompts === 1 &&
+        !run.status &&
+        Number.isFinite(run.deadline),
+      "Prior workload differs; no replacement",
+    );
+    const first = snapshot(run.firstSnapshot, "codex", STOPPED_SOURCE),
+      last = snapshot(run.lastSnapshot, "codex", STOPPED_SOURCE);
+    need(
+      first.totalAttempts === 0 &&
+        first.rows.length === 0 &&
+        last.totalAttempts === 0 &&
+        last.rows.length === 0 &&
+        canonical(first.scope) === canonical(last.scope),
+      "Prior baseline differs; retain and inspect the report",
+    );
+    const launches = report.evidence.filter((e) => e.kind === "launch"),
+      baseline = report.evidence.filter((e) => e.kind === "pre-launch"),
+      cleanup = report.evidence.filter((e) => e.kind === "cleanup").at(-1);
+    need(
+      launches.length === 1 &&
+        launches[0].sessionId === STOPPED_SESSION &&
+        uuid(launches[0].id) &&
+        uuid(launches[0].operationId) &&
+        Number.isFinite(Date.parse(launches[0].at)) &&
+        launches[0].profileId === PROFILES.codex.id &&
+        launches[0].revision === 1 &&
+        launches[0].journalId === HOLDER &&
+        uuid(launches[0].holderId) &&
+        launches[0].recovery === false &&
+        baseline.length === 1 &&
+        baseline[0].marker?.runId === PROFILES.codex.run &&
+        baseline[0].marker?.phase === "baseline" &&
+        cleanup?.status === "closed-and-released" &&
+        Number.isFinite(Date.parse(cleanup.at)) &&
+        !report.evidence.some(
+          (e) => e.kind === "prompt" || e.kind === "permission",
+        ),
+      "Prior launch, baseline or cleanup is incomplete",
+    );
+    const commands = report.operations.filter(
+      (o) => o.path === "/api/agent-sessions/" + STOPPED_SESSION + "/commands",
+    );
+    need(
+      commands.length === 3 &&
+        ["prompt", "cancel", "close"].every(
+          (kind) =>
+            commands.filter(
+              (o) =>
+                o.body?.kind === kind &&
+                uuid(o.body.operationId) &&
+                o.body.generation === 1,
+            ).length === 1,
+        ),
+      "Prior command set differs",
+    );
+    const prompt = commands.find((o) => o.body.kind === "prompt");
+    need(
+      prompt.body.text ===
+        "Reply exactly READY. Do not use tools or modify files.",
+      "Prior prompt differs",
+    );
+    need(
+      report.operations.length === 6 &&
+        report.operations.every(
+          (o) =>
+            o.status === "received" &&
+            (commands.includes(o) ||
+              (o.path === "/api/agent-launches" &&
+                o.body?.operationId === launches[0].operationId) ||
+              (o.kind === "lease-acquisition" &&
+                o.path ===
+                  "/api/agent-sessions/" + STOPPED_SESSION + "/control") ||
+              (o.path ===
+                "/api/agent-permissions/" + STOPPED_PERMISSION + "/decision" &&
+                o.body?.outcome?.outcome === "cancelled")),
+        ),
+      "Uncertain or additional prior operations require separate inspection",
+    );
+    return {
+      report,
+      run,
+      first,
+      launch: launches[0],
+      baseline: baseline[0].marker,
+      cleanup,
+      commands,
+      prompt,
+    };
+  }
   function permission(detail, session, generation, expected, kind, now) {
     need(
       detail?.session_id === session &&
@@ -342,6 +463,191 @@
       "Missing unambiguous once-only option",
     );
     return choices[0].optionId;
+  }
+  function communicationPermission(detail, session, generation, now) {
+    need(
+      detail?.session_id === session &&
+        detail.generation === generation &&
+        !detail.rebinding &&
+        detail.state === "pending" &&
+        Date.parse(detail.expires_at) > now,
+      "Permission changed or expired",
+    );
+    const c = detail.context;
+    need(
+      c?.title === "Allow " + COMMUNICATION_TOOL + "?" &&
+        typeof c.toolCallId === "string" &&
+        /^[A-Za-z0-9_.:-]{1,128}$/.test(c.toolCallId) &&
+        typeof c.description === "string" &&
+        new TextEncoder().encode(c.description).length <= 4000,
+      "Unverifiable Relay read permission",
+    );
+    let input;
+    try {
+      input = JSON.parse(c.description);
+    } catch {
+      throw new Error("Full Relay read input unavailable; do not approve");
+    }
+    need(
+      input &&
+        typeof input === "object" &&
+        !Array.isArray(input) &&
+        Object.keys(input).every((k) =>
+          ["channelId", "after", "limit"].includes(k),
+        ) &&
+        (input.channelId === undefined ||
+          input.channelId === COMMUNICATION_CHANNEL) &&
+        (input.limit === undefined ||
+          (Number.isSafeInteger(input.limit) &&
+            input.limit >= 1 &&
+            input.limit <= 50)) &&
+        (input.after === undefined ||
+          (typeof input.after === "string" &&
+            /^(0|[1-9][0-9]{0,18})$/.test(input.after) &&
+            BigInt(input.after) <= 9223372036854775807n)),
+      "Relay read input is outside the approved profile scope",
+    );
+    const choices = c.options?.filter((o) => o.kind === "allow_once");
+    need(
+      choices?.length === 1 &&
+        typeof choices[0].optionId === "string" &&
+        choices[0].optionId.length > 0,
+      "Missing unambiguous once-only option",
+    );
+    return choices[0].optionId;
+  }
+  function communicationToolEvents(
+    events,
+    approvals,
+    markerExpectation = null,
+  ) {
+    // e843 may omit Codex native IDs from its projection. Classify a complete,
+    // strictly sequential stream; this is NOT a permission/native ID or input
+    // join. In-progress precedes policy approval and never proves execution.
+    need(
+      Array.isArray(approvals) && approvals.length <= 1,
+      "Ambiguous Relay read permissions",
+    );
+    if (markerExpectation)
+      need(
+        typeof markerExpectation.command === "string" &&
+          markerExpectation.command.length > 0 &&
+          ["allow_once", "reject_once"].includes(markerExpectation.decision),
+        "Invalid marker expectation",
+      );
+    const classifications = [],
+      seenIds = new Set();
+    let active = null,
+      previousSequence = -1n;
+    for (const row of events) {
+      need(
+        typeof row.sequence === "string" &&
+          /^\d+$/.test(row.sequence) &&
+          BigInt(row.sequence) > previousSequence,
+        "Native tool sequence is incomplete or unordered",
+      );
+      previousSequence = BigInt(row.sequence);
+      const e = row.event;
+      need(
+        e?.kind === "update" &&
+          ["tool_call", "tool_call_update"].includes(e.type) &&
+          ["pending", "in_progress", "completed", "failed"].includes(e.status),
+        "Unexpected native tool activity",
+      );
+      const id = e.toolCallId === undefined ? null : e.toolCallId;
+      need(
+        e.toolCallId === undefined ||
+          (typeof id === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(id)),
+        "Invalid projected native tool ID",
+      );
+      if (e.type === "tool_call") {
+        need(
+          !active &&
+            typeof e.title === "string" &&
+            e.title.length > 0 &&
+            ["pending", "in_progress"].includes(e.status) &&
+            (id === null || !seenIds.has(id)),
+          "Overlapping or repeated native tool start",
+        );
+        if (id !== null) seenIds.add(id);
+        const category =
+          e.title === COMMUNICATION_TOOL ? "communication" : "marker";
+        need(
+          category === "communication" || markerExpectation,
+          "Unexpected native tool category",
+        );
+        need(
+          !classifications.some((c) => c.category === category),
+          "Repeated native tool category",
+        );
+        active = {
+          category,
+          nativeToolId: id,
+          startSequence: row.sequence,
+          status: "pending",
+          fullCommandObserved: false,
+        };
+      } else {
+        need(
+          active && active.nativeToolId === id,
+          "Orphan or inconsistent native tool update",
+        );
+      }
+      need(
+        !(active.status === "in_progress" && e.status === "pending"),
+        "Native tool status regressed",
+      );
+      if (active.category === "communication") {
+        need(
+          e.title === undefined || e.title === COMMUNICATION_TOOL,
+          "Conflicting Relay read title",
+        );
+      } else {
+        const command = markerExpectation.command;
+        if (e.title !== undefined) {
+          need(
+            e.title === command ||
+              (!active.fullCommandObserved &&
+                e.status === "pending" &&
+                typeof e.title === "string" &&
+                e.title.length > 0 &&
+                (e.title === "bash" || command.startsWith(e.title))),
+            "Unexpected marker tool title",
+          );
+          if (e.title === command) active.fullCommandObserved = true;
+        }
+        need(
+          e.status === "pending" || active.fullCommandObserved,
+          "Exact marker command not projected",
+        );
+      }
+      active.status = e.status;
+      if (["completed", "failed"].includes(e.status)) {
+        const expected =
+          active.category === "marker" &&
+          markerExpectation.decision === "reject_once"
+            ? "failed"
+            : "completed";
+        need(e.status === expected, "Unexpected native tool terminal outcome");
+        classifications.push({ ...active, endSequence: row.sequence });
+        active = null;
+      }
+    }
+    need(!active, "Native tool terminal outcome missing");
+    const reads = classifications.filter((c) => c.category === "communication");
+    const markers = classifications.filter((c) => c.category === "marker");
+    need(
+      reads.length === approvals.length &&
+        markers.length === (markerExpectation ? 1 : 0),
+      "Expected native tool classification missing",
+    );
+    return {
+      nativeToolIds: reads
+        .map((c) => c.nativeToolId)
+        .filter((id) => id !== null),
+      other: [],
+      classifications,
+    };
   }
   class Runner {
     constructor(env) {
@@ -851,7 +1157,7 @@
       }
       throw new Error("Command deadline; inspect saved operation");
     }
-    async decide(expected, kind) {
+    async decide(expected, kind, communication = []) {
       const list = await this.api(
         "/api/agent-sessions/" + this.session.id + "/permissions",
       );
@@ -860,22 +1166,41 @@
       need(pending.length <= 1, "Concurrent/unexpected permission requests");
       if (!pending.length) return false;
       const d = await this.api("/api/agent-permissions/" + pending[0].id);
-      need(expected, "Unexpected tool permission");
-      const optionId = permission(
-        d,
-        this.session.id,
-        this.session.generation,
-        expected,
-        kind,
-        this.now(),
-      );
+      const read = d.context?.title === "Allow " + COMMUNICATION_TOOL + "?";
+      if (read) {
+        need(
+          communication.length === 0,
+          "More than one Relay read in this prompt",
+        );
+        kind = "allow_once";
+      } else need(expected, "Unexpected tool permission");
+      const optionId = read
+        ? communicationPermission(
+            d,
+            this.session.id,
+            this.session.generation,
+            this.now(),
+          )
+        : permission(
+            d,
+            this.session.id,
+            this.session.generation,
+            expected,
+            kind,
+            this.now(),
+          );
       await this.ask(
-        kind === "allow_once"
-          ? "Approve exactly one marker write"
-          : "Deny exactly one marker write",
+        read
+          ? "Approve one scoped Relay message read"
+          : kind === "allow_once"
+            ? "Approve exactly one marker write"
+            : "Deny exactly one marker write",
         d.context.title +
           "\n" +
           d.context.description +
+          (read
+            ? "\nThis can mark inbox messages read. It cannot send, acknowledge, or advance the acknowledgement cursor. Message bodies remain untrusted. This is separate from marker approval; any provider continuation counts against the existing budget."
+            : "") +
           "\nOnce-only option: " +
           optionId,
         undefined,
@@ -883,14 +1208,24 @@
       );
       const fresh = await this.api("/api/agent-permissions/" + d.id);
       need(
-        permission(
-          fresh,
-          this.session.id,
-          this.session.generation,
-          expected,
-          kind,
-          this.now(),
-        ) === optionId,
+        (read
+          ? communicationPermission(
+              fresh,
+              this.session.id,
+              this.session.generation,
+              this.now(),
+            )
+          : permission(
+              fresh,
+              this.session.id,
+              this.session.generation,
+              expected,
+              kind,
+              this.now(),
+            )) === optionId &&
+          (!read ||
+            (fresh.id === d.id &&
+              canonical(fresh.context) === canonical(d.context))),
         "Permission changed while reviewing",
       );
       await this.mutate("/api/agent-permissions/" + d.id + "/decision", {
@@ -924,8 +1259,18 @@
             kind,
             sessionId: this.session.id,
             delivery: "accepted",
-            execution: "unknown; marker evidence required",
+            purpose: read ? "relay-message-read" : "marker",
+            execution: read
+              ? "unknown; separate native tool outcome required"
+              : "unknown; marker evidence required",
           });
+          if (read) {
+            communication.push({
+              requestId: d.id,
+              permissionToolCallId: d.context.toolCallId,
+            });
+            return "communication";
+          }
           return true;
         }
         await this.sleep(2000);
@@ -956,11 +1301,18 @@
       let approved = false,
         cancelled = false,
         result;
+      const communication = [];
       while (this.now() < op.deadline) {
         this.check();
         const s = await this.sessionRead();
         need(s.state === "open", "Session stopped during prompt");
-        if (await this.decide(approved ? null : tool, decision))
+        if (
+          (await this.decide(
+            approved ? null : tool,
+            decision,
+            communication,
+          )) === true
+        )
           approved = true;
         const row = await this.operation(op);
         if (cancel && !cancelled && row.state === "accepted") {
@@ -1015,16 +1367,30 @@
           )
           .map((e) => e.event.text || "")
           .join("");
+        let toolsProjected = false;
+        try {
+          communicationToolEvents(
+            added.filter((e) => /tool_call/.test(e.event.type || "")),
+            communication,
+            tool && approved ? { command: tool, decision } : null,
+          );
+          toolsProjected = true;
+        } catch {
+          // Wait only for the existing bounded projection window. The final
+          // validation below still refuses missing or invalid native evidence.
+        }
         if (
-          (expectedText && messages.trim() === expectedText) ||
-          (notice && messages.includes(notice)) ||
-          (backendRefusal && messages.includes(CONFIGURATION_CHANGED_NOTICE)) ||
-          (!expectedText &&
-            !notice &&
-            !backendRefusal &&
-            all.prompts.some(
-              (p) => p.id === op.row.id && p.state === "completed",
-            ))
+          toolsProjected &&
+          ((expectedText && messages.trim() === expectedText) ||
+            (notice && messages.includes(notice)) ||
+            (backendRefusal &&
+              messages.includes(CONFIGURATION_CHANGED_NOTICE)) ||
+            (!expectedText &&
+              !notice &&
+              !backendRefusal &&
+              all.prompts.some(
+                (p) => p.id === op.row.id && p.state === "completed",
+              )))
         )
           break;
         await this.sleep(1000);
@@ -1032,8 +1398,12 @@
       const toolEvents = added.filter((e) =>
         /tool_call/.test(e.event.type || ""),
       );
-      need(tool || toolEvents.length === 0, "Unexpected tool activity");
       if (tool) need(approved, "Expected permission path not exercised");
+      const reads = communicationToolEvents(
+        toolEvents,
+        communication,
+        tool ? { command: tool, decision } : null,
+      );
       if (expectedText)
         need(messages.trim() === expectedText, "Unexpected assistant result");
       if (notice)
@@ -1057,6 +1427,12 @@
         expectedText: expectedText || null,
         expectedNotice: notice || null,
         permissionExercised: approved,
+        communicationReads: communication.length,
+        communicationPermissions: communication,
+        communicationNativeToolIds: reads.nativeToolIds,
+        nativeToolClassifications: reads.classifications,
+        communicationCorrelation:
+          "Ordered native category/outcome and owner permission are separate evidence; ACP does not link their IDs. Missing projected IDs are not inferred.",
         cancelExercised: cancelled,
       });
       return messages;
@@ -1089,7 +1465,9 @@
           );
           if (zero) need(added === 0, "Expected zero recorded attempts");
           need(
-            v.trajectory.totalAttempts - this.run.firstSnapshot.totalAttempts <=
+            (this.run.carriedAttempts || 0) +
+              v.trajectory.totalAttempts -
+              this.run.firstSnapshot.totalAttempts <=
               (this.run.effort ? 6 : 20),
             "Observed generation budget exceeded",
           );
@@ -1193,12 +1571,17 @@
     async phase(provider, effort = false) {
       const p = PROFILES[provider],
         runId = effort ? EFFORT_RUN : p.run;
+      const replacement =
+        provider === "codex" && !effort ? this.state.replacement : null;
       this.run = {
         provider,
         runId,
         effort,
-        prompts: 0,
-        deadline: this.now() + (effort ? 600000 : 900000),
+        prompts: replacement ? 1 : 0,
+        carriedAttempts: replacement ? 2 : 0,
+        deadline: replacement
+          ? replacement.deadline
+          : this.now() + (effort ? 600000 : 900000),
       };
       this.state.runs.push(this.run);
       this.save();
@@ -1242,6 +1625,16 @@
           };
         },
       );
+      if (replacement) {
+        need(
+          pre.trajectory.scope.since >
+            replacement.priorObservation.observedAt &&
+            pre.trajectory.totalAttempts === 0 &&
+            pre.trajectory.rows.length === 0,
+          "Replacement needs a new, empty source-bound observation window",
+        );
+        unchangedBaseline(replacement.marker, pre.marker);
+      }
       this.run.firstSnapshot = pre.trajectory;
       this.run.lastSnapshot = pre.trajectory;
       this.record("pre-launch", {
@@ -1288,7 +1681,7 @@
     }
     async lifecycle() {
       await this.prompt(
-        "Reply exactly READY. Do not use tools or modify files.",
+        "After any required scoped Relay message read, reply exactly READY. Do not use other tools or modify files.",
         { expectedText: "READY" },
       );
       const known = await this.evidence(
@@ -1297,7 +1690,7 @@
       );
       need(known.added >= 1, "Recorder coverage not exercised");
       const prefix =
-        "Request permission to run exactly the following shell command once. Do not run any other command, change the command, retry after denial, or modify any other file. After the decision, report the outcome and stop. COMMAND: ";
+        "After any required scoped Relay message read, request permission to run exactly the following shell command once. Do not run any other command, change the command, retry after denial, or modify any other file. After the decision, report the outcome and stop. COMMAND: ";
       const denied = markerCommand(this.run.provider, this.run.runId, "denied"),
         effects = markerCommand(this.run.provider, this.run.runId, "effects");
       await this.prompt(prefix + denied, {
@@ -1332,19 +1725,19 @@
         true,
       );
       await this.prompt(
-        "Reply exactly BRANCH_OK. Do not use tools, repeat earlier commands, or modify files.",
+        "After any required scoped Relay message read, reply exactly BRANCH_OK. Do not use other tools, repeat earlier commands, or modify files.",
         { expectedText: "BRANCH_OK" },
       );
       await this.evidence("Independent branch completion", "approved");
       await this.prompt("/relay-compact", { notice: "History compacted." });
       await this.evidence("Compaction settled", "approved");
       await this.prompt(
-        "Reply exactly COMPACT_OK. Do not use tools, repeat earlier commands, or modify files.",
+        "After any required scoped Relay message read, reply exactly COMPACT_OK. Do not use other tools, repeat earlier commands, or modify files.",
         { expectedText: "COMPACT_OK" },
       );
       await this.evidence("Compacted history continuation", "approved");
       await this.prompt(
-        "Without using tools or modifying files, count upward from 1, one integer per line, until 500.",
+        "After any required scoped Relay message read, count upward from 1, one integer per line, until 500. Do not use other tools or modify files.",
         { cancel: true },
       );
       await this.evidence("Cancellation settled; no tool effect", "approved");
@@ -1392,7 +1785,7 @@
         );
       }
       await this.prompt(
-        "Reply exactly RECOVERED_OK. Do not use tools, repeat earlier commands, or modify files.",
+        "After any required scoped Relay message read, reply exactly RECOVERED_OK. Do not use other tools, repeat earlier commands, or modify files.",
         { expectedText: "RECOVERED_OK" },
       );
       await this.evidence(
@@ -1403,7 +1796,7 @@
     async effort() {
       await this.setEffort("low");
       await this.prompt(
-        "Reply exactly EFFORT_LOW_OK. Do not use tools, access files or modify anything.",
+        "After any required scoped Relay message read, reply exactly EFFORT_LOW_OK. Do not use other tools, access files or modify anything.",
         { expectedText: "EFFORT_LOW_OK" },
       );
       const low = await this.evidence(
@@ -1413,7 +1806,7 @@
       need(low.added >= 1, "Effort recorder coverage missing");
       await this.setEffort("high");
       await this.prompt(
-        "Reply exactly EFFORT_HIGH_PROBE. Do not use tools, access files or modify anything.",
+        "After any required scoped Relay message read, reply exactly EFFORT_HIGH_PROBE. Do not use other tools, access files or modify anything.",
         { backendRefusal: true },
       );
       await this.evidence(
@@ -1434,7 +1827,7 @@
         true,
       );
       await this.prompt(
-        "Reply exactly EFFORT_HIGH_OK. Do not use tools, access files or modify anything.",
+        "After any required scoped Relay message read, reply exactly EFFORT_HIGH_OK. Do not use other tools, access files or modify anything.",
         { expectedText: "EFFORT_HIGH_OK" },
       );
       await this.evidence("High effort completed on successor branch", null);
@@ -1898,6 +2291,18 @@
             new Set(launches.map((l) => l.id)).size === 5,
           "Expected five recorded phase-A launches for cleanup evidence",
         );
+        if (this.state.predecessor) {
+          const prior = stoppedPredecessor(this.state.predecessor.raw);
+          need(
+            !launches.some(
+              (l) =>
+                l.id === prior.launch.id ||
+                l.sessionId === prior.launch.sessionId,
+            ),
+            "Prior launch reused in replacement",
+          );
+          launches.push(prior.launch);
+        }
         const expected = launches.map((l) => {
           const target = targets.find(
             (t) => PROFILES[t.provider].id === l.profileId,
@@ -2031,23 +2436,175 @@
     start() {
       return this.runExclusive(() => this.startRun());
     }
-    async startRun() {
+    replaceStopped() {
+      return this.runExclusive(() => this.startRun(true));
+    }
+    async replacementPreflight(prior) {
+      const path = "/api/agent-sessions/" + STOPPED_SESSION;
+      const session = await this.api(path),
+        control = await this.api(path + "/control");
+      need(
+        session.id === STOPPED_SESSION &&
+          session.kind === "holder" &&
+          session.connector_id === HOST &&
+          session.generation === 1 &&
+          !session.rebinding &&
+          !session.parent_session_id &&
+          session.state === "closed" &&
+          control.lease === null,
+        "Prior session is not independently closed and released",
+      );
+      const commands = [];
+      for (const op of prior.commands) {
+        const row = await this.operation({ ...op, sessionId: STOPPED_SESSION });
+        need(
+          row.state === "completed" &&
+            (op.body.kind === "prompt"
+              ? ["cancelled", "end_turn"].includes(
+                  row.receipt?.result?.stopReason,
+                )
+              : row.receipt?.result?.cancelSent === true),
+          "Prior command has no settled native outcome",
+        );
+        commands.push({
+          operationId: row.operation_id,
+          commandId: row.id,
+          kind: row.kind,
+          receipt: row.receipt,
+        });
+      }
+      const permission = await this.api(
+        "/api/agent-permissions/" + STOPPED_PERMISSION,
+      );
+      need(
+        permission.id === STOPPED_PERMISSION &&
+          permission.session_id === STOPPED_SESSION &&
+          permission.generation === 1 &&
+          permission.state === "resolved" &&
+          permission.decision?.outcome === "cancelled" &&
+          permission.context?.title === "Allow " + COMMUNICATION_TOOL + "?",
+        "Prior permission outcome is unresolved or changed",
+      );
+      this.check();
+      const boundary = this.collectionBoundary(
+        "Stopped-run replacement review",
+      );
+      const approved = await this.ask(
+        "Assign one bounded replacement for the stopped Codex run",
+        "Download and preserve the original report first. This is a new owner-assigned window, not continuation of its expired deadline. Paste {confirmReplacement:true,reportDownloaded:true,operatorVerified:true,priorReportCanonicalSha256:'" +
+          this.state.predecessor.canonicalSha256 +
+          "',windowStartUtc:ISO,windowEndUtc:ISO,trajectory:FRESH_COMPLETE_CODEX_SNAPSHOT_WITH_ORIGINAL_SINCE,marker:FRESH_BASELINE}. The trajectory is read on source " +
+          ROUTER +
+          " with original since=" +
+          prior.first.scope.since +
+          "; it must contain only the two settled original requests. It does not rewrite the old 4af evidence. Observe after " +
+          new Date(boundary.notBefore).toISOString() +
+          ". Assign at most 15 minutes, ending before credential expiry. The original 1 prompt and 2 attempts remain charged against 12 prompts/20 generations; preserve all marker UUIDs. Any additional work or uncertain state stops here.",
+        (v) => {
+          need(
+            v?.confirmReplacement === true &&
+              v.reportDownloaded === true &&
+              v.operatorVerified === true &&
+              v.priorReportCanonicalSha256 ===
+                this.state.predecessor.canonicalSha256,
+            "Explicit owner replacement and preserved report required",
+          );
+          const start = Date.parse(v.windowStartUtc),
+            end = Date.parse(v.windowEndUtc),
+            now = this.now();
+          need(
+            Number.isFinite(start) &&
+              Number.isFinite(end) &&
+              start <= now &&
+              now - start <= 120000 &&
+              end > now &&
+              end - start <= 900000 &&
+              end <= EXPIRES,
+            "Invalid replacement window; credential expiry and 15-minute cap remain",
+          );
+          const trajectory = snapshot(v.trajectory, "codex"),
+            currentMarker = marker(
+              v.marker,
+              "codex",
+              PROFILES.codex.run,
+              "baseline",
+              now,
+            );
+          this.collectedAfter(boundary, trajectory, currentMarker);
+          need(
+            now - trajectory.observedAt >= -5000 &&
+              now - trajectory.observedAt < 120000 &&
+              canonical(trajectory.scope) === canonical(prior.first.scope) &&
+              trajectory.rows.length === 2 &&
+              trajectory.totalAttempts === 2 &&
+              trajectory.rows.every(
+                (r) =>
+                  r.attempts === 1 &&
+                  r.startedAt > prior.first.observedAt &&
+                  r.endedAt <= Date.parse(prior.cleanup.at) + CLOCK_SKEW_MS,
+              ) &&
+              trajectory.rows.some(
+                (r) => r.id.startsWith("338869f5-") && r.status === "complete",
+              ) &&
+              trajectory.rows.some(
+                (r) => r.id.startsWith("811cab9f-") && r.status === "cancelled",
+              ),
+            "Prior attempt accounting differs; no new launch",
+          );
+          unchangedBaseline(prior.baseline, currentMarker);
+          return {
+            start,
+            deadline: end,
+            carriedPrompts: 1,
+            carriedAttempts: 2,
+            priorObservation: trajectory,
+            marker: currentMarker,
+            originalDeadline: prior.run.deadline,
+            operatorVerified: true,
+          };
+        },
+      );
+      this.state.replacement = approved;
+      this.record("replacement-authorization", {
+        priorSessionId: STOPPED_SESSION,
+        commands,
+        permissionId: STOPPED_PERMISSION,
+        ...approved,
+        sourceBoundary: {
+          predecessor: STOPPED_SOURCE,
+          successor: ROUTER,
+          note: "Old report retained; historical rows observed on successor, then a separate empty successor baseline. No cross-source delta.",
+        },
+      });
+    }
+    async startRun(replacement = false) {
       need(
         this.env.origin === ORIGIN,
         "Run only in the owner session at " + ORIGIN,
       );
-      need(
-        !this.env.load(),
-        "A saved run already exists. Export/inspect it; never restart uncertain effects",
-      );
+      const raw = this.env.load();
+      const prior = replacement ? stoppedPredecessor(raw) : null;
+      if (!replacement)
+        need(
+          !raw,
+          "A saved run already exists. Export/inspect it; never restart uncertain effects",
+        );
       need(
         QUALIFIED_INPUTS,
         "Await the qualified patch release and reviewed successor inputs; this draft cannot launch",
       );
       this.check();
+      if (prior)
+        this.state.predecessor = {
+          raw,
+          canonicalSha256: await digest(this.crypto, prior.report),
+          source: STOPPED_SOURCE,
+          sessionId: STOPPED_SESSION,
+        };
       this.state.status = "running";
       this.save();
       try {
+        if (prior) await this.replacementPreflight(prior);
         const handoff = await this.ask(
           "Fresh patched-holder handoff",
           "Paste {holderId:UUID,journalId:UUID,nativeRecovery:2,nativeStateReady:true,qualifiedRelease:'v0.13.1',profilesSha256:OBSERVED_PROFILE_FILE_SHA256,holderBinarySha256:OBSERVED_INSTALLED_BINARY_SHA256,operatorVerified:true}. Use the current operator readback after stopped upgrade and explicit seal release, not copied expected hashes. The journal ID may survive while incarnation changes.",
@@ -2147,6 +2704,7 @@
     input.placeholder = "Paste requested nonsecret JSON evidence here";
     const proceed = element("button", "Confirm current checkpoint"),
       start = element("button", "Start phase A"),
+      replace = element("button", "Review stopped-run replacement"),
       stop = element("button", "Stop and clean up"),
       revoke = element("button", "Review final grant revocation"),
       download = element("button", "Download sanitized report");
@@ -2205,10 +2763,11 @@
       }
     };
     let heartbeat;
-    start.onclick = async () => {
+    const runAction = async (action) => {
       if (active) return;
       active = true;
       start.disabled = true;
+      replace.disabled = true;
       heartbeat = win.setInterval(() => {
         runner.renew().catch(() => {
           runner.stopped = true;
@@ -2216,7 +2775,7 @@
         });
       }, 20000);
       try {
-        await runner.start();
+        await action();
         status.textContent =
           "Phase A passed. Download report; Claude/warm/final cleanup remain.";
         revoke.disabled = false;
@@ -2230,6 +2789,8 @@
         active = false;
       }
     };
+    start.onclick = () => runAction(() => runner.start());
+    replace.onclick = () => runAction(() => runner.replaceStopped());
     stop.onclick = async () => {
       await runner.stop();
       status.textContent = "Stopped; inspect cleanup in report.";
@@ -2275,8 +2836,22 @@
       status.textContent =
         "Saved run exists: export and inspect it. Automatic replay is disabled.";
     }
+    // This successor packet covers the known stopped run. A blank browser store
+    // is not permission to reset its used prompts, generations or marker UUIDs.
+    start.disabled = true;
+    replace.disabled = true;
+    try {
+      stoppedPredecessor(read());
+      replace.disabled = !QUALIFIED_INPUTS;
+      status.textContent =
+        "Known stopped run retained. Download it, then explicitly review a bounded replacement; no automatic replay.";
+    } catch {
+      status.textContent =
+        "Original known stopped report required in this owner browser. Preserve storage and inspect the downloaded report; do not start a fresh run.";
+    }
     if (!QUALIFIED_INPUTS) {
       start.disabled = true;
+      replace.disabled = true;
       status.textContent =
         "Draft held: qualified patch artifacts and successor profile inputs are not installed in this packet. No launch permitted.";
     }
@@ -2299,7 +2874,14 @@
     snapshot,
     delta,
     completed,
+    stoppedPredecessor,
+    STOPPED_SOURCE,
+    STOPPED_SESSION,
+    STOPPED_PERMISSION,
     permission,
+    communicationPermission,
+    communicationToolEvents,
+    COMMUNICATION_CHANNEL,
     mount,
   };
 });

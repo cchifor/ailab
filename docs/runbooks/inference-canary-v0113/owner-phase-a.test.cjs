@@ -166,6 +166,423 @@ function trajectoryRow(attempts = 1) {
   };
 }
 
+// Synthetic evidence of the one eligible stopped run; never reads an owner report.
+function stoppedReport() {
+  const first = { ...trajectory(NOW - 100), source: a.STOPPED_SOURCE };
+  const path = "/api/agent-sessions/" + a.STOPPED_SESSION;
+  const launch = {
+    kind: "launch",
+    at: date(NOW - 80),
+    id: REQUEST,
+    operationId: OP,
+    sessionId: a.STOPPED_SESSION,
+    profileId: p.id,
+    revision: 1,
+    journalId: a.HOLDER,
+    holderId: OTHER,
+    recovery: false,
+  };
+  return {
+    version: 1,
+    relay: a.SOURCE,
+    router: a.STOPPED_SOURCE,
+    status: "stopped",
+    reason: "Unexpected tool permission",
+    completed: false,
+    runs: [
+      {
+        provider: "codex",
+        runId: p.run,
+        effort: false,
+        prompts: 1,
+        deadline: NOW - 1,
+        firstSnapshot: first,
+        lastSnapshot: clone(first),
+      },
+    ],
+    evidence: [
+      launch,
+      { kind: "pre-launch", marker: marker() },
+      { kind: "cleanup", status: "closed-and-released", at: date(NOW) },
+    ],
+    operations: [
+      {
+        status: "received",
+        path: "/api/agent-launches",
+        body: { operationId: OP },
+      },
+      {
+        status: "received",
+        kind: "lease-acquisition",
+        path: path + "/control",
+      },
+      {
+        status: "received",
+        path: "/api/agent-permissions/" + a.STOPPED_PERMISSION + "/decision",
+        body: { outcome: { outcome: "cancelled" } },
+      },
+      ...["prompt", "cancel", "close"].map((kind, i) => ({
+        status: "received",
+        path: path + "/commands",
+        body: {
+          kind,
+          generation: 1,
+          operationId: [SID, OTHER, LEASE][i],
+          ...(kind === "prompt"
+            ? { text: "Reply exactly READY. Do not use tools or modify files." }
+            : {}),
+        },
+      })),
+    ],
+  };
+}
+
+test("replacement accepts only the known stopped workload, never uncertain or extra work", () => {
+  const report = stoppedReport();
+  assert.equal(a.stoppedPredecessor(JSON.stringify(report)).run.prompts, 1);
+  for (const mutate of [
+    (r) => {
+      r.router = a.ROUTER;
+    },
+    (r) => {
+      r.reason = "Network error";
+    },
+    (r) => {
+      r.completed = true;
+    },
+    (r) => {
+      r.predecessor = {};
+    },
+    (r) => {
+      r.runs.push(clone(r.runs[0]));
+    },
+    (r) => {
+      r.runs[0].prompts = 2;
+    },
+    (r) => {
+      r.operations[0].status = "unknown";
+    },
+    (r) => {
+      r.operations.push(clone(r.operations[0]));
+    },
+    (r) => {
+      r.operations[3].body.text += " Again.";
+    },
+    (r) => {
+      r.evidence[0].sessionId = SID;
+    },
+    (r) => {
+      r.evidence[2].status = "uncertain";
+    },
+    (r) => {
+      r.evidence.push({ kind: "permission" });
+    },
+  ]) {
+    const changed = clone(report);
+    mutate(changed);
+    assert.throws(() => a.stoppedPredecessor(JSON.stringify(changed)));
+  }
+});
+
+async function replacementHarness({ drift, approval } = {}) {
+  const raw = JSON.stringify(stoppedReport(), null, 2);
+  const prior = a.stoppedPredecessor(raw);
+  const h = harness((c) => {
+    assert.equal(
+      c.method,
+      "GET",
+      "Replacement preflight must not dispatch work",
+    );
+    let value;
+    if (c.path.endsWith("/control")) value = { lease: null };
+    else if (c.path.includes("/operations/")) {
+      const op = prior.commands.find((o) =>
+        c.path.endsWith(o.body.operationId),
+      );
+      assert(op);
+      value = {
+        command: {
+          id: OP,
+          operation_id: op.body.operationId,
+          session_id: a.STOPPED_SESSION,
+          kind: op.body.kind,
+          generation: 1,
+          state: "completed",
+          receipt: {
+            status: "completed",
+            result:
+              op.body.kind === "prompt"
+                ? { stopReason: "end_turn" }
+                : { cancelSent: true },
+          },
+        },
+      };
+    } else if (c.path.startsWith("/api/agent-permissions/"))
+      value = {
+        id: a.STOPPED_PERMISSION,
+        session_id: a.STOPPED_SESSION,
+        generation: 1,
+        state: "resolved",
+        decision: { outcome: "cancelled" },
+        context: { title: "Allow mcp__relay__relay_messages_read?" },
+      };
+    else value = session({ id: a.STOPPED_SESSION, state: "closed" });
+    if (drift) drift(value, c);
+    return value;
+  });
+  h.runner.state.predecessor = {
+    raw,
+    canonicalSha256: await a.digest(webcrypto, prior.report),
+    source: a.STOPPED_SOURCE,
+    sessionId: a.STOPPED_SESSION,
+  };
+  h.runner.env.ask = async (_title, _text, validate) => {
+    h.advance(6000);
+    const rows = ["338869f5-complete", "811cab9f-cancelled"].map((id, i) => ({
+      ...trajectoryRow(),
+      id,
+      status: i ? "cancelled" : "complete",
+      startedAt: NOW - 50 + i,
+      endedAt: NOW - 20 + i,
+    }));
+    const value = {
+      confirmReplacement: true,
+      reportDownloaded: true,
+      operatorVerified: true,
+      priorReportCanonicalSha256: h.runner.state.predecessor.canonicalSha256,
+      windowStartUtc: date(h.runner.now()),
+      windowEndUtc: date(h.runner.now() + 900000),
+      trajectory: trajectory(h.runner.now(), rows),
+      marker: { ...marker(), observedUtc: date(h.runner.now()) },
+    };
+    if (approval) approval(value);
+    return validate(value);
+  };
+  return { ...h, raw, prior };
+}
+
+test("replacement preflight independently settles the predecessor using GETs and carries its budget", async () => {
+  const h = await replacementHarness();
+  await h.runner.replacementPreflight(h.prior);
+  assert.equal(h.calls.length, 6);
+  assert(h.calls.every((c) => c.method === "GET"));
+  assert.equal(h.runner.state.predecessor.raw, h.raw);
+  assert.equal(
+    h.runner.state.predecessor.canonicalSha256,
+    await a.digest(webcrypto, h.prior.report),
+  );
+  const replacement = h.runner.state.replacement;
+  assert.equal(replacement.carriedPrompts, 1);
+  assert.equal(replacement.carriedAttempts, 2);
+  assert.equal(replacement.originalDeadline, NOW - 1);
+  assert.equal(replacement.deadline - replacement.start, 900000);
+  assert.equal(replacement.priorObservation.source, a.ROUTER);
+  assert.equal(h.prior.first.source, a.STOPPED_SOURCE);
+  assert.deepEqual(replacement.priorObservation.scope, h.prior.first.scope);
+});
+
+test("replacement declines or changed closure/receipts/permission never dispatch a new launch", async () => {
+  const options = [
+    {
+      approval: (v) => {
+        v.confirmReplacement = false;
+      },
+    },
+    {
+      approval: (v) => {
+        v.priorReportCanonicalSha256 = "0".repeat(64);
+      },
+    },
+    {
+      approval: (v) => {
+        v.windowEndUtc = date(NOW + 906001);
+      },
+    },
+    {
+      approval: (v) => {
+        v.trajectory.scope.since++;
+      },
+    },
+    {
+      approval: (v) => {
+        v.trajectory.rows[0].attempts++;
+        v.trajectory.totalAttempts++;
+      },
+    },
+    {
+      approval: (v) => {
+        v.trajectory.rows[0].id = "unrecognized";
+      },
+    },
+    {
+      approval: (v) => {
+        v.marker.files.denied = { state: "present" };
+      },
+    },
+    {
+      drift: (v, c) => {
+        if (c.path.endsWith(a.STOPPED_SESSION)) v.state = "open";
+      },
+    },
+    {
+      drift: (v, c) => {
+        if (c.path.endsWith("/control")) v.lease = { id: LEASE };
+      },
+    },
+    {
+      drift: (v) => {
+        if (v.command) v.command.state = "accepted";
+      },
+    },
+    {
+      drift: (v) => {
+        if (v.command) v.command.generation = 2;
+      },
+    },
+    {
+      drift: (v) => {
+        if (v.decision) v.decision.outcome = "selected";
+      },
+    },
+  ];
+  for (const option of options) {
+    const h = await replacementHarness(option);
+    await assert.rejects(h.runner.replacementPreflight(h.prior));
+    assert(h.calls.every((c) => c.method === "GET"));
+    assert.equal(h.runner.state.replacement, undefined);
+    assert.equal(h.runner.state.predecessor.raw, h.raw);
+  }
+});
+
+test("replacement entry point preserves the exact raw predecessor even when owner declines", async () => {
+  const h = await replacementHarness({
+    approval: (v) => {
+      v.confirmReplacement = false;
+    },
+  });
+  h.runner.env.load = () => h.raw;
+  // Exercise the actual wrapper, not merely a pre-populated predecessor state.
+  delete h.runner.state.predecessor;
+  await assert.rejects(h.runner.replaceStopped(), /Explicit owner replacement/);
+  assert.equal(h.runner.state.predecessor.raw, h.raw);
+  assert.equal(
+    h.runner.state.predecessor.canonicalSha256,
+    await a.digest(webcrypto, JSON.parse(h.raw)),
+  );
+  assert.equal(h.runner.state.completed, false);
+  assert.equal(h.runner.state.status, "stopped");
+  assert(h.calls.every((c) => c.method === "GET"));
+  assert(h.saves.every((s) => s.predecessor.raw === h.raw));
+});
+
+test("replacement lifecycle retains one prior prompt and two attempts within the unchanged caps", async () => {
+  const f = phaseServer();
+  f.runner.state.replacement = {
+    deadline: NOW + 900000,
+    carriedPrompts: 1,
+    carriedAttempts: 2,
+    priorObservation: trajectory(NOW - 10000),
+    marker: marker(),
+  };
+  await f.runner.phase("codex");
+  const run = f.runner.state.runs[0];
+  assert.equal(run.prompts, 12);
+  assert.equal(run.carriedAttempts, 2);
+  assert.equal(run.deadline, NOW + 900000);
+  assert.equal(
+    f.calls.filter((c) => c.method === "POST" && c.body?.kind === "prompt")
+      .length,
+    11,
+  );
+  assert.equal(run.firstSnapshot.totalAttempts, 0);
+  assert(
+    run.firstSnapshot.scope.since >
+      f.runner.state.replacement.priorObservation.observedAt,
+  );
+  assert(run.lastSnapshot.totalAttempts + run.carriedAttempts <= 20);
+  assert.equal(f.effects.get(p.run), 1);
+});
+
+test("replacement final cleanup requires the old sixth launch as well as the five new launches", async () => {
+  const report = stoppedReport();
+  const h = finalRevocationServer({ predecessor: report });
+  await h.runner.revokeFinal();
+  assert.equal(h.runner.state.finalRevocation.status, "confirmed");
+  const missing = finalRevocationServer({
+    predecessor: report,
+    omitPredecessorCleanup: true,
+  });
+  await assert.rejects(missing.runner.revokeFinal());
+  assert.notEqual(missing.runner.state.finalRevocation.status, "confirmed");
+});
+
+test("mount never dispatches or writes storage and enables replacement only for the known stopped report", () => {
+  for (const [raw, eligible] of [
+    [null, false],
+    ["{invalid", false],
+    [JSON.stringify({ version: 1, status: "stopped" }), false],
+    [JSON.stringify(stoppedReport()), true],
+  ]) {
+    const nodes = [],
+      calls = [],
+      writes = [];
+    const createElement = (tag) => {
+      const node = {
+        tagName: tag,
+        style: {},
+        children: [],
+        disabled: false,
+        appendChild(child) {
+          this.children.push(child);
+        },
+      };
+      nodes.push(node);
+      return node;
+    };
+    const body = createElement("body");
+    a.mount({
+      location: { origin: a.ORIGIN },
+      crypto: webcrypto,
+      document: { createElement, body, getElementById: () => null },
+      localStorage: {
+        getItem: () => raw,
+        setItem: (...args) => writes.push(args),
+        removeItem: (...args) => writes.push(args),
+        clear: () => writes.push(["clear"]),
+      },
+      fetch: (...args) => {
+        calls.push(args);
+        throw Error("Mount dispatched a request");
+      },
+      setTimeout: () => {
+        throw Error("Mount started a checkpoint timer");
+      },
+      setInterval: () => {
+        throw Error("Mount started a heartbeat");
+      },
+      addEventListener: (name, listener) => {
+        assert.equal(name, "beforeunload");
+        assert.equal(typeof listener, "function");
+      },
+    });
+    const button = (text) => {
+      const matches = nodes.filter(
+        (n) => n.tagName === "button" && n.textContent === text,
+      );
+      assert.equal(matches.length, 1);
+      return matches[0];
+    };
+    assert.equal(button("Start phase A").disabled, true);
+    assert.equal(button("Review stopped-run replacement").disabled, !eligible);
+    assert.equal(button("Confirm current checkpoint").disabled, true);
+    assert.equal(button("Review final grant revocation").disabled, true);
+    assert.equal(body.children.length, 1);
+    assert.equal(body.children[0].id, "relay-pi-acceptance-panel");
+    assert.deepEqual(calls, []);
+    assert.deepEqual(writes, []);
+  }
+});
+
 test("requiring the browser script does not dispatch work", () => {
   const h = harness();
   assert.equal(h.calls.length, 0);
@@ -480,6 +897,307 @@ test("once-only permission validates exact input, expiry, options and identity",
     assert.throws(() => a.permission(d, SID, 1, command, "allow_once", NOW));
   }
 });
+function communicationDetail(input = {}) {
+  const d = detail();
+  d.context.title = "Allow mcp__relay__relay_messages_read?";
+  d.context.description = JSON.stringify(input);
+  return d;
+}
+
+test("communication read permission accepts only reviewed inbox/channel cursor shapes and owner-once option", () => {
+  const definitions = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "launch-definitions.json"), "utf8"),
+  );
+  assert.equal(a.COMMUNICATION_CHANNEL, "b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1");
+  for (const definition of definitions)
+    assert(
+      definition.session.communication.channels.includes(
+        a.COMMUNICATION_CHANNEL,
+      ),
+    );
+  for (const input of [
+    {},
+    { limit: 1 },
+    { limit: 50 },
+    { after: "0" },
+    { after: "9223372036854775807" },
+    { channelId: a.COMMUNICATION_CHANNEL },
+    { channelId: a.COMMUNICATION_CHANNEL, after: "10", limit: 5 },
+  ]) {
+    const d = communicationDetail(input);
+    assert.equal(a.communicationPermission(d, SID, 1, NOW), "yes");
+    // Validation cannot authorize marker writes. A read may update read_at;
+    // this contract does not authorize acknowledgement, send or write tools.
+    assert.throws(() => a.permission(d, SID, 1, command, "allow_once", NOW));
+  }
+  const boundary = communicationDetail();
+  boundary.context.toolCallId = "a".repeat(128);
+  assert.equal(a.communicationPermission(boundary, SID, 1, NOW), "yes");
+});
+
+test("communication read permission refuses malformed, broader or ambiguous requests", () => {
+  for (const input of [
+    null,
+    [],
+    "read",
+    { command },
+    { channelId: OTHER },
+    { channelId: null },
+    { channelId: "not-a-uuid" },
+    { after: "-1" },
+    { after: "01" },
+    { after: "+1" },
+    { after: "1.0" },
+    { after: " 1" },
+    { after: "9223372036854775808" },
+    { after: "99999999999999999999" },
+    { after: 1 },
+    { after: null },
+    { limit: 0 },
+    { limit: 51 },
+    { limit: 1.5 },
+    { limit: "1" },
+    { limit: null },
+    { limit: true },
+    { limit: 1, acknowledge: true },
+  ]) {
+    assert.throws(
+      () => a.communicationPermission(communicationDetail(input), SID, 1, NOW),
+      undefined,
+      JSON.stringify(input),
+    );
+  }
+  const mutations = [
+    (d) => {
+      d.context.title = "Allow mcp__relay__relay_messages_ack?";
+    },
+    (d) => {
+      d.context.title = "Allow mcp__relay__relay_messages_send?";
+    },
+    (d) => {
+      d.context.title = "Allow bash?";
+    },
+    (d) => {
+      d.context.description = "";
+    },
+    (d) => {
+      d.context.description = "{";
+    },
+    (d) => {
+      d.context.description = " ".repeat(4000) + "{}";
+    },
+    // Oversized UTF-8 input is also outside the exact reviewed channel schema.
+    (d) => {
+      d.context.description = JSON.stringify({ channelId: "é".repeat(2100) });
+    },
+    (d) => {
+      d.context.toolCallId = "";
+    },
+    (d) => {
+      d.context.toolCallId = "a".repeat(129);
+    },
+    (d) => {
+      d.context.toolCallId = "unsafe id";
+    },
+    (d) => {
+      delete d.context.toolCallId;
+    },
+    (d) => {
+      d.context.options[0].kind = "allow_always";
+    },
+    (d) => {
+      d.context.options.push(clone(d.context.options[0]));
+    },
+    (d) => {
+      d.context.options[0].optionId = null;
+    },
+    (d) => {
+      d.session_id = OTHER;
+    },
+    (d) => {
+      d.generation = 2;
+    },
+    (d) => {
+      d.rebinding = true;
+    },
+    (d) => {
+      d.state = "resolved";
+    },
+    (d) => {
+      d.expires_at = date(NOW);
+    },
+    (d) => {
+      d.expires_at = "invalid";
+    },
+  ];
+  for (const mutate of mutations) {
+    const d = communicationDetail();
+    mutate(d);
+    assert.throws(() => a.communicationPermission(d, SID, 1, NOW));
+  }
+});
+
+test("owner-once communication read waits for accepted delivery and never returns marker approval", async () => {
+  for (const outcome of ["accepted", "unknown"]) {
+    let posted = false,
+      polls = 0,
+      asks = 0;
+    const communication = [];
+    const h = harness((c) => {
+      if (c.path.endsWith("/permissions"))
+        return [{ id: REQUEST, state: "pending" }];
+      if (c.method === "POST") {
+        posted = true;
+        assert.equal(c.path, "/api/agent-permissions/" + REQUEST + "/decision");
+        assert.deepEqual(c.body.outcome, {
+          outcome: "selected",
+          optionId: "yes",
+        });
+        assert.equal(c.body.generation, 1);
+        return {
+          commandId: OP,
+          requestId: REQUEST,
+          delivery: "pending",
+          execution: "unknown",
+        };
+      }
+      const d = communicationDetail({ limit: 1 });
+      if (!posted) return d;
+      if (++polls === 1) return { ...d, state: "decided", delivery: "offered" };
+      return {
+        ...d,
+        state: outcome === "accepted" ? "resolved" : "decided",
+        delivery: outcome,
+        decision: { outcome: "selected", optionId: "yes" },
+      };
+    });
+    h.runner.session = session();
+    h.runner.env.ask = async (title, text, validate) => {
+      asks++;
+      assert.equal(title, "Approve one scoped Relay message read");
+      assert.match(text, /mark inbox messages read/);
+      assert.match(text, /cannot send, acknowledge/);
+      return validate(true);
+    };
+    if (outcome === "accepted") {
+      assert.equal(
+        await h.runner.decide(undefined, undefined, communication),
+        "communication",
+      );
+      assert.equal(communication.length, 1);
+      assert.equal(communication[0].permissionToolCallId, "pi-ui-fixed");
+      assert.equal(
+        h.runner.state.evidence.at(-1).purpose,
+        "relay-message-read",
+      );
+      assert.match(h.runner.state.evidence.at(-1).execution, /unknown/);
+    } else {
+      await assert.rejects(
+        h.runner.decide(undefined, undefined, communication),
+        /delivery failed\/uncertain/,
+      );
+      assert.equal(communication.length, 0);
+      assert.equal(h.runner.state.evidence.length, 0);
+    }
+    assert.equal(asks, 1);
+    assert.equal(polls, 2);
+    assert.equal(h.calls.filter((c) => c.method === "POST").length, 1);
+  }
+});
+
+test("communication permission changes during owner review cause zero decision POSTs", async () => {
+  for (const change of [
+    (d) => {
+      d.context.description = JSON.stringify({ limit: 2 });
+    },
+    (d) => {
+      d.context.toolCallId = "pi-ui-other";
+    },
+    (d) => {
+      d.context.options[0].name = "Changed label";
+    },
+    (d) => {
+      d.id = OTHER;
+    },
+    (d) => {
+      d.generation = 2;
+    },
+    (d) => {
+      d.expires_at = date(NOW);
+    },
+  ]) {
+    let reviewed = false;
+    const h = harness((c) => {
+      if (c.path.endsWith("/permissions"))
+        return [{ id: REQUEST, state: "pending" }];
+      const d = communicationDetail({ limit: 1 });
+      if (reviewed) change(d);
+      return d;
+    });
+    h.runner.session = session();
+    h.runner.env.ask = async (_title, _text, validate) => {
+      reviewed = true;
+      return validate(true);
+    };
+    await assert.rejects(h.runner.decide(undefined, undefined, []));
+    assert.equal(reviewed, true);
+    assert(h.calls.every((c) => c.method === "GET"));
+  }
+});
+
+test("second communication read in one prompt refuses before asking or posting", async () => {
+  const h = harness((c) =>
+    c.path.endsWith("/permissions")
+      ? [{ id: REQUEST, state: "pending" }]
+      : communicationDetail(),
+  );
+  h.runner.session = session();
+  h.runner.env.ask = async () => {
+    throw Error("Must not ask again");
+  };
+  await assert.rejects(
+    h.runner.decide(undefined, undefined, [{ requestId: OTHER }]),
+    /More than one Relay read/,
+  );
+  assert(h.calls.every((c) => c.method === "GET"));
+});
+
+test("recorded communication permission does not consume the separate marker deny decision", async () => {
+  let submitted = false;
+  const communication = [
+    { requestId: OTHER, permissionToolCallId: "pi-ui-read" },
+  ];
+  const h = harness((c) => {
+    if (c.path.endsWith("/permissions"))
+      return [{ id: REQUEST, state: "pending" }];
+    if (c.method === "POST") {
+      submitted = true;
+      assert.deepEqual(c.body.outcome, { outcome: "selected", optionId: "no" });
+      return {
+        commandId: OP,
+        requestId: REQUEST,
+        delivery: "pending",
+        execution: "unknown",
+      };
+    }
+    return submitted
+      ? detail({
+          state: "resolved",
+          delivery: "accepted",
+          decision: { outcome: "selected", optionId: "no" },
+        })
+      : detail();
+  });
+  h.runner.session = session();
+  assert.equal(
+    await h.runner.decide(command, "reject_once", communication),
+    true,
+  );
+  assert.equal(communication.length, 1);
+  assert.equal(h.runner.state.evidence.at(-1).purpose, "marker");
+  assert.equal(h.runner.state.evidence.at(-1).kind, "reject_once");
+});
+
 test("permission changes during owner review do not dispatch a decision", async () => {
   let reads = 0,
     asked = 0;
@@ -779,6 +1497,389 @@ test("bounded prompt requires actual terminal receipt and exact new assistant te
     assert.equal(h.runner.run.prompts, 1);
   }
 });
+function nativeReadEvents() {
+  return [
+    {
+      sequence: "1",
+      event: {
+        kind: "update",
+        type: "tool_call",
+        toolCallId: "native-read-1",
+        title: "mcp__relay__relay_messages_read",
+        status: "pending",
+      },
+    },
+    {
+      sequence: "2",
+      event: {
+        kind: "update",
+        type: "tool_call_update",
+        toolCallId: "native-read-1",
+        status: "in_progress",
+      },
+    },
+    {
+      sequence: "3",
+      event: {
+        kind: "update",
+        type: "tool_call_update",
+        toolCallId: "native-read-1",
+        status: "completed",
+      },
+    },
+  ];
+}
+
+test("native communication classification keeps permission UI identity separate and rejects ambiguous outcomes", () => {
+  const approvals = [
+    { requestId: REQUEST, permissionToolCallId: "pi-ui-fixed" },
+  ];
+  assert.deepEqual(
+    a.communicationToolEvents(nativeReadEvents(), approvals).nativeToolIds,
+    ["native-read-1"],
+  );
+  for (const mutate of [
+    (e) => e.splice(0),
+    (e) => e.pop(),
+    (e) => {
+      e[2].event.status = "failed";
+    },
+    (e) => {
+      e[2].event.title = "bash";
+    },
+    (e) => {
+      e[2].event.toolCallId = "unrelated";
+    },
+    (e) => {
+      e[0].event.toolCallId = "bad id";
+    },
+    (e) => e.push({ ...clone(e[0]), sequence: "4" }),
+    (e) =>
+      e.push({
+        sequence: "4",
+        event: {
+          kind: "update",
+          type: "tool_call_update",
+          toolCallId: "native-read-1",
+          status: "pending",
+        },
+      }),
+  ]) {
+    const events = nativeReadEvents();
+    mutate(events);
+    assert.throws(() => a.communicationToolEvents(events, approvals));
+  }
+  assert.throws(() => a.communicationToolEvents(nativeReadEvents(), []));
+  const extra = {
+    sequence: "4",
+    event: {
+      kind: "update",
+      type: "tool_call",
+      toolCallId: "other-tool",
+      title: "bash",
+      status: "completed",
+    },
+  };
+  assert.throws(() =>
+    a.communicationToolEvents([...nativeReadEvents(), extra], approvals),
+  );
+});
+
+function projectedCodexReadEvents() {
+  // Actual Codex IDs can contain '|'; pinned e843 omits those IDs from projection.
+  // Model that omission, not a client-side regex expansion or fabricated UI-ID link.
+  return nativeReadEvents().map(({ event, ...row }) => {
+    const { toolCallId, ...projected } = event;
+    return { ...row, event: projected };
+  });
+}
+
+test("single-active native read classification permits consistently absent projected Codex IDs", () => {
+  const approvals = [
+    { requestId: REQUEST, permissionToolCallId: "pi-ui-fixed" },
+  ];
+  const result = a.communicationToolEvents(
+    projectedCodexReadEvents(),
+    approvals,
+  );
+  assert.deepEqual(result.nativeToolIds, []);
+  for (const mutate of [
+    (e) => {
+      e[1].event.toolCallId = "late-present-id";
+    },
+    (e) => e.unshift(clone(e[1])),
+    (e) => e.splice(1, 0, clone(e[0])),
+    (e) => {
+      e[1].event.title = "unknown_tool";
+    },
+    (e) => {
+      e[2].event.status = "failed";
+    },
+  ]) {
+    const events = projectedCodexReadEvents();
+    mutate(events);
+    assert.throws(() => a.communicationToolEvents(events, approvals));
+  }
+  const mixed = nativeReadEvents();
+  delete mixed[1].event.toolCallId;
+  assert.throws(() => a.communicationToolEvents(mixed, approvals));
+});
+
+test("ordered marker classification requires exact command and decision-specific native terminal state", () => {
+  const events = [
+    {
+      sequence: "1",
+      event: {
+        kind: "update",
+        type: "tool_call",
+        title: "bash",
+        status: "pending",
+      },
+    },
+    {
+      sequence: "2",
+      event: {
+        kind: "update",
+        type: "tool_call_update",
+        title: command,
+        status: "in_progress",
+      },
+    },
+    {
+      sequence: "3",
+      event: {
+        kind: "update",
+        type: "tool_call_update",
+        title: command,
+        status: "completed",
+      },
+    },
+  ];
+  assert.doesNotThrow(() =>
+    a.communicationToolEvents(events, [], { command, decision: "allow_once" }),
+  );
+  assert.throws(() =>
+    a.communicationToolEvents(events, [], { command, decision: "reject_once" }),
+  );
+  const denied = clone(events);
+  denied[2].event.status = "failed";
+  assert.doesNotThrow(() =>
+    a.communicationToolEvents(denied, [], { command, decision: "reject_once" }),
+  );
+  for (const mutate of [
+    (e) => {
+      e[1].event.title = command + "; unexpected";
+    },
+    (e) => {
+      e[1].event.title = "bash";
+      e[2].event.title = "bash";
+    },
+    (e) =>
+      e.unshift({ event: { type: "tool_call_update", status: "pending" } }),
+    (e) => e.splice(1, 0, clone(e[0])),
+    (e) => e.push(...clone(e)),
+  ]) {
+    const changed = clone(events);
+    mutate(changed);
+    assert.throws(() =>
+      a.communicationToolEvents(changed, [], {
+        command,
+        decision: "allow_once",
+      }),
+    );
+  }
+});
+
+function readyWithCommunication(events, delayedCompletionPolls = 0) {
+  let posted,
+    timelines = 0,
+    decided = false;
+  const h = harness((c) => {
+    if (c.path.includes("/timeline?"))
+      return {
+        sessionId: SID,
+        generation: 1,
+        text: true,
+        events: timelines++
+          ? [
+              ...(timelines <= delayedCompletionPolls + 1
+                ? events.filter((e) => e.event.status !== "completed")
+                : events),
+              {
+                sequence: "10",
+                event: {
+                  kind: "update",
+                  type: "agent_message_chunk",
+                  text: "READY",
+                },
+              },
+            ]
+          : [],
+        prompts: posted ? [{ id: OP, state: "completed" }] : [],
+        nextAfter: null,
+        nextPromptsAfter: null,
+      };
+    if (c.path.endsWith("/permissions"))
+      return decided ? [] : [{ id: REQUEST, state: "pending" }];
+    if (c.path.endsWith("/decision")) {
+      decided = true;
+      assert.deepEqual(c.body.outcome, {
+        outcome: "selected",
+        optionId: "yes",
+      });
+      return {
+        commandId: OTHER,
+        requestId: REQUEST,
+        delivery: "pending",
+        execution: "unknown",
+      };
+    }
+    if (c.path === "/api/agent-permissions/" + REQUEST) {
+      const d = communicationDetail({ limit: 1 });
+      return decided
+        ? {
+            ...d,
+            state: "resolved",
+            delivery: "accepted",
+            decision: { outcome: "selected", optionId: "yes" },
+          }
+        : d;
+    }
+    if (c.path.endsWith("/commands")) {
+      posted = c.body;
+      return { id: OP };
+    }
+    if (c.path.includes("/operations/"))
+      return {
+        command: {
+          operation_id: posted.operationId,
+          session_id: SID,
+          kind: "prompt",
+          generation: 1,
+          state: "completed",
+          receipt: { status: "completed", result: { stopReason: "end_turn" } },
+        },
+      };
+    return session();
+  });
+  h.runner.session = session();
+  h.runner.lease = { id: LEASE, expires_at: date(NOW + 60000) };
+  h.runner.run = { effort: false, prompts: 0, deadline: NOW + 60000 };
+  return h;
+}
+
+test("READY permits one owner-confirmed read with distinct UI/native IDs and no marker approval", async () => {
+  const h = readyWithCommunication(nativeReadEvents());
+  assert.equal(
+    await h.runner.prompt("Reply exactly READY", { expectedText: "READY" }),
+    "READY",
+  );
+  const result = h.runner.state.evidence.find((e) => e.kind === "prompt");
+  assert.equal(result.permissionExercised, false);
+  assert.equal(result.communicationReads, 1);
+  assert.equal(
+    result.communicationPermissions[0].permissionToolCallId,
+    "pi-ui-fixed",
+  );
+  assert.deepEqual(result.communicationNativeToolIds, ["native-read-1"]);
+  assert.match(result.communicationCorrelation, /does not link/);
+  assert.equal(h.runner.run.prompts, 1);
+  assert.equal(h.calls.filter((c) => c.method === "POST").length, 2);
+});
+
+test("READY waits for late native read completion without repeating prompt or permission decision", async () => {
+  const h = readyWithCommunication(nativeReadEvents(), 2);
+  assert.equal(
+    await h.runner.prompt("Reply exactly READY", { expectedText: "READY" }),
+    "READY",
+  );
+  assert.equal(h.calls.filter((c) => c.path.includes("/timeline?")).length, 4);
+  assert.equal(h.runner.now(), NOW + 2000);
+  assert.equal(
+    h.calls.filter((c) => c.method === "POST" && c.path.endsWith("/commands"))
+      .length,
+    1,
+  );
+  assert.equal(
+    h.calls.filter((c) => c.method === "POST" && c.path.endsWith("/decision"))
+      .length,
+    1,
+  );
+  assert.equal(h.runner.run.prompts, 1);
+  const result = h.runner.state.evidence.find((e) => e.kind === "prompt");
+  assert.equal(result.communicationReads, 1);
+  assert.equal(result.permissionExercised, false);
+  assert.deepEqual(result.communicationNativeToolIds, ["native-read-1"]);
+});
+
+test("READY accepts completed single read with consistently missing pinned-hub native IDs", async () => {
+  const h = readyWithCommunication(projectedCodexReadEvents());
+  assert.equal(
+    await h.runner.prompt("Reply exactly READY", { expectedText: "READY" }),
+    "READY",
+  );
+  const result = h.runner.state.evidence.find((e) => e.kind === "prompt");
+  assert.equal(result.permissionExercised, false);
+  assert.equal(result.communicationReads, 1);
+  assert.deepEqual(result.communicationNativeToolIds, []);
+  assert.equal(
+    result.communicationPermissions[0].permissionToolCallId,
+    "pi-ui-fixed",
+  );
+  assert.equal(h.calls.filter((c) => c.method === "POST").length, 2);
+});
+
+test("READY refuses extra, failed, missing or conflicting communication activity", async () => {
+  for (const mutate of [
+    (e) =>
+      e.push({
+        sequence: "4",
+        event: {
+          kind: "update",
+          type: "tool_call",
+          title: "bash",
+          toolCallId: "other-tool",
+          status: "completed",
+        },
+      }),
+    (e) => {
+      e[2].event.status = "failed";
+    },
+    (e) => e.splice(0),
+    (e) => {
+      e[2].event.title = "mcp__relay__relay_messages_ack";
+    },
+  ]) {
+    const events = nativeReadEvents();
+    mutate(events);
+    const h = readyWithCommunication(events);
+    await assert.rejects(
+      h.runner.prompt("Reply exactly READY", { expectedText: "READY" }),
+    );
+    assert.equal(
+      h.runner.state.evidence.filter((e) => e.kind === "prompt").length,
+      0,
+    );
+    assert.equal(h.calls.filter((c) => c.path.endsWith("/decision")).length, 1);
+  }
+});
+
+test("communication read during marker prompt cannot satisfy the marker permission requirement", async () => {
+  const h = readyWithCommunication(nativeReadEvents());
+  await assert.rejects(
+    h.runner.prompt("Request the fixed marker", {
+      tool: command,
+      decision: "allow_once",
+    }),
+    /Expected permission path not exercised/,
+  );
+  assert.equal(
+    h.runner.state.evidence.filter((e) => e.kind === "prompt").length,
+    0,
+  );
+  assert.equal(h.calls.filter((c) => c.path.endsWith("/decision")).length, 1);
+});
+
 test("queued permission decision waits for resolved accepted delivery, never execution proof", async () => {
   for (const outcome of ["accepted", "unknown"]) {
     let submitted = false,
@@ -1015,6 +2116,20 @@ function phaseServer({
         : c.refusal
           ? "refusal"
           : "end_turn";
+      if (c.permission) {
+        const q = permissions.get(c.permission);
+        s.events.push({
+          sequence: String(++sequence),
+          createdAt: date(clock),
+          event: {
+            kind: "update",
+            type: "tool_call_update",
+            title: JSON.parse(q.context.description).command,
+            ...(s.provider === "codex" ? {} : { toolCallId: c.nativeToolId }),
+            status: q.decision.optionId === "yes" ? "completed" : "failed",
+          },
+        });
+      }
       message(s, c.response);
     } else if (c.kind === "close") {
       s.state = "closed";
@@ -1349,7 +2464,11 @@ function phaseServer({
               "/relay-reconcile confirmed": "Previous branch retired.",
             };
             if (Object.hasOwn(fixed, text)) c.response = fixed[text];
-            else if (text.startsWith("Request permission")) {
+            else if (
+              text.startsWith(
+                "After any required scoped Relay message read, request permission",
+              )
+            ) {
               const cmd = text.split("COMMAND: ")[1];
               assert(cmd);
               const q = detail({
@@ -1363,10 +2482,29 @@ function phaseServer({
               });
               permissions.set(q.id, q);
               c.permission = q.id;
+              c.nativeToolId = "native-bash-" + c.id;
+              for (const event of [
+                { type: "tool_call", title: "bash", status: "pending" },
+                { type: "tool_call_update", title: cmd, status: "in_progress" },
+              ])
+                s.events.push({
+                  sequence: String(++sequence),
+                  createdAt: date(clock),
+                  event: {
+                    kind: "update",
+                    ...event,
+                    ...(s.provider === "codex"
+                      ? {}
+                      : { toolCallId: c.nativeToolId }),
+                  },
+                });
               c.response = "Decision handled.";
             } else if (c.counting) c.response = "";
             else {
-              const expected = /Reply exactly ([A-Z_]+)\./.exec(text);
+              const expected =
+                /^After any required scoped Relay message read, reply exactly ([A-Z_]+)\./.exec(
+                  text,
+                );
               assert(expected, "Unexpected prompt " + text);
               c.response = c.refusal ? configurationNotice : expected[1];
             }
@@ -1444,17 +2582,17 @@ test("full lifecycle phase crosses queued hub contracts through recovery without
           : c.body.text.split(".")[0],
       ),
       [
-        "Reply exactly READY",
-        "Request permission to run exactly the following shell command once",
-        "Request permission to run exactly the following shell command once",
+        "After any required scoped Relay message read, reply exactly READY",
+        "After any required scoped Relay message read, request permission to run exactly the following shell command once",
+        "After any required scoped Relay message read, request permission to run exactly the following shell command once",
         "/relay-history",
         "/relay-branch 1234abcd",
-        "Reply exactly BRANCH_OK",
+        "After any required scoped Relay message read, reply exactly BRANCH_OK",
         "/relay-compact",
-        "Reply exactly COMPACT_OK",
-        "Without using tools or modifying files, count upward from 1, one integer per line, until 500",
+        "After any required scoped Relay message read, reply exactly COMPACT_OK",
+        "After any required scoped Relay message read, count upward from 1, one integer per line, until 500",
         "/relay-reconcile confirmed",
-        "Reply exactly RECOVERED_OK",
+        "After any required scoped Relay message read, reply exactly RECOVERED_OK",
       ],
     );
     assert.deepEqual(
@@ -1741,6 +2879,11 @@ function finalRevocationServer(options = {}) {
     }),
   );
   r.state.evidence = clone(launches);
+  if (options.predecessor) {
+    r.state.predecessor = { raw: JSON.stringify(options.predecessor) };
+    if (!options.omitPredecessorCleanup)
+      launches.push(a.stoppedPredecessor(r.state.predecessor.raw).launch);
+  }
   for (const provider of ["codex", "qwen"])
     r.state.evidence.push({
       kind: "operator-observation",
