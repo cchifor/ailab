@@ -142,6 +142,12 @@ spec:
             webhook_configs:
               - url: http://ntfy.monitoring.svc.cluster.local/ailab-alerts?template=ailab-alertmanager
                 send_resolved: true
+                # ntfy also rejects the INCOMING webhook body over ~128 KiB (HTTP 413 "JSON body too large",
+                # unrecoverable -> dropped). 2026-11-25..26: KubeJobFailed/velero reached 121 alerts
+                # (135 KB), every flush 413'd, and a failed flush never clears resolved alerts, so the
+                # group grew to 3600+ and AlertmanagerClusterFailedToSendAlerts fired for over a day. 20
+                # alerts is ~22-32 KB; the template shows 8 and counts the rest via `truncatedAlerts`.
+                max_alerts: 20
                 http_config:
                   basic_auth:
                     username: ailab

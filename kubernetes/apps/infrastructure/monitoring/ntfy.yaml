@@ -30,14 +30,21 @@ data:
   # so a multibyte character at the cut renders as U+FFFD — cosmetic, ntfy accepts it.
   # ORDERING: this must be LIVE (ntfy restarted onto it) BEFORE the receiver URL names it — an unknown
   # template is also an HTTP 400 drop. Hence the URL switch ships in a separate, later PR.
+  # COUNTS = len .alerts + .truncatedAlerts. The receiver sets `max_alerts` (kube-prometheus-stack.yaml)
+  # because ntfy also caps the INCOMING webhook JSON (~128 KiB, HTTP 413 code 41303 "JSON body too large",
+  # unrecoverable -> dropped): on 2026-11-25 a 121-alert KubeJobFailed/velero group (135 KB) hit it, and
+  # since a failed flush never clears resolved alerts the group snowballed to 3600+ and never delivered
+  # again. With max_alerts the body is truncated and Alertmanager reports the rest in `truncatedAlerts`
+  # (always present, 0 when nothing was cut), so `len .alerts` alone would claim "×20" for a 3648 group.
   ailab-alertmanager.yml: |
     title: |-
-      {{ if eq .status "firing" }}🔥{{ else }}✅{{ end }} {{ trunc 80 (or .commonLabels.alertname "Alerts") }}{{ with .commonLabels.namespace }} ({{ trunc 40 . }}){{ end }}{{ if gt (len .alerts) 1 }} ×{{ len .alerts }}{{ end }}
+      {{- $n := add (len .alerts) .truncatedAlerts }}{{ if eq .status "firing" }}🔥{{ else }}✅{{ end }} {{ trunc 80 (or .commonLabels.alertname "Alerts") }}{{ with .commonLabels.namespace }} ({{ trunc 40 . }}){{ end }}{{ if gt $n 1 }} ×{{ $n }}{{ end }}
     message: |-
+      {{- $n := add (len .alerts) .truncatedAlerts }}
       {{- range $i, $a := .alerts }}{{ if lt $i 8 }}{{ if $i }}
       {{ end }}{{ if eq $a.status "firing" }}•{{ else }}✓{{ end }} [{{ trunc 12 (or $a.labels.severity "none") }}] {{ trunc 240 (replace "\n" " " (or $a.annotations.summary $a.annotations.description $a.labels.alertname "")) }}{{ with $a.labels.instance }} — {{ trunc 80 . }}{{ end }}{{ with $a.labels.pod }} — {{ trunc 80 . }}{{ end }}{{ end }}{{ end }}
-      {{- if gt (len .alerts) 8 }}
-      …and {{ sub (len .alerts) 8 }} more{{ end }}
+      {{- if gt $n 8 }}
+      …and {{ sub $n 8 }} more{{ end }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -79,7 +86,7 @@ spec:
       annotations:
         # subPath mounts never refresh and templates load at startup: bump this whenever
         # ailab-alertmanager.yml changes so the pod restarts onto the new template.
-        ailab.io/ntfy-template-rev: "1"
+        ailab.io/ntfy-template-rev: "2"
     spec:
       containers:
         - name: ntfy
