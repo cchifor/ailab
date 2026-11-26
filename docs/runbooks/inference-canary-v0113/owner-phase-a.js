@@ -15,6 +15,7 @@
   const EXPIRES = Date.parse("2026-11-26T21:27:37Z");
   const CLOCK_SKEW_MS = 5000;
   const HOLDER = "bbe0a6fb-25ea-44f8-8c21-5cba89f07aeb";
+  const APPROVED_PROFILE_REVISION = 1;
   const PROFILES_SHA256 =
     "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4";
   const HOLDER_BINARY_SHA256 =
@@ -734,7 +735,7 @@
         : {
             operationId,
             profileId: p.id,
-            revision: 1,
+            revision: APPROVED_PROFILE_REVISION,
             cwd: "/home/c4/.local/state/relay-holder/workspaces/" + p.id,
           };
       const first = await this.mutate(path, body);
@@ -761,7 +762,7 @@
         if (l.state === "open") {
           need(
             l.profile_id === p.id &&
-              l.profile_revision === 1 &&
+              l.profile_revision === APPROVED_PROFILE_REVISION &&
               l.cwd === "/home/c4/.local/state/relay-holder/workspaces/" + p.id,
             "Launch profile/workspace changed",
           );
@@ -1203,7 +1204,10 @@
       this.save();
       const profiles = await this.api("/api/agent-profiles");
       const match = profiles.filter(
-        (r) => r.id === p.id && r.revision === 1 && r.enabled === true,
+        (r) =>
+          r.id === p.id &&
+          r.revision === APPROVED_PROFILE_REVISION &&
+          r.enabled === true,
       );
       need(
         match.length === 1 &&
