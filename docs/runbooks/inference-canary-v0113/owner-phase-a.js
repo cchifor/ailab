@@ -15,6 +15,10 @@
   const EXPIRES = Date.parse("2026-11-26T21:27:37Z");
   const CLOCK_SKEW_MS = 5000;
   const HOLDER = "bbe0a6fb-25ea-44f8-8c21-5cba89f07aeb";
+  const PROFILES_SHA256 =
+    "58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39";
+  const HOLDER_BINARY_SHA256 =
+    "0b1a7907f6da2ef6b5794621d87c55c2e0ee6d5aeb1c4e0fdf35c9031a127003";
   // Published v0.13.1 artifacts and revision-3 definitions passed installation,
   // deployed-hub schema checks and five synthetic wire cases. This enables the
   // packet, not a host: Start still requires the fresh operator handoff below.
@@ -2042,7 +2046,7 @@
       try {
         const handoff = await this.ask(
           "Fresh patched-holder handoff",
-          "Paste {holderId:UUID,journalId:UUID,nativeRecovery:2,nativeStateReady:true,qualifiedRelease:'v0.13.1',operatorVerified:true}. Use the current operator readback after stopped upgrade and explicit seal release; the journal ID may survive while incarnation changes.",
+          "Paste {holderId:UUID,journalId:UUID,nativeRecovery:2,nativeStateReady:true,qualifiedRelease:'v0.13.1',profilesSha256:OBSERVED_PROFILE_FILE_SHA256,holderBinarySha256:OBSERVED_INSTALLED_BINARY_SHA256,operatorVerified:true}. Use the current operator readback after stopped upgrade and explicit seal release, not copied expected hashes. The journal ID may survive while incarnation changes.",
           (v) => {
             need(
               uuid(v?.holderId) &&
@@ -2050,10 +2054,19 @@
                 v.nativeRecovery === 2 &&
                 v.nativeStateReady === true &&
                 v.qualifiedRelease === "v0.13.1" &&
+                v.profilesSha256 === PROFILES_SHA256 &&
+                v.holderBinarySha256 === HOLDER_BINARY_SHA256 &&
                 v.operatorVerified === true,
               "Qualified holder handoff missing",
             );
-            return { holderId: v.holderId, journalId: v.journalId };
+            return {
+              holderId: v.holderId,
+              journalId: v.journalId,
+              profilesSha256: v.profilesSha256,
+              holderBinarySha256: v.holderBinarySha256,
+              provenance:
+                "operator-reported installed file hashes; not a browser host measurement",
+            };
           },
         );
         this.holderId = handoff.holderId;

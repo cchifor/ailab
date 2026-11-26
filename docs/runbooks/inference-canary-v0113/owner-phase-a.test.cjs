@@ -18,6 +18,13 @@ const clone = (v) => JSON.parse(JSON.stringify(v));
 const date = (n) => new Date(n).toISOString();
 const p = a.PROFILES.codex;
 const command = a.markerCommand("codex", p.run, "effects");
+const holderInputs = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "holder-inputs.json"), "utf8"),
+);
+const handoffHashes = {
+  profilesSha256: holderInputs.relay_holder_profiles_sha256,
+  holderBinarySha256: holderInputs.relay_holder_binary_sha256,
+};
 
 function harness(
   handler = () => {
@@ -200,6 +207,7 @@ test("qualified packet refuses absent or invalid holder handoff before any reque
     nativeStateReady: true,
     qualifiedRelease: "v0.13.1",
     operatorVerified: true,
+    ...handoffHashes,
   };
   for (const input of [
     null,
@@ -210,6 +218,10 @@ test("qualified packet refuses absent or invalid holder handoff before any reque
     { ...valid, nativeStateReady: false },
     { ...valid, qualifiedRelease: "v0.13.0" },
     { ...valid, operatorVerified: false },
+    { ...valid, profilesSha256: undefined },
+    { ...valid, holderBinarySha256: undefined },
+    { ...valid, profilesSha256: "0".repeat(64) },
+    { ...valid, holderBinarySha256: "0".repeat(64) },
   ]) {
     const h = harness();
     let asked = 0;
@@ -238,10 +250,17 @@ test("qualified packet keeps incarnation separate from surviving journal identit
       nativeStateReady: true,
       qualifiedRelease: "v0.13.1",
       operatorVerified: true,
+      ...handoffHashes,
     });
   await assert.rejects(h.runner.start(), /Stop at first metadata read/);
   assert.equal(h.runner.holderId, SID);
   assert.equal(h.runner.journalId, OTHER);
+  const recorded = h.runner.state.evidence.find(
+    (e) => e.kind === "operator-holder-handoff",
+  );
+  assert.equal(recorded.profilesSha256, handoffHashes.profilesSha256);
+  assert.equal(recorded.holderBinarySha256, handoffHashes.holderBinarySha256);
+  assert.match(recorded.provenance, /operator-reported/);
   assert.equal(h.calls.length, 1);
   assert.equal(h.calls[0].method, "GET");
   assert.equal(h.runner.state.operations.length, 0);

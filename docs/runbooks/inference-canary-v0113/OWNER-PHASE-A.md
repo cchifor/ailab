@@ -49,11 +49,22 @@ incarnation and journal ID. A stopped upgrade changes the incarnation while the
 journal can survive; never copy the historical incarnation into both fields.
 The operator must verify `nativeRecovery: 2`, `nativeStateReady: true`, the
 qualified v0.13.1 release and explicit maintenance-seal release before Start.
+The handoff must also include `profilesSha256` and `holderBinarySha256`, measured
+from the installed profile file and holder binary. The driver compares both to
+the exact values in [holder-inputs.json](holder-inputs.json) before any request;
+a release label alone is insufficient. Paste the operator's actual readback,
+not expected values copied from this guide. The saved report attributes these
+hashes to the operator; the browser does not measure host files.
 
 The current two grants expire **2026-11-26 21:27:37 UTC**. The driver never renews
 or reissues them. Its assigned run UUIDs are fixed, so an existing marker cannot
 be hidden by choosing a new run. Its source assertions are for the hub/API
 contract, not a claim that reading API metadata authenticates a remote binary.
+If either grant expires, rotates or is reissued, stop and prepare a new reviewed
+packet with the actual credential/key identities and authorized window before
+Start. Do not edit `EXPIRES` or credential IDs locally. The existing delivery
+checks also compare live credential, binding, consumer and router-key identities
+before the first prompt; a successful source qualification cannot override drift.
 
 Obtain the operator's observations immediately around each checkpoint. The
 marker tool prints JSON on stdout; preserve distinct pre-launch and post-open
