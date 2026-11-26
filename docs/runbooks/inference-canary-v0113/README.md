@@ -13,10 +13,13 @@ router-ab gate with route changes or new inference qualification workloads.
 **Successor hold (2026-11-26):** holder/Pi v0.13.1 source
 `2604c41b69c5d9c50a3324545a51f0bfa38435a0` is reviewed and merged in
 [Relay PR705](https://git.chifor.me/cchifor/relay/pulls/705). It contains the
-permission-review and structured configuration-refusal corrections. Final
-published pins, the successor profile bytes and qualification results are still
-pending in this packet. The revision2 JSON and pin table below remain the
-historical v0.13.0 baseline; do not use them to claim the successor is ready.
+permission-review and structured configuration-refusal corrections. Publication
+completed in [run150672](https://git.chifor.me/cchifor/relay/actions/runs/150672).
+The checked-in successor profiles are revision3, SHA256
+`58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`.
+Published-artifact root/profile and deployed-hub schema qualification passed
+offline. Five-case wire qualification, the idle upgrade, exact successor approval
+readbacks and live acceptance remain pending; publication is not activation.
 
 The deployed hub remains v0.13.0/source
 `e843921b7cff76406b7da0b5b35cf653c7e458c5`, with the
@@ -53,20 +56,50 @@ not a requirement to ask again for the same covered scope. Other changes are
 not covered. No routes, grants, identities, output/time budgets or Qwen effort
 capability may be added under this decision.
 
-Historical v0.13.0 pins (successor values pending; JSON inputs remain authoritative):
+Published v0.13.1 successor pins (JSON inputs remain authoritative):
 
 | Item | Exact value |
 | --- | --- |
-| Application/installer image | `registry.chifor.me/relay/control-plane@sha256:021a8fbed305c338dc46022abc992f3e0b2c538c6c491fd2aa9f0b279dbccdd8` |
-| Control-plane manifest SHA256 | `4a6f09dd297cf2ee3c1ad249348886ff09ed7e0fbc0ef279d08d22b8c0d6df95` |
-| Holder archive SHA256 | `3ee727c19dcaf5221510e3b22c88dcde50d1b917d7ccba19fd1296d7041c4a70` |
-| Holder manifest SHA256 | `ec9ee0fc8a525e758408c5398997180d5d1379eb771b31487de1030653935369` |
-| Holder binary SHA256 | `f70a471bb00b3f61675768666802e9b3ac9ea02b59dbf554191c198bd88d7909` |
-| Pi archive SHA256 | `b12de9f54aeab0704b71d1fdde97c663faedc96e4791ac12151c8d9d00a7669d` |
-| Pi manifest SHA256 | `7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f` |
+| Holder installer image; hub unchanged | `registry.chifor.me/relay/control-plane@sha256:f2eacdda4614f4cadf51faa68291b4af2249f9231fcdf38afe16a53bee064dbe` |
+| Control-plane manifest SHA256 | `d4d353a8b409b28593339b9de2773939328b49b1aa2fd307d65acb0af463ea9f` |
+| Holder archive SHA256 | `e502c526c5dc0cfa9d033831e5e6e4fcf9b2f9692ff7db5c5c098831f80e4f2c` |
+| Holder manifest SHA256 | `b970fba0e4eaa4efdf5bf9d548137ccde020bec06e1c542271aaed4b4c64ea39` |
+| Holder binary SHA256 | `0b1a7907f6da2ef6b5794621d87c55c2e0ee6d5aeb1c4e0fdf35c9031a127003` |
+| Pi archive SHA256 | `096ea187814a4332898751ae4e5dbfaac2455369624d30d6e9a2190c8f7df4cd` |
+| Pi manifest SHA256 | `d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d` |
 
-The historical offline proof used this exact published image, holder/Pi archives and candidate
-profile bytes at the actual state/home paths as UID1000. Both installer modes
+The [v0.13.1 deployment receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.13.1/deployment-images-150672.json)
+has SHA256 `96efee03a390918917ecd5d88c008e3df6c96c6276870e93e1ed7d6c3ff6d318`.
+It binds source2604c41, the installer image and control-plane manifest above.
+Archive bytes, inner manifests and selected runtime entries were independently
+checked against those published hashes. The candidate report SHA256 is
+`2901990c87d782de1f7e5583a97944505c3aec4037e8048a6e8f36776c287b2f`.
+Comparison with the eight frozen revision2 Git blobs found exactly four changed
+files and 50 reported JSON-pointer changes: artifact/runtime pins and matching
+revision2-to-3 metadata only. The four renderer/binding files remain byte-identical;
+connector/renderer pins, identities, routes, grants, limits and effort choices
+remain unchanged. Source digests are authenticated through the receipt-bound
+manifest, not independently recomputed from the build closure. This comparison
+does not itself grant profile approval.
+
+The v0.13.1 root qualification used these exact archives and revision3 profiles,
+UID1000 and the actual `/home/c4/.local/state/relay-holder` paths in an isolated
+offline container. Installation and repeat verification passed using packaged
+Node22.23.2. Holder hello reported `nativeRecovery:2`, `nativeStateReady:true`,
+all three profiles, zero sessions/children and empty native homes; shutdown
+exited0. The unchanged e843 hub image's compiled schemas passed **31 positive
+and five negative cases** against the successor inputs. Approval-definition
+hashes were computed after the deployed `ApproveLaunchProfile` defaults, not
+from unnormalized input JSON. Evidence in the Relay workspace is
+`.data/pi-v0131-root-qualification-20261126/`: `qualification-summary.json`,
+`actual-root/hello-corrected.json`, `hub-schema.log` and
+`normalized-definition-hashes.json`. The retained connector was hash-checked,
+not executed. This proves offline installation/profile admission and schema
+compatibility, not a real systemd upgrade, live readiness or provider acceptance.
+Published v0.13.1 wire qualification against Router4af66b8 is still pending.
+
+The historical v0.13.0 offline proof used its e843/021a8fbed installer,
+holder/Pi archives and revision2 profile bytes at the actual state/home paths as UID1000. Both installer modes
 passed; hello reported `nativeRecovery:2`, `nativeStateReady:true`, all three
 profiles, zero sessions and zero children, with no credentials. The private lock
 inode was retained. The old connector hash was verified without executing it.
@@ -75,7 +108,8 @@ cases. These results establish offline installation/profile readiness and schema
 validation, not owner authority, managed delivery, live inference or recovery.
 
 Historical published-Pi wire/replay qualification passed **5/5, zero skipped, in 63.10s**
-on 2026-11-25. It used the published Pi manifest above and packaged Node22.23.2
+on 2026-11-25. It used v0.13.0 Pi manifest
+`7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f` and packaged Node22.23.2
 (SHA256 `3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327`),
 against exact router TypeScript source `b60fb03b23ce52548f49513d45466f4670f5a369`
 under Node24.22.2 with synthetic upstreams and external networking disabled.
@@ -308,7 +342,7 @@ operator subsequently reported the holder started and idle (bus1945/1967).
 That historical startup does not authorize the successor upgrade or acceptance;
 preserve the operator's owner-approved window and shared-UID constraints.
 Its original revision1 hash and v0.11.3 staging references are historical inputs,
-not approval to activate the revision2 definitions. The deployment hold above
+not approval to activate the successor revision3 definitions. The deployment hold above
 also applies to that workflow. Before publishing the final activation change,
 verify the integrated published pins and activation procedure's exact-profile
 references against the final reviewed bytes and record the completed offline qualification and remaining live gates.

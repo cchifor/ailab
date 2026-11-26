@@ -8,9 +8,11 @@ inventory imports them. This change starts no service and creates no key itself.
 
 **Successor hold:** reviewed holder/Pi v0.13.1 source
 `2604c41b69c5d9c50a3324545a51f0bfa38435a0` replaces the historical v0.13.0 runtime.
-Final published pins, successor profile bytes and qualification results are
-pending in [README.md](README.md). The existing revision2 activation hash and
-publication149439 proofs do not qualify that replacement. The hub stays at
+Published run150672 pins and revision3 profile bytes are recorded in
+[README.md](README.md); exact-artifact root/profile and deployed-hub schema
+qualification passed offline. Five-case wire qualification and the actual
+upgrade/activation remain pending. Historical revision2/publication149439 proofs
+do not qualify that replacement. The hub stays at
 e843/schema93; the required Router correction source is 4af66b8. Verify actual
 Router deployment separately. Complete qualification and verify the approved final diff before
 execution. The effort capability exceeded the earlier home-layout/artifact-only
@@ -56,8 +58,8 @@ prompt**. Do not pre-render a token manually, forge a receipt, force a binding t
 ## Gates before either activation converge
 
 1. Record the existing Covered decision and operator verification of the exact `profiles.json` diff:
-   The historical revision2 SHA-256 is `665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e`;
-   the successor byte hash remains pending. The operator must verify
+   The successor revision3 SHA-256 is `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`;
+   the historical revision2 baseline is `665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e`. The operator must verify
    the final diff against the owner's approved scope; source PR reviews and
    staging do not substitute for that exact-byte verification.
 2. The owner creates only the Codex and Qwen bindings from the existing
