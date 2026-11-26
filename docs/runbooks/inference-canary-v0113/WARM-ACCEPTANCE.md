@@ -2,13 +2,17 @@
 
 **Current Router:** [the native output replay release](../relay-router-messages-native-output-20261126.md) defines source `4e4bb34e2f968f9450aabe9cf228d3e70c8bab71`, image `registry.chifor.me/llm-router/router@sha256:f180cf7f1f960782a46dff6bb73cb955ce34dcb6e083daed0b1202f58753b457`, and bridges the unchanged warm/provider source below. Preserve historical proof; completed cold/lifecycle acceptance and the separately assigned exclusive warm window remain required.
 
-Operator decision **Relay bus 2086 (2026-11-26)** selects the original six prompts
-with at most **18 minutes / 14 observed upstream generations**, and a separate
-capacity phase of **6 minutes / 5 generations**, still two sessions / four prompts.
-Allow at most one scoped Relay read per prompt. The 120-second prompt limit,
-1024-token cap, denied `pwd`, no-retry rule and existing cleanup are unchanged.
-This records the delegated scope decision; merging it does not start a window or
-perform a configuration change.
+Operator decision **2091, relayed by Relay bus 2101 (2026-11-26)** withdraws the
+2083/2086 ceiling increase recorded in [PR2037](https://git.chifor.me/cchifor/ailab/pulls/2037).
+Restore the original **15-minute / nine-generation** warm limit and separate
+**five-minute / three-generation** capacity limit. The operator selected the
+[four-prompt procedure](WARM-COMMUNICATION-WINDOW.md) under the owner's delegation,
+**pending the owner's confirmation on return**; no live window is assigned here.
+Its row ceilings are 2 / 2 / 3 / 2, with no borrowing and at most one scoped read
+per row. Capacity stays unexercised in that window when reads occur. The
+120-second prompt limit, 1024-token cap, denied `pwd`, no-retry rule and cleanup
+are unchanged. Leave `warmSessions:false` at the end; active-generation drain is
+unexercised and requires a separate owner-decided check before promotion.
 
 This is a prepared operator procedure, not a live result. Run it only after the
 published Relay/holder/Pi and router releases pass cold Messages, native opaque
@@ -126,21 +130,27 @@ absence of work before trajectory creation.
 
 ## Six-prompt warm and rollback phase
 
-Allocate at most 18 minutes, six prompt commands and 14 observed upstream
+This original six-prompt reference is **not selected for the current proposed
+window**. Use the [operator-selected four-prompt guide](WARM-COMMUNICATION-WINDOW.md)
+only after the pending owner confirmation and existing execution prerequisites.
+Do not run both sequences or append these rows to that window. With normal reads,
+the six-row sequence can exceed its original ceiling; stop instead of borrowing
+the withdrawn 18-minute/14-generation allowance.
+
+Allocate at most 15 minutes, six prompt commands and nine observed upstream
 generations. No warmup, retry or padding loop. Keep the existing 120-second
 request limit and 1024-token output cap. Record baseline process/RSS observations
 before enabling retention and after each settled row. Use current generation,
 epoch and lease values; every logical command has a distinct operation UUID.
 
-Before each prompt, reserve its bounded continuation allowance against the
-remaining total: two generations for each ordinary prompt, three for the `pwd`
-prompt (one read, the shell request and post-denial continuation). These reserve
-13 of the 14 allowed generations; unused headroom authorizes no extra prompt,
-second read, unexpected tool or retry. Before each permission decision, including
-denial, recheck remaining time and continuation budget without double-counting an
-existing reservation. Count every observed attempt and in-flight generation,
-including failed/cancelled work. Unknown coverage or exhausted bounds stops
-advancement; cancel through normal cleanup and record any racing completion.
+Before each prompt or permission continuation, including denial, check the
+remaining original time/generation budget and count all attempts and in-flight
+work without double-counting reservations. A read can add a generation; the
+six-row reference does not promise that every row fits with reads. Unknown
+coverage or insufficient remaining budget stops advancement through normal
+cleanup. No extra prompt, second read, unexpected tool or retry is permitted.
+The selected four-prompt alternative has additional hard per-row ceilings;
+unused allocation from any row cannot fund another row.
 
 At the [pinned source](https://git.chifor.me/cchifor/llm-router/src/commit/4e4bb34e2f968f9450aabe9cf228d3e70c8bab71/packages/adapters/claude-sdk/warm.ts#L119), a worker is retained only after successful `end_turn`
 without `tool_use`. A tool boundary reaps the producing worker before returning
@@ -200,7 +210,7 @@ busy check is not a pool-capacity test. Do not saturate shared production slots.
 
 Only in the operator's exclusive scope, use the current documented account
 admission limit and at most two fresh managed canary sessions, four prompt commands,
-five observed upstream generations and six minutes. Do not raise account
+three observed upstream generations and five minutes. Do not raise account
 concurrency or lower a shared pod limit merely to manufacture refusal. If the
 existing account limit cannot be reached within this bounded scope, leave live capacity
 unexercised and retain the existing isolated automated capacity evidence.
@@ -208,16 +218,17 @@ unexercised and retain the existing isolated automated capacity evidence.
 The optional
 [Claude account-capacity window](CLAUDE-CAPACITY-WINDOW.md) documents a separate
 operator-approved exception for the observed account limit 4: temporarily 1, then
-restore 4 using fresh revisions. It uses the same two-session/six-minute/five-generation budget
+restore 4 using fresh revisions. It uses the original two-session/five-minute/three-generation budget
 and global run cap; documentation merge does not authorize execution. Without
 that explicit window decision, this default remains unchanged and the row stays
 unexercised when the existing limit is unreachable.
 
-Apply the same at-most-one scoped read per prompt and full time/generation
-accounting. Reserve two generations for A, one for B's refusal probe (any
-unexpected upstream execution counts and fails that refusal claim), zero for
-the explicit local reconciliation command, and two for the released continuation.
-Recheck before permissions/continuations; do not omit reads to fit the budget.
+In the operator-selected four-prompt window, **capacity remains unexercised when
+reads occur**; this is the accepted scope, not a failed qualification or a PASS.
+Do not suppress reads or borrow from warm or future-drain allocations to fit
+capacity. Any later capacity exercise retains the original three-generation
+ceiling, counts every attempted generation and requires its separate owner
+decision for the 4→1→4 exception. Recheck time/generations before continuation.
 Submit B only while A is observed holding upstream admission, never merely while
 A waits for a read permission. No peer traffic may occupy the account.
 
@@ -242,6 +253,14 @@ no recipe to occupy three warm slots;
 do not claim that specific pool limit passed from a different admission refusal.
 
 ## Close, restore and record
+
+The selected four-prompt window establishes idle rollback only. A separate future
+live active-drain check needs an owner decision before execution: a counting
+prompt, `warmSessions:false` committed while an upstream generation is observed
+active, then a cold continuation, at most four generations including reads.
+It must pass before any promotion of warm retention. Its budget cannot be added
+to the current window; no active-drain or capacity result is implied by idle
+rollback. The optional capacity exception is a separate owner decision.
 
 Close the canary sessions and release owned leases through normal controls.
 Leave warm retention disabled after rollback. Restore the original idle value
