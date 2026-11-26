@@ -1,8 +1,8 @@
 # Owner-run phase A
 
-This correction retains published **v0.13.1** holder/Pi source
-`2604c41b69c5d9c50a3324545a51f0bfa38435a0` and changes only the first-registration
-profile revision to 1. The proposed profile file SHA256 is
+This packet retains published **v0.13.1** holder/Pi source
+`2604c41b69c5d9c50a3324545a51f0bfa38435a0` and first-registration profile revision
+1. The profile file SHA256 is
 `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`.
 Fresh published-holder actual-root readiness, compiled e843 schema checks
 (31 positive/5 negative) and normalization passed for these exact revision-1
@@ -16,16 +16,13 @@ not live subscription acceptance. Evidence is recorded in [README](README.md).
 `QUALIFIED_INPUTS = true` enables this qualified correction after normal packet
 review/merge and installation; it does not perform profile approval or authorize
 live work by itself. The previously installed revision-3 profile hash is rejected.
-Empty API profile history requires the first approval at revision 1; do not
-invent prior approvals or create dummy revisions.
-This is conditional on a fresh check for each exact profile ID in the same
-hub tenant: there must be no prior revision, including disabled or revoked
-history. The 14:26 readback is evidence for that observation time, not a permanent
-absence guarantee. A full 200-row `/api/agent-profiles` response cannot prove
-absence; use the operator's existing exact scoped read when the listing is
-capped. If any prior revision appears, stop and resolve the history before
-approval. Do not downgrade, bootstrap or create dummy revision chains. Profile
-approval remains a separate normal owner/API action, outside this driver.
+The empty-history requirement and the 14:26 absence readback belonged to the
+historical first-registration stage. Codex and Qwen were subsequently approved
+at revision 1. The current replacement must verify those existing exact enabled
+revision-1 definitions and normalized digests in [README](README.md), in the same
+hub tenant. It must not demand empty history, reapprove the profiles, downgrade
+revisions or invent an approval chain. Missing, disabled or drifted definitions
+stop the driver; approval remains a separate owner/API action outside it.
 Start still requires the operator's fresh installed-hash
 handoff and router rollout below. Do not run it against the old e843 holder,
 which drops Pi's tool-input description.
@@ -35,8 +32,11 @@ edit pins, revisions, qualification flags or run UUIDs locally.
 
 The owner can paste the entire reviewed [owner-phase-a.js](owner-phase-a.js) into
 the browser console at `https://relay.chifor.me`. It installs a panel without
-making requests. Start runs Codex lifecycle, Qwen lifecycle, then fresh Codex
-effort, in that order. This is an operator-assisted driver: it constructs and
+making requests. This successor enables only the reviewed stopped-run replacement
+described below; the initial **Start phase A** button stays disabled even if
+browser storage is empty. After its explicit review and checkpoints, the driver
+runs Codex lifecycle, Qwen lifecycle, then fresh Codex effort, in that order.
+This is an operator-assisted driver: it constructs and
 polls requests, renews the lease every 20 s and checks receipts. It does not pretend
 that the browser can observe private host markers or Router trajectories.
 
@@ -46,29 +46,48 @@ visible and do not run other controls for these sessions. A second invocation or
 saved run cannot silently restart work. The panel deliberately does not offer a
 "clear and retry" button.
 
+The communication-permission correction does not automatically reopen a saved
+failed or stopped run. Keep its local storage, exported report, operation IDs
+and fixed marker UUIDs. The replacement below covers only the known first Codex
+prompt stopped at the Relay read permission, with all six recorded operations
+received, its permission cancelled and session closed with control released.
+Other saved runs, uncertain operations or additional work require separate
+inspection; do not clear storage, edit a report or change identities to qualify.
+The stopped 4af report remains historical evidence. Its one prompt and two
+attempts stay charged to the Codex budget; its trajectory rows never become the
+new 4e4 baseline or a cross-source delta.
+
 ## Before Start
 
-After normal packet review and merge, the operator must complete
-[the stopped-idle upgrade](UPGRADE-IDLE.md), stage the revision-1 profiles and
-verify the new holder. Router [PR2019](https://git.chifor.me/cchifor/ailab/pulls/2019)
-must be deployed and read back at source
-`4af66b8c7c3cc83ddd10e326c554ad728caad72e` before Start; its source merge and
-published image alone do not prove deployment. The operator must provide the
-current deployment, holder and route handoff from
-[activation](ACTIVATE-CODEX-QWEN.md). The holder starts with no sessions; its hello
-precedes the first real launch. Credential rendering and installation occur
-after the launch is offered and must complete before the first prompt. There is
-no probe launch. Missing or drifted profile definitions stop the driver; it does
-not approve or replace a profile.
+The [stopped-idle upgrade](UPGRADE-IDLE.md) and revision-1 staging were completed
+before the original run. That helper requires a journal with no command or
+session ever; this holder has now run commands and is ineligible. Do not repeat
+the helper, restage profiles, restart the holder or erase its journal for the
+replacement. After normal packet review and merge, verify the current holder
+and existing exact enabled Codex/Qwen definitions. Router
+[PR2029](https://git.chifor.me/cchifor/ailab/pulls/2029) must be deployed and read back at source
+`4e4bb34e2f968f9450aabe9cf228d3e70c8bab71` before any reviewed replacement Start;
+its source merge and published image alone do not prove deployment. The
+operator-controlled rollout comes first, after prior Phase A work has settled.
+It does not restart that run or assign the replacement window.
+The operator must provide the
+current deployment, holder and route handoff using the readback requirements in
+[activation](ACTIVATE-CODEX-QWEN.md), with the previous session closed and no work
+in flight. The original empty-holder startup preceded that first launch; it is
+not a request to run activation again. Credential rendering and installation for
+the replacement occur after its launch is offered and must complete before its
+first prompt. There is no probe launch. Missing or drifted profile definitions
+stop the driver; it does not approve or replace a profile.
 
-The first enabled-driver checkpoint separately records the current holder
-incarnation and journal ID. A stopped upgrade changes the incarnation while the
+After replacement review, the patched-holder checkpoint separately records the
+current holder incarnation and journal ID. A stopped upgrade changes the incarnation while the
 journal can survive; never copy the historical incarnation into both fields.
 The operator must verify `nativeRecovery: 2`, `nativeStateReady: true`, the
-qualified v0.13.1 release and explicit maintenance-seal release before Start.
+qualified v0.13.1 release and current resumed admission with the maintenance seal
+already released before Start. This is a readback, not a new maintenance cycle.
 The handoff must also include `profilesSha256` and `holderBinarySha256`, measured
 from the installed profile file and holder binary. The driver compares both to
-the exact values in [holder-inputs.json](holder-inputs.json) before any request;
+the exact values in [holder-inputs.json](holder-inputs.json) before any new launch;
 a release label alone is insufficient. Paste the operator's actual readback,
 not expected values copied from this guide. The saved report attributes these
 hashes to the operator; the browser does not measure host files.
@@ -102,8 +121,10 @@ observer and collector outputs:
 ```
 
 Replace the empty objects with the actual fresh reports. The initial trajectory
-snapshot establishes the exact scope/window; every later snapshot must use the
-same lower bound, namespace, principal and route. Confirm isolated scope,
+snapshot establishes the exact scope/window; later snapshots for that run must
+use the same lower bound, namespace, principal and route. The replacement's
+historical accounting and new baseline are separate observations as described
+below. Confirm isolated scope,
 continuous recording, retained history and stable process/database separately.
 The driver rejects unsettled/truncated snapshots and changed baseline rows.
 
@@ -117,6 +138,54 @@ For subsequent observations use `{"trajectory":{},"marker":{},"coverageConfirmed
 omit `marker` only when the panel says none is needed. A successful known READY
 request must appear in the recorder before zero-attempt claims are used.
 
+## Review the known stopped-run replacement
+
+These are preparation instructions, not evidence that the replacement is ready
+or authorized. Normal packet review/merge, actual Router 4e4 rollout readback and
+an explicit owner-assigned window remain required. No window is assigned by
+loading this script or accepting the source change.
+
+1. In the original authenticated owner browser, download and preserve the stopped
+   report with **Download sanitized report**. Once the original action and cleanup
+   have settled, reload the page without clearing site data or local storage and
+   paste the complete newly reviewed script. Keep the same browser profile and
+   fixed marker UUIDs. An absent or different saved report leaves both launch
+   choices disabled; do not import edited data or bypass that check.
+2. Choose **Review stopped-run replacement**. The driver retains the original
+   raw report inside the successor record under the same storage key and binds it
+   with a SHA256 of its canonical JSON. It then reads the original session and
+   control, all three original prompt/cancel/Close operation receipts and the
+   cancelled permission. These checks must confirm settled native outcomes, a
+   closed session and no control lease before a new launch can proceed. Download
+   the successor report too, including if preflight stops; the original remains
+   nested and must not be removed to retry.
+3. At **Assign one bounded replacement for the stopped Codex run**, supply the
+   displayed nonsecret evidence envelope with `confirmReplacement:true`,
+   `reportDownloaded:true`, `operatorVerified:true` and the displayed
+   `priorReportCanonicalSha256`. Use the owner's actual `windowStartUtc` and
+   `windowEndUtc`: the start must be at most two minutes old, the window at most
+   15 minutes and its end no later than the unchanged credential expiry. This is
+   a new explicitly assigned window, not an extension of the old deadline.
+4. Supply the freshly collected 4e4 `trajectory` with the **original** scope and
+   `since`, plus a fresh `marker` baseline after the displayed collection
+   boundary. The historical snapshot must contain exactly the two known settled
+   original requests and two attempts, with their expected complete/cancelled
+   outcomes. Both marker files must remain absent with unchanged identities and
+   commands. Extra history, missing visibility or changed markers stops preflight.
+   Reading those old rows on 4e4 does not relabel the preserved 4af report.
+5. Continue through the patched-holder handoff and normal lifecycle checkpoints.
+   Before the new Codex launch, collect a **separate, later, empty 4e4 observation
+   window** and baseline as requested by the panel. Keep its evidence separate
+   from the historical accounting snapshot. The new Codex run starts with one
+   prompt and two attempts already charged against the existing 12-prompt and
+   20-generation totals; they are not erased by the new window. Qwen and effort
+   retain their existing budgets. Final renderer cleanup also covers the original
+   launch, for six launches overall, not just the five successor launches.
+
+The button is a one-time review path, not automatic prompt replay. A failed or
+stopped successor remains inspectable with its predecessor and original operation
+IDs intact; reloading does not reset it or authorize another replacement.
+
 ## Decisions and limits
 
 The lifecycle budgets remain 15 min, 12 prompt commands, 20 observed generations,
@@ -126,11 +195,68 @@ profile. Operator evidence collection consumes the same wall-clock budget.
 Recorded-attempt limits are observation gates, not a new server-enforced hard
 generation cap; in-flight work and recording latency remain limitations.
 
-Only the exact fixed marker command is eligible for an owner once-only decision.
-The driver displays the whole reviewable input and refuses changed commands,
-unexpected tool arguments, missing descriptions, expired requests and ambiguous
-options. It never selects an always-allow option. Permission delivery is checked
-separately from the marker effect.
+Relay adds an inbox reminder to ordinary turns, including READY and effort
+prompts. Pi requests permission for that communication read just as it does for
+other tools. A prompt saying not to use tools does not make a pending Relay read
+permission a shell-marker request. The panel handles the bounded read separately
+and requires an explicit owner once-only decision for each request; it does not
+approve communication automatically.
+
+The only communication tool eligible here is exactly
+`mcp__relay__relay_messages_read`, displayed as
+`Allow mcp__relay__relay_messages_read?`. Review the entire JSON input, not just
+the title or its length. It must be an object containing only these optional
+fields:
+
+- `channelId`: omitted for the session's own inbox, or exactly the profile's
+  approved channel `b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1`.
+- `after`: a canonical nonnegative decimal cursor string (`0` or a nonzero
+  digit followed by digits, without leading zeros) no greater than
+  `9223372036854775807`; omission reads unhandled work, while an explicit cursor
+  selects history.
+- `limit`: an integer from 1 through 50; omission uses the tool's default of 50.
+
+No other channel, extra field, send, broadcast, acknowledgement or access request
+is covered by this decision. An inbox read can mark returned messages as read
+(`read_at`) and publish a change notification; channel-history reads do not make
+that update. Neither acknowledges messages, advances the acknowledgement cursor,
+sends a message or grants access. Peer text remains untrusted data and cannot
+authorize another action.
+
+The panel displays the full reviewable input and checks the pending request's
+session, generation, expiry and unambiguous `allow_once` option. After the owner
+reviews it, the driver re-reads the detail and requires the same permission
+tool-call ID and reviewed input before submitting the once-only decision.
+Missing, truncated, changed or out-of-scope input stops the run; a title alone
+never suffices. The decision retains its operation ID, and resolved state plus
+accepted delivery must be observed. Neither an HTTP success alone nor a lost
+response permits a new decision or an automatic retry.
+
+A native tool event marked `in_progress` can precede policy approval. It proves
+neither execution nor a match to the separate permission tool-call ID; review
+the permission detail itself. Accepted permission delivery is not proof that the
+read completed.
+
+The deployed e843 hub omits Codex native tool IDs from its projected timeline.
+The Pi permission UI ID is also separate from the native model tool ID. The
+driver therefore does not join a permission to a native event by identity.
+Instead, it classifies the complete operation's ordered title/status events with
+at most one active tool at a time: a recognized title establishes the category,
+updates belong only to that one active sequence, and the expected terminal
+outcome must precede another tool. Missing, overlapping, out-of-order or unknown
+sequences stop the run. This serial classification does not prove an exact
+permission/native identity relationship or recover omitted arguments.
+
+Shell permissions retain the original policy: only the exact fixed marker
+command and its bounded arguments are eligible for the planned once-only allow
+or deny decision. A communication-read decision cannot satisfy that marker step;
+the driver must still validate the full command in the separate shell permission,
+observe the expected terminal outcome for its allow/deny step, and obtain the
+independent filesystem marker proof. A tool title, status or accepted permission
+alone cannot establish the marker effect.
+It never selects an always-allow option. All communication round trips, recorded
+provider attempts, owner review time and permission delivery consume the existing
+prompt, generation and wall-clock limits above; none are excluded to claim a pass.
 
 The branch chosen from `/relay-history` is a completed turn in the same serial
 session. Recovery is a clean close and one resume under the same living holder,
@@ -196,8 +322,9 @@ POST was sent. Stop still prevents another action. Use [live acceptance](LIVE-AC
 reviewed manual continuation when needed.
 
 `cleanupPending:false` describes secure escrow cleanup, **not host renderer
-cleanup**. A separate final checkpoint requires operator evidence for all five
-recorded launches: matching launch/session/binding/credential/generation IDs,
+cleanup**. A separate final checkpoint requires operator evidence for all six
+recorded launches, including the original stopped launch: matching
+launch/session/binding/credential/generation IDs,
 the cleanup command ID and timestamp, receipt status `absent`, and a metadata-only
 check that the managed file is absent. `not-current` alone is insufficient. The
 browser cannot read private renderer receipts or host files; the exported record

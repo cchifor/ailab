@@ -8,6 +8,19 @@ Relay session and approves the profiles. The inference session owns these pinned
 definitions and subsequent paired acceptance. Do not overlap the operator's
 router-ab gate with route changes or new inference qualification workloads.
 
+**Current Router update (2026-11-26):** [PR2029 rollout readback](https://git.chifor.me/cchifor/ailab/pulls/2029#issuecomment-145609)
+records deployed source `4e4bb34e2f968f9450aabe9cf228d3e70c8bab71`, image
+`registry.chifor.me/llm-router/router@sha256:f180cf7f1f960782a46dff6bb73cb955ce34dcb6e083daed0b1202f58753b457`.
+Fresh direct Claude B0 passed at 19:24:28–19:24:36 UTC; independent retrieval of
+the saved report confirmed `passed:true`, seven requests and one qualifier tool
+effect. This is not Pi lifecycle or warm acceptance. The 4af prerequisites and
+proofs below remain historical; they do not identify the current Router.
+The corrected [owner replacement driver](OWNER-PHASE-A.md#review-the-known-stopped-run-replacement)
+is pending normal review/merge and an explicit owner window, not ready to run.
+The stopped run's one prompt and two attempts carry forward without resetting
+its report or markers. Follow the [scoped communication-read rule](LIVE-ACCEPTANCE.md#scoped-relay-communication-reads);
+it adds no budget, automatic approval or authority to resume stopped work.
+
 ## Fixed scope
 
 **First-registration hold (2026-11-26):** holder/Pi v0.13.1 source
