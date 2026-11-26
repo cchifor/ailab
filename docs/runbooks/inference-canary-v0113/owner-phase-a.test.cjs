@@ -523,8 +523,7 @@ test("mount never dispatches or writes storage and enables replacement only for 
     [JSON.stringify({ version: 1, status: "stopped" }), false],
     [JSON.stringify(stoppedReport()), true],
   ]) {
-    const nodes = [],
-      calls = [],
+    const calls = [],
       writes = [];
     const createElement = (tag) => {
       const node = {
@@ -536,7 +535,6 @@ test("mount never dispatches or writes storage and enables replacement only for 
           this.children.push(child);
         },
       };
-      nodes.push(node);
       return node;
     };
     const body = createElement("body");
@@ -565,8 +563,10 @@ test("mount never dispatches or writes storage and enables replacement only for 
         assert.equal(typeof listener, "function");
       },
     });
+    const descendants = (node) =>
+      node.children.flatMap((child) => [child, ...descendants(child)]);
     const button = (text) => {
-      const matches = nodes.filter(
+      const matches = descendants(body).filter(
         (n) => n.tagName === "button" && n.textContent === text,
       );
       assert.equal(matches.length, 1);
