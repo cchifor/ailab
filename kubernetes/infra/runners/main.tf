@@ -59,7 +59,7 @@ resource "proxmox_virtual_environment_vm" "runner" {
   # Per-runner floor override (runner_nodes[*].memory_floating_mib) for runners on a host that sits at
   # pvestatd's ~80% line, where the floor IS the working size; see variables.tf.
   memory {
-    dedicated = var.runner_memory_mib
+    dedicated = coalesce(each.value.memory_mib, var.runner_memory_mib)
     floating  = coalesce(each.value.memory_floating_mib, var.runner_memory_floating_mib)
   }
 
