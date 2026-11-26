@@ -253,12 +253,14 @@ variable "runner_nodes" {
     vm_id     = number
     ip        = string
     hostname  = string
-    # Optional per-runner balloon floor (MiB); null = runner_memory_floating_mib.
-    memory_floating_mib = optional(number)
     # Optional per-runner memory CEILING (MiB); null = runner_memory_mib. Set it equal to
     # memory_floating_mib to pin a runner at a fixed size (no ballooning), e.g. on a host whose free
     # memory is a reserve for something else (ci-runner-9 on ai-node3: the qwen3.8-27b lazy load).
+    # Setting it BELOW the global runner_memory_floating_mib also needs memory_floating_mib, or the
+    # main.tf precondition (floor <= ceiling, both effective per-runner values) fails the plan.
     memory_mib = optional(number)
+    # Optional per-runner balloon floor (MiB); null = runner_memory_floating_mib.
+    memory_floating_mib = optional(number)
     # Optional per-runner root-disk WRITE cap; null = uncapped. Rendered as bpg disk.speed (main.tf)
     # with the burstable value equal to the cap, i.e. Proxmox mbps_wr = mbps_wr_max and
     # iops_wr = iops_wr_max. Units: MiB/s (bpg says "megabytes", but 30 gives QEMU
