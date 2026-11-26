@@ -5,17 +5,17 @@
     "holder": {
       "version": 1,
       "id": "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
-      "revision": 2,
-      "executable": "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/node",
+      "revision": 3,
+      "executable": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/node",
       "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
       "artifacts": {
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-pi.mjs": "acdbbd6e8061c1bcf34064e3de1aa6a9466a203a48b2414615d0a5c9584ac96d",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/pi-worker.mjs": "e3ba40ee30fce8a8bbc58ae08bf30c7707bf56ff44891a6488b03d0b419d5476",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-pi-policy.mjs": "d81ee1ec220ba5d101d23e93ff675b4751d020a8daa6a1683aeecdc99351e7b8",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-agent-tools.mjs": "95cdea84d25a170b7cbbfd0e4e0862b8c7804e9792c5dcca56fdcaeaba0de6f2",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/bin/pi": "b227ca690d402915855c94b5181a395c6ed003ed4dd4caa29d035c5708de65f1",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/bin/npm": "275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/manifest.json": "7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f"
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-pi.mjs": "acdbbd6e8061c1bcf34064e3de1aa6a9466a203a48b2414615d0a5c9584ac96d",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/pi-worker.mjs": "e3ba40ee30fce8a8bbc58ae08bf30c7707bf56ff44891a6488b03d0b419d5476",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-pi-policy.mjs": "577ad67bc8dec918e115a5ac407adc4d8aa5c74be4a22da28c87dc9a147ac7bc",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-agent-tools.mjs": "95cdea84d25a170b7cbbfd0e4e0862b8c7804e9792c5dcca56fdcaeaba0de6f2",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/bin/pi": "b227ca690d402915855c94b5181a395c6ed003ed4dd4caa29d035c5708de65f1",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/bin/npm": "275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/manifest.json": "d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d"
       },
       "args": [],
       "environment": {},
@@ -28,7 +28,7 @@
       "qualification": "protocol-fixture",
       "native": {
         "kind": "pi",
-        "runtimeDirectory": "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f",
+        "runtimeDirectory": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d",
         "contextWindow": 200000,
         "maxTokens": 1024
       },
@@ -47,9 +47,9 @@
         }
       },
       "communication": {
-        "executable": "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/node",
+        "executable": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/node",
         "args": [
-          "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-agent-tools.mjs"
+          "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-agent-tools.mjs"
         ],
         "origin": "https://relay.chifor.me"
       },
@@ -66,7 +66,7 @@
     },
     "session": {
       "id": "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
-      "revision": 2,
+      "revision": 3,
       "adapterDigest": "acdbbd6e8061c1bcf34064e3de1aa6a9466a203a48b2414615d0a5c9584ac96d",
       "harness": "pi",
       "executionIdentity": "c4",
@@ -97,17 +97,17 @@
     "holder": {
       "version": 1,
       "id": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
-      "revision": 2,
-      "executable": "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/node",
+      "revision": 3,
+      "executable": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/node",
       "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
       "artifacts": {
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-pi.mjs": "acdbbd6e8061c1bcf34064e3de1aa6a9466a203a48b2414615d0a5c9584ac96d",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/pi-worker.mjs": "e3ba40ee30fce8a8bbc58ae08bf30c7707bf56ff44891a6488b03d0b419d5476",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-pi-policy.mjs": "d81ee1ec220ba5d101d23e93ff675b4751d020a8daa6a1683aeecdc99351e7b8",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-agent-tools.mjs": "95cdea84d25a170b7cbbfd0e4e0862b8c7804e9792c5dcca56fdcaeaba0de6f2",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/bin/pi": "b227ca690d402915855c94b5181a395c6ed003ed4dd4caa29d035c5708de65f1",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/bin/npm": "275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/manifest.json": "7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f"
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-pi.mjs": "acdbbd6e8061c1bcf34064e3de1aa6a9466a203a48b2414615d0a5c9584ac96d",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/pi-worker.mjs": "e3ba40ee30fce8a8bbc58ae08bf30c7707bf56ff44891a6488b03d0b419d5476",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-pi-policy.mjs": "577ad67bc8dec918e115a5ac407adc4d8aa5c74be4a22da28c87dc9a147ac7bc",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-agent-tools.mjs": "95cdea84d25a170b7cbbfd0e4e0862b8c7804e9792c5dcca56fdcaeaba0de6f2",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/bin/pi": "b227ca690d402915855c94b5181a395c6ed003ed4dd4caa29d035c5708de65f1",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/bin/npm": "275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/manifest.json": "d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d"
       },
       "args": [],
       "environment": {},
@@ -120,7 +120,7 @@
       "qualification": "protocol-fixture",
       "native": {
         "kind": "pi",
-        "runtimeDirectory": "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f",
+        "runtimeDirectory": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d",
         "contextWindow": 32768,
         "maxTokens": 1024
       },
@@ -139,16 +139,16 @@
         }
       },
       "communication": {
-        "executable": "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/node",
+        "executable": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/node",
         "args": [
-          "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-agent-tools.mjs"
+          "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-agent-tools.mjs"
         ],
         "origin": "https://relay.chifor.me"
       }
     },
     "session": {
       "id": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
-      "revision": 2,
+      "revision": 3,
       "adapterDigest": "acdbbd6e8061c1bcf34064e3de1aa6a9466a203a48b2414615d0a5c9584ac96d",
       "harness": "pi",
       "executionIdentity": "c4",
@@ -179,17 +179,17 @@
     "holder": {
       "version": 1,
       "id": "fdb56ca5-908b-40ee-94b3-aac735dd8622",
-      "revision": 2,
-      "executable": "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/node",
+      "revision": 3,
+      "executable": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/node",
       "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
       "artifacts": {
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-pi.mjs": "acdbbd6e8061c1bcf34064e3de1aa6a9466a203a48b2414615d0a5c9584ac96d",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/pi-worker.mjs": "e3ba40ee30fce8a8bbc58ae08bf30c7707bf56ff44891a6488b03d0b419d5476",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-pi-policy.mjs": "d81ee1ec220ba5d101d23e93ff675b4751d020a8daa6a1683aeecdc99351e7b8",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-agent-tools.mjs": "95cdea84d25a170b7cbbfd0e4e0862b8c7804e9792c5dcca56fdcaeaba0de6f2",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/bin/pi": "b227ca690d402915855c94b5181a395c6ed003ed4dd4caa29d035c5708de65f1",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/bin/npm": "275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc",
-        "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/manifest.json": "7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f"
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-pi.mjs": "acdbbd6e8061c1bcf34064e3de1aa6a9466a203a48b2414615d0a5c9584ac96d",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/pi-worker.mjs": "e3ba40ee30fce8a8bbc58ae08bf30c7707bf56ff44891a6488b03d0b419d5476",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-pi-policy.mjs": "577ad67bc8dec918e115a5ac407adc4d8aa5c74be4a22da28c87dc9a147ac7bc",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-agent-tools.mjs": "95cdea84d25a170b7cbbfd0e4e0862b8c7804e9792c5dcca56fdcaeaba0de6f2",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/bin/pi": "b227ca690d402915855c94b5181a395c6ed003ed4dd4caa29d035c5708de65f1",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/bin/npm": "275239824e00e61b0a220e61a41791c7e9b4bd726f8b0c27077a338f8131c9dc",
+        "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/manifest.json": "d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d"
       },
       "args": [],
       "environment": {},
@@ -202,7 +202,7 @@
       "qualification": "protocol-fixture",
       "native": {
         "kind": "pi",
-        "runtimeDirectory": "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f",
+        "runtimeDirectory": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d",
         "contextWindow": 200000,
         "maxTokens": 1024
       },
@@ -221,9 +221,9 @@
         }
       },
       "communication": {
-        "executable": "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/node",
+        "executable": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/node",
         "args": [
-          "/opt/relay-pi/releases/7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f/relay-agent-tools.mjs"
+          "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/relay-agent-tools.mjs"
         ],
         "origin": "https://relay.chifor.me"
       },
@@ -240,7 +240,7 @@
     },
     "session": {
       "id": "fdb56ca5-908b-40ee-94b3-aac735dd8622",
-      "revision": 2,
+      "revision": 3,
       "adapterDigest": "acdbbd6e8061c1bcf34064e3de1aa6a9466a203a48b2414615d0a5c9584ac96d",
       "harness": "pi",
       "executionIdentity": "c4",

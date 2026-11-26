@@ -1,27 +1,27 @@
 {
   "relay_holder_enabled": true,
   "relay_holder_start": false,
-  "relay_holder_image": "registry.chifor.me/relay/control-plane@sha256:021a8fbed305c338dc46022abc992f3e0b2c538c6c491fd2aa9f0b279dbccdd8",
-  "relay_holder_source_commit": "e843921b7cff76406b7da0b5b35cf653c7e458c5",
-  "relay_holder_binary_sha256": "f70a471bb00b3f61675768666802e9b3ac9ea02b59dbf554191c198bd88d7909",
+  "relay_holder_image": "registry.chifor.me/relay/control-plane@sha256:f2eacdda4614f4cadf51faa68291b4af2249f9231fcdf38afe16a53bee064dbe",
+  "relay_holder_source_commit": "2604c41b69c5d9c50a3324545a51f0bfa38435a0",
+  "relay_holder_binary_sha256": "0b1a7907f6da2ef6b5794621d87c55c2e0ee6d5aeb1c4e0fdf35c9031a127003",
   "relay_holder_connector_version": "0.11.3",
   "relay_holder_connector_sha256": "bc2a0b69aa763ffcf9182d1d6ffc8fc25862cf325d7baa66982d989a4a1defe6",
   "relay_holder_connector_source": "/evidence/v0.11.3/relay-connector-linux-amd64",
   "relay_holder_archives": [
     {
-      "source": "/evidence/v0.13.0/relay-holder-e843921b7cff76406b7da0b5b35cf653c7e458c5.tar.gz",
+      "source": "/evidence/v0.13.1/relay-holder-2604c41b69c5d9c50a3324545a51f0bfa38435a0.tar.gz",
       "component": "holder",
-      "sha256": "3ee727c19dcaf5221510e3b22c88dcde50d1b917d7ccba19fd1296d7041c4a70",
-      "manifestSha256": "ec9ee0fc8a525e758408c5398997180d5d1379eb771b31487de1030653935369"
+      "sha256": "e502c526c5dc0cfa9d033831e5e6e4fcf9b2f9692ff7db5c5c098831f80e4f2c",
+      "manifestSha256": "b970fba0e4eaa4efdf5bf9d548137ccde020bec06e1c542271aaed4b4c64ea39"
     },
     {
-      "source": "/evidence/v0.13.0/relay-pi-linux-x64-e843921b7cff76406b7da0b5b35cf653c7e458c5.tar.gz",
+      "source": "/evidence/v0.13.1/relay-pi-linux-x64-2604c41b69c5d9c50a3324545a51f0bfa38435a0.tar.gz",
       "component": "pi-linux-x64",
-      "sha256": "b12de9f54aeab0704b71d1fdde97c663faedc96e4791ac12151c8d9d00a7669d",
-      "manifestSha256": "7eafd53ce7a67e38432d8163f17dfe586ad7c6a571d1f18a0b893a087e523d6f",
+      "sha256": "096ea187814a4332898751ae4e5dbfaac2455369624d30d6e9a2190c8f7df4cd",
+      "manifestSha256": "d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d",
       "nodeVersion": "22.23.2"
     }
   ],
   "relay_holder_profiles_source": "/repo/docs/runbooks/inference-canary-v0113/profiles.json",
-  "relay_holder_profiles_sha256": "665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e"
+  "relay_holder_profiles_sha256": "58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39"
 }
