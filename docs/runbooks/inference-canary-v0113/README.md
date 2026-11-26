@@ -15,8 +15,11 @@ Fresh direct Claude B0 passed at 19:24:28–19:24:36 UTC; independent retrieval 
 the saved report confirmed `passed:true`, seven requests and one qualifier tool
 effect. This is not Pi lifecycle or warm acceptance. The 4af prerequisites and
 proofs below remain historical; they do not identify the current Router.
-The corrected [owner replacement driver](OWNER-PHASE-A.md#review-the-known-stopped-run-replacement)
-is pending normal review/merge and an explicit owner window, not ready to run.
+The first communication correction merged in
+[PR2031](https://git.chifor.me/cchifor/ailab/pulls/2031). Its original credential
+pins expire on November 26. The [post-expiry owner replacement](OWNER-PHASE-A.md#review-the-known-stopped-run-replacement)
+remains disabled pending its qualification, normal review/merge, deployment of
+the renewal-capable hub, separate owner renewals and an explicit owner window.
 The stopped run's one prompt and two attempts carry forward without resetting
 its report or markers. Follow the [scoped communication-read rule](LIVE-ACCEPTANCE.md#scoped-relay-communication-reads);
 it adds no budget, automatic approval or authority to resume stopped work.
@@ -498,21 +501,32 @@ No warm retention is enabled by these inputs.
 If a credential expires before acceptance, stop new launches and inspect its
 binding through the normal hub flow. A ready, enabled binding without a pending
 credential supports `RotateCredential` with its current revision and a fresh
-operation UUID; rotation retains the binding ID and paths while advancing the
-credential generation. Reconcile renderer delivery and hub readiness before
-resuming. Reusing the original CreateCredential operation only retries the original
-issuance; it does not renew its expiry. A failed/revoked/pending binding must be
-reconciled through its normal retry/revocation flow before rotation is allowed.
+operation UUID. The original e843 hub cannot rotate a binding that normal expiry
+cleanup has left failed with no credential pointers; retry does not repair that
+gap or renew the old key. [Relay PR716](https://git.chifor.me/cchifor/relay/pulls/716)
+adds an explicitly requested renewal for eligible ordinary bindings after all
+generations have confirmed revocation and completed cleanup. That path requires
+its deployed hub release and fresh server `canRenew === true`, not merely a source
+merge or an old expiry timestamp. It retains the binding, grant and approved
+profile selection, issues a new generation and still refuses disabled, explicitly
+revoked, uncertain or special-authority bindings. Use the actual new identities
+and expiry through the reviewed [post-expiry owner workflow](OWNER-PHASE-A.md).
+The driver does not issue credentials or infer a new acceptance window.
+Reusing the original CreateCredential operation only retries the original
+issuance; it does not renew its expiry.
 Initial issuance is `installing`, not `ready`; staged services alone do not make
 it rotatable. Issue late, start the reviewed renderers and holder under the
 operator's decision, verify the empty-session hello, then request the first
 approved normal launch. That launch schedules rendering and managed installation;
 the binding becomes ready after the validated install receipt. Require delivery
 and readiness before its first prompt. Readiness remains a prerequisite for
-rotation; it is not a prerequisite that can precede the initial launch. No direct
-token placement, synthetic receipt or extra probe launch is part of this flow.
-Do not force state changes. If it cannot return to a rotatable state, replacement
-requires new binding IDs, revised files/pins and renewed exact-profile approval.
+ordinary pre-expiry rotation; it is not a prerequisite that can precede the initial
+launch. Post-expiry renewal instead requires its separate server eligibility
+predicate. No direct token placement, synthetic receipt or extra probe launch
+is part of this flow.
+Do not force state changes. If a binding cannot use either supported path,
+replacement requires a separately reviewed binding/profile procedure; do not
+silently change IDs or restart this already-used holder.
 
 Startup is a separate explicit operator action using the reviewed holder role
 after prerequisites pass. Activate the Codex/Qwen profiles first if Claude is
