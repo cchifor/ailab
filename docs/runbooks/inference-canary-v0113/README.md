@@ -105,9 +105,22 @@ user `c4`/UID 1000. Tenant `00000000-0000-4000-8000-000000000001`, router connec
 
 | Profile | Protocol | Dedicated route | Fixed target |
 | --- | --- | --- | --- |
-| pi-canary-codex | openai-responses | canary-pi-codex | codex-2 / gpt-6-astra |
+| pi-canary-codex | openai-responses | canary-pi-codex | codex-3 / gpt-6-astra |
 | pi-canary-qwen | openai-chat | canary-pi-qwen | lan-192.168.0.28-18020 / qwen3.8-27b |
 | pi-canary-claude | anthropic-messages | canary-pi-claude | claude / sonnet |
+
+Operator handoff 1945 records the owner's approval to move the Codex target from
+`codex-2` to `codex-3` at Router configuration revision 2803, with profiles,
+bindings and keys unchanged. An independent read-only metadata check at
+**2026-11-26 10:45:38 UTC**
+observed configuration **2882** and confirmed the table's Codex target was the
+only enabled target, with `maxAttempts:1` and no fallback. The running Router
+reported source `b60fb03b23ce52548f49513d45466f4670f5a369` and image
+`registry.chifor.me/llm-router/router@sha256:0d4fa1318f2c03d192a28f6d5eee8fca6b8e62b5ce3d9c3e770d21f42d8050a6`;
+Deployment/Pod identity remained stable across the check. This metadata readback
+made no provider request and does not establish current quota availability,
+credential delivery or live Pi acceptance. Refresh the scoped route readback
+before the owner launch as required by [live acceptance](LIVE-ACCEPTANCE.md).
 
 Every route must have exactly one enabled target, no fallback and maxAttempts 1.
 Profiles select that alias as `{"kind":"model","model":"<route alias>"}`:
