@@ -139,15 +139,25 @@ spec:
         summary: Relay critical metric schema is incomplete
         description: A successful scrape omitted a required holder, delivery or cleanup observation. Check release
           compatibility; missing series must not look like a healthy zero.
+    # filesystem_missing is EXPECTED until a holder runs on an approved bounded volume (--storage-policy):
+    # without one a holder never sends a filesystem sample, and Relay counts every fresh holder with a NULL
+    # sample as missing (it exports no per-holder policy flag). On 2026-11-26 no holder had ever had a
+    # bounded volume, so this leg fired permanently with nothing to act on. It now arms only once SOME
+    # holder reported a bounded filesystem in the last 14 days (keyed on job: the pod-IP instance changes
+    # on every restart), i.e. bounded volumes are deployed and one has stopped reporting. The native-home
+    # legs are unchanged. Once Relay exports a per-holder "policy configured" signal, key on that instead.
+    # DISARM: the window is bounded by Prometheus retention (15d), so if NO holder reports a bounded
+    # filesystem for 14 days the leg resolves while samples are still missing (the description says so;
+    # pinned by the "disarms" test). A holder that stops reporting entirely is RelayHolderObservationMissing's.
     - alert: RelayHolderStorageObservationMissing
-      expr: label_replace(relay_control_holder_filesystem_reports_missing{job="relay-control-plane"} > 0, "reason", "filesystem_missing", "", "") or label_replace(relay_control_holder_native_home_reports_missing{job="relay-control-plane"} > 0, "reason", "native_home_missing", "", "") or label_replace(relay_control_holder_native_home_reports_incomplete{job="relay-control-plane"} > 0, "reason", "native_home_incomplete", "", "")
+      expr: label_replace((relay_control_holder_filesystem_reports_missing{job="relay-control-plane"} > 0) and on(job) (max_over_time(relay_control_holder_filesystems_fresh{job="relay-control-plane"}[14d]) > 0), "reason", "filesystem_missing", "", "") or label_replace(relay_control_holder_native_home_reports_missing{job="relay-control-plane"} > 0, "reason", "native_home_missing", "", "") or label_replace(relay_control_holder_native_home_reports_incomplete{job="relay-control-plane"} > 0, "reason", "native_home_incomplete", "", "")
       for: 5m
       labels:
         severity: warning
         service: relay
       annotations:
         summary: Relay holder storage observations are unavailable
-        description: Inspect approved bounded-volume placement and native-home sampling using the reason label. Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are excluded from capacity totals and never establish zero usage.
+        description: Inspect approved bounded-volume placement and native-home sampling using the reason label. Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are excluded from capacity totals and never establish zero usage. The filesystem_missing reason is armed only while some holder reported a bounded filesystem in the last 14 days (relay_control_holder_filesystems_fresh), so a resolve after 14 days without any such report means the arming expired, not that samples recovered.
     - alert: RelayHolderFilesystemNearCapacity
       expr: relay_control_holder_filesystems_near_capacity{job="relay-control-plane"} > 0
       for: 2m
