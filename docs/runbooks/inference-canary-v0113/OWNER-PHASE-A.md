@@ -149,6 +149,13 @@ check that the managed file is absent. `not-current` alone is insufficient. The
 browser cannot read private renderer receipts or host files; the exported record
 explicitly attributes these observations to the operator.
 
+A launch-bound cleanup receipt can predate final revocation: cleanup may already
+have completed. It must be no earlier than that launch, allowing the verified
+clock skew. The file-absence observation must still be fresh after the final
+checkpoint; a historical receipt alone is insufficient. Final marker hashes and
+byte counts must exactly match the last saved recovered-phase observation for
+each provider and run, not merely have a plausible one-marker shape.
+
 The checkpoint accepts this shape; copy exact recorded identities from the
 panel and supply real observations, never placeholder values:
 
@@ -156,12 +163,23 @@ panel and supply real observations, never placeholder values:
 {
   "operatorVerified": true,
   "observedUtc": "<fresh ISO timestamp>",
-  "launches": [{
-    "launchId": "<UUID>", "sessionId": "<UUID>", "bindingId": "<UUID>",
-    "credentialId": "<UUID>", "generation": 1, "commandId": "<UUID>",
-    "cleanedAt": "<receipt ISO timestamp>", "status": "absent", "fileAbsent": true
-  }],
-  "markers": ["<Codex recovered observer report>", "<Qwen recovered observer report>"]
+  "launches": [
+    {
+      "launchId": "<UUID>",
+      "sessionId": "<UUID>",
+      "bindingId": "<UUID>",
+      "credentialId": "<UUID>",
+      "generation": 1,
+      "commandId": "<UUID>",
+      "cleanedAt": "<receipt ISO timestamp>",
+      "status": "absent",
+      "fileAbsent": true
+    }
+  ],
+  "markers": [
+    "<Codex recovered observer report>",
+    "<Qwen recovered observer report>"
+  ]
 }
 ```
 
