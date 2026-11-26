@@ -934,7 +934,8 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
             {"path": "{{ registry_zot_config_dir }}/htpasswd", "name": "{{ item.user }}", "state": "absent"},
         )
         self.assertIs(self.remove_task["no_log"], True)
-        self.assertEqual(self.remove_task["notify"], "restart zot")
+        # zot reloads htpasswd in place (test_registry_zot_htpasswd_proof.py): the removal must not restart it.
+        self.assertNotIn("notify", self.remove_task)
         self.assertEqual(self.remove_task["loop"], "{{ registry_zot_scoped_push_users }}")
 
     def test_password_flow_matches_the_other_scoped_users(self):

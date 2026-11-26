@@ -34,7 +34,7 @@ jobs:
 
       # The owner acceptance driver is a dependency-free browser script. Its
       # network-isolated contract tests run through the Python test suite.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.23.5"
 

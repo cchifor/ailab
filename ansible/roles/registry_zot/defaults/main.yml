@@ -188,6 +188,14 @@ registry_zot_sync_credentials_file: "{{ registry_zot_config_dir }}/sync-credenti
 # and a first deploy restart regardless, as before. docs/runbooks/registry-cache.md "Reload or restart".
 registry_zot_config_allow_restart: false
 
+# Seconds the htpasswd proof (files/zot-htpasswd-proof.py) waits for the running zot's "loaded htpasswd file" line
+# after an htpasswd change. zot reloads within ~1 s (fsnotify, 150 ms debounce; a 1 s stat poll as backstop).
+registry_zot_htpasswd_proof_timeout: 30
+# The login checks after the proof (ci, pull, each scoped user): a bounded request timeout (seconds) and retries, 2 s
+# apart. Worst case per user: (retries + 1) x (timeout + 2) s = 42 s, which only a stalled zot would ever spend.
+registry_zot_htpasswd_login_timeout: 5
+registry_zot_htpasswd_login_retries: 5
+
 # The registry-side WRITER FENCE. When true, config.json renders every accessControl action list (anonymous, ci, pull,
 # the scoped push users, the admin group and adminPolicy) as read-only: pushes and deletes are denied, pulls work.
 # http.accessControl is reload-safe (files/zot-config-apply.py RELOADABLE), so turning it on or off is a reload, not a
