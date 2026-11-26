@@ -147,6 +147,28 @@ class IdleUpgrade(unittest.TestCase):
                     self.prepare(status=lambda name: {**self.status(name), field: value})
                 self.assert_originals()
 
+    def test_moved_units_can_remain_loaded_until_operator_reloads_manager(self):
+        observed = set()
+        def stale_status(name):
+            if not (self.home / '.config/systemd/user' / name).exists():
+                observed.add(name)
+            return dict(Id=name, LoadState='loaded', ActiveState='inactive', SubState='dead',
+                        MainPID='0', ControlGroup='', UnitFileState='disabled', DropInPaths='',
+                        FragmentPath=str(self.home / '.config/systemd/user' / name),
+                        NeedDaemonReload='yes' if name in observed else 'no')
+        result = self.prepare(status=stale_status)
+        self.assertEqual(result['state'], 'prepared-stopped-sealed')
+        self.assertEqual(observed, set(upgrade.UNITS))
+        self.assertTrue((Path(result['backup']) / 'complete.json').exists())
+
+    def test_preparation_operation_must_be_fresh_relative_to_journal(self):
+        for operation in (self.seal, self.events[1]['operationId']):
+            with self.subTest(operation=operation):
+                self.value['operationId'] = operation
+                with self.assertRaisesRegex(ValueError, 'Preparation operation'):
+                    self.prepare()
+                self.assert_originals()
+
     def test_both_existing_locks_are_respected(self):
         for name in ('holder.lock', 'connector-control.lock'):
             with self.subTest(name=name), open(self.state / name, 'r+b') as held:
@@ -224,6 +246,22 @@ class IdleUpgrade(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.prepare()
                 self.assert_originals()
+
+    def test_journal_uses_lf_framing_with_rust_compatible_json_whitespace(self):
+        valid = self.write_journal()
+        # A bare CR is not a record delimiter. Exact expected hashes do not turn
+        # a different framing into a valid journal.
+        invalid = valid.replace(b'\n', b'\r', 1)
+        (self.state / 'journal.jsonl').write_bytes(invalid)
+        self.value['journal']['sha256'] = hashlib.sha256(invalid).hexdigest()
+        with self.assertRaises(ValueError):
+            self.prepare()
+        self.assert_originals()
+        # Rust read_until(LF) + serde_json also accepts CRLF JSON whitespace.
+        compatible = valid.replace(b'\n', b'\r\n')
+        (self.state / 'journal.jsonl').write_bytes(compatible)
+        self.value['journal']['sha256'] = hashlib.sha256(compatible).hexdigest()
+        self.assertEqual(self.prepare()['state'], 'prepared-stopped-sealed')
 
     def test_seal_survives_a_prior_idle_restart_without_losing_journal_identity(self):
         old = self.incarnation

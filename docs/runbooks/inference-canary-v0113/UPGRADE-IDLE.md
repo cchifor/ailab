@@ -120,6 +120,9 @@ allowed events are `holder-started`, `holder-admission` and
 `holder-maintenance-seal`, with their exact fields and valid admission/operation/
 incarnation transitions. Admission must end paused with the recorded seal.
 All command and session events are refused, including failed or rejected ones.
+The preparation UUID must also be absent from the journal's maintenance
+operations. Records use the Rust reader's LF framing; permitted JSON whitespace
+does not weaken the exact journal SHA256 comparison.
 
 The helper also requires empty `native-homes` and `tool-bindings`, the exact
 three profile-home/workspace directories, canonical owned paths and unchanged
@@ -135,6 +138,11 @@ and parent directory is synced and receives its own receipt. Journal bytes and
 inode, singleton locks, native directories and service status are rechecked
 between moves. A final `complete.json` records `prepared-stopped-sealed`.
 The backup directory is private and existing operations are never overwritten.
+Systemd can keep removed units loaded with their old FragmentPath and
+NeedDaemonReload=yes until the later explicit role/activation sequence reloads
+the manager. The helper accepts this stale loaded metadata for its own moved
+units, as well as not-found metadata, while still requiring inactive/disabled
+services, MainPID0, empty cgroups and no overrides. It does not reload systemd.
 This is same-UID maintenance, not protection from a hostile process sharing c4.
 
 ## Install separately and verify the preserved seal

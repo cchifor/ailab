@@ -63,17 +63,22 @@ def request(value):
     sha(value['journal']['sha256'])
     for name in ('journalId', 'incarnation', 'sealId'):
         canonical_uuid(value['journal'][name])
+    require(value['operationId'] != value['journal']['sealId'],
+            'Preparation operation must differ from the maintenance seal')
     return value
 
 
-def journal_proof(data, expected):
+def journal_proof(data, expected, preparation_id=None):
     """Mirror the v1 Record and admission transitions, permitting no worker events."""
     require(0 < len(data) <= MAX_JOURNAL and data.endswith(b'\n'), 'Invalid journal size or tail')
     require(hashlib.sha256(data).hexdigest() == expected['sha256'], 'Journal SHA mismatch')
     revision, paused, seal, current, first = 0, False, None, None, None
     operations, incarnations = set(), set()
     count = 0
-    for count, line in enumerate(data.splitlines(keepends=True), 1):
+    # The Rust reader frames with read_until(b'\n'), not the broader splitlines
+    # delimiter set. JSON whitespace (including a CR before LF) remains valid.
+    for count, body in enumerate(data[:-1].split(b'\n'), 1):
+        line = body + b'\n'
         require(len(line) <= MAX_RECORD and line.endswith(b'\n'), 'Invalid journal record boundary')
         record = parse_json(line)
         exact_keys(record, ('version', 'sequence', 'incarnation', 'event'))
@@ -125,6 +130,7 @@ def journal_proof(data, expected):
     require(first == expected['journalId'] and current == expected['incarnation'],
             'Journal identity mismatch')
     require(paused and seal == expected['sealId'], 'Holder must remain durably paused and sealed')
+    require(preparation_id not in operations, 'Preparation operation already appears in the journal')
     return dict(journalId=first, incarnation=current, sealId=seal,
                 admissionRevision=revision, records=count, sha256=expected['sha256'])
 
@@ -146,7 +152,7 @@ def identity(path):
     return (meta.st_dev, meta.st_ino, meta.st_uid, meta.st_mode, meta.st_nlink, meta.st_size)
 
 
-def read_journal(path, uid, expected):
+def read_journal(path, uid, expected, preparation_id):
     fd = private_open(path, uid)
     try:
         before = identity(path)
@@ -154,7 +160,7 @@ def read_journal(path, uid, expected):
         require(before[-1] <= MAX_JOURNAL, 'Journal exceeds bound')
         with os.fdopen(os.dup(fd), 'rb') as stream:
             data = stream.read(MAX_JOURNAL + 1)
-        proof = journal_proof(data, expected)
+        proof = journal_proof(data, expected, preparation_id)
         require(identity(path) == before, 'Journal changed while reading')
         return before, proof
     finally:
@@ -203,7 +209,8 @@ def prepare(value, *, home=common.HOME, uid=1000, status=common.unit_status,
                 directories[path] = common.directory_identity(path, uid, True)
         for path in {(home / rel).parent for rel, _ in FILES.values()}:
             directories[path] = common.directory_identity(path, uid)
-        journal_identity, proof = read_journal(state / 'journal.jsonl', uid, value['journal'])
+        journal_identity, proof = read_journal(state / 'journal.jsonl', uid, value['journal'],
+                                             value['operationId'])
         records = {key: common.inspect_file(home / rel, uid, mode, value['expectedFiles'][key])
                    for key, (rel, mode) in FILES.items()}
         backup_root = home / '.config/relay-holder/idle-upgrades'
@@ -227,7 +234,8 @@ def prepare(value, *, home=common.HOME, uid=1000, status=common.unit_status,
                 require(not any((state / name).iterdir()), 'Native or communication state is not empty')
             if socket_identity is not None:
                 require(identity(state / 'control.sock') == socket_identity, 'Holder socket changed')
-            observed, _ = read_journal(state / 'journal.jsonl', uid, value['journal'])
+            observed, _ = read_journal(state / 'journal.jsonl', uid, value['journal'],
+                                       value['operationId'])
             require(observed == journal_identity, 'Journal inode changed')
             for key, (rel, mode) in FILES.items():
                 path = backup / key if key in moved else home / rel
