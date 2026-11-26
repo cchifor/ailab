@@ -23,5 +23,5 @@
     }
   ],
   "relay_holder_profiles_source": "/repo/docs/runbooks/inference-canary-v0113/profiles.json",
-  "relay_holder_profiles_sha256": "58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39"
+  "relay_holder_profiles_sha256": "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4"
 }
