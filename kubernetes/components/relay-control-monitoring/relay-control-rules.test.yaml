@@ -804,6 +804,9 @@ tests:
 - name: holder_filesystem_reports_missing fires and clears on recovery
   interval: 1m
   input_series:
+  # A bounded volume was observed (so filesystem samples are EXPECTED), then the sample went missing.
+  - series: relay_control_holder_filesystems_fresh{job="relay-control-plane",instance="relay:80"}
+    values: 1 0+0x10
   - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="relay:80"}
     values: 1+0x7 0+0x3
   alert_rule_test:
@@ -827,6 +830,48 @@ tests:
   - eval_time: 9m
     alertname: RelayHolderStorageObservationMissing
     exp_alerts: []
+- name: holder_filesystem_reports_missing stays quiet while no holder runs on a bounded volume
+  # 2026-11-26: every holder runs without --storage-policy (no approved bounded volume exists yet), so
+  # each one reports filesystem NULL forever. That is not an action anyone can take - the leg arms
+  # itself only once some holder has reported a bounded filesystem in the last 7 days.
+  interval: 1m
+  input_series:
+  - series: relay_control_holder_filesystems_fresh{job="relay-control-plane",instance="relay:80"}
+    values: 0+0x10
+  - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x10
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts: []
+  - eval_time: 10m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts: []
+- name: holder_filesystem_reports_missing stays armed across a control-plane pod restart
+  # The scrape target is the pod, so `instance` changes on every restart: arming must key on the job.
+  interval: 1m
+  input_series:
+  - series: relay_control_holder_filesystems_fresh{job="relay-control-plane",instance="10.244.5.7:8788"}
+    values: 1+0x2
+  - series: relay_control_holder_filesystems_fresh{job="relay-control-plane",instance="10.244.5.9:8788"}
+    values: _x3 0+0x10
+  - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="10.244.5.9:8788"}
+    values: _x3 1+0x10
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: 10.244.5.9:8788
+        reason: filesystem_missing
+      exp_annotations:
+        summary: Relay holder storage observations are unavailable
+        description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
+          Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
+          excluded from capacity totals and never establish zero usage.
 - name: holder_native_home_reports_missing fires and clears on recovery
   interval: 1m
   input_series:
@@ -1083,6 +1128,9 @@ tests:
 - name: simultaneous missing storage observations retain each reason
   interval: 1m
   input_series:
+  # bounded volumes are deployed (one reported at t0), so a missing filesystem sample is expected-to-alert
+  - series: relay_control_holder_filesystems_fresh{job="relay-control-plane",instance="relay:80"}
+    values: 1 0+0x8
   - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="relay:80"}
     values: 1+0x8
   - series: relay_control_holder_native_home_reports_missing{job="relay-control-plane",instance="relay:80"}

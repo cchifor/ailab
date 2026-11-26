@@ -139,8 +139,15 @@ spec:
         summary: Relay critical metric schema is incomplete
         description: A successful scrape omitted a required holder, delivery or cleanup observation. Check release
           compatibility; missing series must not look like a healthy zero.
+    # filesystem_missing is EXPECTED until a holder runs on an approved bounded volume (--storage-policy):
+    # without one a holder never sends a filesystem sample, and Relay counts every fresh holder with a NULL
+    # sample as missing (it exports no per-holder policy flag). On 2026-11-26 no holder had ever had a
+    # bounded volume, so this leg fired permanently with nothing to act on. It now arms only once SOME
+    # holder reported a bounded filesystem in the last 7 days (keyed on job: the pod-IP instance changes
+    # on every restart), i.e. bounded volumes are deployed and one has stopped reporting. The native-home
+    # legs are unchanged. Once Relay exports a per-holder "policy configured" signal, key on that instead.
     - alert: RelayHolderStorageObservationMissing
-      expr: label_replace(relay_control_holder_filesystem_reports_missing{job="relay-control-plane"} > 0, "reason", "filesystem_missing", "", "") or label_replace(relay_control_holder_native_home_reports_missing{job="relay-control-plane"} > 0, "reason", "native_home_missing", "", "") or label_replace(relay_control_holder_native_home_reports_incomplete{job="relay-control-plane"} > 0, "reason", "native_home_incomplete", "", "")
+      expr: label_replace((relay_control_holder_filesystem_reports_missing{job="relay-control-plane"} > 0) and on(job) (max_over_time(relay_control_holder_filesystems_fresh{job="relay-control-plane"}[7d]) > 0), "reason", "filesystem_missing", "", "") or label_replace(relay_control_holder_native_home_reports_missing{job="relay-control-plane"} > 0, "reason", "native_home_missing", "", "") or label_replace(relay_control_holder_native_home_reports_incomplete{job="relay-control-plane"} > 0, "reason", "native_home_incomplete", "", "")
       for: 5m
       labels:
         severity: warning
