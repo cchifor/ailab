@@ -41,13 +41,19 @@ identity is selected only if independently present in the current root subtree.
 New children of an already detached process are not inferred to be descendants.
 Root replacement or an unreadable root stops collection.
 
-For a previously observed identity, `ENOENT` produces one `absent` observation
+For a previously observed identity, `ENOENT` or `ESRCH` (including reaping between
+opening and reading stat) produces one `absent` observation
 with its PID, start ticks, timestamp and fixed status `absent-at-read`. This is
 normal observational data, not a collector failure or proof of reaping. That
 identity becomes dormant and is checked again only if its numeric PID returns
 in the inventory. Its bounded identity record remains available to distinguish
-the same reparented process from PID reuse. Missing reads for identities never
-observed, denied reads and malformed stat data remain explicit gaps.
+the same reparented process from PID reuse. For a PID listed in the inventory but
+never successfully observed, those errors produce an `inventoryTransient` row
+containing only the PID, timestamp and fixed status `inventory-transient`. Its
+ancestry is unknown: it may have been inside or outside the root subtree. These
+rows are informational and do not force exit 1. Denied reads, malformed stat data
+and other read failures remain explicit gaps. Preserve transient observations
+when assessing coverage; do not dismiss them as unrelated background processes.
 
 Bounds are enforced: duration 1–900 seconds; interval 0.25–60 seconds; at most
 16,384 inventory/tracked PIDs (default 4,096); at most 16 MiB of output (default
@@ -59,7 +65,8 @@ The deadline is checked between reads and during ancestry traversal; it is not a
 hard real-time guarantee against a stalled kernel. Slow samples report an
 overrun; SIGINT/deadline-incomplete samples stop explicitly. No catch-up
 burst is performed. A final fixed-code stop record is reserved within the output
-budget. Exit 0 means the requested duration ended without recorded gaps; exit 1
+budget. Exit 0 means the requested duration ended without recorded gaps, and may
+include known-identity absences or unknown-ancestry inventory transients; exit 1
 means a gap or early stop; exit 2 means startup was refused. These are collector
 statuses, not warm-session acceptance verdicts.
 Require the final stop record. External termination, a broken output stream or

@@ -45,7 +45,10 @@ class Reader:
 
 
 def sample(reader, tracked=None, limit=100):
-    return observer.snapshot(reader, 10, 100, tracked or {}, limit, lambda: None)[:3]
+    result = observer.snapshot(reader, 10, 100, tracked or {}, limit, lambda: None)
+    for gap in result[1]:
+        unittest.TestCase().assertIn(gap['code'], observer.GAP_CODES)
+    return result[:3]
 
 
 class Clock:
@@ -152,14 +155,18 @@ class WarmProcessObserverTest(unittest.TestCase):
         clock, out = clock or Clock(), io.StringIO()
         result = observer.observe(args or options(), reader, out, clock.now, clock.sleep,
                                   lambda: '2026-11-26T00:00:00.000+00:00')
-        return result, [json.loads(line) for line in out.getvalue().splitlines()], out.getvalue()
+        records = [json.loads(line) for line in out.getvalue().splitlines()]
+        for record in records:
+            for gap in record.get('gaps', []):
+                self.assertIn(gap['code'], observer.GAP_CODES)
+        return result, records, out.getvalue()
 
     def test_duration_sampling_and_output_allowlist(self):
         status, records, raw = self.run_observer(Reader([row(10, 1, 100)]))
         self.assertEqual(status, 0)
         self.assertEqual([r['type'] for r in records], ['sample', 'sample', 'stop'])
         self.assertEqual(records[-1]['reason'], 'duration-limit')
-        self.assertEqual(set(records[0]), {'type', 'sampleStartedAt', 'observedAt', 'processes', 'absent', 'gaps'})
+        self.assertEqual(set(records[0]), {'type', 'sampleStartedAt', 'observedAt', 'processes', 'absent', 'inventoryTransient', 'gaps'})
         self.assertNotIn('comm', raw)
 
     def test_incomplete_deadline_sample_is_failure_not_clean_duration_end(self):
@@ -276,8 +283,9 @@ class WarmProcessObserverTest(unittest.TestCase):
 
         def take():
             nonlocal known
-            rows, gaps, known, absent = observer.snapshot(
+            rows, gaps, known, absent, transient = observer.snapshot(
                 reader, 10, 100, known, 100, lambda: None, dormant, lambda: 'fixed-time')
+            self.assertEqual(transient, [])
             return rows, gaps, absent
         take()
         del reader.rows[11]
@@ -294,10 +302,46 @@ class WarmProcessObserverTest(unittest.TestCase):
         self.assertEqual(gaps, [{'pid': 11, 'startTicks': 101, 'code': 'pid-reused'}])
         self.assertEqual(absent, [])
 
-    def test_unobserved_process_disappearing_mid_inventory_is_still_a_gap(self):
+    def test_unobserved_disappearance_is_explicit_unknown_ancestry_not_read_failure(self):
         reader = Reader([row(10, 1, 100), row(11, 10, 101)])
         reader.errors[11] = 'stat-missing'
-        self.assertEqual(sample(reader)[1], [{'pid': 11, 'code': 'stat-missing'}])
+        status, records, _ = self.run_observer(reader)
+        self.assertEqual(status, 0)
+        self.assertEqual(records[0]['inventoryTransient'], [{
+            'pid': 11, 'observedAt': '2026-11-26T00:00:00.000+00:00',
+            'status': 'inventory-transient'}])
+        self.assertEqual(records[0]['gaps'], [])
+        self.assertEqual(records[0]['absent'], [])
+        self.assertEqual([r['pid'] for r in records[0]['processes']], [10])
+
+    @unittest.skipUnless(os.name == 'posix', 'Linux file-open contract')
+    def test_esrch_after_open_uses_known_identity_absence_path(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for pid in (10, 11):
+                path = pathlib.Path(folder) / str(pid)
+                path.mkdir()
+                (path / 'stat').write_bytes(stat_bytes(pid=pid, ppid=1 if pid == 10 else 10,
+                                                     start=100 if pid == 10 else 101))
+            reader = observer.ProcReader(folder, 4096)
+            original_read = observer.os.read
+            calls = 0
+
+            def reaped_after_open(fd, size):
+                nonlocal calls
+                calls += 1
+                # Root read and EOF precede the child stat read.
+                if calls == 3:
+                    raise ProcessLookupError('SECRET process payload')
+                return original_read(fd, size)
+            with patch.object(observer.os, 'read', side_effect=reaped_after_open):
+                rows, gaps, known, absent, transient = observer.snapshot(
+                    reader, 10, 100, {10: 100, 11: 101}, 100, lambda: None,
+                    timestamp=lambda: 'fixed-time')
+            self.assertEqual([r['pid'] for r in rows], [10])
+            self.assertEqual((gaps, transient), ([], []))
+            self.assertEqual(absent, [{'pid': 11, 'startTicks': 101,
+                                      'observedAt': 'fixed-time', 'status': 'absent-at-read'}])
+            self.assertNotIn('SECRET', json.dumps(absent))
 
 
 if __name__ == '__main__':

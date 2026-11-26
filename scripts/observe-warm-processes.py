@@ -23,6 +23,7 @@ GAP_CODES = frozenset({
     'stat-read-error', 'root-unavailable', 'root-identity-changed', 'tracking-limit',
     'output-limit', 'invalid-arguments', 'duration-limit', 'sample-deadline',
     'observer-failed', 'platform-not-supported',
+    'pid-reused', 'ancestry-time-order', 'sample-overrun',
 })
 FIELDS = ('pid', 'ppid', 'startTicks', 'rssBytes')
 
@@ -102,7 +103,7 @@ class ProcReader:
                     break
                 data += part
             return parse_stat(data, pid, self.page_size)
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
             raise Gap('stat-missing') from None
         except PermissionError:
             raise Gap('stat-denied') from None
@@ -133,7 +134,7 @@ def snapshot(reader, root_pid, root_start, tracked, limit, check_deadline,
     # reparented processes. Never silently truncate an inventory.
     if len(pids | set(tracked) | {root_pid}) > limit:
         raise Gap('inventory-limit')
-    gaps, absent = [], []
+    gaps, absent, transient = [], [], []
     for pid in sorted(pids - {root_pid}):
         check_deadline()
         try:
@@ -144,6 +145,11 @@ def snapshot(reader, root_pid, root_start, tracked, limit, check_deadline,
                 absent.append({'pid': pid, 'startTicks': tracked[pid],
                                'observedAt': timestamp(), 'status': 'absent-at-read'})
                 dormant.add(pid)
+            elif str(error) == 'stat-missing':
+                # Ancestry was never read: do not call this unrelated churn or
+                # claim it was outside the root subtree.
+                transient.append({'pid': pid, 'observedAt': timestamp(),
+                                  'status': 'inventory-transient'})
             else:
                 gaps.append({'pid': pid, 'code': str(error)})
     records[root_pid] = root()  # refuse a root replacement during the scan
@@ -177,7 +183,8 @@ def snapshot(reader, root_pid, root_start, tracked, limit, check_deadline,
         known[pid] = records[pid]['startTicks']
     if len(known) > limit:
         raise Gap('tracking-limit')
-    return [{key: records[pid][key] for key in FIELDS} for pid in sorted(selected)], gaps, known, absent
+    return ([{key: records[pid][key] for key in FIELDS} for pid in sorted(selected)],
+            gaps, known, absent, transient)
 
 
 def utc_now():
@@ -230,7 +237,7 @@ def observe(args, reader, stream, monotonic=time.monotonic, sleep=time.sleep, ti
             started = monotonic()
             began = timestamp()
             try:
-                rows, gaps, tracked, absent = snapshot(
+                rows, gaps, tracked, absent, transient = snapshot(
                     reader, args.root_pid, args.root_start_ticks, tracked,
                     args.max_processes, check_deadline, dormant, timestamp)
             except Gap as error:
@@ -243,7 +250,7 @@ def observe(args, reader, stream, monotonic=time.monotonic, sleep=time.sleep, ti
             had_gaps = had_gaps or bool(gaps)
             output.emit({'type': 'sample', 'sampleStartedAt': began,
                          'observedAt': timestamp(), 'processes': rows,
-                         'absent': absent, 'gaps': gaps})
+                         'absent': absent, 'inventoryTransient': transient, 'gaps': gaps})
             # No catch-up burst after an overrun. Deadline checks occur between
             # bounded reads; this is not a hard real-time scheduler.
             sleep(max(0, min(args.interval, deadline - monotonic())))
