@@ -1,5 +1,7 @@
 # Bounded warm Claude acceptance and rollback
 
+**Router successor:** [the native output replay release](../relay-router-messages-native-output-20261126.md) defines source4e4/imagef180 after verified rollout and bridges the unchanged warm/provider source below. Finish active owner Phase A on source4af before replacement. Preserve historical proof; fresh cold/lifecycle acceptance and the separately approved exclusive warm window remain required.
+
 This is a prepared operator procedure, not a live result. Run it only after the
 published Relay/holder/Pi and router releases pass cold Messages, native opaque
 replay and normal session-control acceptance. It does not change the checked-in
