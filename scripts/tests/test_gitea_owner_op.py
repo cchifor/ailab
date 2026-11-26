@@ -33,6 +33,28 @@ SCRIPT = os.path.join(REPO, "scripts", "gitea-owner-op.sh")
 PRESETS = os.path.join(REPO, "scripts", "owner-ops")
 RENOVATE = os.path.join(PRESETS, "renovate-onboard.ops")
 TEMPLATE = os.path.join(PRESETS, "repository-template-settings.ops")
+REVIEWER = os.path.join(PRESETS, "reviewer-onboard.ops")
+# The bots-only `main` rule, as read from the live protected_branch rows of cchifor/workbricks-apps and cchifor/relay on
+# 2026-11-25 (identical but for relay's status context): reviewer-claude=47, reviewer-codex=48, chifor=3.
+REVIEWER_PROTECTION = {
+    "rule_name": "main",
+    "enable_push": False,
+    "enable_force_push": False,
+    "enable_merge_whitelist": True,
+    "merge_whitelist_usernames": ["reviewer-claude", "reviewer-codex", "chifor"],
+    "enable_status_check": True,
+    "status_check_contexts": ["CI / verify (pull_request)"],
+    "required_approvals": 2,
+    "enable_approvals_whitelist": True,
+    "approvals_whitelist_username": ["reviewer-claude", "reviewer-codex"],
+    "block_on_rejected_reviews": True,
+    "block_on_official_review_requests": False,
+    "block_on_outdated_branch": True,
+    "dismiss_stale_approvals": True,
+    "ignore_stale_approvals": False,
+    "require_signed_commits": False,
+    "block_admin_merge_override": False,
+}
 BASH = shutil.which("bash")
 ORIGIN = "https://git.chifor.me/api/v1"
 TOKEN_NAME_TAIL = r"-\d{14}-[0-9a-f]{8}"
@@ -395,6 +417,13 @@ class GiteaOwnerOpTest(unittest.TestCase):
             (TEMPLATE, [], "owner-op-repository-template-settings",
              ["1. PATCH /repos/cchifor/repository-template  body repository-template-settings.json {"
               + ", ".join(TEMPLATE_SETTINGS) + "}  expect 200"]),
+            (REVIEWER, ["--var", "REPO=specpulse"], "owner-op-reviewer-onboard-specpulse",
+             ["1. PUT /repos/cchifor/specpulse/collaborators/reviewer-claude  body reviewer-onboard-collaborator.json "
+              "{permission}  expect 204",
+              "2. PUT /repos/cchifor/specpulse/collaborators/reviewer-codex  body reviewer-onboard-collaborator.json "
+              "{permission}  expect 204",
+              "3. POST /repos/cchifor/specpulse/branch_protections  body reviewer-onboard-protection.json {"
+              + ", ".join(REVIEWER_PROTECTION) + "}  expect 201"]),
         )
         for ops, args, name, lines in cases:
             with self.subTest(ops=os.path.basename(ops)):
@@ -410,13 +439,22 @@ class GiteaOwnerOpTest(unittest.TestCase):
 
     def test_shipped_preset_files_are_lf_and_hold_the_recorded_settings(self):
         for name in ("renovate-onboard.ops", "renovate-onboard-collaborator.json",
-                     "repository-template-settings.ops", "repository-template-settings.json"):
+                     "repository-template-settings.ops", "repository-template-settings.json",
+                     "reviewer-onboard.ops", "reviewer-onboard-collaborator.json",
+                     "reviewer-onboard-protection.json"):
             with open(os.path.join(PRESETS, name), "rb") as f:
                 self.assertNotIn(b"\r", f.read(), name)
         with open(os.path.join(PRESETS, "repository-template-settings.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f), TEMPLATE_SETTINGS)
         with open(os.path.join(PRESETS, "renovate-onboard-collaborator.json"), encoding="utf-8") as f:
             self.assertEqual(json.load(f), {"permission": "write"})
+        with open(os.path.join(PRESETS, "reviewer-onboard-collaborator.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f), {"permission": "write"})
+        # Key order too: the dry-run plan prints the top-level keys in file order.
+        with open(os.path.join(PRESETS, "reviewer-onboard-protection.json"), encoding="utf-8") as f:
+            body = json.load(f)
+        self.assertEqual(body, REVIEWER_PROTECTION)
+        self.assertEqual(list(body), list(REVIEWER_PROTECTION))
         with open(TEMPLATE, encoding="utf-8") as f:
             self.assertIn(".gitea/branch-protection.json", f.read(), "point at where the protection is recorded")
 

@@ -2687,7 +2687,7 @@ class AllowlistDefaultsTest(unittest.TestCase):
 
     EXPECTED = ["cchifor/ailab", "cchifor/platform", "cchifor/dsh-team-conductor",
                 "cchifor/forge", "cchifor/relay", "cchifor/llm-router", "cchifor/dsh-acp-plus",
-                "cchifor/workbricks", "cchifor/workbricks-apps"]
+                "cchifor/workbricks", "cchifor/workbricks-apps", "cchifor/specpulse"]
 
     @staticmethod
     def _strict_yaml(text):

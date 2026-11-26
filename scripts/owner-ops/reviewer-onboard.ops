@@ -1,0 +1,16 @@
+# reviewer-onboard: admit cchifor/${REPO} to the two review bots. Both reviewer identities get write, and `main` gets
+# the bots-only rule that cchifor/workbricks-apps and cchifor/relay carry (relay's differs only in its status context).
+#   scripts/gitea-owner-op.sh scripts/owner-ops/reviewer-onboard.ops --var REPO=<repository>             # dry run
+#   scripts/gitea-owner-op.sh scripts/owner-ops/reviewer-onboard.ops --var REPO=<repository> --execute
+# Collaborators and branch protection need repository admin, which the routine identities do not hold: an owner
+# operation. The rule requires the context `CI / verify (pull_request)`: the repository needs a workflow `CI` with a
+# job `verify`, or nothing can merge (reviewbot also merges only on a combined status of success). The context is
+# fixed in the body because a --var value allows only [A-Za-z0-9._-]: a repository with another workflow or job name
+# needs its own body. Run this BEFORE the allowlist entry in ansible/roles/pr_reviewer/defaults/main.yml merges: any
+# reviewer-host converge after that merge activates the entry, and a private repository is invisible to the reviewers
+# until this grants them access. That entry and a reviewer-host converge complete the admission.
+# The POST answers 403 on a repository that already has a `main` rule: read it first and edit it deliberately.
+# scopes: write:repository
+PUT /repos/cchifor/${REPO}/collaborators/reviewer-claude reviewer-onboard-collaborator.json 204
+PUT /repos/cchifor/${REPO}/collaborators/reviewer-codex reviewer-onboard-collaborator.json 204
+POST /repos/cchifor/${REPO}/branch_protections reviewer-onboard-protection.json 201
