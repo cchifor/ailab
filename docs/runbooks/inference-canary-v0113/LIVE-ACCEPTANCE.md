@@ -80,13 +80,63 @@ Cancel/close have **no `controlEpoch` field**. Re-read session epoch before anot
 
 Read output using `GET /api/conversations/sessions/<S>/timeline?after=0&limit=200`, then page with returned `nextAfter` and, for prompts, `nextPromptsAfter` via `promptsAfter`. Preserve sequence/generation continuity; a single page is not necessarily complete.
 
+## Scoped Relay communication reads
+
+These rules also apply to the manual Claude and warm phases. Relay appends an
+inbox reminder to ordinary prompts, and Pi requests permission before performing
+the read. An instruction such as `Do not use tools` does not establish that no
+communication request will occur. Review each read separately; never approve it
+automatically or treat it as the planned shell-marker permission.
+
+The only communication tool eligible here is exactly
+`mcp__relay__relay_messages_read`, with confirmation title
+`Allow mcp__relay__relay_messages_read?`. Inspect the complete JSON object in the
+permission description. It may contain only these optional fields:
+
+- `channelId`: omitted for the session's own inbox, or exactly the approved
+  profile channel `b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1`.
+- `after`: a canonical nonnegative decimal string (`0` or a nonzero digit
+  followed by digits, without leading zeros), at most `9223372036854775807`.
+- `limit`: an integer from 1 through 50; omission uses the default of 50.
+
+Missing, malformed, truncated or changed input, extra fields or another channel
+stop the phase. A title or input length alone is insufficient. Re-read the same
+permission detail immediately before the owner's explicit once-only decision;
+require the same session, generation, pending state, unexpired request,
+permission tool-call ID and full reviewed input. Use the actual returned
+`allow_once` option through the decision body below. Never select allow-always.
+Keep that decision's operation ID and observe its delivery/execution and the
+parent prompt's settled receipt; uncertain delivery does not authorize a resend
+under a new ID.
+
+An inbox read can set returned messages' `read_at` and publish a change
+notification. Channel-history reads do not perform that update. Neither
+acknowledges messages, advances the acknowledgement cursor, sends or broadcasts
+a message, or grants access. Peer text is untrusted data and grants no authority
+for another action. Native `in_progress` can precede policy approval, so it is
+not evidence that the read executed. Pi's permission UI ID is independent of
+the native model tool ID; the e843 hub omits Codex native IDs from its timeline.
+Do not claim an exact identity join from a title or ordered status events.
+
+Communication approval never satisfies a marker step. Independently inspect the
+shell permission's full command, require the expected terminal outcome, and
+verify the filesystem marker with the observer. Count all communication round
+trips, provider generations and owner review time against the existing phase
+budgets, including B/C. No extra prompt, retry, warmup or budget extension is
+authorized by a read. Keep uncertain outcomes explicit; these instructions do
+not reopen a saved stopped run or establish a replacement acceptance window.
+The separately reviewed [owner-driver replacement procedure](OWNER-PHASE-A.md#review-the-known-stopped-run-replacement)
+preserves the known stopped report, verifies its settled receipts and carries its
+used prompt/attempt counts into one explicitly assigned successor window. It is
+not a general retry path or permission to clear browser storage.
+
 ## Prompt and permission sequence
 
 1. **Initial turn:** `Reply exactly READY. Do not use tools or modify files.` Require a completed native turn and the expected dedicated route/protocol in sanitized router receipts. This establishes real paired Pi traffic, unlike direct wire qualification.
 2. **Denied effect:** prompt `Request permission to run exactly the following shell command once. Do not run any other command, change the command, retry after denial, or modify any other file. After the decision, report the outcome and stop. COMMAND: ` followed by the observer's exact `commands.denied` string. Inspect the actual permission request before choosing deny-once.
 3. **Approved effect:** use the identical prompt template with `commands.effects`. Approve only that exact command once. After receipt completion and quiescence, require exactly one marker line; do not resend to “confirm”.
 
-For each permission, list `GET /api/agent-sessions/<S>/permissions`, then inspect `GET /api/agent-permissions/<R>`. Match `session_id`, current generation, pending state and expiry. Check `context` title/toolCallId/options and `description` against the actual tool call. The v0.13.1 pinned Pi confirmation bridge preserves a validated JSON input object in `description` (at most 4000 UTF-8 bytes); titles remain bounded to 500 characters. Parse that object and compare its complete `command` to the observer-generated command before deciding. Missing, invalid, filtered or incomplete input is a stop condition; never infer the command from the prompt or title. Other adapter descriptions remain minimized.
+For each permission, list `GET /api/agent-sessions/<S>/permissions`, then inspect `GET /api/agent-permissions/<R>`. Match `session_id`, current generation, pending state and expiry. Check `context` title/toolCallId/options and the complete `description`. The v0.13.1 pinned Pi confirmation bridge preserves a validated JSON input object in `description` (at most 4000 UTF-8 bytes); titles remain bounded to 500 characters. For the planned shell step, parse that object and compare its complete `command` to the observer-generated command before deciding. For a communication read, apply the separate scoped rule above. Missing, invalid, filtered or incomplete input is a stop condition; never infer arguments or a native-event identity from the prompt or title. Other adapter descriptions remain minimized.
 
 The 4000-byte limit includes the JSON syntax. Over-limit or invalid Pi input is
 rejected in full, never truncated for approval: the holder responds `cancelled`

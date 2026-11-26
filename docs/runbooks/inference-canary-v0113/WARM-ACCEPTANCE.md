@@ -58,6 +58,29 @@ the owned lease and command/permission receipts described in
 configuration unchanged across measured turns. Renew the lease every 20 seconds.
 Do not directly read or copy rendered credentials.
 
+Apply the shared [scoped Relay communication-read rule](LIVE-ACCEPTANCE.md#scoped-relay-communication-reads)
+throughout this phase and the capacity phase below. Ordinary prompts retain
+Relay's inbox reminder, including those whose exact text says not to use tools.
+The owner may separately allow each fully inspected
+`mcp__relay__relay_messages_read` request once, only for the own inbox or exact
+approved channel and bounded arguments in that rule. Re-read the pending detail
+before deciding. Inbox reads may set `read_at` and publish a notification; they
+do not acknowledge or send messages or grant access. The `pwd` denial remains a
+separate shell decision; a read approval cannot satisfy it.
+
+All read round trips, upstream generations and owner decision time consume the
+existing phase limits and idle window. Keep the exact prompts and budgets below;
+do not ignore extra calls, add prompts or repeat a turn to manufacture reuse.
+Record every observed generation and process transition. If a read prevents
+establishing the required timing, reuse or capacity outcome, mark that claim
+unobserved or inconclusive and stop the affected phase. A permission title,
+native `in_progress` status or completed read does not establish worker reuse.
+These manual instructions do not reopen a stopped Phase A run or assign its
+replacement window. Follow only the separately reviewed
+[owner-driver replacement procedure](OWNER-PHASE-A.md#review-the-known-stopped-run-replacement)
+for that known stopped run; it preserves historical evidence and spent counters.
+Warm and capacity execution still require their own preceding gates and window.
+
 Before execution identify an operator-approved, read-only observation of the
 router process tree in its PID namespace. Record only process PID, parent PID,
 start time, RSS bytes and observation time. Do not collect command lines,
@@ -100,9 +123,10 @@ epoch and lease values; every logical command has a distinct operation UUID.
 | 5 | `Without using tools or modifying files, count upward from 1, one integer per line, until 500.` | Once this generation is observed active, the operator commits `warmSessions:false` through the same normal workflow, retaining sdk-resume, Messages and all other settings. Record config revision/time and completion or cancellation of the old generation. Do not force a restart. |
 | 6 | Only after prompt 5 completes successfully with a complete router receipt and warm:false is read back: `Reply exactly COLD_ROLLBACK_OK. Do not use tools or modify files.` | Successful cold continuation of the same conversation/native history, with the old provider generation drained and its retained processes released. Record latency, RSS and the final zero retained-worker observation. |
 
-`pwd` requests only the selected session workspace and is always denied. An
-unexpected tool, command, missing permission or early process loss stops that
-row; do not substitute an arbitrary model-selected command. If prompt 5 finishes
+`pwd` requests only the selected session workspace and is always denied. Apart
+from separately reviewed communication reads under the rule above, an unexpected
+tool, command, missing permission or early process loss stops that row; do not
+substitute an arbitrary model-selected command. If prompt 5 finishes
 before the configuration change, the active-generation rollback claim is
 unexercised, even if prompt 6 succeeds. Cancellation or an uncertain router
 receipt stops the phase; settled cancellation does not authorize prompt 6.
