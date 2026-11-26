@@ -12,8 +12,9 @@ The reviewed holder/Pi successor is v0.13.1 source
 `2604c41b69c5d9c50a3324545a51f0bfa38435a0`; the required Router source is
 `4af66b8c7c3cc83ddd10e326c554ad728caad72e`, while the hub stays e843/schema93.
 Published run150672 pins and revision3 profiles have passed offline root/profile
-and deployed-hub schema qualification in [README.md](README.md). Five-case wire
-qualification and actual upgrade/readiness remain pending. The v0.13.0 root and
+and deployed-hub schema qualification in [README.md](README.md); all five
+published-Pi wire/replay cases against Router4af66b8 with synthetic upstreams
+also passed. Actual upgrade/readiness and live acceptance remain pending. The v0.13.0 root and
 five-case wire proofs there are historical. Use [UPGRADE-IDLE.md](UPGRADE-IDLE.md) for the
 started, never-launched canary before new acceptance. Warm acceptance remains held until
 the preceding cold/lifecycle gates pass. Opaque replay uses the operator-selected

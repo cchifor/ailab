@@ -18,8 +18,9 @@ completed in [run150672](https://git.chifor.me/cchifor/relay/actions/runs/150672
 The checked-in successor profiles are revision3, SHA256
 `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`.
 Published-artifact root/profile and deployed-hub schema qualification passed
-offline. Five-case wire qualification, the idle upgrade, exact successor approval
-readbacks and live acceptance remain pending; publication is not activation.
+offline, along with five published-Pi wire cases. The idle upgrade, exact
+successor approval readbacks and live acceptance remain pending; publication
+and offline qualification are not activation.
 
 The deployed hub remains v0.13.0/source
 `e843921b7cff76406b7da0b5b35cf653c7e458c5`, with the
@@ -96,7 +97,19 @@ from unnormalized input JSON. Evidence in the Relay workspace is
 `normalized-definition-hashes.json`. The retained connector was hash-checked,
 not executed. This proves offline installation/profile admission and schema
 compatibility, not a real systemd upgrade, live readiness or provider acceptance.
-Published v0.13.1 wire qualification against Router4af66b8 is still pending.
+Published v0.13.1 Pi wire/replay qualification passed **5/5, zero skipped, in
+74.05s** on 2026-11-26. It used the exact Pi manifest/archive above, packaged
+Node22.23.2 (SHA256 `3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327`),
+and Router TypeScript source `4af66b8c7c3cc83ddd10e326c554ad728caad72e` under
+Node24.22.2 with synthetic upstreams and external networking disabled. Source
+and runtime mounts were read-only; runtime and test source were not rebuilt or
+modified. Evidence is `.data/published-pi-wire-v0131-20261126/qualification-evidence.json`
+and its `r1/` summary, provenance and Vitest results. Installation/repeat evidence
+is `.data/published-pi-install-v0131-20261126/published-pi-installation.json`.
+This qualifies published Pi/ACP/policy/tools against that Router source;
+it does **not** exercise the published Router image, real subscription CLI,
+holder/hub lifecycle or live upstream payloads. Preserve those limits alongside
+the still-required live receipts and attempt metadata.
 
 The historical v0.13.0 offline proof used its e843/021a8fbed installer,
 holder/Pi archives and revision2 profile bytes at the actual state/home paths as UID1000. Both installer modes

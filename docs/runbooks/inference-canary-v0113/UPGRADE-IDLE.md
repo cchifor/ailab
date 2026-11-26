@@ -27,8 +27,9 @@ The current successor source is reviewed v0.13.1
 pins and revision3 profile SHA256
 `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`
 are recorded in [README.md](README.md). Offline root/profile and deployed-hub
-schema qualification passed; five-case wire qualification and the actual upgrade
-remain pending. Do not stop the current idle holder merely because source merged
+schema qualification passed, along with all five published-Pi wire/replay
+cases against Router4af66b8 with synthetic upstreams. The actual upgrade and
+live acceptance remain pending. Do not stop the current idle holder merely because source merged
 or artifacts were published. The hub stays at e843/schema93. The required Router correction
 source is 4af66b8, with actual deployment/readiness verified separately.
 Operator bus1967's idle/no-launch report selects this procedure; the helper must

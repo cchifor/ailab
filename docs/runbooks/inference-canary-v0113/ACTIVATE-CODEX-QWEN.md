@@ -10,8 +10,9 @@ inventory imports them. This change starts no service and creates no key itself.
 `2604c41b69c5d9c50a3324545a51f0bfa38435a0` replaces the historical v0.13.0 runtime.
 Published run150672 pins and revision3 profile bytes are recorded in
 [README.md](README.md); exact-artifact root/profile and deployed-hub schema
-qualification passed offline. Five-case wire qualification and the actual
-upgrade/activation remain pending. Historical revision2/publication149439 proofs
+qualification passed offline, as did all five published-Pi wire/replay cases
+against Router4af66b8 with synthetic upstreams. Actual upgrade/activation
+readbacks and live acceptance remain pending. Historical revision2/publication149439 proofs
 do not qualify that replacement. The hub stays at
 e843/schema93; the required Router correction source is 4af66b8. Verify actual
 Router deployment separately. Complete qualification and verify the approved final diff before
