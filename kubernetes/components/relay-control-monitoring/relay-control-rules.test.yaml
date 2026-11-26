@@ -826,7 +826,9 @@ tests:
         summary: Relay holder storage observations are unavailable
         description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
           Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
-          excluded from capacity totals and never establish zero usage.
+          excluded from capacity totals and never establish zero usage. The filesystem_missing reason is armed only
+          while some holder reported a bounded filesystem in the last 14 days (relay_control_holder_filesystems_fresh),
+          so a resolve after 14 days without any such report means the arming expired, not that samples recovered.
   - eval_time: 9m
     alertname: RelayHolderStorageObservationMissing
     exp_alerts: []
@@ -871,7 +873,40 @@ tests:
         summary: Relay holder storage observations are unavailable
         description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
           Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
-          excluded from capacity totals and never establish zero usage.
+          excluded from capacity totals and never establish zero usage. The filesystem_missing reason is armed only
+          while some holder reported a bounded filesystem in the last 14 days (relay_control_holder_filesystems_fresh),
+          so a resolve after 14 days without any such report means the arming expired, not that samples recovered.
+- name: holder_filesystem_reports_missing disarms once no bounded filesystem was reported for 14 days
+  # The arming window is bounded by retention (15d): if every bounded holder keeps reporting WITHOUT a
+  # filesystem sample, the leg fires, then resolves when the last fresh report ages out of [14d]. Pinned
+  # here so a resolve is never read as recovery (the description says the same).
+  # 4m samples: inside the 5m lookback, so `for: 5m` can hold (1h samples go stale between points)
+  interval: 4m
+  input_series:
+  - series: relay_control_holder_filesystems_fresh{job="relay-control-plane",instance="relay:80"}
+    values: 1 0+0x5700
+  - series: relay_control_holder_filesystem_reports_missing{job="relay-control-plane",instance="relay:80"}
+    values: 1+0x5700
+  alert_rule_test:
+  - eval_time: 2d
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        service: relay
+        job: relay-control-plane
+        instance: relay:80
+        reason: filesystem_missing
+      exp_annotations:
+        summary: Relay holder storage observations are unavailable
+        description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
+          Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
+          excluded from capacity totals and never establish zero usage. The filesystem_missing reason is armed only
+          while some holder reported a bounded filesystem in the last 14 days (relay_control_holder_filesystems_fresh),
+          so a resolve after 14 days without any such report means the arming expired, not that samples recovered.
+  - eval_time: 15d
+    alertname: RelayHolderStorageObservationMissing
+    exp_alerts: []
 - name: holder_native_home_reports_missing fires and clears on recovery
   interval: 1m
   input_series:
@@ -894,7 +929,9 @@ tests:
         summary: Relay holder storage observations are unavailable
         description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
           Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
-          excluded from capacity totals and never establish zero usage.
+          excluded from capacity totals and never establish zero usage. The filesystem_missing reason is armed only
+          while some holder reported a bounded filesystem in the last 14 days (relay_control_holder_filesystems_fresh),
+          so a resolve after 14 days without any such report means the arming expired, not that samples recovered.
   - eval_time: 9m
     alertname: RelayHolderStorageObservationMissing
     exp_alerts: []
@@ -920,7 +957,9 @@ tests:
         summary: Relay holder storage observations are unavailable
         description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
           Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
-          excluded from capacity totals and never establish zero usage.
+          excluded from capacity totals and never establish zero usage. The filesystem_missing reason is armed only
+          while some holder reported a bounded filesystem in the last 14 days (relay_control_holder_filesystems_fresh),
+          so a resolve after 14 days without any such report means the arming expired, not that samples recovered.
   - eval_time: 9m
     alertname: RelayHolderStorageObservationMissing
     exp_alerts: []
@@ -1151,7 +1190,9 @@ tests:
         summary: Relay holder storage observations are unavailable
         description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
           Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
-          excluded from capacity totals and never establish zero usage.
+          excluded from capacity totals and never establish zero usage. The filesystem_missing reason is armed only
+          while some holder reported a bounded filesystem in the last 14 days (relay_control_holder_filesystems_fresh),
+          so a resolve after 14 days without any such report means the arming expired, not that samples recovered.
     - exp_labels:
         severity: warning
         service: relay
@@ -1162,7 +1203,9 @@ tests:
         summary: Relay holder storage observations are unavailable
         description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
           Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
-          excluded from capacity totals and never establish zero usage.
+          excluded from capacity totals and never establish zero usage. The filesystem_missing reason is armed only
+          while some holder reported a bounded filesystem in the last 14 days (relay_control_holder_filesystems_fresh),
+          so a resolve after 14 days without any such report means the arming expired, not that samples recovered.
     - exp_labels:
         severity: warning
         service: relay
@@ -1173,4 +1216,6 @@ tests:
         summary: Relay holder storage observations are unavailable
         description: Inspect approved bounded-volume placement and native-home sampling using the reason label.
           Expired native-home samples are counted as incomplete. Missing, incomplete or expired samples are
-          excluded from capacity totals and never establish zero usage.
+          excluded from capacity totals and never establish zero usage. The filesystem_missing reason is armed only
+          while some holder reported a bounded filesystem in the last 14 days (relay_control_holder_filesystems_fresh),
+          so a resolve after 14 days without any such report means the arming expired, not that samples recovered.
