@@ -891,6 +891,7 @@ class RegistryZotScopedPushPasswordTaskTest(unittest.TestCase):
             self.assertFalse(self._eval(that, self.users[_STRIVE_CI_USER], passwords))
             self.assertFalse(self._eval(that, self.users["trueswarm-ci"], passwords))
             self.assertFalse(self._eval(that, self.users["workbricks-ci"], passwords))
+            self.assertFalse(self._eval(that, self.users["specpulse-ci"], passwords))
         present = {u: "x" for u in self.users}
         for item in self.users.values():
             self.assertTrue(self._eval(that, item, present))

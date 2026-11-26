@@ -288,6 +288,7 @@ prefix (`read`/`create`/`update`, no `delete`), listed in `registry_zot_scoped_p
 | `trueswarm-ci` | `trueswarm/**` | `cchifor/trueswarm` `.gitea/workflows/publish.yml` (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`) |
 | `workbricks-ci` | `workbricks/**` | `cchifor/workbricks` image-publish CI (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`; Workbricks OR-12). The cell pulls anonymously, like every other image; the registry is LAN-only. |
 | `strive-ci-push` | `strive/ci-build/**` | `cchifor/platform` e2e build-once (platform#2823): stack-smoke pushes `strive/ci-build/<image>:ci-<40-hex commit>` and the journey shards pull by digest. A `ci-` tag is kept while it is among the 10 most recently pushed in its repository OR was pushed within 24h (`registry_zot_strive_ci_build_keep_recent` / `_keep_within`); its retention policy precedes `strive/**`. NOT `strive/ci/**`: those 12 existing platform repos keep their `strive/**` rules. Entry carries `password_optional: true` until its SOPS key exists. |
+| `specpulse-ci` | `specpulse/**` | `cchifor/specpulse` `.gitea/workflows/publish.yml` (Actions secrets `REGISTRY_USERNAME`/`REGISTRY_PASSWORD`): pushes `specpulse/specpulse` from main; `kubernetes/apps/apps/specpulse` pins the digest. Added with its SOPS key in the same change (no `password_optional`). |
 
 A logged-in scoped user has **no** rights outside its prefix, not even read: zot's `anonymousPolicy`
 applies only to unauthenticated requests. Use the credential for the push only (platform#2823 writes
