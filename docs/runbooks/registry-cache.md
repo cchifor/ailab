@@ -141,19 +141,25 @@ consulting `keepTags`. So, for every repo before it goes on the list:
 **htpasswd changes reload in place too** (since 2026-11-26): adding a scoped push user, removing an optional one, or
 rotating a password. zot v2.1.23 watches the htpasswd file whenever htpasswd auth is on (`pkg/api/htpasswd.go`
 HTPasswdWatcher) and logs `loaded htpasswd file` with the user count on each reload. Measured on the v2.1.23 binary
-(2026-11-26): a user added by an in-place write and by temp+rename logged in within 1 s, same PID; a wrong password
-stayed 401. On EVERY apply against a running zot (not only when the file changed), the role:
-- snapshots zot's MainPID, journal cursor and the file's content digest before the htpasswd tasks;
-- runs `files/zot-htpasswd-proof.py prove`: "unchanged" when the digest is the same, else it waits for the LATEST
-  reload outcome logged after the file's last write to be a load with the file's user count, from the same MainPID.
-  That shows zot reloaded after the write, not which bytes it read;
-- then ci, pull and each scoped user with a key log in on `/v2/`, retried within the proof timeout. These logins are
-  the ground truth for added and rotated users, and they also catch a zot left stale by an earlier failed run.
-  (Removals rely on zot's final reload; there is no password to test a removed user with.)
+(2026-11-26), with the helper below end to end: an added user logged in within 1 s from the same PID; a removed user
+got 401; a rotated password switched (old 401, new 200); rewriting the file's own bytes in place made zot reload it.
 
-Anything unproven FAILS the play and restarts nothing; `-e registry_zot_config_allow_restart=true` accepts the
-restart instead. The check is skipped when the config apply already queued a restart (e.g. a port change), and on a
-stopped zot, which "Enable + start zot" starts and which reads the file then.
+The role snapshots zot's MainPID, journal cursor, time and the file's content digest before the htpasswd tasks, and
+at the END of every real apply (after the handler flush and "Enable + start zot", so any restart another task queued
+has happened) runs `files/zot-htpasswd-proof.py prove`:
+- zot is a new process (restarted or first started by the play): `restarted`. A new zot loads the file only when its
+  start-up store parse ends (`Controller.Init`, after `InitMetaDB`) and watches it from then on, so it cannot hold
+  stale credentials. It is not serving yet, so the logins are skipped;
+- the same process, file changed: the LATEST reload outcome logged after the file's last write must be a load with
+  the file's user count (`reloaded`);
+- the same process, file unchanged: the helper rewrites the file's own bytes in place (same inode, same length,
+  identical content at every instant) so that zot reloads it, and proves that reload (`reloaded-forced`). This is
+  what re-proves an earlier run's unproven write, including a removal, which no login can test.
+
+Then ci, pull and each scoped user with a key log in on `/v2/` (5 s request timeout, 5 retries 2 s apart: at most
+42 s per user). A reload line shows zot read the file after its last write, not which bytes it read, so these logins
+are the ground truth for added and rotated users. Anything unproven FAILS the play and restarts nothing;
+`-e registry_zot_config_allow_restart=true` accepts the restart instead.
 
 **Everything else the role converges still restarts zot**: certs, sync credentials, the unit and the binary.
 Batch those changes into one apply, in a quiet window.

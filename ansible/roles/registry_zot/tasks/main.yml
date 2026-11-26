@@ -364,102 +364,6 @@
   when: item.user in (registry_scoped_push_passwords | default({}))
   no_log: true
 
-- name: Note the zot state the htpasswd check compares against
-  ansible.builtin.set_fact:
-    registry_zot_htpasswd_before: "{{ registry_zot_htpasswd_snapshot.stdout | from_json }}"
-
-# Runs on EVERY apply against a running zot, not only when this run wrote the file: a write whose reload went unproven
-# on an earlier run leaves the file unchanged now, so only these checks still catch a zot that holds old credentials.
-# The helper returns "unchanged" when the content digest is the snapshot's (an owner/mode-only fix writes no content).
-- name: Verify the running zot serves the current htpasswd (reloaded in place, never restarted)
-  when:
-    - (registry_zot_htpasswd_before.pid | int) > 0
-    - not ansible_check_mode
-    # A restart already queued by the config apply (e.g. a port change) loads the file fresh; checking now would
-    # hit an endpoint the running zot does not serve yet.
-    - ((registry_zot_config_apply.stdout | default('{}', true) | from_json).mode | default('none')) != 'restart'
-  block:
-    - name: Prove the running zot reloaded the htpasswd file in place (no restart)
-      ansible.builtin.command:
-        argv:
-          - python3
-          - /usr/local/lib/zot-htpasswd-proof.py
-          - prove
-          - --unit
-          - zot.service
-          - --file
-          - "{{ registry_zot_config_dir }}/htpasswd"
-          - --pid
-          - "{{ registry_zot_htpasswd_before.pid | string }}"
-          - --cursor
-          - "{{ registry_zot_htpasswd_before.cursor | default('', true) }}"
-          - --before-sha256
-          - "{{ registry_zot_htpasswd_before.sha256 | default('', true) }}"
-          - --timeout
-          - "{{ registry_zot_htpasswd_proof_timeout | string }}"
-      register: registry_zot_htpasswd_proof
-      changed_when: false
-
-    - name: The ci and pull users log in on the running zot
-      ansible.builtin.uri:
-        url: "https://127.0.0.1:{{ registry_zot_port }}/v2/"
-        url_username: "{{ item.user }}"
-        url_password: "{{ item.password }}"
-        force_basic_auth: true
-        validate_certs: false # 127.0.0.1 is not on the certificate; this checks the credentials, not TLS
-        status_code: 200
-      loop:
-        - { user: "{{ registry_zot_ci_user }}", password: "{{ registry_ci_password }}" }
-        - { user: "{{ registry_zot_pull_user }}", password: "{{ registry_pull_password }}" }
-      loop_control:
-        label: "{{ item.user }}"
-      no_log: true
-      register: registry_zot_htpasswd_login
-      # The reload proof shows zot reloaded after the last write, not which bytes it read (a reload that began before
-      # a same-count rotation can log after it), so the logins are the ground truth: retry until the final
-      # credentials are live, within the proof timeout.
-      until: (registry_zot_htpasswd_login.status | default(0)) == 200
-      retries: "{{ (registry_zot_htpasswd_proof_timeout | int) // 2 }}"
-      delay: 2
-
-    - name: Every scoped push user with a SOPS password logs in on the running zot
-      ansible.builtin.uri:
-        url: "https://127.0.0.1:{{ registry_zot_port }}/v2/"
-        url_username: "{{ item.user }}"
-        url_password: "{{ registry_scoped_push_passwords[item.user] }}"
-        force_basic_auth: true
-        validate_certs: false # 127.0.0.1 is not on the certificate; this checks the credentials, not TLS
-        status_code: 200
-      loop: "{{ registry_zot_scoped_push_users }}"
-      loop_control:
-        label: "{{ item.user }}"
-      no_log: true
-      register: registry_zot_htpasswd_login
-      # The reload proof shows zot reloaded after the last write, not which bytes it read (a reload that began before
-      # a same-count rotation can log after it), so the logins are the ground truth: retry until the final
-      # credentials are live, within the proof timeout.
-      until: (registry_zot_htpasswd_login.status | default(0)) == 200
-      retries: "{{ (registry_zot_htpasswd_proof_timeout | int) // 2 }}"
-      delay: 2
-      when: item.user in (registry_scoped_push_passwords | default({}))
-  rescue:
-    - name: Restart zot because its htpasswd state was not proven and a restart is allowed
-      ansible.builtin.debug:
-        msg: >-
-          {{ ansible_failed_task.name }} failed ({{ ansible_failed_result.stdout | default('details hidden') }});
-          restarting zot, as registry_zot_config_allow_restart allows.
-      when: registry_zot_config_allow_restart | bool
-      changed_when: true
-      notify: restart zot
-
-    - name: Stop because the htpasswd state was not proven (no restart without registry_zot_config_allow_restart)
-      ansible.builtin.fail:
-        msg: >-
-          {{ ansible_failed_task.name }} failed ({{ ansible_failed_result.stdout | default('details hidden') }}).
-          zot was not restarted and keeps the credentials it had loaded. Check `journalctl -u zot | grep htpasswd`,
-          or accept a restart (a ~19 min registry outage) in a quiet window: -e registry_zot_config_allow_restart=true.
-      when: not (registry_zot_config_allow_restart | bool)
-
 # Optional Docker Hub credentials for the pull-through cache's UPSTREAM (sync.credentialsFile).
 # Only rendered when registry_zot_sync_dockerhub_user is set; config.json references it only then.
 # Lifts the cache's own Docker Hub egress off the anonymous 100-pulls/6h limit (see defaults).
@@ -492,6 +396,103 @@
     name: zot.service
     enabled: true
     state: started
+
+# ---- Prove the running zot serves the current htpasswd (after the handlers: no restart is still pending) ----
+# On EVERY apply, not only when this run wrote the file: an earlier run whose reload went unproven (an added, rotated
+# or REMOVED user) leaves the file unchanged now. files/zot-htpasswd-proof.py judges the zot running at this point:
+# - a zot restarted (or first started) by this play (binary, certs, unit, sync credentials, a restart-only config
+#   change) loads the file only when its start-up store parse ends (up to ~19 min) and watches it from then on, so
+#   it cannot hold stale credentials: "restarted", and no login checks (it is not serving yet);
+# - the same process as the snapshot: a changed file must show its reload ("reloaded"); an unchanged one is rewritten
+#   with its own bytes (same inode, length and content) so that zot reloads it, and that reload is proven
+#   ("reloaded-forced"), so a pending removal from an earlier run is applied and proven now.
+# The logins are the ground truth for added and rotated users: a reload line shows zot read the file after its last
+# write, not which bytes it read. Anything unproven fails the play and restarts nothing unless
+# registry_zot_config_allow_restart is set.
+- name: Verify the running zot serves the current htpasswd (reloaded in place, never restarted for it)
+  when: not ansible_check_mode
+  block:
+    - name: Prove the running zot loaded the current htpasswd file
+      ansible.builtin.command:
+        argv:
+          - python3
+          - /usr/local/lib/zot-htpasswd-proof.py
+          - prove
+          - --unit
+          - zot.service
+          - --file
+          - "{{ registry_zot_config_dir }}/htpasswd"
+          - --pid
+          - "{{ (registry_zot_htpasswd_snapshot.stdout | from_json).pid | string }}"
+          - --cursor
+          - "{{ (registry_zot_htpasswd_snapshot.stdout | from_json).cursor | default('', true) }}"
+          - --since-ns
+          - "{{ (registry_zot_htpasswd_snapshot.stdout | from_json).timeNs | string }}"
+          - --before-sha256
+          - "{{ (registry_zot_htpasswd_snapshot.stdout | from_json).sha256 | default('', true) }}"
+          - --timeout
+          - "{{ registry_zot_htpasswd_proof_timeout | string }}"
+      register: registry_zot_htpasswd_proof
+      changed_when: (registry_zot_htpasswd_proof.stdout | from_json).mode == 'reloaded-forced'
+
+    - name: The ci and pull users log in on the running zot
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:{{ registry_zot_port }}/v2/"
+        url_username: "{{ item.user }}"
+        url_password: "{{ item.password }}"
+        force_basic_auth: true
+        validate_certs: false # 127.0.0.1 is not on the certificate; this checks the credentials, not TLS
+        status_code: 200
+        timeout: "{{ registry_zot_htpasswd_login_timeout }}"
+      loop:
+        - { user: "{{ registry_zot_ci_user }}", password: "{{ registry_ci_password }}" }
+        - { user: "{{ registry_zot_pull_user }}", password: "{{ registry_pull_password }}" }
+      loop_control:
+        label: "{{ item.user }}"
+      no_log: true
+      register: registry_zot_htpasswd_login
+      until: (registry_zot_htpasswd_login.status | default(0)) == 200
+      retries: "{{ registry_zot_htpasswd_login_retries }}"
+      delay: 2
+      when: (registry_zot_htpasswd_proof.stdout | from_json).mode != 'restarted'
+
+    - name: Every scoped push user with a SOPS password logs in on the running zot
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:{{ registry_zot_port }}/v2/"
+        url_username: "{{ item.user }}"
+        url_password: "{{ registry_scoped_push_passwords[item.user] }}"
+        force_basic_auth: true
+        validate_certs: false # 127.0.0.1 is not on the certificate; this checks the credentials, not TLS
+        status_code: 200
+        timeout: "{{ registry_zot_htpasswd_login_timeout }}"
+      loop: "{{ registry_zot_scoped_push_users }}"
+      loop_control:
+        label: "{{ item.user }}"
+      no_log: true
+      register: registry_zot_htpasswd_login
+      until: (registry_zot_htpasswd_login.status | default(0)) == 200
+      retries: "{{ registry_zot_htpasswd_login_retries }}"
+      delay: 2
+      when:
+        - (registry_zot_htpasswd_proof.stdout | from_json).mode != 'restarted'
+        - item.user in (registry_scoped_push_passwords | default({}))
+  rescue:
+    - name: Restart zot because its htpasswd state was not proven and a restart is allowed
+      ansible.builtin.debug:
+        msg: >-
+          {{ ansible_failed_task.name }} failed ({{ ansible_failed_result.stdout | default('details hidden') }});
+          restarting zot, as registry_zot_config_allow_restart allows.
+      when: registry_zot_config_allow_restart | bool
+      changed_when: true
+      notify: restart zot
+
+    - name: Stop because the htpasswd state was not proven (no restart without registry_zot_config_allow_restart)
+      ansible.builtin.fail:
+        msg: >-
+          {{ ansible_failed_task.name }} failed ({{ ansible_failed_result.stdout | default('details hidden') }}).
+          zot was not restarted and keeps the credentials it had loaded. Check `journalctl -u zot | grep htpasswd`,
+          or accept a restart (a ~19 min registry outage) in a quiet window: -e registry_zot_config_allow_restart=true.
+      when: not (registry_zot_config_allow_restart | bool)
 
 # ---- Firewall ----
 - name: Allow SSH + HTTPS through ufw
