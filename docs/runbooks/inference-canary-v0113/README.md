@@ -112,7 +112,8 @@ user `c4`/UID 1000. Tenant `00000000-0000-4000-8000-000000000001`, router connec
 [Operator handoff 1945](https://git.chifor.me/cchifor/ailab/pulls/2016#issuecomment-143858)
 records the owner's approval to move the Codex target from
 `codex-2` to `codex-3` at Router configuration revision 2803, with profiles,
-bindings and keys unchanged. An independent read-only metadata check at
+bindings and keys unchanged. An independent
+[read-only metadata check](https://git.chifor.me/cchifor/ailab/pulls/2016#issuecomment-143840) at
 **2026-11-26 10:45:38 UTC** observed configuration **2882** and confirmed the table's Codex target was the
 only enabled target, with `maxAttempts:1` and no fallback. The running Router
 reported source `b60fb03b23ce52548f49513d45466f4670f5a369` and image
