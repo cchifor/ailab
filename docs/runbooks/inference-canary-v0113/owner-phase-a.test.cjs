@@ -358,7 +358,7 @@ test("lost close POST cleanup inspects same close and never creates replacement"
 // A stateful HTTP boundary fixture: actual Runner methods remain untouched.
 // No live runtime is claimed. Responses use the audited hub field names and
 // independent queued/accepted/completed states, not a stubbed phase result.
-function phaseServer() {
+function phaseServer({ configurationNotice = "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used." } = {}) {
   let clock = NOW, serial = 100, sequence = 0;
   const sessions = new Map(), launches = [], commands = new Map(), permissions = new Map();
   const calls = [], checkpoints = [], attempts = [], effects = new Map();
@@ -509,7 +509,7 @@ function phaseServer() {
             } else if (c.counting) c.response = "";
             else {
               const expected = /Reply exactly ([A-Z_]+)\./.exec(text); assert(expected, "Unexpected prompt " + text);
-              c.response = c.refusal ? "Model backend unavailable. No provider or model fallback was used." : expected[1];
+              c.response = c.refusal ? configurationNotice : expected[1];
             }
             if (!c.refusal && (!text.startsWith("/relay-") || text === "/relay-compact")) attempts.push({
               id: id(), requestId: id(), namespace: "default", principalId: "key:" + pp.key, route: "canary-pi-" + s.provider,
@@ -573,4 +573,15 @@ test("full effort phase uses fresh session low/high refusal and explicit reconst
   assert.equal(f.attempts.length, 2); assert.equal(f.permissions.size, 0); assert.equal(f.effects.size, 0);
   assert.equal(writes.length, 9); assert.equal(f.launches.length, 1);
   assert.equal(f.runner.state.runs[0].status, "passed-with-live-wire-unobserved");
+});
+test("generic backend failure and refusal alone cannot pass effort configuration fence", async () => {
+  for (const configurationNotice of ["Model backend unavailable. No provider or model fallback was used.", ""]) {
+    const f = phaseServer({ configurationNotice });
+    await assert.rejects(f.runner.phase("codex", true), /refusal|configuration|notice/i);
+    const prompts = f.calls.filter(c => c.body?.kind === "prompt");
+    assert.equal(prompts.length, 2); // low completion + probe; no reconciliation/high continuation
+    assert(!prompts.some(c => c.body.text === "/relay-reconcile confirmed"));
+    assert.equal(f.runner.state.runs[0].status, undefined);
+    assert.equal(f.runner.state.completed, false);
+  }
 });
