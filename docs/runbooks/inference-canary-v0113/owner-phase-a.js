@@ -1434,6 +1434,28 @@
       if (this.cleaning || this.cleanupAttempted) return;
       this.cleaning = true;
       this.cleanupAttempted = true;
+      let step = "inspect-state",
+        operationId = null;
+      const dispatch = async (path, body) => {
+        if (body.leaseId)
+          need(
+            Date.parse(this.lease?.expires_at) > this.now() + 1000,
+            "Cleanup lease expired; no command dispatched",
+          );
+        operationId = body.operationId;
+        const item = { path, body, status: "cleanup-dispatch" };
+        this.state.operations.push(item);
+        this.save();
+        try {
+          await this.api(path, "POST", body);
+          item.status = "received";
+        } catch (error) {
+          item.status = "uncertain";
+          throw error;
+        } finally {
+          this.save();
+        }
+      };
       try {
         // Narrowing actions only; never launch, prompt, approve, reconcile or take a lease here.
         if (
@@ -1481,6 +1503,7 @@
           return;
         }
         const path = "/api/agent-sessions/" + this.session.id;
+        step = "inspect-session-and-control";
         const s = await this.api(path),
           lease = await this.api(path + "/control");
         need(
@@ -1499,6 +1522,7 @@
           lease.lease?.owned === true && lease.lease.id === this.lease.id,
           "Cleanup authority changed; owner inspection required",
         );
+        step = "inspect-permissions";
         const list = await this.api(path + "/permissions");
         for (const p of list.filter((p) => p.state === "pending")) {
           const body = {
@@ -1506,20 +1530,13 @@
             generation: s.generation,
             outcome: { outcome: "cancelled" },
           };
-          this.state.operations.push({
-            path: "/api/agent-permissions/" + p.id + "/decision",
-            body,
-            status: "cleanup-dispatch",
-          });
-          this.save();
-          await this.api(
-            "/api/agent-permissions/" + p.id + "/decision",
-            "POST",
-            body,
-          );
+          step = "cancel-permission";
+          await dispatch("/api/agent-permissions/" + p.id + "/decision", body);
         }
         if (s.state === "open") {
           const narrow = async (kind) => {
+            step = "dispatch-" + kind;
+            operationId = null;
             let intent = kind === "close" ? this.closeIntent : null;
             if (!intent) {
               const body = {
@@ -1530,15 +1547,21 @@
               };
               intent = { body, sessionId: s.id, deadline: this.now() + 30000 };
               if (kind === "close") this.closeIntent = intent;
-              this.state.operations.push({
-                path: path + "/commands",
-                body,
-                status: "cleanup-dispatch",
-              });
-              this.save();
-              await this.api(path + "/commands", "POST", body);
+              try {
+                await dispatch(path + "/commands", body);
+              } catch (error) {
+                if (
+                  !this.state.operations.some(
+                    (op) => op.body.operationId === body.operationId,
+                  )
+                )
+                  throw error; // Expiry refused dispatch; no operation to inspect.
+                // POST may have committed. Read the original operation only.
+              }
             }
             // If dispatch was uncertain, inspect the SAME operation. Never resubmit it.
+            step = "inspect-" + kind + "-receipt";
+            operationId = intent.body.operationId;
             const receipt = await this.finishCommand({
               ...intent,
               deadline: this.now() + 30000,
@@ -1550,6 +1573,8 @@
           };
           if (this.pending) {
             await narrow("cancel");
+            step = "inspect-prompt-receipt";
+            operationId = this.pending.body.operationId;
             const receipt = await this.finishCommand({
               ...this.pending,
               deadline: this.now() + 30000,
@@ -1567,6 +1592,7 @@
             this.pending = null;
           }
           await narrow("close");
+          step = "confirm-session-closed";
           const end = this.now() + 30000;
           let closed = false;
           while (this.now() < end) {
@@ -1578,11 +1604,28 @@
           }
           need(closed, "Close unresolved; retain lease evidence");
         }
+        step = "release-control";
         await this.release();
         this.record("cleanup", { status: "closed-and-released" });
-      } catch {
+      } catch (error) {
+        const safeReasons = [
+          "Cleanup lease expired; no command dispatched",
+          "Cleanup session changed",
+          "Cleanup authority changed; owner inspection required",
+          "Cleanup notification not delivered",
+          "Prompt outcome unresolved; inspect before Close/release",
+          "Close unresolved; retain lease evidence",
+          "Command deadline; inspect saved operation",
+        ];
         this.record("cleanup", {
           status: "unresolved-owner-inspection-required",
+          reason: safeReasons.includes(error.message)
+            ? error.message
+            : "Request or receipt inspection failed",
+          step,
+          operationId,
+          sessionId: this.session?.id || null,
+          generation: this.session?.generation || null,
         });
       } finally {
         this.cleaning = false;

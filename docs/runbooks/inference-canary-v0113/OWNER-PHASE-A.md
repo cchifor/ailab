@@ -112,7 +112,14 @@ turn, waits for the original operation outcome, then requests Close and verifies
 session closure. It releases only its own lease; a lease already retired by a
 verified Close is recorded correctly. Unknown dispatches retain their original
 operation ID and body. Cleanup does not relaunch, retry a prompt, reconstruct a
-branch, rotate a credential or take over another lease.
+branch, rotate a credential or take over another lease. Before each cleanup
+command that carries a lease, it checks the existing lease expiry; it does not
+renew or reacquire control. If settlement consumed the lease window, Close is
+not dispatched and the report explicitly records the expiry. Cleanup records
+the failing step, a sanitized reason and the original operation ID where one
+was dispatched. POST records distinguish received responses from uncertain
+responses; uncertain cancel/Close dispatches inspect only the same operation,
+without resending.
 
 A browser cannot guarantee cleanup after tab termination, connectivity loss or
 expired authority. The report lists unresolved operations for the owner/operator.

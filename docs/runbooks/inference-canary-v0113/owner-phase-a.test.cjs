@@ -2128,3 +2128,135 @@ test("Stop during control GET prevents acquisition intent and POST", async () =>
   );
   assert.equal(h.runner.state.evidence.at(-1).sessionId, SID);
 });
+
+function cleanupServer({
+  slow = false,
+  lost = null,
+  unreadable = false,
+  permission = false,
+} = {}) {
+  const commands = new Map();
+  let closed = false;
+  const h = harness((c) => {
+    if (c.path.endsWith("/control"))
+      return {
+        lease: closed ? null : { id: LEASE, owned: true, generation: 1 },
+      };
+    if (c.path.endsWith("/permissions"))
+      return permission ? [{ id: REQUEST, state: "pending" }] : [];
+    if (c.path.endsWith("/decision"))
+      throw Error("private-token-do-not-export");
+    if (c.path.endsWith("/commands")) {
+      commands.set(c.body.operationId, c.body);
+      if (c.body.kind === "close") closed = true;
+      if (c.body.kind === lost) throw Error("private-token-do-not-export");
+      return { id: c.body.operationId };
+    }
+    if (c.path.includes("/operations/")) {
+      const body = commands.get(c.path.split("/").at(-1));
+      assert(body);
+      if (unreadable) throw Error("private-token-do-not-export");
+      if (slow) h.advance(25000);
+      return {
+        command: {
+          operation_id: body.operationId,
+          session_id: SID,
+          generation: 1,
+          kind: body.kind,
+          state: "completed",
+          receipt: {
+            status: "completed",
+            result:
+              body.kind === "prompt"
+                ? { stopReason: "cancelled" }
+                : { cancelSent: true, execution: "unknown" },
+          },
+        },
+      };
+    }
+    return session({ state: closed ? "closed" : "open" });
+  });
+  h.runner.session = session();
+  h.runner.lease = {
+    id: LEASE,
+    expires_at: date(NOW + (slow ? 40000 : 60000)),
+  };
+  if (!permission) {
+    const body = {
+      operationId: OP,
+      leaseId: LEASE,
+      generation: 1,
+      kind: "prompt",
+      text: "READY",
+    };
+    commands.set(OP, body);
+    h.runner.pending = { body, sessionId: SID, deadline: NOW + 30000 };
+  }
+  return { ...h, commands };
+}
+
+test("slow cancel and prompt settlement refuse expired Close before any POST", async () => {
+  const h = cleanupServer({ slow: true });
+  await h.runner.cleanup();
+  assert.deepEqual(
+    h.calls.filter((c) => c.method === "POST").map((c) => c.body.kind),
+    ["cancel"],
+  );
+  const report = h.runner.state.evidence.at(-1);
+  assert.equal(report.step, "dispatch-close");
+  assert.equal(report.reason, "Cleanup lease expired; no command dispatched");
+  assert.equal(report.sessionId, SID);
+  assert.equal(h.runner.state.operations.at(-1).status, "received");
+  assert(!h.calls.some((c) => c.method === "DELETE"));
+});
+
+test("lost cleanup cancel or Close reads the same operation without resend", async () => {
+  for (const kind of ["cancel", "close"]) {
+    const h = cleanupServer({ lost: kind });
+    await h.runner.cleanup();
+    const posts = h.calls.filter((c) => c.method === "POST");
+    assert.deepEqual(
+      posts.map((c) => c.body.kind),
+      ["cancel", "close"],
+    );
+    const item = h.runner.state.operations.find((o) => o.body.kind === kind);
+    assert.equal(item.status, "uncertain");
+    assert(
+      h.calls.some((c) =>
+        c.path.endsWith("/operations/" + item.body.operationId),
+      ),
+    );
+    assert.equal(h.runner.state.evidence.at(-1).status, "closed-and-released");
+    assert(!JSON.stringify(h.runner.state).includes("private-token"));
+    const count = h.calls.length;
+    await h.runner.cleanup();
+    assert.equal(h.calls.length, count);
+  }
+});
+
+test("failed cleanup readback reports original operation, sanitized reason and step", async () => {
+  const h = cleanupServer({ lost: "cancel", unreadable: true });
+  await h.runner.cleanup();
+  const item = h.runner.state.operations.find((o) => o.body.kind === "cancel");
+  assert.equal(item.status, "uncertain");
+  const report = h.runner.state.evidence.at(-1);
+  assert.equal(report.step, "inspect-cancel-receipt");
+  assert.equal(report.operationId, item.body.operationId);
+  assert.equal(report.reason, "Request or receipt inspection failed");
+  assert.equal(h.calls.filter((c) => c.method === "POST").length, 1);
+  assert(!JSON.stringify(h.runner.state).includes("private-token"));
+});
+
+test("lost cleanup permission decision records uncertain without repeating it", async () => {
+  const h = cleanupServer({ permission: true });
+  await h.runner.cleanup();
+  assert.equal(h.runner.state.operations[0].status, "uncertain");
+  const report = h.runner.state.evidence.at(-1);
+  assert.equal(report.step, "cancel-permission");
+  assert.equal(
+    report.operationId,
+    h.runner.state.operations[0].body.operationId,
+  );
+  assert.equal(h.calls.filter((c) => c.method === "POST").length, 1);
+  assert(!JSON.stringify(h.runner.state).includes("private-token"));
+});
