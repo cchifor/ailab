@@ -30,8 +30,9 @@ plain `ansible-playbook registry.yml` matches the live binary. The older `-e` re
 longer needed for these values.
 
 There is no config-only apply: `registry.yml` always runs the WHOLE role. Besides `config.json`,
-it converges the htpasswd lines, the certs, the sync upstream credentials and the systemd unit, and
-a change to any of those restarts zot (a config.json change may reload instead, see "Reload or restart"). Its `get_url` task also converges `/usr/local/bin/zot` to
+it converges the htpasswd lines, the certs, the sync upstream credentials and the systemd unit. A change to the
+certs, the sync credentials or the unit restarts zot; an htpasswd change and a reload-safe config.json change
+reload in place (see "Reload or restart"). Its `get_url` task also converges `/usr/local/bin/zot` to
 `registry_zot_version` (the renovate pin in defaults), and the live binary can lag it (2026-11-17:
 live `v2.1.18`, pin `v2.1.23`). For a config or auth change, pin the version that is running:
 
@@ -137,8 +138,31 @@ consulting `keepTags`. So, for every repo before it goes on the list:
    `/v2/_catalog`), drop them from the list and from the tests' `_EXISTING_STRIVE_CI_REPOS`, so the list only names
    repos that exist and were pre-checked.
 
-**Everything else the role converges still restarts zot**: htpasswd lines, certs, sync credentials, the unit and
-the binary. Batch those changes into one apply, in a quiet window.
+**htpasswd changes reload in place too** (since 2026-11-26): adding a scoped push user, removing an optional one, or
+rotating a password. zot v2.1.23 watches the htpasswd file whenever htpasswd auth is on (`pkg/api/htpasswd.go`
+HTPasswdWatcher) and logs `loaded htpasswd file` with the user count on each reload. Measured on the v2.1.23 binary
+(2026-11-26), with the helper below end to end: an added user logged in within 1 s from the same PID; a removed user
+got 401; a rotated password switched (old 401, new 200); rewriting the file's own bytes in place made zot reload it.
+
+The role snapshots zot's MainPID, journal cursor, time and the file's content digest before the htpasswd tasks, and
+at the END of every real apply (after the handler flush and "Enable + start zot", so any restart another task queued
+has happened) runs `files/zot-htpasswd-proof.py prove`:
+- zot is a new process (restarted or first started by the play): `restarted`. A new zot loads the file only when its
+  start-up store parse ends (`Controller.Init`, after `InitMetaDB`) and watches it from then on, so it cannot hold
+  stale credentials. It is not serving yet, so the logins are skipped;
+- the same process, file changed: the LATEST reload outcome logged after the file's last write must be a load with
+  the file's user count (`reloaded`);
+- the same process, file unchanged: the helper rewrites the file's own bytes in place (same inode, same length,
+  identical content at every instant) so that zot reloads it, and proves that reload (`reloaded-forced`). This is
+  what re-proves an earlier run's unproven write, including a removal, which no login can test.
+
+Then ci, pull and each scoped user with a key log in on `/v2/` (5 s request timeout, 5 retries 2 s apart: at most
+42 s per user). A reload line shows zot read the file after its last write, not which bytes it read, so these logins
+are the ground truth for added and rotated users. Anything unproven FAILS the play and restarts nothing;
+`-e registry_zot_config_allow_restart=true` accepts the restart instead.
+
+**Everything else the role converges still restarts zot**: certs, sync credentials, the unit and the binary.
+Batch those changes into one apply, in a quiet window.
 
 ### Changing tag retention (dry run first)
 
@@ -286,7 +310,8 @@ top-level key would be stored in plaintext).
 
 **Retiring a project:** removing the list entry drops its policy, but the htpasswd task only
 adds/updates, so the user would still AUTHENTICATE. Remove it explicitly, then the other homes:
-`ssh registry 'sudo htpasswd -D /etc/zot/htpasswd <user> && sudo systemctl restart zot'`, delete
+`ssh registry 'sudo htpasswd -D /etc/zot/htpasswd <user>'` (zot reloads the file in place; check
+`journalctl -u zot | grep "loaded htpasswd file"` shows the lower user count, no restart needed), delete
 the SOPS key and the `af/estate/registry` `<user, - as _>_password` seed field, and delete the app
 repo's `REGISTRY_USERNAME`/`REGISTRY_PASSWORD` Actions secrets.
 
