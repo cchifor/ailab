@@ -152,6 +152,14 @@ cleanup. No extra prompt, second read, unexpected tool or retry is permitted.
 The selected four-prompt alternative has additional hard per-row ceilings;
 unused allocation from any row cannot fund another row.
 
+For this six-row reference, the minimum is seven generations without reads:
+one for each of the five ordinary rows and two for the `pwd` request plus its
+post-denial continuation. Thus only two additional read generations can fit the
+nine-generation total. Before starting a row, compare observed spending and
+in-flight work with the minimum needed for that row and all remaining rows;
+if they cannot fit, stop before issuing it. This is a feasibility check, not a
+guarantee that later model behavior fits, and it never authorizes skipping reads.
+
 At the [pinned source](https://git.chifor.me/cchifor/llm-router/src/commit/4e4bb34e2f968f9450aabe9cf228d3e70c8bab71/packages/adapters/claude-sdk/warm.ts#L119), a worker is retained only after successful `end_turn`
 without `tool_use`. A tool boundary reaps the producing worker before returning
 its terminal result; it is never held across owner permission waits. Reuse also

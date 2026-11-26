@@ -120,7 +120,12 @@ normal controls and stop. Do not kill a process or extend a permission to obtain
 the desired observation. Unexpected command/input, missing permission, uncertain
 native outcome or unresolved process disappearance stops the affected phase.
 If the P3 twenty-second launch interval is missed, mark that timed claim
-unobserved and stop; do not add a padding prompt or repeat P2 to reset the clock.
+unobserved and abort all remaining planned rows in this warm window: do not start
+P3 or P4. This preserves the stop rule; it does not merely drop the timing claim
+and continue collecting inference evidence. Necessary cleanup still applies:
+settle any work, disable warm retention through the fresh settings workflow below,
+close/release through normal controls and record unresolved outcomes. No P4
+prompt follows that cleanup. Do not add padding or repeat P2 to reset the clock.
 
 For idle rollback, use the operator's existing authenticated configuration
 workflow. Read `GET /admin/v1/plugins/provider-claude/config` again, preserve its
