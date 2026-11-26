@@ -71,6 +71,13 @@ test("requiring the browser script does not dispatch work", () => {
   const h = harness(); assert.equal(h.calls.length, 0); assert.equal(h.saves.length, 0);
   assert.equal(h.runner.state.completed, false);
 });
+test("unqualified draft start refuses before network, checkpoints or saved-run mutation", async () => {
+  const h = harness();
+  h.runner.env.ask = () => { throw Error("Draft must not ask to activate"); };
+  await assert.rejects(h.runner.start(), /draft|qualified|publication|pins/i);
+  assert.equal(h.calls.length, 0); assert.equal(h.saves.length, 0);
+  assert.equal(h.runner.state.completed, false);
+});
 test("profile hashes bind reviewed definitions after deployed schema defaults", async () => {
   const definitions = JSON.parse(fs.readFileSync(path.join(__dirname, "launch-definitions.json"), "utf8"));
   // Independently checked against ApproveLaunchProfile in deployed e843 OCI021a8f:
