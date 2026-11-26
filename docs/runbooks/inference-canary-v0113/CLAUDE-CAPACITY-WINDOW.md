@@ -1,5 +1,16 @@
 # Optional Claude account-capacity window
 
+Operator scope decision **Relay bus 2086 (2026-11-26)** retains two fresh sessions
+and four planned prompts, with **at most six minutes / five observed upstream
+generations** and at most one scoped Relay read per prompt. The 120-second prompt
+limit, 1024-token cap, no-retry rule and existing cleanup remain unchanged. This
+scope decision does not itself start the exclusive window or mutate the account.
+Use current Router source `4e4bb34e2f968f9450aabe9cf228d3e70c8bab71` and image
+`registry.chifor.me/llm-router/router@sha256:f180cf7f1f960782a46dff6bb73cb955ce34dcb6e083daed0b1202f58753b457`;
+[the release bridge](../relay-router-messages-native-output-20261126.md) preserves
+the account/configuration semantics cited below. The following readback remains
+historical and must not supply a write precondition.
+
 The saved read-only observation at **2026-11-26 14:56:06.878 UTC** shows
 `canary-pi-claude` targeting account `claude`: configured concurrency **4**,
 effective shared-pool capacity **4**, one enabled pool member, queue disabled.
@@ -21,8 +32,8 @@ The optional exception is exactly account `claude` concurrency **4 → 1 → 4**
 the already required exclusive, drained window. Keep global
 `provider-claude.maxRunning: 8`, every other account field, pool identity, queue,
 route, fallback, grant, model, capture setting and existing warm settings
-unchanged. Preserve the existing capacity budget: **≤5 minutes, ≤2 fresh sessions,
-4 prompts, ≤3 generations**, 120 seconds per prompt, 1024 output cap, existing
+unchanged. Use the authorized capacity budget: **≤6 minutes, ≤2 fresh sessions,
+4 prompts, ≤5 generations**, 120 seconds per prompt, 1024 output cap, existing
 permission/lease/cleanup controls. Do not compensate by creating extra sessions,
 holding unrelated requests, changing queue settings, or consuming another seat.
 
@@ -105,6 +116,21 @@ attempt delta for B, using the existing receipt/counter/proc evidence limitation
 Provider process-slot or warm-pool failures are not equivalent. If A settled too
 soon, another cause blocked B, or coverage is incomplete, mark the row
 unexercised/inconclusive. No extra prompts or retries to manufacture a pass.
+
+Use the [scoped Relay-read rule](LIVE-ACCEPTANCE.md#scoped-relay-communication-reads),
+at most once per prompt, with full input review and a separate owner decision.
+Count every read continuation, observed upstream attempt and owner-review delay.
+Before prompts and permission continuations, reserve/check the remaining window
+and generation allowance: two for A, one for B's refusal probe, zero for the
+explicit local reconciliation command, and two for B's released continuation.
+Do not double-count a reserved continuation. B should consume zero upstream
+generations on account-admission refusal; any unexpected execution counts and
+fails that claim. Unknown coverage, a second read or insufficient budget stops
+advancement through normal cleanup; no extra prompt or automatic reconciliation.
+Peer traffic remains excluded. A read permission wait does not hold an upstream
+admission slot: tool boundaries reap workers, so submit B only during observed
+active upstream work on A. Keep per-attempt latency and owner decision time
+separate in the record.
 
 Cancel A if active and wait for the existing settled cleanup. Only the already
 planned B reconciliation/continuation is permitted. Session closure, lease

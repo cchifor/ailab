@@ -1,6 +1,14 @@
 # Bounded warm Claude acceptance and rollback
 
-**Router successor:** [the native output replay release](../relay-router-messages-native-output-20261126.md) defines source `4e4bb34e2f968f9450aabe9cf228d3e70c8bab71`, image `registry.chifor.me/llm-router/router@sha256:f180cf7f1f960782a46dff6bb73cb955ce34dcb6e083daed0b1202f58753b457` after verified rollout and bridges the unchanged warm/provider source below. Finish active owner Phase A on source4af before replacement. Preserve historical proof; fresh cold/lifecycle acceptance and the separately approved exclusive warm window remain required.
+**Current Router:** [the native output replay release](../relay-router-messages-native-output-20261126.md) defines source `4e4bb34e2f968f9450aabe9cf228d3e70c8bab71`, image `registry.chifor.me/llm-router/router@sha256:f180cf7f1f960782a46dff6bb73cb955ce34dcb6e083daed0b1202f58753b457`, and bridges the unchanged warm/provider source below. Preserve historical proof; completed cold/lifecycle acceptance and the separately assigned exclusive warm window remain required.
+
+Operator decision **Relay bus 2086 (2026-11-26)** selects the original six prompts
+with at most **18 minutes / 14 observed upstream generations**, and a separate
+capacity phase of **6 minutes / 5 generations**, still two sessions / four prompts.
+Allow at most one scoped Relay read per prompt. The 120-second prompt limit,
+1024-token cap, denied `pwd`, no-retry rule and existing cleanup are unchanged.
+This records the delegated scope decision; merging it does not start a window or
+perform a configuration change.
 
 This is a prepared operator procedure, not a live result. Run it only after the
 published Relay/holder/Pi and router releases pass cold Messages, native opaque
@@ -12,17 +20,19 @@ retention phase.
 
 The reviewed holder/Pi successor is v0.13.1 source
 `2604c41b69c5d9c50a3324545a51f0bfa38435a0`; the required Router source is
-`4af66b8c7c3cc83ddd10e326c554ad728caad72e`, while the hub stays e843/schema93.
+`4e4bb34e2f968f9450aabe9cf228d3e70c8bab71`, while the hub stays e843/schema93.
 Published run150672 runtime pins are unchanged. [README.md](README.md) records
 the correction from installed, never-approved revision3 to first hub approval
 revision1. Exact revision1 root/profile/schema qualification and nine compiled
 approval-boundary cases passed offline with the fixture limits in README. The
-second live sealed-idle configuration replacement, first approval readbacks and
-live acceptance remain pending. Prior revision3 root/schema
+first-registration preparation and its approval-boundary proof are historical;
+verify the current approved profile and preceding live acceptance readbacks.
+Prior revision3 root/schema
 and the unchanged runtime's five synthetic wire cases against Router4af66b8 do
 not establish first approval or live acceptance. The v0.13.0 root and
-five-case wire proofs there are historical. Use [UPGRADE-IDLE.md](UPGRADE-IDLE.md) for the
-started, never-launched canary before new acceptance. Warm acceptance remains held until
+five-case wire proofs there are historical. [UPGRADE-IDLE.md](UPGRADE-IDLE.md) applies
+only to its never-launched preparation stage; do not repeat it on a holder that
+has executed commands. Warm acceptance remains held until
 the preceding cold/lifecycle gates pass. Opaque replay uses the operator-selected
 paired live/synthetic evidence method; final outbound effort/cap fields and opaque
 bytes remain unproven live.
@@ -58,7 +68,10 @@ Use a fresh normal Relay Claude session and its existing managed binding, then
 the owned lease and command/permission receipts described in
 [LIVE-ACCEPTANCE.md](LIVE-ACCEPTANCE.md). Keep effort, model, system and tool
 configuration unchanged across measured turns. Renew the lease every 20 seconds.
-Do not directly read or copy rendered credentials.
+Do not directly read or copy rendered credentials. Keep peer traffic and other
+callers out of the selected session/account window; do not send messages to
+trigger a read or add warmup traffic. Deliver no messages to the fresh session
+during this phase; this excludes peer text, not the normal inbox-read reminder.
 
 Apply the shared [scoped Relay communication-read rule](LIVE-ACCEPTANCE.md#scoped-relay-communication-reads)
 throughout this phase and the capacity phase below. Ordinary prompts retain
@@ -70,8 +83,9 @@ before deciding. Inbox reads may set `read_at` and publish a notification; they
 do not acknowledge or send messages or grant access. The `pwd` denial remains a
 separate shell decision; a read approval cannot satisfy it.
 
-All read round trips, upstream generations and owner decision time consume the
-existing phase limits and idle window. Keep the exact prompts and budgets below;
+Allow at most one such read per prompt; a second read stops advancement through
+normal cancellation/cleanup. All read round trips, upstream generations and owner
+decision time consume the phase limits and idle window. Keep the exact prompts below;
 do not ignore extra calls, add prompts or repeat a turn to manufacture reuse.
 Record every observed generation and process transition. If a read prevents
 establishing the required timing, reuse or capacity outcome, mark that claim
@@ -102,7 +116,9 @@ a warm-acceptance verdict, and its use does not authorize another workload.
 Pair these observations with settled scoped trajectory metadata, normal Relay
 receipts and request-correlated native outcome. Record full completion latency
 from accepted prompt submission until the completed native turn, separately from
-queue time if available. Do not call this time-to-first-token. Record actual
+queue time if available. Also record each upstream attempt's start/end and latency,
+and owner permission-decision time separately; do not attribute review time to
+provider inference or call completion latency time-to-first-token. Record actual
 cache read/write/input/output counters only when supplied; a cache miss is not a
 continuity failure. Warm-pool statistics are internal at this source, not an
 assumed HTTP endpoint. Trajectory metadata alone proves neither process reuse nor
@@ -110,20 +126,55 @@ absence of work before trajectory creation.
 
 ## Six-prompt warm and rollback phase
 
-Allocate at most 15 minutes, six prompt commands and nine observed upstream
+Allocate at most 18 minutes, six prompt commands and 14 observed upstream
 generations. No warmup, retry or padding loop. Keep the existing 120-second
 request limit and 1024-token output cap. Record baseline process/RSS observations
 before enabling retention and after each settled row. Use current generation,
 epoch and lease values; every logical command has a distinct operation UUID.
 
+Before each prompt, reserve its bounded continuation allowance against the
+remaining total: two generations for each ordinary prompt, three for the `pwd`
+prompt (one read, the shell request and post-denial continuation). These reserve
+13 of the 14 allowed generations; unused headroom authorizes no extra prompt,
+second read, unexpected tool or retry. Before each permission decision, including
+denial, recheck remaining time and continuation budget without double-counting an
+existing reservation. Count every observed attempt and in-flight generation,
+including failed/cancelled work. Unknown coverage or exhausted bounds stops
+advancement; cancel through normal cleanup and record any racing completion.
+
+At the [pinned source](https://git.chifor.me/cchifor/llm-router/src/commit/4e4bb34e2f968f9450aabe9cf228d3e70c8bab71/packages/adapters/claude-sdk/warm.ts#L119), a worker is retained only after successful `end_turn`
+without `tool_use`. A tool boundary reaps the producing worker before returning
+its terminal result; it is never held across owner permission waits. Reuse also
+requires the same account/conversation, fingerprint and extending native history.
+For prompt 2, compare its **first upstream attempt** with prompt 1's final retained
+worker using PID **and start ticks**, within 10000 ms of prompt 1's final native
+completion. A Relay read can reap that worker and require a new process for the
+post-read generation. The final prompt PID need not match. If sampling cannot
+establish first-attempt identity, leave reuse unobserved; no later PID, cache hit
+or prompt completion substitutes for that observation.
+
 | Prompt | Exact text and timing | Required observation |
 | --- | --- | --- |
 | 1 | `Reply exactly WARM_FIRST_OK. Do not use tools or modify files.` | Successful initial completion; record newly retained Claude process identity, completion latency and RSS. |
-| 2 | Within the 10000-ms idle window after prompt 1 settles: `Reply exactly WARM_SECOND_OK. Do not use tools or modify files.` | Successful linear continuation with the same process identity; record latency/RSS and unchanged route/account/native history. If the deadline is missed, record cold reconstruction instead of reuse. |
+| 2 | Within the 10000-ms idle window after prompt 1's final native completion: `Reply exactly WARM_SECOND_OK. Do not use tools or modify files.` | Observe the first upstream attempt on prompt 1's final retained PID/start ticks within that interval. Record per-attempt latency/RSS and unchanged route/account/native history, plus any read-boundary retirement and reconstructed continuation. Final-PID equality is not required. A missed interval is cold reconstruction; missing first-attempt identity is unobserved reuse. |
 | 3 | After observing that worker gone at idle expiry, within 20 seconds of the previous completion: `Reply exactly AFTER_IDLE_OK. Do not use tools or modify files.` | No retained worker after expiry; successful continuation in a new process. Record elapsed idle time and RSS after release. If reaping is unresolved, stop. |
 | 4 | `Request permission to run the shell command pwd once. Do not run any other command or modify files.` | When the normal shell permission is visible, verify the producing Claude process is gone. Hold the decision for 15 seconds, exceeding the configured idle timeout, then **deny** within the existing 30-second permission bound. Require no shell execution and no parked Claude process during the wait; record bounded model continuation after denial. |
 | 5 | `Without using tools or modifying files, count upward from 1, one integer per line, until 500.` | Once this generation is observed active, the operator commits `warmSessions:false` through the same normal workflow, retaining sdk-resume, Messages and all other settings. Record config revision/time and completion or cancellation of the old generation. Do not force a restart. |
 | 6 | Only after prompt 5 completes successfully with a complete router receipt and warm:false is read back: `Reply exactly COLD_ROLLBACK_OK. Do not use tools or modify files.` | Successful cold continuation of the same conversation/native history, with the old provider generation drained and its retained processes released. Record latency, RSS and the final zero retained-worker observation. |
+
+Measure prompt 3's twenty-second interval from prompt 2's final native generation
+completion, after observing its retained worker gone at idle expiry. A missed
+interval stops that timed claim; do not repeat a prompt to reset the clock.
+For prompt 5, the configuration change must overlap an observed active upstream
+generation, not a Relay-read permission wait. Record which attempt was active.
+
+For enable/disable and final idle-value restoration, use a fresh
+`GET /admin/v1/plugins/provider-claude/config`, preserve complete current `values`,
+and `PATCH` that endpoint with `{values:FULL_CURRENT_VALUES}` changing only the
+intended settings. `If-Match` is the fresh **64-hex plugin-settings revision**,
+not the integer global config revision. Read back effective settings; do not
+restore a stale snapshot, submit partial values or retry a conflict/lost response
+without inspection. The operator performs these existing authorized mutations.
 
 `pwd` requests only the selected session workspace and is always denied. Apart
 from separately reviewed communication reads under the rule above, an unexpected
@@ -149,18 +200,26 @@ busy check is not a pool-capacity test. Do not saturate shared production slots.
 
 Only in the operator's exclusive scope, use the current documented account
 admission limit and at most two fresh managed canary sessions, four prompt commands,
-three observed upstream generations and five minutes. Do not raise account
+five observed upstream generations and six minutes. Do not raise account
 concurrency or lower a shared pod limit merely to manufacture refusal. If the
 existing account limit cannot be reached within this bounded scope, leave live capacity
 unexercised and retain the existing isolated automated capacity evidence.
 
-Keep existing limits in this default procedure. The optional
+The optional
 [Claude account-capacity window](CLAUDE-CAPACITY-WINDOW.md) documents a separate
 operator-approved exception for the observed account limit 4: temporarily 1, then
-restore 4 using fresh revisions. It retains the two-session/five-minute budget
+restore 4 using fresh revisions. It uses the same two-session/six-minute/five-generation budget
 and global run cap; documentation merge does not authorize execution. Without
 that explicit window decision, this default remains unchanged and the row stays
 unexercised when the existing limit is unreachable.
+
+Apply the same at-most-one scoped read per prompt and full time/generation
+accounting. Reserve two generations for A, one for B's refusal probe (any
+unexpected upstream execution counts and fails that refusal claim), zero for
+the explicit local reconciliation command, and two for the released continuation.
+Recheck before permissions/continuations; do not omit reads to fit the budget.
+Submit B only while A is observed holding upstream admission, never merely while
+A waits for a read permission. No peer traffic may occupy the account.
 
 Start a bounded no-tools counting prompt on session A. While it is observed
 active, submit one text-only `Reply exactly CAPACITY_PROBE. Do not use tools or
