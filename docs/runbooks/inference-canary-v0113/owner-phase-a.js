@@ -399,20 +399,28 @@
         "Reply exactly READY. Do not use tools or modify files.",
       "Prior prompt differs",
     );
+    const otherOperations = [
+      (o) =>
+        o.path === "/api/agent-launches" &&
+        o.body?.operationId === launches[0].operationId,
+      (o) =>
+        o.kind === "lease-acquisition" &&
+        o.path === "/api/agent-sessions/" + STOPPED_SESSION + "/control",
+      (o) =>
+        o.path ===
+          "/api/agent-permissions/" + STOPPED_PERMISSION + "/decision" &&
+        o.body?.outcome?.outcome === "cancelled",
+    ];
     need(
       report.operations.length === 6 &&
+        otherOperations.every(
+          (matches) => report.operations.filter(matches).length === 1,
+        ) &&
         report.operations.every(
           (o) =>
             o.status === "received" &&
             (commands.includes(o) ||
-              (o.path === "/api/agent-launches" &&
-                o.body?.operationId === launches[0].operationId) ||
-              (o.kind === "lease-acquisition" &&
-                o.path ===
-                  "/api/agent-sessions/" + STOPPED_SESSION + "/control") ||
-              (o.path ===
-                "/api/agent-permissions/" + STOPPED_PERMISSION + "/decision" &&
-                o.body?.outcome?.outcome === "cancelled")),
+              otherOperations.some((matches) => matches(o))),
         ),
       "Uncertain or additional prior operations require separate inspection",
     );
@@ -1573,12 +1581,22 @@
         runId = effort ? EFFORT_RUN : p.run;
       const replacement =
         provider === "codex" && !effort ? this.state.replacement : null;
+      if (replacement) {
+        need(
+          this.now() < replacement.deadline,
+          "Replacement window expired before phase",
+        );
+        need(
+          replacement.carriedPrompts === 1 && replacement.carriedAttempts === 2,
+          "Replacement accounting changed",
+        );
+      }
       this.run = {
         provider,
         runId,
         effort,
-        prompts: replacement ? 1 : 0,
-        carriedAttempts: replacement ? 2 : 0,
+        prompts: replacement ? replacement.carriedPrompts : 0,
+        carriedAttempts: replacement ? replacement.carriedAttempts : 0,
         deadline: replacement
           ? replacement.deadline
           : this.now() + (effort ? 600000 : 900000),
@@ -2457,6 +2475,9 @@
       const commands = [];
       for (const op of prior.commands) {
         const row = await this.operation({ ...op, sessionId: STOPPED_SESSION });
+        // Published holder 2604 runtime.rs:1846-1860 emits cancelSent for both
+        // Cancel and Close; deployed e843 control.ts:731-742 requires it. The
+        // separate closed-session/no-lease read above establishes settlement.
         need(
           row.state === "completed" &&
             (op.body.kind === "prompt"
@@ -2702,6 +2723,8 @@
     input.rows = 9;
     input.style.width = "100%";
     input.placeholder = "Paste requested nonsecret JSON evidence here";
+    // element() immediately appends each control to panel; there is no later
+    // control append list. The entire panel is attached to document.body below.
     const proceed = element("button", "Confirm current checkpoint"),
       start = element("button", "Start phase A"),
       replace = element("button", "Review stopped-run replacement"),
@@ -2831,7 +2854,8 @@
         e.returnValue = "";
       }
     });
-    if (read()) {
+    const saved = read();
+    if (saved) {
       start.disabled = true;
       status.textContent =
         "Saved run exists: export and inspect it. Automatic replay is disabled.";
@@ -2841,13 +2865,22 @@
     start.disabled = true;
     replace.disabled = true;
     try {
-      stoppedPredecessor(read());
+      stoppedPredecessor(saved);
       replace.disabled = !QUALIFIED_INPUTS;
       status.textContent =
         "Known stopped run retained. Download it, then explicitly review a bounded replacement; no automatic replay.";
     } catch {
-      status.textContent =
-        "Original known stopped report required in this owner browser. Preserve storage and inspect the downloaded report; do not start a fresh run.";
+      if (!saved)
+        status.textContent =
+          "Original known stopped report required in this owner browser. Do not start a fresh run.";
+      else {
+        try {
+          JSON.parse(saved);
+        } catch {
+          status.textContent =
+            "Saved report is not valid JSON. Preserve its bytes and inspect it; do not clear storage or start a fresh run.";
+        }
+      }
     }
     if (!QUALIFIED_INPUTS) {
       start.disabled = true;

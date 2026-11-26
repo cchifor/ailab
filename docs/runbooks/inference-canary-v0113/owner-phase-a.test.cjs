@@ -284,6 +284,16 @@ test("replacement accepts only the known stopped workload, never uncertain or ex
   }
 });
 
+test("replacement refuses duplicate non-command categories even with exactly six received operations", () => {
+  for (const category of [0, 1, 2]) {
+    const report = stoppedReport();
+    report.operations[(category + 1) % 3] = clone(report.operations[category]);
+    assert.equal(report.operations.length, 6);
+    assert(report.operations.every((o) => o.status === "received"));
+    assert.throws(() => a.stoppedPredecessor(JSON.stringify(report)));
+  }
+});
+
 async function replacementHarness({ drift, approval } = {}) {
   const raw = JSON.stringify(stoppedReport(), null, 2);
   const prior = a.stoppedPredecessor(raw);
@@ -503,6 +513,46 @@ test("replacement lifecycle retains one prior prompt and two attempts within the
   assert.equal(f.effects.get(p.run), 1);
 });
 
+test("expired replacement refuses before profile reads and a window expiring during handoff never launches", async () => {
+  const expired = harness();
+  expired.runner.state.replacement = {
+    deadline: NOW,
+    carriedPrompts: 1,
+    carriedAttempts: 2,
+    priorObservation: trajectory(NOW - 10000),
+    marker: marker(),
+  };
+  await assert.rejects(
+    expired.runner.phase("codex"),
+    /deadline|window|expired/i,
+  );
+  assert.deepEqual(expired.calls, []);
+  assert.equal(expired.runner.state.runs.length, 0);
+
+  const f = phaseServer();
+  f.runner.state.replacement = {
+    deadline: NOW + 900000,
+    carriedPrompts: 1,
+    carriedAttempts: 2,
+    priorObservation: trajectory(NOW - 10000),
+    marker: marker(),
+  };
+  const ask = f.runner.env.ask;
+  let handoffs = 0;
+  f.runner.env.ask = async (...args) => {
+    const result = await ask(...args);
+    if (args[0].includes("pre-launch handoff")) {
+      handoffs++;
+      await f.runner.sleep(900001);
+    }
+    return result;
+  };
+  await assert.rejects(f.runner.phase("codex"), /deadline|window|expired/i);
+  assert.equal(handoffs, 1);
+  assert(f.calls.some((c) => c.path === "/api/agent-profiles"));
+  assert.equal(f.calls.filter((c) => c.method !== "GET").length, 0);
+});
+
 test("replacement final cleanup requires the old sixth launch as well as the five new launches", async () => {
   const report = stoppedReport();
   const h = finalRevocationServer({ predecessor: report });
@@ -517,11 +567,19 @@ test("replacement final cleanup requires the old sixth launch as well as the fiv
 });
 
 test("mount never dispatches or writes storage and enables replacement only for the known stopped report", () => {
-  for (const [raw, eligible] of [
+  for (const [raw, eligible, savedSuccessor] of [
     [null, false],
     ["{invalid", false],
     [JSON.stringify({ version: 1, status: "stopped" }), false],
     [JSON.stringify(stoppedReport()), true],
+    [
+      JSON.stringify({
+        ...stoppedReport(),
+        predecessor: { raw: JSON.stringify(stoppedReport()) },
+      }),
+      false,
+      true,
+    ],
   ]) {
     const calls = [],
       writes = [];
@@ -578,6 +636,13 @@ test("mount never dispatches or writes storage and enables replacement only for 
     assert.equal(button("Review final grant revocation").disabled, true);
     assert.equal(body.children.length, 1);
     assert.equal(body.children[0].id, "relay-pi-acceptance-panel");
+    if (savedSuccessor)
+      assert(
+        descendants(body).some(
+          (n) =>
+            n.tagName === "p" && n.textContent.startsWith("Saved run exists:"),
+        ),
+      );
     assert.deepEqual(calls, []);
     assert.deepEqual(writes, []);
   }
