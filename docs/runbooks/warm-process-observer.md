@@ -26,7 +26,7 @@ operator identity already has the needed visibility. No additional host access
 or inspection of argv, environment, executable paths or process names is needed.
 
 Each JSONL sample contains timestamps, process rows (`pid`, `ppid`, `startTicks`,
-`rssBytes`) and fixed-code gaps. The reader opens only numeric `/proc/PID/stat`
+`rssBytes`), absence observations and fixed-code gaps. The reader opens only numeric `/proc/PID/stat`
 files, at most 4,096 bytes each. It discards the parenthesized command field as
 bytes, including embedded parentheses, newlines or invalid UTF-8. RSS is field
 24 multiplied by the system page size; start ticks are field 22. No names,
@@ -40,6 +40,14 @@ A reused PID is reported and is never treated as the old process; its new
 identity is selected only if independently present in the current root subtree.
 New children of an already detached process are not inferred to be descendants.
 Root replacement or an unreadable root stops collection.
+
+For a previously observed identity, `ENOENT` produces one `absent` observation
+with its PID, start ticks, timestamp and fixed status `absent-at-read`. This is
+normal observational data, not a collector failure or proof of reaping. That
+identity becomes dormant and is checked again only if its numeric PID returns
+in the inventory. Its bounded identity record remains available to distinguish
+the same reparented process from PID reuse. Missing reads for identities never
+observed, denied reads and malformed stat data remain explicit gaps.
 
 Bounds are enforced: duration 1–900 seconds; interval 0.25–60 seconds; at most
 16,384 inventory/tracked PIDs (default 4,096); at most 16 MiB of output (default
@@ -62,7 +70,7 @@ between samples, discover children reparented before observation, establish
 provider/account identity, or prove that a missing PID was reaped rather than
 unreadable. PID presence also does not distinguish a running process from a
 zombie awaiting reaping; the collector intentionally does not emit process state.
-A missing/denied/malformed stat read is an explicit gap. RSS is not
+Absence is scoped to its read timestamp and current visibility. RSS is not
 unique memory or an aggregate memory limit. Correlate the observations with the
 operator's known root, exclusive window, source/configuration receipts and
 request times; retain gaps and stop records in the acceptance report. Do not

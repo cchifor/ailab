@@ -45,7 +45,7 @@ class Reader:
 
 
 def sample(reader, tracked=None, limit=100):
-    return observer.snapshot(reader, 10, 100, tracked or {}, limit, lambda: None)
+    return observer.snapshot(reader, 10, 100, tracked or {}, limit, lambda: None)[:3]
 
 
 class Clock:
@@ -132,7 +132,7 @@ class WarmProcessObserverTest(unittest.TestCase):
         reader.errors[12] = 'stat-denied'
         rows, gaps, following = sample(reader, known)
         self.assertEqual([r['pid'] for r in rows], [10])
-        self.assertEqual(gaps, [{'pid': 11, 'code': 'stat-missing'}, {'pid': 12, 'code': 'stat-denied'}])
+        self.assertEqual(gaps, [{'pid': 12, 'code': 'stat-denied'}])
         self.assertEqual(following, known)
         reader.errors[10] = 'stat-denied'
         with self.assertRaisesRegex(observer.Gap, '^root-unavailable$'):
@@ -159,7 +159,7 @@ class WarmProcessObserverTest(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual([r['type'] for r in records], ['sample', 'sample', 'stop'])
         self.assertEqual(records[-1]['reason'], 'duration-limit')
-        self.assertEqual(set(records[0]), {'type', 'sampleStartedAt', 'observedAt', 'processes', 'gaps'})
+        self.assertEqual(set(records[0]), {'type', 'sampleStartedAt', 'observedAt', 'processes', 'absent', 'gaps'})
         self.assertNotIn('comm', raw)
 
     def test_incomplete_deadline_sample_is_failure_not_clean_duration_end(self):
@@ -251,6 +251,53 @@ class WarmProcessObserverTest(unittest.TestCase):
             with self.assertRaisesRegex(observer.Gap, '^page-size-invalid$'):
                 observer.ProcReader('/unused-fixture', 0)
             sysconf.assert_not_called()
+
+    def test_normal_child_exit_records_absence_once_without_failing_collection(self):
+        clock = Clock()
+        reader = Reader([row(10, 1, 100), row(11, 10, 101)])
+        original_sleep = clock.sleep
+
+        def child_exit(seconds):
+            reader.rows.pop(11, None)
+            original_sleep(seconds)
+        clock.sleep = child_exit
+        status, records, _ = self.run_observer(reader, options(duration=3), clock)
+        self.assertEqual(status, 0)
+        self.assertEqual(records[1]['absent'], [{
+            'pid': 11, 'startTicks': 101, 'observedAt': '2026-11-26T00:00:00.000+00:00',
+            'status': 'absent-at-read'}])
+        self.assertEqual(records[2]['absent'], [])
+        self.assertEqual(reader.calls.count(11), 2)
+        self.assertTrue(all(not r['gaps'] for r in records if r['type'] == 'sample'))
+
+    def test_absent_identity_reappears_or_reused_pid_is_distinguished(self):
+        reader = Reader([row(10, 1, 100), row(11, 10, 101)])
+        dormant, known = set(), {}
+
+        def take():
+            nonlocal known
+            rows, gaps, known, absent = observer.snapshot(
+                reader, 10, 100, known, 100, lambda: None, dormant, lambda: 'fixed-time')
+            return rows, gaps, absent
+        take()
+        del reader.rows[11]
+        self.assertEqual(take()[2][0]['status'], 'absent-at-read')
+        reader.rows[11] = row(11, 1, 101)
+        rows, gaps, absent = take()
+        self.assertEqual([r['pid'] for r in rows], [10, 11])
+        self.assertEqual((gaps, absent, dormant), ([], [], set()))
+        del reader.rows[11]
+        take()
+        reader.rows[11] = row(11, 1, 999)
+        rows, gaps, absent = take()
+        self.assertEqual([r['pid'] for r in rows], [10])
+        self.assertEqual(gaps, [{'pid': 11, 'startTicks': 101, 'code': 'pid-reused'}])
+        self.assertEqual(absent, [])
+
+    def test_unobserved_process_disappearing_mid_inventory_is_still_a_gap(self):
+        reader = Reader([row(10, 1, 100), row(11, 10, 101)])
+        reader.errors[11] = 'stat-missing'
+        self.assertEqual(sample(reader)[1], [{'pid': 11, 'code': 'stat-missing'}])
 
 
 if __name__ == '__main__':
