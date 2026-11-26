@@ -63,6 +63,13 @@ process. PID alone cannot establish identity: compare start time as well. If
 process identity or disappearance cannot be established, leave reuse/release
 unobserved. Never kill a process to manufacture the result.
 
+The [bounded process metadata collector](../warm-process-observer.md) supports
+this observation using the operator-supplied root PID and start ticks. Its
+samples cover only visible, observed ancestry; they do not establish provider
+identity, prove reaping or exclude processes between samples. Keep unknown
+ancestry, gaps and the final stop record with the report. Collector exit0 is not
+a warm-acceptance verdict, and its use does not authorize another workload.
+
 Pair these observations with settled scoped trajectory metadata, normal Relay
 receipts and request-correlated native outcome. Record full completion latency
 from accepted prompt submission until the completed native turn, separately from
