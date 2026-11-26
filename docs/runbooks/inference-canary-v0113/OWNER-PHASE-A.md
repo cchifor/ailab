@@ -15,7 +15,7 @@ The owner can paste the entire reviewed [owner-phase-a.js](owner-phase-a.js) int
 the browser console at `https://relay.chifor.me`. It installs a panel without
 making requests. Start runs Codex lifecycle, Qwen lifecycle, then fresh Codex
 effort, in that order. This is an operator-assisted driver: it constructs and
-polls requests, renews the lease every20s and checks receipts. It does not pretend
+polls requests, renews the lease every 20 s and checks receipts. It does not pretend
 that the browser can observe private host markers or Router trajectories.
 
 Use the owner's existing authenticated session. No token, cookie, key file,
@@ -80,9 +80,9 @@ request must appear in the recorder before zero-attempt claims are used.
 
 ## Decisions and limits
 
-The lifecycle budgets remain15min,12 prompt commands,20 observed generations,
-120s per prompt, and30s per permission decision. Effort remains10min,4 prompts,
-6 observed generations and120s per prompt. Output cap1024 stays in the approved
+The lifecycle budgets remain 15 min, 12 prompt commands, 20 observed generations,
+120 s per prompt, and 30 s per permission decision. Effort remains 10 min, 4 prompts,
+6 observed generations and 120 s per prompt. Output cap 1024 stays in the approved
 profile. Operator evidence collection consumes the same wall-clock budget.
 Recorded-attempt limits are observation gates, not a new server-enforced hard
 generation cap; in-flight work and recording latency remain limitations.
@@ -145,7 +145,7 @@ inference can finish; revocation is not proof that earlier work stopped.
 
 Each operation ID and body is saved before its POST. If the response is lost,
 the driver reads the same operation from the oldest credential generation; it
-does not resend or create a replacement operation. It waits at most120s per
+does not resend or create a replacement operation. It waits at most 120 s per
 binding, within the existing credential window. It requires all generations to
 be revoked, escrow cleanup complete, the binding disabled at the expected
 revision, and the exact operation confirmed. An unresolved outcome stops this
@@ -200,7 +200,7 @@ panel and supply real observations, never placeholder values:
 
 `launches` must include every recorded launch; each marker entry is the actual
 JSON report object, not a string. Collect the file and marker observations after
-the displayed boundary, which includes a conservative5s clock-skew allowance.
+the displayed boundary, which includes a conservative 5 s clock-skew allowance.
 The current two marker files must still show exactly one approved effect and no
 denied effect. Preserve histories, workspaces and markers; this action does not
 delete them. Only after both revocation and separate renderer evidence pass does

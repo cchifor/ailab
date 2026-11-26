@@ -1209,7 +1209,7 @@
         provider +
           (effort ? " effort" : " lifecycle") +
           ": operator pre-launch handoff",
-        "Paste {trajectory: fresh scoped snapshot, marker: baseline observe.py report, coverageConfirmed:true, holderReadyConfirmed:true, routeConfirmed:true, clocksWithin5s:true}. Operator must verify browser/collector/observer clocks differ by at most5s, and freshly confirm holder " +
+        "Paste {trajectory: fresh scoped snapshot, marker: baseline observe.py report, coverageConfirmed:true, holderReadyConfirmed:true, routeConfirmed:true, clocksWithin5s:true}. Operator must verify browser/collector/observer clocks differ by at most 5 s, and freshly confirm holder " +
           this.holderId +
           ", zero unrelated work, published pins, one attempt/no fallback; Codex target codex-3/gpt-6-astra. Run UUID " +
           runId +
