@@ -66,6 +66,10 @@ registry_zot_scoped_push_users:
   # registry_zot_strive_ci_build_keep_recent below.
   - user: "strive-ci-push"
     repositories: "strive/ci-build/**"
+  # cchifor/specpulse .gitea/workflows/publish.yml: the deployed app's image, pinned by digest in
+  # kubernetes/apps/apps/specpulse (owner decision 2026-11-26: deploy specpulse on ailab by GitOps).
+  - user: "specpulse-ci"
+    repositories: "specpulse/**"
 
 # Web-UI SSO via Authelia (zot-native OIDC). Docker push (ci/htpasswd) + anonymous pull are
 # UNAFFECTED — only the browser UI gains a "Login with Authelia" button. The plaintext client
