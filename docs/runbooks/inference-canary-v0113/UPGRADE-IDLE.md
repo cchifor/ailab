@@ -28,9 +28,12 @@ The current runtime remains reviewed/published v0.13.1
 profile SHA256 `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`.
 The correction prepares first hub approval revision1, SHA256
 `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`, with the same artifact pins and all
-other scope unchanged. No approval history exists for these IDs; see
-[README.md](README.md). New exact revision1 root/profile/schema qualification
-and the second configuration replacement remain pending. Prior revision3
+other scope unchanged. The 14:26 UTC tenant-scoped read found no approval
+history for these IDs; a current readback is still required as described in
+[README.md](README.md). Exact revision1 root/profile/schema qualification and
+nine compiled approval-boundary cases passed offline with the stated fixture
+limits. The second live configuration replacement, first approval readbacks and
+live acceptance remain pending. Prior revision3
 installation and the unchanged runtime's five synthetic wire cases remain
 evidence for their original scope, not permission to launch. Do not stop the current idle holder merely because source merged
 or artifacts were published. The hub stays at e843/schema93. The required Router correction

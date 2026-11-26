@@ -17,8 +17,9 @@ permission-review and structured configuration-refusal corrections. Publication
 completed in [run150672](https://git.chifor.me/cchifor/relay/actions/runs/150672).
 The checked-in profiles now use **first hub approval revision1**, SHA256
 `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`. Published runtime artifacts are unchanged.
-The operator's 14:22 UTC readback of [PR2022](https://git.chifor.me/cchifor/ailab/pulls/2022)
-confirmed installed revision3 bytes `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`,
+The [operator's PR2022 upgrade readback at14:20:17 UTC](https://git.chifor.me/cchifor/ailab/pulls/2022#issuecomment-144744)
+and a separate independent SSH readback at14:22:37 UTC confirmed installed
+revision3 bytes `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`,
 the published holder, recovery2/readiness, resumed admission and zero sessions.
 That is an installation result, not a hub profile approval. A tenant-scoped
 14:26 UTC read found no approval rows for any of the three exact profile IDs.
@@ -41,11 +42,12 @@ that an ID has no history. If any revision now exists, stop and derive the next
 revision from that actual history; never downgrade or invent approval history.
 Also recheck the never-launched journal and stopped-idle eligibility below.
 
-New exact revision1 root/profile and schema qualification, a second sealed-idle
-configuration replacement, first approval readbacks and live acceptance remain
-pending. Prior revision3 root/schema proof and the unchanged runtime's five
-synthetic wire cases remain evidence for their stated scope; neither is live
-acceptance or authority to launch.
+Exact revision1 root/profile and deployed-hub schema qualification passed,
+along with nine compiled approval-boundary cases described below. The second
+live sealed-idle configuration replacement, first approval readbacks and live
+acceptance remain pending. Prior revision3 root/schema proof and the unchanged
+runtime's five synthetic wire cases remain evidence for their stated scope;
+none is live acceptance or authority to launch.
 
 The deployed hub remains v0.13.0/source
 `e843921b7cff76406b7da0b5b35cf653c7e458c5`, with the
@@ -108,6 +110,25 @@ connector/renderer pins, identities, routes, grants, limits and effort choices
 remain unchanged. Source digests are authenticated through the receipt-bound
 manifest, not independently recomputed from the build closure. This comparison
 does not itself grant profile approval.
+
+The corrected revision1 profile SHA256 `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`
+passed a fresh offline actual-root qualification using the unchanged published
+v0.13.1 holder/Pi artifacts. Hello admitted all three profiles with
+`nativeRecovery:2`, `nativeStateReady:true` and zero sessions. The deployed e843
+image's compiled schemas passed **31 positive and five negative cases**, and
+normalized definition hashes were computed with its actual approval defaults.
+Evidence is `.data/pi-v0131-first-registration-root-20261126/` in the Relay
+workspace: `qualification-summary.json`, `actual-root/hello-corrected.json`,
+`hub-schema.log` and `normalized-definition-hashes.json`.
+
+The deployed image's compiled approval function also passed **nine boundary
+cases**: each profile's fixtures accept revision1 without prior history, refuse
+revision3 without prior history, and refuse revision1 when revision3 exists. Evidence is
+`.data/pi-v0131-first-registration-boundary-20261126/result.json`. These use a
+strict fake database and synthetic caller authority/state, not HTTP requests or
+a real database transaction. They do not establish current approval history,
+live authority or an actual approval. Keep the fresh scoped history readback,
+second configuration replacement and normal owner approval steps above.
 
 The earlier v0.13.1 root qualification used these exact archives and revision3 profiles,
 UID1000 and the actual `/home/c4/.local/state/relay-holder` paths in an isolated

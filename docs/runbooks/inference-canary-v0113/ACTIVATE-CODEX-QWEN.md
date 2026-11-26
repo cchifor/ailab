@@ -12,12 +12,14 @@ unchanged. [PR2022](https://git.chifor.me/cchifor/ailab/pulls/2022) installed
 revision3, but no hub approval exists for these IDs; the first approval must use
 revision1 with matching holder/session metadata. The new profile SHA256 is
 `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`; see [README.md](README.md).
-Exact revision1 root/profile/schema qualification and a second preserved-state
-configuration replacement are pending. Prior revision3 installation/root/schema
+Exact revision1 root/profile/schema qualification and nine compiled approval
+boundary cases passed offline, with the limits recorded in README. The second
+live preserved-state configuration replacement, first approval readbacks and
+live acceptance remain pending. Prior revision3 installation/root/schema
 and the unchanged runtime's five synthetic wire cases do not establish approval
 or live acceptance. The hub stays at
 e843/schema93; the required Router correction source is 4af66b8. Verify actual
-Router deployment separately. Complete qualification and verify the approved final diff before
+Router deployment separately. Use the recorded qualification and verify the approved final diff before
 execution. The effort capability exceeded the earlier home-layout/artifact-only
 preapproval; operator bus1861 now records the owner's 15:30 **Covered** decision
 for home layout, pins and Claude/Codex `off/low/high` only. Verify the full

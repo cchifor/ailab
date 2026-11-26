@@ -13,8 +13,10 @@ The reviewed holder/Pi successor is v0.13.1 source
 `4af66b8c7c3cc83ddd10e326c554ad728caad72e`, while the hub stays e843/schema93.
 Published run150672 runtime pins are unchanged. [README.md](README.md) records
 the correction from installed, never-approved revision3 to first hub approval
-revision1. Exact revision1 root/profile/schema qualification and a second
-sealed-idle configuration replacement remain pending. Prior revision3 root/schema
+revision1. Exact revision1 root/profile/schema qualification and nine compiled
+approval-boundary cases passed offline with the fixture limits in README. The
+second live sealed-idle configuration replacement, first approval readbacks and
+live acceptance remain pending. Prior revision3 root/schema
 and the unchanged runtime's five synthetic wire cases against Router4af66b8 do
 not establish first approval or live acceptance. The v0.13.0 root and
 five-case wire proofs there are historical. Use [UPGRADE-IDLE.md](UPGRADE-IDLE.md) for the
