@@ -21,15 +21,21 @@ stopped configuration handoff. No role behavior is changed.
 
 ## Review the successor before stopping
 
-The current successor source is reviewed v0.13.1
+The current runtime remains reviewed/published v0.13.1
 `2604c41b69c5d9c50a3324545a51f0bfa38435a0`
-([Relay PR705](https://git.chifor.me/cchifor/relay/pulls/705)). Published run150672
-pins and revision3 profile SHA256
-`58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`
-are recorded in [README.md](README.md). Offline root/profile and deployed-hub
-schema qualification passed, along with all five published-Pi wire/replay
-cases against Router4af66b8 with synthetic upstreams. The actual upgrade and
-live acceptance remain pending. Do not stop the current idle holder merely because source merged
+([Relay PR705](https://git.chifor.me/cchifor/relay/pulls/705)). The first
+[PR2022 upgrade](https://git.chifor.me/cchifor/ailab/pulls/2022) installed revision3
+profile SHA256 `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`.
+The correction prepares first hub approval revision1, SHA256
+`928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`, with the same artifact pins and all
+other scope unchanged. The 14:26 UTC tenant-scoped read found no approval
+history for these IDs; a current readback is still required as described in
+[README.md](README.md). Exact revision1 root/profile/schema qualification and
+nine compiled approval-boundary cases passed offline with the stated fixture
+limits. The second live configuration replacement, first approval readbacks and
+live acceptance remain pending. Prior revision3
+installation and the unchanged runtime's five synthetic wire cases remain
+evidence for their original scope, not permission to launch. Do not stop the current idle holder merely because source merged
 or artifacts were published. The hub stays at e843/schema93. The required Router correction
 source is 4af66b8, with actual deployment/readiness verified separately.
 Operator bus1967's idle/no-launch report selects this procedure; the helper must
@@ -40,11 +46,29 @@ manifest, immutable installer image receipt and exact profile definitions ready.
 Verify their source and hashes through the existing release process. Keep the
 current connector, credential renderer, binding identities, route grants,
 workspaces, credential homes, effort allowlists and request/output limits.
-Runtime and artifact pins change together in `profiles.json` and
-`launch-definitions.json`; their holder/session revisions must be the next
-approved revision, never replacement bytes at an already approved revision.
+Keep the holder/session revisions equal in `profiles.json` and
+`launch-definitions.json`. The deployed hub requires revision1 for the first
+approval and exactly previous+1 thereafter. This correction changes only the
+never-approved installed revision3 metadata to first-registration revision1;
+all runtime/artifact pins stay fixed. Never replace an already approved revision,
+create dummy earlier approvals, or weaken the hub revision check.
+Before repeating this procedure, refresh the exact three-ID approval-history
+readback, including revoked revisions, through the existing tenant-scoped
+operator context described in README. A capped profile list is not an absence
+proof. Any existing revision stops this first-registration correction; use its
+actual history instead. Recheck the full never-launched journal independently.
 Derive the exact profile file SHA256 in `holder-inputs.json` and
 `holder-activate-codex-qwen.json` from the new bytes.
+
+A second preparation is valid only after the first completed successfully and
+the normal role repopulated the four files. Preserve its backup and receipts.
+The full journal must retain the first pause/seal, restart, release/resume and
+the fresh pause/seal; maintenance revisions continue increasing even though the
+never-approved profile metadata is corrected to1. Use current exact file/journal
+hashes, current incarnation and seal, and a new preparation UUID. The original
+journal ID and both lock inodes remain unchanged. Any command, session or
+preflight refusal still disqualifies this procedure. This is not permission to
+retry a partial preparation or erase history.
 
 The helper has no successor-pin arguments and cannot approve that release or
 profile. The independently reviewed successor inputs govern the later role run.
@@ -206,7 +230,10 @@ Focused Linux validation:
 python3 -B -m unittest scripts.tests.test_prepare_idle_holder_upgrade -v
 ```
 
-The tests exercise real flock/no-clobber filesystem behavior with synthetic
+The 22 focused tests passed on Linux, including two complete preparations with
+a restart/release/resume/new pause/seal between them, preservation of the first
+backup and journal inode, and refusal of command/preflight tails before a second
+move. They exercise real flock/no-clobber filesystem behavior with synthetic
 systemd status and exact journal-format fixtures. They do not establish a live
 systemd upgrade or authorize production execution.
 

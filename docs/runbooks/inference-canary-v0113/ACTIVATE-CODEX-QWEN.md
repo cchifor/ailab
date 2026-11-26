@@ -1,21 +1,28 @@
 # Held Codex/Qwen service activation
 
-Successor preparation from AILab main `b1c98cccc222db4e6d35d5cd9356871c40c9029a`.
+First-registration correction from AILab main `7ad457775daa397fcc529fa3aa348e2a2e6a4f34`.
 This is a proposed operator procedure, not approval or evidence of activation.
-Keep the activation PR held with `no-automerge` until the operator confirms
-the gates below. Merging these opt-in inputs does not run either playbook; no
-inventory imports them. This change starts no service and creates no key itself.
+The prior owner-held activation [PR2022](https://git.chifor.me/cchifor/ailab/pulls/2022)
+was merged. This correction follows ordinary CI and reviewer merge; it adds no
+source-merge hold. Merging these opt-in inputs does not run either playbook, and
+no inventory imports them. The actual configuration replacement remains an
+operator-coordinated action subject to all existing gates below. This source
+change starts no service and creates no key itself.
 
-**Successor hold:** reviewed holder/Pi v0.13.1 source
-`2604c41b69c5d9c50a3324545a51f0bfa38435a0` replaces the historical v0.13.0 runtime.
-Published run150672 pins and revision3 profile bytes are recorded in
-[README.md](README.md); exact-artifact root/profile and deployed-hub schema
-qualification passed offline, as did all five published-Pi wire/replay cases
-against Router4af66b8 with synthetic upstreams. Actual upgrade/activation
-readbacks and live acceptance remain pending. Historical revision2/publication149439 proofs
-do not qualify that replacement. The hub stays at
+**First-registration hold:** holder/Pi v0.13.1 source
+`2604c41b69c5d9c50a3324545a51f0bfa38435a0` and all run150672 artifact pins remain
+unchanged. [PR2022](https://git.chifor.me/cchifor/ailab/pulls/2022) installed
+revision3, but no hub approval exists for these IDs; the first approval must use
+revision1 with matching holder/session metadata. The new profile SHA256 is
+`928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`; see [README.md](README.md).
+Exact revision1 root/profile/schema qualification and nine compiled approval
+boundary cases passed offline, with the limits recorded in README. The second
+live preserved-state configuration replacement, first approval readbacks and
+live acceptance remain pending. Prior revision3 installation/root/schema
+and the unchanged runtime's five synthetic wire cases do not establish approval
+or live acceptance. The hub stays at
 e843/schema93; the required Router correction source is 4af66b8. Verify actual
-Router deployment separately. Complete qualification and verify the approved final diff before
+Router deployment separately. Use the recorded qualification and verify the approved final diff before
 execution. The effort capability exceeded the earlier home-layout/artifact-only
 preapproval; operator bus1861 now records the owner's 15:30 **Covered** decision
 for home layout, pins and Claude/Codex `off/low/high` only. Verify the full
@@ -59,8 +66,8 @@ prompt**. Do not pre-render a token manually, forge a receipt, force a binding t
 ## Gates before either activation converge
 
 1. Record the existing Covered decision and operator verification of the exact `profiles.json` diff:
-   The successor revision3 SHA-256 is `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`;
-   the historical revision2 baseline is `665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e`. The operator must verify
+   The first-registration revision1 SHA-256 is `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`;
+   the installed revision3 baseline is `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`. The operator must verify
    the final diff against the owner's approved scope; source PR reviews and
    staging do not substitute for that exact-byte verification.
 2. The owner creates only the Codex and Qwen bindings from the existing
@@ -253,7 +260,7 @@ Do not bypass a failed gate, rotate blindly or infer readiness from an active
 service or HTTP202. These launch steps do not authorize inference before the
 operator's handoff and do not change the reviewed prompt/generation budgets.
 
-## Historical offline validation of revision1 preparation
+## Historical offline validation of v0.11.3 revision1 preparation
 
 Before the revision2 integration, the real Ansible renderer-role suite passed 13 tests in a disposable container
 with networking disabled, capabilities dropped and a read-only checkout. Service

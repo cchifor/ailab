@@ -1,17 +1,34 @@
 # Owner-run phase A
 
-This packet uses published **v0.13.1** holder/Pi source
-`2604c41b69c5d9c50a3324545a51f0bfa38435a0`, revision-3 definitions and profile
-file SHA256 `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`.
-Published installation/repeat verification, actual-root readiness, the deployed
-e843 hub's compiled schema checks (31 positive/5 negative), and all five native
-wire cases passed. The wire cases use Router TypeScript source with synthetic
-providers; they do not establish live subscription acceptance. The exact pins
-and qualification evidence are recorded in [README](README.md).
+This correction retains published **v0.13.1** holder/Pi source
+`2604c41b69c5d9c50a3324545a51f0bfa38435a0` and changes only the first-registration
+profile revision to 1. The proposed profile file SHA256 is
+`928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`.
+Fresh published-holder actual-root readiness, compiled e843 schema checks
+(31 positive/5 negative) and normalization passed for these exact revision-1
+bytes. Nine offline compiled registration-boundary cases passed: each profile
+accepts revision 1 with empty history and refuses revision 3 with empty history
+or revision 1 over existing revision 3. These use strict fake database fixtures,
+not live API authority or real database transactions. The runtime artifacts
+are unchanged; the earlier five synthetic wire cases remain runtime evidence,
+not live subscription acceptance. Evidence is recorded in [README](README.md).
 
-`QUALIFIED_INPUTS = true` enables this reviewed packet. **Start still requires
-the operator's fresh post-upgrade handoff and the router rollout below.** Do not
-run it against the old e843 holder, which drops Pi's tool-input description.
+`QUALIFIED_INPUTS = true` enables this qualified correction after normal packet
+review/merge and installation; it does not perform profile approval or authorize
+live work by itself. The previously installed revision-3 profile hash is rejected.
+Empty API profile history requires the first approval at revision 1; do not
+invent prior approvals or create dummy revisions.
+This is conditional on a fresh check for each exact profile ID in the same
+hub tenant: there must be no prior revision, including disabled or revoked
+history. The 14:26 readback is evidence for that observation time, not a permanent
+absence guarantee. A full 200-row `/api/agent-profiles` response cannot prove
+absence; use the operator's existing exact scoped read when the listing is
+capped. If any prior revision appears, stop and resolve the history before
+approval. Do not downgrade, bootstrap or create dummy revision chains. Profile
+approval remains a separate normal owner/API action, outside this driver.
+Start still requires the operator's fresh installed-hash
+handoff and router rollout below. Do not run it against the old e843 holder,
+which drops Pi's tool-input description.
 The e843 hub/API and schema 93 stay in place; the holder/Pi update is separate.
 An empty permission description is a stop, never an approval shortcut. Do not
 edit pins, revisions, qualification flags or run UUIDs locally.
@@ -32,7 +49,7 @@ saved run cannot silently restart work. The panel deliberately does not offer a
 ## Before Start
 
 After normal packet review and merge, the operator must complete
-[the stopped-idle upgrade](UPGRADE-IDLE.md), stage the revision-3 profiles and
+[the stopped-idle upgrade](UPGRADE-IDLE.md), stage the revision-1 profiles and
 verify the new holder. Router [PR2019](https://git.chifor.me/cchifor/ailab/pulls/2019)
 must be deployed and read back at source
 `4af66b8c7c3cc83ddd10e326c554ad728caad72e` before Start; its source merge and

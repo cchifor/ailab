@@ -287,6 +287,82 @@ class IdleUpgrade(unittest.TestCase):
                 self.assert_originals()
                 self.value['journal'][key] = old
 
+    def test_second_idle_upgrade_preserves_first_backup_and_released_journal_history(self):
+        first = self.prepare()
+        first_backup = Path(first['backup'])
+        first_files = {p: (p.read_bytes(), upgrade.identity(p)) for p in first_backup.iterdir()}
+        journal_path = self.state / 'journal.jsonl'
+        original_journal_inode = upgrade.identity(journal_path)[:2]
+        locks = {self.state / name: upgrade.identity(self.state / name)
+                 for name in ('holder.lock', 'connector-control.lock')}
+        # Simulate the separate role repopulating the four files after the first
+        # successful preparation. Its old backup must never become a move target.
+        installed = {}
+        for key, (rel, mode) in upgrade.FILES.items():
+            path = self.home / rel
+            data = ('reviewed replacement ' + key + '\n').encode()
+            path.write_bytes(data)
+            path.chmod(mode)
+            installed[path] = (data, upgrade.identity(path))
+            self.hashes[key] = hashlib.sha256(data).hexdigest()
+        records = [dict(version=1, sequence=i, incarnation=self.incarnation, event=event)
+                   for i, event in enumerate(self.events, 1)]
+        next_incarnation, next_seal = str(uuid.uuid4()), str(uuid.uuid4())
+        tail = [dict(kind='holder-started', version=1),
+                dict(kind='holder-maintenance-seal', operationId=str(uuid.uuid4()), revision=3,
+                     expectedIncarnation=next_incarnation, sealId=self.seal, sealed=False),
+                dict(kind='holder-admission', operationId=str(uuid.uuid4()), revision=4, paused=False),
+                dict(kind='holder-admission', operationId=str(uuid.uuid4()), revision=5, paused=True),
+                dict(kind='holder-maintenance-seal', operationId=next_seal, revision=6,
+                     expectedIncarnation=next_incarnation, sealId=next_seal, sealed=True)]
+        records.extend(dict(version=1, sequence=i, incarnation=next_incarnation, event=event)
+                       for i, event in enumerate(tail, len(records) + 1))
+        self.value['operationId'] = str(uuid.uuid4())
+        self.value['journal'].update(incarnation=next_incarnation, sealId=next_seal)
+        second_backup = first_backup.parent / self.value['operationId']
+        # Independent invalid-tail fixtures retain the complete first cycle.
+        # A later seal or an existing successful backup never excuses worker events.
+        for kind in ('command-accepted', 'command-preflight-rejected'):
+            with self.subTest(kind=kind):
+                invalid = records + [dict(version=1, sequence=len(records) + 1, incarnation=next_incarnation,
+                                          event=dict(kind=kind))]
+                refused_journal = self.write_journal(invalid)
+                before = upgrade.identity(journal_path)
+                with self.assertRaisesRegex(ValueError, 'command/session'):
+                    self.prepare()
+                self.assertFalse(second_backup.exists())
+                self.assertEqual(journal_path.read_bytes(), refused_journal)
+                self.assertEqual(upgrade.identity(journal_path), before)
+                for path, (data, identity) in {**first_files, **installed}.items():
+                    self.assertEqual(path.read_bytes(), data)
+                    self.assertEqual(upgrade.identity(path), identity)
+        journal = self.write_journal(records)
+        before = upgrade.identity(journal_path)
+        result = self.prepare()
+        self.assertEqual(result['state'], 'prepared-stopped-sealed')
+        self.assertEqual(Path(result['backup']), second_backup)
+        self.assertEqual(result['journal']['journalId'], self.incarnation)
+        self.assertEqual(result['journal']['incarnation'], next_incarnation)
+        self.assertEqual(result['journal']['sealId'], next_seal)
+        self.assertEqual(result['journal']['admissionRevision'], 6)
+        self.assertEqual(result['journal']['records'], len(records))
+        self.assertEqual(journal_path.read_bytes(), journal)
+        self.assertEqual(upgrade.identity(journal_path), before)
+        self.assertEqual(before[:2], original_journal_inode)
+        for path, (data, identity) in first_files.items():
+            self.assertEqual(path.read_bytes(), data)
+            self.assertEqual(upgrade.identity(path), identity)
+        for key, (rel, _) in upgrade.FILES.items():
+            path = self.home / rel
+            self.assertFalse(path.exists())
+            self.assertEqual((second_backup / key).read_bytes(), installed[path][0])
+            self.assertEqual(upgrade.identity(second_backup / key), installed[path][1])
+        self.assertTrue((second_backup / 'complete.json').is_file())
+        for path, identity in locks.items():
+            self.assertEqual(upgrade.identity(path), identity)
+        for path in self.sentinels:
+            self.assertEqual(path.read_bytes(), b'preserve-only-do-not-log')
+
     def test_duplicate_operation_and_unsealed_or_unpaused_tail_refused(self):
         valid = copy.deepcopy(self.events)
         release = dict(kind='holder-maintenance-seal', operationId=str(uuid.uuid4()), revision=3,

@@ -221,6 +221,11 @@ test("qualified packet refuses absent or invalid holder handoff before any reque
     { ...valid, profilesSha256: undefined },
     { ...valid, holderBinarySha256: undefined },
     { ...valid, profilesSha256: "0".repeat(64) },
+    {
+      ...valid,
+      profilesSha256:
+        "58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39",
+    },
     { ...valid, holderBinarySha256: "0".repeat(64) },
   ]) {
     const h = harness();
@@ -917,6 +922,7 @@ test("lost close POST cleanup inspects same close and never creates replacement"
 function phaseServer({
   configurationNotice = "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used.",
   clocksWithin5s = true,
+  approvedRevision = 1,
 } = {}) {
   let clock = NOW,
     serial = 100,
@@ -1108,7 +1114,7 @@ function phaseServer({
       if (pathName === "/api/agent-profiles")
         result = definitions.map((d) => ({
           id: d.holder.id,
-          revision: 3,
+          revision: approvedRevision,
           enabled: true,
           definition: d,
         }));
@@ -1148,7 +1154,7 @@ function phaseServer({
           id: id(),
           operation_id: body.operationId,
           profile_id: pp.id,
-          profile_revision: 3,
+          profile_revision: 1,
           cwd: "/home/c4/.local/state/relay-holder/workspaces/" + pp.id,
           state: "pending",
           session_id: sid,
@@ -2351,4 +2357,18 @@ test("lost cleanup permission decision records uncertain without repeating it", 
   );
   assert.equal(h.calls.filter((c) => c.method === "POST").length, 1);
   assert(!JSON.stringify(h.runner.state).includes("private-token"));
+});
+
+test("first registration refuses a wrong approved revision before launch", async () => {
+  for (const provider of ["codex", "qwen"]) {
+    for (const approvedRevision of [2, 3]) {
+      const f = phaseServer({ approvedRevision });
+      await assert.rejects(f.runner.phase(provider), /Approved profile absent/);
+      assert.equal(f.calls.length, 1);
+      assert.equal(f.calls[0].method, "GET");
+      assert.equal(f.launches.length, 0);
+      assert.equal(f.runner.state.operations.length, 0);
+      assert.equal(f.checkpoints.length, 0);
+    }
+  }
 });

@@ -2,7 +2,7 @@
   {
     "version": 1,
     "id": "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
-    "revision": 3,
+    "revision": 1,
     "executable": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/node",
     "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
     "artifacts": {
@@ -64,7 +64,7 @@
   {
     "version": 1,
     "id": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
-    "revision": 3,
+    "revision": 1,
     "executable": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/node",
     "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
     "artifacts": {
@@ -116,7 +116,7 @@
   {
     "version": 1,
     "id": "fdb56ca5-908b-40ee-94b3-aac735dd8622",
-    "revision": 3,
+    "revision": 1,
     "executable": "/opt/relay-pi/releases/d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d/node",
     "executableSha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
     "artifacts": {
