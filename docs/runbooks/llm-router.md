@@ -3909,7 +3909,8 @@ paired"), remain the leads.
 
 **The same-image spread, measured (2026-11-24/25, the step this note asked for before the 1.2x margin is reconsidered).**
 `codex-control` `code-edit`, uncached prompt tokens router ÷ direct, every run paired on `codex-2` (dev-worker-1's
-login), Layer (a) identical in every run, no other margin failed:
+login), Layer (a) identical in every run, no other `codex-control` margin failed (the `codex` provider's own reading
+is in the prose below, not in this table):
 
 | When (UTC) | Image | Pairs | Codex requests in flight at start | Ratio | Verdict |
 |---|---|---|---|---|---|
@@ -3918,17 +3919,23 @@ login), Layer (a) identical in every run, no other margin failed:
 | 11-24 19:50 | `1d3eaf56` | 6 | 1 | 1.75x | FAIL |
 | 11-24 19:58 | `1d3eaf56` | 6 | 0 | 0.51x | PASS |
 | 11-24 20:08 | `1d3eaf56` | 6 | 0 | 1.15x | PASS (NEAR) |
-| 11-24 20:25 | `1d3eaf56` | 6 | (after the canary routes, which carry no gate traffic) | 1.45x | FAIL |
+| 11-24 20:25 | `1d3eaf56` | 6 | not captured (run after the canary routes, which carry no gate traffic) | 1.45x | FAIL |
 | 11-25 10:18 | `c35fc222` | 6 | (seat recovering from a 429 cooldown) | 0.58x | PASS |
 
-On ONE image (`1d3eaf56`, six runs) the ratio spans **0.51x to 3.96x** (median 1.30x). The three quiet-window runs
-(19:50–20:17Z) read 1.75x, 0.51x and 1.15x, and the only failing one started with a Codex request already in flight,
-which fits the concurrent-traffic lead. The `codex` provider read 4.5x on `c35fc222` the same morning (11-25 10:18Z,
+On ONE image (`1d3eaf56`) the ratio spans **0.51x to 3.96x**: median **1.45x** over its five 6-pair runs (1.30x if
+the 3-pair full-gate run at 14:43 is counted as a sixth). The three quiet-window runs, started at 19:50, 19:58 and
+20:08Z, read 1.75x, 0.51x and 1.15x. Of those, the one that failed started with a Codex request already in flight,
+which fits the concurrent-traffic lead. The 20:25Z FAIL (1.45x) is **not** explained by it: its in-flight count was
+not captured. The `codex` provider read 4.5x on `c35fc222` the same morning (11-25 10:18Z,
 `codex-2` just out of a throttle). So a single run of this metric cannot separate a router change from the
 environment: at 6 pairs the spread is several times the 1.2x margin. The margin itself is left unchanged here; the
 choice between widening it (a known deviation with this spread as its bound), deciding on more pairs, or keeping
 each FAIL as a documented exception is the gate owner's. Records: ailab #1972 (the gate and spread runs), #1987
 (around the canary route change) and #1998 (`c35fc222`).
+**Pairing after 11-25 evening.** `codex-2` reached 100% of its usage window by the evening of 11-25 (it resets
+2026-11-27 07:21Z), so the Codex gate runs of 11-25 20:03Z and later read "not paired". The Router places no request on
+an account at its limit. Read those INVALID results as the seat being at its limit, not as traffic, and re-measure
+after the reset.
 
 **Open at rev 2247:** `qwen-cloud3` `code-edit` is FAIL on uncached tokens in 2 of 2 runs (1.29x, 1.20x), with Layer (a)
 clean and the model doing more work via the router (1.30x, 1.91x output tokens). cloud2 passes on the same day. On one
