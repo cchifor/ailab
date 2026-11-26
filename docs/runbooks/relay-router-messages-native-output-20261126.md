@@ -48,6 +48,10 @@ bounded cold qualification is still required after rollout.
   `c3e5ab92a64973cebc373100868eeb5af9e26d15efe6c3521d108617e74b5886`.
   It binds the packaging commit, archive, source and runtime to image
   `registry.chifor.me/llm-router/router@sha256:f180cf7f1f960782a46dff6bb73cb955ce34dcb6e083daed0b1202f58753b457`.
+  Relay's `v0.2.0` release is the existing shared host for Router build assets;
+  it is not the installed Relay version or an immutable release listing.
+  Verify these exact asset hashes, source and OCI digest rather than trusting
+  the hosting release tag alone.
 - The archive now includes `scripts/qualify-inference-sessions.mjs` and
   `operational-scripts-manifest.json`; these are the only added archive paths.
   The manifest SHA256 is
@@ -134,6 +138,23 @@ successful backup init, exact image/source, expected plugins and preserved
 policies/mounts. Verify the image's operational-script manifest and qualifier
 bytes before a separately authorized cold run. Explain independent health/config
 events rather than assuming the configuration revision cannot advance.
+
+If the fresh bounded cold run fails, retain its existing qualifier report in a
+new mode0600 evidence file, the report's request statuses and trajectory IDs,
+the existing bounded trajectory/attempt metadata (including a refusal code if
+present there), and the operator's key-revocation/401-verification/file-removal
+receipt. Declare the failed run and stop; do not retry, change its budget or
+advance to Claude lifecycle/warm acceptance. A strict parser rejection cannot
+be diagnosed as a particular field from its generic HTTP400 alone:
+[`parseMessages`](https://git.chifor.me/cchifor/llm-router/src/commit/4e4bb34e2f968f9450aabe9cf228d3e70c8bab71/packages/adapters/protocol/anthropic.ts#L25)
+does not publish its Zod error path, and the
+[qualifier](https://git.chifor.me/cchifor/llm-router/src/commit/4e4bb34e2f968f9450aabe9cf228d3e70c8bab71/scripts/qualify-inference-sessions.mjs#L121)
+deliberately omits upstream bodies. Record payload shape and parser path as
+unavailable, not inferred. There is no capture flag in this release and this
+procedure adds no wire/payload capture. If another failure needs more evidence,
+prepare a separately reviewed bounded structural-only diagnostic that excludes
+text, arguments, signatures and citation payloads before any further provider
+run; it is not part of this deployment or an authorization to capture content.
 
 Rollback is an owner-reviewed GitOps revert to source4af/imagee98 above. Preserve
 the current database and admission history; do not restore a snapshot to erase
