@@ -209,7 +209,7 @@ test("observed generation ceiling and zero-attempt checkpoints are enforced", as
   for (const [effort, attempts, zero] of [[false, 21, false], [true, 7, false], [false, 1, true]]) {
     const h = harness(); const before = trajectory(NOW - 10);
     h.runner.run = { provider: "codex", effort, deadline: NOW + 60000, firstSnapshot: before, lastSnapshot: before };
-    h.runner.env.ask = async (_t, _i, validate) => validate({ coverageConfirmed: true, trajectory: trajectory(NOW + 5, [trajectoryRow(attempts)]) });
+    h.runner.env.ask = async (_t, _i, validate) => { h.advance(6000); return validate({ coverageConfirmed: true, trajectory: trajectory(NOW + 6005, [trajectoryRow(attempts)]) }); };
     await assert.rejects(h.runner.evidence("bounded", null, zero), /budget|zero recorded/);
     assert.deepEqual(h.runner.run.lastSnapshot, before); assert.equal(h.calls.length, 0);
   }
@@ -365,7 +365,7 @@ test("lost close POST cleanup inspects same close and never creates replacement"
 // A stateful HTTP boundary fixture: actual Runner methods remain untouched.
 // No live runtime is claimed. Responses use the audited hub field names and
 // independent queued/accepted/completed states, not a stubbed phase result.
-function phaseServer({ configurationNotice = "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used." } = {}) {
+function phaseServer({ configurationNotice = "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used.", clocksWithin5s = true } = {}) {
   let clock = NOW, serial = 100, sequence = 0;
   const sessions = new Map(), launches = [], commands = new Map(), permissions = new Map();
   const calls = [], checkpoints = [], attempts = [], effects = new Map();
@@ -412,10 +412,13 @@ function phaseServer({ configurationNotice = "Router refused changed session con
     sleep: async ms => { clock += ms; }, load: () => null, save: () => {},
     ask: async (title, instructions, validate) => {
       checkpoints.push(title); clock += 20;
+      const boundary = runner.state.evidence.filter(e => e.kind === "collection-boundary").at(-1);
+      if (boundary) clock = Math.max(clock, boundary.notBefore + 1);
+      if (runner.lease && Date.parse(runner.lease.expires_at) - clock < 30000) await runner.renew();
       let value = true;
       if (title === "Inspect retained branch before continuation") value = { reconcile: true };
       else if (title.includes("pre-launch handoff")) value = { trajectory: observeTrajectory(runner.run.provider),
-        marker: observeMarker(runner.run.provider, runner.run.runId, "baseline"), coverageConfirmed: true, holderReadyConfirmed: true, routeConfirmed: true };
+        marker: observeMarker(runner.run.provider, runner.run.runId, "baseline"), coverageConfirmed: true, holderReadyConfirmed: true, routeConfirmed: true, clocksWithin5s };
       else if (title.startsWith("Open complete:")) value = { marker: observeMarker(runner.run.provider, runner.run.runId, "baseline"), deliveryConfirmed: true };
       else if (instructions.startsWith("Paste operator JSON:")) {
         const phase = /Marker phase=(\w+)/.exec(instructions)?.[1];
@@ -559,7 +562,8 @@ test("full lifecycle phase crosses queued hub contracts through recovery without
     assert.equal(writes.filter(c => c.path.endsWith("/resume")).length, 1);
     assert.equal(writes.filter(c => c.body?.kind === "close").length, 2);
     assert.equal(writes.filter(c => c.body?.kind === "cancel").length, 1);
-    assert.equal(writes.length, 20); // launch + two leases + 11 prompts + two decisions + cancel + twoClose + resume
+    assert.equal(writes.filter(c => !(c.path.endsWith("/control") && c.body.leaseId)).length, 20);
+    assert.equal(writes.filter(c => c.path.endsWith("/control") && c.body.leaseId).length, 2);
     assert.equal(new Set(writes.filter(c => c.body.operationId).map(c => c.body.operationId)).size, 18);
     assert.equal(f.effects.get(a.PROFILES[provider].run), 1);
     assert([...f.sessions.values()].every(s => s.state === "closed" && s.lease === null));
@@ -578,7 +582,8 @@ test("full effort phase uses fresh session low/high refusal and explicit reconst
   assert.equal(texts.length, 4); assert(texts[0].includes("EFFORT_LOW_OK"));
   assert(texts[1].includes("EFFORT_HIGH_PROBE")); assert.equal(texts[2], "/relay-reconcile confirmed"); assert(texts[3].includes("EFFORT_HIGH_OK"));
   assert.equal(f.attempts.length, 2); assert.equal(f.permissions.size, 0); assert.equal(f.effects.size, 0);
-  assert.equal(writes.length, 9); assert.equal(f.launches.length, 1);
+  assert.equal(writes.filter(c => !(c.path.endsWith("/control") && c.body.leaseId)).length, 9);
+  assert.equal(writes.filter(c => c.path.endsWith("/control") && c.body.leaseId).length, 1); assert.equal(f.launches.length, 1);
   assert.equal(f.runner.state.runs[0].status, "passed-with-live-wire-unobserved");
 });
 test("generic backend failure and refusal alone cannot pass effort configuration fence", async () => {
@@ -591,4 +596,156 @@ test("generic backend failure and refusal alone cannot pass effort configuration
     assert.equal(f.runner.state.runs[0].status, undefined);
     assert.equal(f.runner.state.completed, false);
   }
+});
+test("lost lease acquisition is persisted, then observed without adopting foreign or owned leases", async () => {
+  for (const owned of [true, false, null]) {
+    let posted = false;
+    const h = harness((c, _r, saves) => {
+      if (!c.path.endsWith("/control")) return session();
+      if (c.method === "POST") {
+        assert.equal(saves.at(-1).controlAcquisition.status, "sending");
+        assert.deepEqual(saves.at(-1).controlAcquisition.body, { generation: 1 });
+        posted = true; throw Error("lease response lost");
+      }
+      return { lease: !posted || owned === null ? null : { id: LEASE, generation: 1, expires_at: date(NOW + 60000), owned } };
+    });
+    h.runner.session = session();
+    await assert.rejects(h.runner.acquire(), /response lost/);
+    assert.equal(h.runner.lease, null); assert.equal(h.runner.state.controlAcquisition.status, "uncertain");
+    await h.runner.cleanup();
+    assert.equal(h.calls.filter(c => c.method === "POST").length, 1);
+    assert(!h.calls.some(c => c.method === "DELETE"));
+    assert.equal(h.runner.state.controlAcquisition.observation.status, owned === null ? "no-lease-observed" : "lease-observed");
+  }
+});
+test("fresh increasing snapshots collected before action cannot prove its zero delta", async () => {
+  const h = harness();
+  const before = trajectory(NOW - 2000), freshButBeforeAction = trajectory(NOW - 1000);
+  h.runner.run = { provider: "codex", effort: false, deadline: NOW + 60000, firstSnapshot: before, lastSnapshot: before };
+  h.runner.env.ask = async (_t, _i, validate) => validate({ coverageConfirmed: true, trajectory: freshButBeforeAction });
+  await assert.rejects(h.runner.evidence("after action", null, true), /boundary|checkpoint|after|predate/i);
+  assert.deepEqual(h.runner.run.lastSnapshot, before); assert.equal(h.calls.length, 0);
+});
+test("unverified observer clock bound stops phase before the first launch", async () => {
+  const f = phaseServer({ clocksWithin5s: false });
+  await assert.rejects(f.runner.phase("codex"), /handoff|clock/i);
+  assert(!f.calls.some(c => c.method !== "GET"));
+});
+
+function finalRevocationServer(options = {}) {
+  let serial = 500;
+  const uid = () => `00000000-0000-4000-8000-${String(++serial).padStart(12, "0")}`;
+  const rows = Object.entries(a.PROFILES).map(([provider, pp]) => ({ provider, pp,
+    binding: { id: pp.binding, host_id: HOST, execution_identity: "c4", revision: 3, generation: 2,
+      enabled: true, state: "ready", current_credential_id: pp.credential, pending_credential_id: null },
+    credentials: [{ id: uid(), binding_id: pp.binding, generation: 1, router_key_id: "key_0123456789abcdef" },
+      { id: pp.credential, binding_id: pp.binding, generation: 2, router_key_id: pp.key }], op: null }));
+  const h = harness((c, _r, saves) => {
+    if (c.path === "/api/router-credentials") {
+      const v = { bindings: rows.map(r => r.binding), credentials: rows.flatMap(r => r.credentials), consumers: [] };
+      if (options.truncated) v.credentials = Array(1000).fill(v.credentials[0]);
+      if (options.gap) v.credentials = v.credentials.filter(x => x.generation !== 1);
+      if (options.activeConsumer) v.consumers.push({ binding_id: p.binding, state: "active" });
+      return v;
+    }
+    if (c.method === "POST") {
+      const row = rows.find(r => c.path === "/api/router-credentials/" + r.pp.binding + "/revoke"); assert(row);
+      assert.equal(c.body.revision, 3);
+      const saved = saves.at(-1).finalRevocation.intents.at(-1);
+      assert.deepEqual(saved.body, c.body); assert.equal(saved.status, "sending");
+      if (!options.uncommitted) row.op = clone(c.body);
+      if (options.lost) throw Error("POST response lost");
+      return { bindings: [], credentials: [], consumers: [] }; //202 inventory alone proves nothing
+    }
+    const row = rows.find(r => r.credentials.some(x => c.path.endsWith("/" + x.id))); assert(row, "Unexpected revocation endpoint");
+    const cred = row.credentials.find(x => c.path.endsWith("/" + x.id));
+    const revoked = !!row.op;
+    return { credential: { id: cred.id, bindingId: row.pp.binding, generation: cred.generation,
+      routerKeyId: cred.router_key_id, state: revoked ? "revoked" : "ready", revokeRequested: revoked,
+      cleanupPending: options.escrowPending && revoked ? true : false, failureCode: null },
+      binding: { id: row.pp.binding, revision: revoked ? (options.changedRevision ? 6 : 4) : 3, generation: 2,
+        enabled: !revoked, state: revoked ? "revoked" : "ready",
+        currentCredentialId: revoked ? null : row.pp.credential, pendingCredentialId: null },
+      operations: revoked && cred.generation === 1 ? [{ id: options.wrongOperation ? OTHER : row.op.operationId,
+        kind: "revoke-binding", state: "revoked", failureCode: null }] : [], consumers: [] };
+  });
+  const r = h.runner;
+  r.state.status = "phase-a-passed";
+  r.state.runs = ["codex", "qwen", "codex"].map((provider, i) => ({ provider, effort: i === 2, status: "passed-with-live-wire-unobserved" }));
+  const launches = ["codex", "codex", "qwen", "qwen", "codex"].map(provider => ({ kind: "launch", id: uid(), sessionId: uid(), profileId: a.PROFILES[provider].id }));
+  r.state.evidence = clone(launches);
+  let reviews = 0, rendererChecks = 0;
+  r.env.ask = async (title, _text, validate) => {
+    if (title.startsWith("Review final")) {
+      reviews++;
+      if (options.decline) return validate(false);
+      const targets = rows.map(row => ({ provider: row.provider, bindingId: row.pp.binding, revision: 3,
+        generations: row.credentials.map(c => ({ id: c.id, generation: c.generation, routerKeyId: c.router_key_id })) }));
+      const result = validate({ confirmRevokeAllGenerations: true, noFurtherUse: true, targets });
+      if (options.changeDuringReview) rows[0].binding.revision++;
+      return result;
+    }
+    rendererChecks++; h.advance(6000);
+    const records = launches.map(l => {
+      const row = rows.find(x => x.pp.id === l.profileId);
+      return { launchId: l.id, sessionId: l.sessionId, bindingId: row.pp.binding, credentialId: row.pp.credential,
+        generation: 2, commandId: uid(), cleanedAt: date(options.staleRenderer ? NOW - 60000 : r.now()), status: options.notCurrent ? "not-current" : "absent", fileAbsent: !options.filePresent };
+    });
+    if (options.missingRenderer) records.pop();
+    const markers = ["codex", "qwen"].map(provider => {
+      const pp = a.PROFILES[provider], m = marker("recovered");
+      return { ...m, provider, profileId: pp.id, runId: pp.run, observedUtc: date(r.now()),
+        commands: { denied: a.markerCommand(provider, pp.run, "denied"), effects: a.markerCommand(provider, pp.run, "effects") } };
+    });
+    return validate({ operatorVerified: true, observedUtc: date(r.now()), launches: records, markers, unrelated: "do-not-save" });
+  };
+  return { ...h, rows, reviews: () => reviews, rendererChecks: () => rendererChecks };
+}
+test("explicit final revocation covers both bindings/all generations and separate renderer proof", async () => {
+  const h = finalRevocationServer(); await h.runner.revokeFinal();
+  const posts = h.calls.filter(c => c.method === "POST");
+  assert.equal(posts.length, 2); assert.equal(h.reviews(), 1); assert.equal(h.rendererChecks(), 1);
+  assert.deepEqual(posts.map(c => c.path), Object.values(a.PROFILES).map(p => "/api/router-credentials/" + p.binding + "/revoke"));
+  assert.notEqual(posts[0].body.operationId, posts[1].body.operationId);
+  assert(h.rows.every(row => h.calls.some(c => c.path.endsWith(row.credentials[0].id))));
+  assert.equal(h.runner.state.finalRevocation.status, "confirmed");
+  assert.equal(h.runner.state.completed, false);
+  assert(!JSON.stringify(h.runner.state).includes("do-not-save"));
+  const count = h.calls.length; await assert.rejects(h.runner.revokeFinal()); assert.equal(h.calls.length, count);
+});
+test("lost revoke response inspects original oldest-generation operation without retransmission", async () => {
+  const h = finalRevocationServer({ lost: true }); await h.runner.revokeFinal();
+  assert.equal(h.calls.filter(c => c.method === "POST").length, 2);
+  assert(h.runner.state.operations.every(op => op.status === "uncertain"));
+  assert.equal(h.runner.state.finalRevocation.status, "confirmed");
+});
+test("uncommitted or mismatched revoke stays unresolved without new operation or second binding", async () => {
+  for (const options of [{ lost: true, uncommitted: true }, { wrongOperation: true }, { escrowPending: true }, { changedRevision: true }]) {
+    const h = finalRevocationServer(options); await assert.rejects(h.runner.revokeFinal(), /Revocation|revocation/);
+    assert.equal(h.calls.filter(c => c.method === "POST").length, 1);
+    assert.equal(h.runner.state.finalRevocation.status, "unresolved-owner-inspection-required");
+    assert.equal(h.rendererChecks(), 0); assert.equal(h.runner.state.completed, false);
+  }
+});
+test("revocation refuses incomplete generations, active consumers, changed review or absent consent", async () => {
+  for (const options of [{ truncated: true }, { gap: true }, { activeConsumer: true }, { changeDuringReview: true }, { decline: true }]) {
+    const h = finalRevocationServer(options); await assert.rejects(h.runner.revokeFinal());
+    assert.equal(h.calls.filter(c => c.method === "POST").length, 0);
+  }
+});
+test("router revocation cannot stand in for every renderer receipt and file absence", async () => {
+  for (const options of [{ missingRenderer: true }, { notCurrent: true }, { filePresent: true }, { staleRenderer: true }]) {
+    const h = finalRevocationServer(options); await assert.rejects(h.runner.revokeFinal(), /renderer|Renderer/);
+    assert(h.runner.state.finalRevocation.intents.every(i => i.status === "router-revoked-and-escrow-cleaned"));
+    assert.equal(h.runner.state.finalRevocation.status, "unresolved-owner-inspection-required");
+    assert.equal(h.runner.state.completed, false);
+  }
+});
+test("stopped or incomplete phases cannot trigger final grant revocation", async () => {
+  for (const change of [r => { r.stopped = true; }, r => { r.pending = {}; }, r => { r.state.runs.pop(); }, r => { r.state.runs[0].status = "failed"; }]) {
+    const h = finalRevocationServer(); change(h.runner);
+    await assert.rejects(h.runner.revokeFinal()); assert.equal(h.calls.length, 0);
+  }
+  const h = finalRevocationServer(); await h.runner.cleanup();
+  assert.equal(h.calls.length, 0); assert.equal(h.runner.state.finalRevocation, undefined);
 });

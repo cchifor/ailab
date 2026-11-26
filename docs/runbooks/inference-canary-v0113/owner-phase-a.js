@@ -13,6 +13,7 @@
   const ROUTER = "b60fb03b23ce52548f49513d45466f4670f5a369";
   const ORIGIN = "https://relay.chifor.me";
   const EXPIRES = Date.parse("2026-11-26T21:27:37Z");
+  const CLOCK_SKEW_MS = 5000;
   const HOLDER = "bbe0a6fb-25ea-44f8-8c21-5cba89f07aeb";
   // Remains false until the reviewed patch artifacts and successor profile pins
   // replace the historical values below. Reviewing this file is not activation.
@@ -371,6 +372,25 @@
       });
       this.save();
     }
+    collectionBoundary(label) {
+      // This runs after the assessed action has settled. A collection must
+      // begin beyond the full allowed clock offset, never merely be fresh.
+      const boundary = {
+        completedBefore: this.now(),
+        notBefore: this.now() + CLOCK_SKEW_MS,
+        maxClockSkewMs: CLOCK_SKEW_MS,
+      };
+      this.record("collection-boundary", { label, ...boundary });
+      return boundary;
+    }
+    collectedAfter(boundary, trajectory, markerReport) {
+      if (trajectory)
+        need(trajectory.requestedAt >= boundary.notBefore,
+          "Trajectory collection predates action completion/skew boundary");
+      if (markerReport)
+        need(Date.parse(markerReport.observedUtc) >= boundary.notBefore,
+          "Marker observation predates action completion/skew boundary");
+    }
     check() {
       need(
         !this.stopped && this.now() < EXPIRES,
@@ -472,23 +492,63 @@
         current.lease === null,
         "Existing control lease; inspect it instead of taking over",
       );
-      this.lease = await this.api(
-        "/api/agent-sessions/" + s.id + "/control",
-        "POST",
-        { generation: s.generation },
-      );
-      need(
-        uuid(this.lease.id) &&
-          this.lease.generation === s.generation &&
-          Date.parse(this.lease.expires_at) > this.now(),
-        "Invalid lease",
-      );
+      const intent = {
+        kind: "lease-acquisition",
+        path: "/api/agent-sessions/" + s.id + "/control",
+        body: { generation: s.generation },
+        sessionId: s.id,
+        at: this.now(),
+        status: "sending",
+      };
+      this.state.controlAcquisition = intent;
+      this.state.operations.push(intent);
+      this.save();
+      try {
+        const lease = await this.api(intent.path, "POST", intent.body);
+        need(uuid(lease.id) && lease.generation === s.generation &&
+          Date.parse(lease.expires_at) > this.now(), "Invalid lease");
+        this.lease = lease;
+        intent.status = "received";
+        intent.id = lease.id;
+        this.save();
+      } catch (error) {
+        intent.status = "uncertain";
+        this.save();
+        await this.inspectAcquisition();
+        throw error;
+      }
       this.state.control = {
         sessionId: s.id,
         generation: s.generation,
         leaseId: this.lease.id,
       };
       this.save();
+    }
+    async inspectAcquisition() {
+      const intent = this.state.controlAcquisition;
+      need(intent?.status === "uncertain" && this.session?.id === intent.sessionId,
+        "No matching uncertain lease acquisition");
+      let observation = { status: "readback-unavailable" };
+      try {
+        const current = await this.api(intent.path);
+        if (current.lease === null) observation = { status: "no-lease-observed" };
+        else {
+          const lease = current.lease;
+          need(uuid(lease?.id) && lease.generation === intent.body.generation &&
+            typeof lease.owned === "boolean" && Number.isFinite(Date.parse(lease.expires_at)),
+            "Uncertain lease readback identity changed");
+          observation = {status:"lease-observed",id:lease.id,generation:lease.generation,
+            owned:lease.owned,expiresAt:lease.expires_at};
+        }
+      } catch { /* Preserve uncertainty; never replace the original request. */ }
+      intent.observation = observation;
+      intent.inspectedAt = this.now();
+      // 'owned' identifies this user, not this tab's lost POST. A concurrent
+      // owner tab may have acquired it. Do not adopt, release or reacquire it.
+      this.record("uncertain-lease-acquisition", {
+        sessionId:intent.sessionId, generation:intent.body.generation,
+        observation, resolution:"owner-inspection-required",
+      });
     }
     async renew() {
       if (!this.lease || this.renewing || this.cleaning || this.closing) return;
@@ -970,16 +1030,20 @@
       return messages;
     }
     async evidence(label, phase, zero = false) {
+      const boundary = this.collectionBoundary(label);
       const value = await this.ask(
         label,
         "Paste operator JSON: {trajectory: the fresh collector snapshot, marker: fresh observe.py report if requested, coverageConfirmed:true}. Same scope/process/database and continuously enabled recording required. " +
-          (phase ? "Marker phase=" + phase : "No marker report needed."),
+          (phase ? "Marker phase=" + phase : "No marker report needed.") +
+          " Begin collection at or after " + new Date(boundary.notBefore).toISOString() +
+          "; all browser/collector/observer clocks must be verified within5s. Do not reuse a pre-action report.",
         (v) => {
           need(
             v?.coverageConfirmed === true,
             "Operator coverage confirmation missing",
           );
           snapshot(v.trajectory, this.run.provider);
+          this.collectedAfter(boundary, v.trajectory, phase ? v.marker : null);
           need(
             this.now() - v.trajectory.observedAt >= -5000 &&
               this.now() - v.trajectory.observedAt < 120000,
@@ -1020,6 +1084,7 @@
         ...(phase ? { marker: value.marker } : {}),
         recordedAttemptDelta: value.added,
         coverage: "operator-confirmed; not independently observed by browser",
+        collectionBoundary: boundary,
       });
       return value;
     }
@@ -1117,7 +1182,7 @@
         provider +
           (effort ? " effort" : " lifecycle") +
           ": operator pre-launch handoff",
-        "Paste {trajectory: fresh scoped snapshot, marker: baseline observe.py report, coverageConfirmed:true, holderReadyConfirmed:true, routeConfirmed:true}. Operator must freshly confirm holder " +
+        "Paste {trajectory: fresh scoped snapshot, marker: baseline observe.py report, coverageConfirmed:true, holderReadyConfirmed:true, routeConfirmed:true, clocksWithin5s:true}. Operator must verify browser/collector/observer clocks differ by at most5s, and freshly confirm holder " +
           this.holderId +
           ", zero unrelated work, published pins, one attempt/no fallback; Codex target codex-3/gpt-6-astra. Run UUID " +
           runId +
@@ -1126,7 +1191,7 @@
           need(
             v?.coverageConfirmed === true &&
               v.holderReadyConfirmed === true &&
-              v.routeConfirmed === true,
+              v.routeConfirmed === true && v.clocksWithin5s === true,
             "Operator handoff incomplete",
           );
           need(
@@ -1147,12 +1212,14 @@
         trajectory: pre.trajectory,
       });
       await this.launch();
+      const openBoundary = this.collectionBoundary("Post-Open marker baseline");
       const post = await this.ask(
         "Open complete: verify delivery before prompting",
-        "Paste {marker: post-open baseline report, deliveryConfirmed:true}. Operator verifies file UID/mode, delivery/install receipts, same principal, holder/profile readiness. Preserve original pre-launch report; this observation cannot replace it.",
+        "Paste {marker: post-open baseline report, deliveryConfirmed:true}. Operator verifies file UID/mode, delivery/install receipts, same principal, holder/profile readiness. Preserve original pre-launch report; this observation cannot replace it. Observe at or after " + new Date(openBoundary.notBefore).toISOString() + ".",
         (v) => {
           need(v?.deliveryConfirmed === true, "Delivery handoff missing");
           const m = marker(v.marker, provider, runId, "baseline", this.now());
+          this.collectedAfter(openBoundary, null, m);
           unchangedBaseline(pre.marker, m);
           return { marker: m };
         },
@@ -1160,6 +1227,7 @@
       this.record("post-open", {
         marker: post.marker,
         delivery: "operator-confirmed",
+        collectionBoundary: openBoundary,
       });
       await this.evidence(
         "Import/Open made no recorded provider attempts",
@@ -1338,6 +1406,11 @@
       this.cleanupAttempted = true;
       try {
         // Narrowing actions only; never launch, prompt, approve, reconcile or take a lease here.
+        if (this.session && !this.lease && this.state.controlAcquisition?.status === "uncertain") {
+          await this.inspectAcquisition();
+          this.record("cleanup", {status:"unresolved-lease-acquisition-owner-inspection-required"});
+          return;
+        }
         if (!this.session || !this.lease) return;
         const path = "/api/agent-sessions/" + this.session.id;
         const s = await this.api(path),
@@ -1447,6 +1520,143 @@
         this.cleaning = false;
       }
     }
+    async revocationInventory() {
+      const inventory = await this.api("/api/router-credentials");
+      need(Array.isArray(inventory.bindings) && inventory.bindings.length < 500 &&
+        Array.isArray(inventory.credentials) && inventory.credentials.length < 1000 &&
+        Array.isArray(inventory.consumers) && inventory.consumers.length < 1000,
+        "Credential inventory incomplete or truncated");
+      const targets = [];
+      for (const [provider, p] of Object.entries(PROFILES)) {
+        const bindings = inventory.bindings.filter(b => b.id === p.binding);
+        need(bindings.length === 1, "Binding inventory ambiguous");
+        const b = bindings[0];
+        need(b.enabled === true && b.state === "ready" && b.host_id === HOST &&
+          b.execution_identity === "c4" && b.current_credential_id === p.credential &&
+          b.pending_credential_id === null && integer(b.revision) && b.revision > 0 &&
+          integer(b.generation) && b.generation > 0 && b.generation < 128,
+          "Binding changed; inspect before revocation");
+        const credentials = inventory.credentials.filter(c => c.binding_id === b.id).sort((a, b) => a.generation - b.generation);
+        need(credentials.length === b.generation && new Set(credentials.map(c => c.id)).size === credentials.length &&
+          credentials.every((c, i) => c.generation === i + 1 && uuid(c.id) && /^key_[a-f0-9]{12,32}$/.test(c.router_key_id)),
+          "Credential generations incomplete or ambiguous");
+        need(credentials.at(-1).id === p.credential && credentials.at(-1).router_key_id === p.key,
+          "Current credential or router principal changed");
+        need(!inventory.consumers.some(c => c.binding_id === b.id && c.state === "active"),
+          "Active consumer remains; revocation requires separate review");
+        const generations = [];
+        for (const c of credentials) {
+          const view = await this.api("/api/router-credentials/keys/" + c.id);
+          need(view.credential?.id === c.id && view.credential.bindingId === b.id &&
+            view.credential.generation === c.generation && view.credential.routerKeyId === c.router_key_id &&
+            view.binding?.id === b.id && view.binding.revision === b.revision && view.binding.enabled === true &&
+            view.binding.currentCredentialId === p.credential && view.binding.pendingCredentialId === null &&
+            Array.isArray(view.consumers) && view.consumers.length < 128 &&
+            !view.consumers.some(x => x.state === "active"), "Credential inspection changed or is incomplete");
+          generations.push({ id: c.id, generation: c.generation, routerKeyId: c.router_key_id });
+        }
+        targets.push({ provider, bindingId: b.id, revision: b.revision, generations });
+      }
+      return targets;
+    }
+    async revokeFinal() {
+      need(this.env.origin === ORIGIN && !this.stopped && !this.session && !this.lease && !this.pending && !this.run,
+        "Final revocation requires settled sessions and no pending work");
+      need(this.state.status === "phase-a-passed" && this.state.runs.length === 3 &&
+        this.state.runs.every((r, i) => r.status === "passed-with-live-wire-unobserved" &&
+          r.provider === ["codex", "qwen", "codex"][i] && r.effort === (i === 2)),
+        "All three phase-A runs must pass before final owner revocation");
+      need(!this.state.finalRevocation, "Revocation already attempted; inspect saved operations, never restart");
+      this.check();
+      this.state.finalRevocation = { status: "reviewing", intents: [] }; this.save();
+      try {
+        const targets = await this.revocationInventory();
+        await this.ask("Review final revocation of both phase-A bindings", "This disables ALL generations. Accepted inference may finish. Do not proceed if later approved work still needs either binding. Paste exactly {confirmRevokeAllGenerations:true,noFurtherUse:true,targets:" + JSON.stringify(targets) + "}. This does not revoke Claude's separate binding or prove renderer cleanup.", v => {
+          need(v?.confirmRevokeAllGenerations === true && v.noFurtherUse === true && canonical(v.targets) === canonical(targets),
+            "Explicit exact binding/revision/generation confirmation required"); return true;
+        });
+        need(canonical(await this.revocationInventory()) === canonical(targets), "Binding inventory changed during owner review");
+        for (const target of targets) {
+          this.check();
+          const body = { operationId: this.crypto.randomUUID(), revision: target.revision };
+          const path = "/api/router-credentials/" + target.bindingId + "/revoke";
+          const intent = { ...target, path, body, status: "sending", at: this.now() };
+          this.state.finalRevocation.intents.push(intent); this.save();
+          try { await this.mutate(path, body); intent.status = "requested"; }
+          catch { intent.status = "dispatch-uncertain"; }
+          this.save();
+          const deadline = Math.min(this.now() + 120000, EXPIRES);
+          let confirmed = false;
+          while (this.now() < deadline) {
+            this.check(); let settled = true;
+            for (const c of target.generations) {
+              const v = await this.api("/api/router-credentials/keys/" + c.id);
+              need(v.credential?.id === c.id && v.credential.bindingId === target.bindingId &&
+                v.credential.generation === c.generation && v.credential.routerKeyId === c.routerKeyId &&
+                v.binding?.id === target.bindingId && v.binding.generation === target.generations.length &&
+                [target.revision, target.revision + 1].includes(v.binding.revision) &&
+                Array.isArray(v.operations) && v.operations.length < 32 &&
+                Array.isArray(v.consumers) && v.consumers.length < 128 && !v.consumers.some(x => x.state === "active"),
+                "Revocation readback changed or is incomplete");
+              const operation = v.operations.find(o => o.id === body.operationId);
+              if (operation) need(operation.kind === "revoke-binding", "Revocation operation identity changed");
+              if (c.generation === 1) settled &&= operation?.state === "revoked" && operation.failureCode === null;
+              settled &&= v.credential.state === "revoked" && v.credential.revokeRequested === true &&
+                v.credential.cleanupPending === false && v.credential.failureCode === null &&
+                v.binding.enabled === false && v.binding.state === "revoked" &&
+                v.binding.revision === target.revision + 1 && v.binding.currentCredentialId === null && v.binding.pendingCredentialId === null;
+            }
+            if (settled) { confirmed = true; break; }
+            await this.sleep(2000);
+          }
+          need(confirmed, "Revocation not confirmed; preserve original operation and inspect without resending");
+          intent.status = "router-revoked-and-escrow-cleaned"; this.save();
+        }
+        this.state.finalRevocation.status = "awaiting-renderer-evidence"; this.save();
+        const launches = this.state.evidence.filter(e => e.kind === "launch");
+        need(launches.length === 5 && new Set(launches.map(l => l.id)).size === 5,
+          "Expected five recorded phase-A launches for cleanup evidence");
+        const expected = launches.map(l => {
+          const target = targets.find(t => PROFILES[t.provider].id === l.profileId);
+          need(target && uuid(l.sessionId), "Unrecognized launch in cleanup evidence");
+          return { launchId: l.id, sessionId: l.sessionId, bindingId: target.bindingId,
+            credentialId: PROFILES[target.provider].credential, generation: target.generations.length };
+        });
+        const boundary = this.collectionBoundary("Final renderer cleanup evidence");
+        const renderer = await this.ask("Separate operator renderer cleanup and marker preservation", "Router revocation and escrow cleanup are confirmed; renderer-file absence is NOT observed by this browser. Collect evidence no earlier than " + new Date(boundary.notBefore).toISOString() + ". Paste {operatorVerified:true,observedUtc:ISO,launches:[...],markers:[Codex recovered report,Qwen recovered report]}. Required launch identities: " + JSON.stringify(expected) + ". Each launch additionally needs commandId:UUID, cleanedAt:ISO, status:'absent', fileAbsent:true from the operator's exact cleanup receipt and metadata-only file check. 'not-current' alone is insufficient. Preserve histories and marker files; provide no credentials or file contents.", v => {
+          const observed = Date.parse(v?.observedUtc);
+          need(v?.operatorVerified === true && Number.isFinite(observed) && observed >= boundary.notBefore && observed <= this.now() + 5000 && observed >= this.now() - 120000 &&
+            Array.isArray(v.launches) && v.launches.length === expected.length &&
+            new Set(v.launches.map(l => l.launchId)).size === expected.length,
+            "Complete fresh operator renderer evidence required");
+          const records = expected.map(e => {
+            const row = v.launches.find(l => l.launchId === e.launchId), cleaned = Date.parse(row?.cleanedAt);
+            const intent = this.state.finalRevocation.intents.find(i => i.bindingId === e.bindingId);
+            need(row && Object.keys(e).every(k => row[k] === e[k]) && uuid(row.commandId) &&
+              row.status === "absent" && row.fileAbsent === true && Number.isFinite(cleaned) &&
+              cleaned >= intent.at - 5000 && cleaned <= observed + 5000,
+              "Renderer cleanup receipt or file absence is unconfirmed");
+            return { ...e, commandId: row.commandId, cleanedAt: row.cleanedAt, status: "absent", fileAbsent: true };
+          });
+          need(Array.isArray(v.markers) && v.markers.length === 2, "Both preserved marker observations required");
+          const markers = ["codex", "qwen"].map(provider => {
+            const reports = v.markers.filter(m => m.provider === provider); need(reports.length === 1, "Marker report ambiguous");
+            need(Date.parse(reports[0].observedUtc) >= boundary.notBefore, "Marker evidence predates final cleanup checkpoint");
+            return marker(reports[0], provider, PROFILES[provider].run, "recovered", this.now());
+          });
+          return { source: "operator-reported; browser did not inspect host files or private renderer receipts",
+            observedUtc: v.observedUtc, launches: records, markers };
+        });
+        this.record("final-renderer-cleanup", renderer);
+        this.state.finalRevocation.status = "confirmed";
+        this.state.status = "phase-a-and-grants-closed";
+        this.state.completed = false; // Claude, warm and overall plan evidence remain separate.
+        this.save();
+      } catch (e) {
+        this.state.finalRevocation.status = "unresolved-owner-inspection-required";
+        this.state.completed = false; this.save(); throw e;
+      }
+    }
     async start() {
       need(
         this.env.origin === ORIGIN,
@@ -1487,7 +1697,8 @@
         await this.phase("qwen");
         await this.phase("codex", true);
         this.state.status = "phase-a-passed";
-        this.state.completed = true;
+        this.state.phaseACompleted = true;
+        this.state.completed = false;
         this.record("limits", {
           liveWireEffortCapOpaque:
             "unobserved; pair with published Pi synthetic qualification",
@@ -1554,8 +1765,10 @@
     const proceed = element("button", "Confirm current checkpoint"),
       start = element("button", "Start phase A"),
       stop = element("button", "Stop and clean up"),
+      revoke = element("button", "Review final grant revocation"),
       download = element("button", "Download sanitized report");
     proceed.disabled = true;
+    revoke.disabled = true;
     let waiting = null,
       active = false;
     const read = () => win.localStorage.getItem(STORE);
@@ -1620,6 +1833,7 @@
         await runner.start();
         status.textContent =
           "Phase A passed. Download report; Claude/warm/final cleanup remain.";
+        revoke.disabled = false;
       } catch (e) {
         status.textContent =
           "STOPPED: " +
@@ -1635,6 +1849,16 @@
       if (waiting) waiting.reject(new Error("Owner stopped"));
       await runner.cleanup();
       status.textContent = "Stopped; inspect cleanup in report.";
+    };
+    revoke.onclick = async () => {
+      if (active) return;
+      active = true; revoke.disabled = true;
+      try {
+        await runner.revokeFinal();
+        status.textContent = "Phase-A grants revoked; operator renderer evidence recorded. Download report. Overall plan remains incomplete.";
+      } catch (e) {
+        status.textContent = "Revocation unresolved: " + e.message + ". Inspect saved operation IDs; no automatic resend.";
+      } finally { active = false; }
     };
     download.onclick = () => {
       const bytes = read() || JSON.stringify(runner.state);

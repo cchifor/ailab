@@ -116,10 +116,63 @@ requests, nonsecret identifiers and projected evidence; it does not store tokens
 raw provider bodies, thinking text or arbitrary tool output. Input observations
 are projected before export. An existing saved run opens in inspection mode.
 
-After all phase-A sessions close, end the two grants through the reviewed normal
-revocation procedure in [live acceptance](LIVE-ACCEPTANCE.md). Preserve histories
-and markers. No run is complete until the operator confirms remote revocation
-and renderer cleanup. Claude and warm acceptance use their separate windows.
+After all three phase-A runs pass and their sessions close, the separate **Review
+final grant revocation** button becomes available. It never runs automatically
+on success, Stop, failure or reload. Keep both grants if later authorized work
+still needs them; coordinate that dependency before confirming. Claude's binding
+is outside this action. The checked-in draft remains disabled until qualified
+successor inputs are reviewed.
+
+The panel inventories both bindings and every credential generation, refuses
+truncated inventories, gaps, active consumers or changed current credentials,
+and shows the exact binding IDs, revisions and generations for confirmation.
+Paste the displayed `targets` array unchanged with
+`confirmRevokeAllGenerations:true` and `noFurtherUse:true`. The normal admin API
+revokes **all generations of each binding**, not just its current key. Accepted
+inference can finish; revocation is not proof that earlier work stopped.
+
+Each operation ID and body is saved before its POST. If the response is lost,
+the driver reads the same operation from the oldest credential generation; it
+does not resend or create a replacement operation. It waits at most120s per
+binding, within the existing credential window. It requires all generations to
+be revoked, escrow cleanup complete, the binding disabled at the expected
+revision, and the exact operation confirmed. An unresolved outcome stops this
+action and leaves its original IDs for owner inspection. A second click/reload
+cannot restart revocation. Use [live acceptance](LIVE-ACCEPTANCE.md) for a
+reviewed manual continuation when needed.
+
+`cleanupPending:false` describes secure escrow cleanup, **not host renderer
+cleanup**. A separate final checkpoint requires operator evidence for all five
+recorded launches: matching launch/session/binding/credential/generation IDs,
+the cleanup command ID and timestamp, receipt status `absent`, and a metadata-only
+check that the managed file is absent. `not-current` alone is insufficient. The
+browser cannot read private renderer receipts or host files; the exported record
+explicitly attributes these observations to the operator.
+
+The checkpoint accepts this shape; copy exact recorded identities from the
+panel and supply real observations, never placeholder values:
+
+```json
+{
+  "operatorVerified": true,
+  "observedUtc": "<fresh ISO timestamp>",
+  "launches": [{
+    "launchId": "<UUID>", "sessionId": "<UUID>", "bindingId": "<UUID>",
+    "credentialId": "<UUID>", "generation": 1, "commandId": "<UUID>",
+    "cleanedAt": "<receipt ISO timestamp>", "status": "absent", "fileAbsent": true
+  }],
+  "markers": ["<Codex recovered observer report>", "<Qwen recovered observer report>"]
+}
+```
+
+`launches` must include every recorded launch; each marker entry is the actual
+JSON report object, not a string. Collect the file and marker observations after
+the displayed boundary, which includes a conservative5s clock-skew allowance.
+The current two marker files must still show exactly one approved effect and no
+denied effect. Preserve histories, workspaces and markers; this action does not
+delete them. Only after both revocation and separate renderer evidence pass does
+the report say `phase-a-and-grants-closed`. Its overall `completed` flag remains
+false: Claude, warm and the remaining plan evidence have separate windows.
 
 The report distinguishes live hub/permission/marker/recorder evidence from the
 published-Pi synthetic wire qualification. Live outbound effort/cap fields and
