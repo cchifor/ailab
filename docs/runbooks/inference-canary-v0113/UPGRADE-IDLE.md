@@ -187,3 +187,16 @@ python3 -B -m unittest scripts.tests.test_prepare_idle_holder_upgrade -v
 The tests exercise real flock/no-clobber filesystem behavior with synthetic
 systemd status and exact journal-format fixtures. They do not establish a live
 systemd upgrade or authorize production execution.
+
+On 2026-11-26, a separate offline check executed the verified published v0.13.0
+holder from source `e843921b7cff76406b7da0b5b35cf653c7e458c5`, binary SHA256
+`f70a471bb00b3f61675768666802e9b3ac9ea02b59dbf554191c198bd88d7909`.
+The published receipt149439, archive and inner manifest were checked before
+execution. A fresh empty-profile holder accepted normal IPC pause/seal calls;
+its live flock prevented preparation. After SIGTERM exit0, the helper accepted
+its unmodified journal and moved all four fixture files, preserving journal
+bytes and inode. That exact emitted journal is a permanent regression fixture,
+SHA256 `033e05cf92d8a8aee7e7e9ad8b24065c3c6a3b9a143453829442530a5eae0556`.
+This ran as UID1000 with networking disabled, no workers or credentials, and
+synthetic stopped-systemd status; it proves the real journal/lock interface,
+not a real user-manager upgrade or live canary outcome.

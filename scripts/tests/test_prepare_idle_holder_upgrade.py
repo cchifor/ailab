@@ -113,6 +113,31 @@ class IdleUpgrade(unittest.TestCase):
         with self.assertRaises((ValueError, FileNotFoundError)):
             self.prepare()
 
+    def test_exact_journal_emitted_by_published_v0130_holder(self):
+        # Captured unchanged from verified e843/v0.13.0 holder f70a471bb00b3f61...
+        # on 2026-11-26: actual IPC pause+seal, SIGTERM exit0, no profiles/workers.
+        # Source artifact receipt149439 and inner manifest ec9ee0fc8a525e75...
+        # were verified before execution. This regression needs no installed binary.
+        data = (
+            b'{"version":1,"sequence":1,"incarnation":"b22d51c3-6caa-47f2-849e-855168cd0be8","event":{"kind":"holder-started","version":1}}\n'
+            b'{"version":1,"sequence":2,"incarnation":"b22d51c3-6caa-47f2-849e-855168cd0be8","event":{"kind":"holder-admission","operationId":"96030616-5748-400e-99d8-2732c7a0c270","revision":1,"paused":true}}\n'
+            b'{"version":1,"sequence":3,"incarnation":"b22d51c3-6caa-47f2-849e-855168cd0be8","event":{"kind":"holder-maintenance-seal","operationId":"e27bc2fc-e9a3-4fb6-bff0-04cf7a427eef","revision":2,"expectedIncarnation":"b22d51c3-6caa-47f2-849e-855168cd0be8","sealId":"e27bc2fc-e9a3-4fb6-bff0-04cf7a427eef","sealed":true}}\n'
+        )
+        expected = '033e05cf92d8a8aee7e7e9ad8b24065c3c6a3b9a143453829442530a5eae0556'
+        self.assertEqual(hashlib.sha256(data).hexdigest(), expected)
+        path = self.state / 'journal.jsonl'
+        path.write_bytes(data)
+        self.value['journal'] = dict(sha256=expected,
+                                     journalId='b22d51c3-6caa-47f2-849e-855168cd0be8',
+                                     incarnation='b22d51c3-6caa-47f2-849e-855168cd0be8',
+                                     sealId='e27bc2fc-e9a3-4fb6-bff0-04cf7a427eef')
+        before = upgrade.identity(path)
+        result = self.prepare()
+        self.assertEqual(result['journal']['admissionRevision'], 2)
+        self.assertEqual(result['journal']['records'], 3)
+        self.assertEqual(path.read_bytes(), data)
+        self.assertEqual(upgrade.identity(path), before)
+
     def test_active_enabled_pid_cgroup_dropin_and_wrong_fragment_refused(self):
         for field, value in [('ActiveState', 'active'), ('UnitFileState', 'enabled'),
                              ('MainPID', '42'), ('ControlGroup', '/occupied'),
