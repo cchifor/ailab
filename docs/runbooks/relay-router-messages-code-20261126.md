@@ -41,6 +41,21 @@ Its rollout receipt is [AILab #2007, comment143268](https://git.chifor.me/cchifo
   `63be6a39b3ce7e58a0206aff443ee8bd3a042fb254989730974d127588bfbd58`.
   That metadata check did not repeat production smoke or perform deployment.
 
+Node `v26.10.0` from the pinned image is the production runtime; Node `24.22.2`
+is the archive build and archive-smoke runtime. The
+[publisher](https://git.chifor.me/cchifor/relay/src/commit/2881055eb789243a039f2c1f2f5be38af31674aa/deploy/ci/publish.py#L61)
+copies the frozen production dependencies into that image without reinstalling
+or rebuilding them. The authenticated archive contains one native addon:
+`node-addon-require-builtin-linux-x64-gnu@0.1.6/prebuilt/linux-x64-gnu-napi-v9.node`,
+SHA-256 `ec78b442caffcce311c6a6cbbc4fead6d59a4b8cae5b5206c6c84994d68d5667`.
+It is a supplied Node-API v9 prebuilt binary. The
+[SQLite worker](https://git.chifor.me/cchifor/llm-router/src/commit/4af66b8c7c3cc83ddd10e326c554ad728caad72e/packages/adapters/sqlite/sqlite-worker.mjs#L6)
+and backup helper use the image runtime's built-in `node:sqlite`. Publication
+150599 ran the production SPA/authenticated Responses/SQLite-worker/MCP smoke
+and backup verification **inside the built Node 26 image**, before publishing
+its digest; both passed. This is the recorded build/runtime compatibility
+qualification, with no claim of a dependency rebuild or live-provider coverage.
+
 The source diff from the previous release contains exactly three files:
 `packages/plugins/api-anthropic/index.ts`, `tests/anthropic-messages.test.ts`
 and `docs/guides/relay-messages.md`. Only a router-owned HTTP409 with exact code
