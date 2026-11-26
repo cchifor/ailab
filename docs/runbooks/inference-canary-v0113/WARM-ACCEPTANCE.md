@@ -110,6 +110,12 @@ absence of work before trajectory creation.
 
 ## Six-prompt warm and rollback phase
 
+The optional [four-prompt communication window](WARM-COMMUNICATION-WINDOW.md)
+preserves the 15-minute/nine-generation limits and measures first-generation reuse
+plus idle rollback. It requires an explicit window selection and does not test
+active-generation drain. The default six-prompt sequence below is unchanged;
+choose one procedure before execution and do not combine their budgets.
+
 Allocate at most 15 minutes, six prompt commands and nine observed upstream
 generations. No warmup, retry or padding loop. Keep the existing 120-second
 request limit and 1024-token output cap. Record baseline process/RSS observations
