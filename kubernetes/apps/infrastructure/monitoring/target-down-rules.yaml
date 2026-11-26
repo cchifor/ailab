@@ -1,0 +1,45 @@
+# TargetDown, restated from kube-prometheus-stack's general.rules (chart 86.2.3, verbatim expr, `for`,
+# labels and annotations) with ONE difference: cloudlab's scrape jobs are not reported while
+# CloudlabAsleep fires. The chart's copy is disabled in kube-prometheus-stack.yaml
+# (defaultRules.disabled.TargetDown), so this is the only TargetDown in the estate.
+#
+# Why (2026-11-26, owner: "an alert means an issue we must address"): cloudlab is powered off every
+# night on purpose, and the chart rule reported its targets as down all night. Alertmanager's inhibit
+# rule kept most of those off the phone, but (a) every one still showed as a warning on the Estate
+# Health dashboard, which counts Prometheus ALERTS, and (b) the inhibit regex named only cloud-node,
+# ci-runner-cloud and cloud-pve - cloud-vllm and cloud-llama-swap were added later and paged nightly.
+#
+# The muted set is a PATTERN (cloud-.+ and ci-runner-cloud), not a list, so a future cloudlab job is
+# covered without editing this file - the list is how vllm/llama-swap slipped through. On 2026-11-26
+# it matched exactly cloud-node, cloud-pve, cloud-vllm, cloud-llama-swap and ci-runner-cloud.
+# Nothing else is muted: CloudlabAsleep is bounded (every host down AND one up within the last 11h,
+# or every host booted <15m ago; see ci-runners-cloud-rules.yaml), so a failure to wake or an
+# unplanned all-host outage un-mutes this after at most 11h, and an awake cloudlab still fires.
+# Fixtures in target-down-rules.test.yaml (NOT a resource - promtool only).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: target-down-rules
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack # the operator's ruleSelector - without this the file is inert
+spec:
+  groups:
+    - name: target-down
+      rules:
+        - alert: TargetDown
+          expr: |
+            (100 * (count(up == 0) by (cluster, job, namespace, service) / count(up) by (cluster, job, namespace, service)) > 10)
+            unless on (job)
+            (
+              count by (job) (up{job=~"cloud-.+|ci-runner-cloud"})
+              and on ()
+              ALERTS{alertname="CloudlabAsleep", alertstate="firing"}
+            )
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            description: '{{ printf "%.4g" $value }}% of the {{ $labels.job }}/{{ $labels.service }} targets in {{ $labels.namespace }} namespace are down.'
+            runbook_url: https://runbooks.prometheus-operator.dev/runbooks/general/targetdown
+            summary: One or more targets are unreachable.
