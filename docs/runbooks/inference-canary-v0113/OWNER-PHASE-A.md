@@ -1,15 +1,20 @@
 # Owner-run phase A
 
-This driver is under qualification. **Do not run it against the deployed e843
-holder:** that holder drops Pi's tool-input message from the permission context.
-The full-command review fix and a distinct configuration-refusal notice must be
-reviewed, packaged, qualified and staged before this script is released for use.
-Its holder identity and runtime/profile pins must then match the operator's new
-handoff. An empty permission description is a stop, never an approval shortcut.
-The checked-in draft has `QUALIFIED_INPUTS = false`: Start is disabled, and the
-runner independently refuses before any request. Do not flip that flag locally.
-The reviewed successor packet must replace the historical pins, profile revisions
-and definition hashes and carry its published-artifact qualification first.
+This packet uses published **v0.13.1** holder/Pi source
+`2604c41b69c5d9c50a3324545a51f0bfa38435a0`, revision-3 definitions and profile
+file SHA256 `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`.
+Published installation/repeat verification, actual-root readiness, the deployed
+e843 hub's compiled schema checks (31 positive/5 negative), and all five native
+wire cases passed. The wire cases use Router TypeScript source with synthetic
+providers; they do not establish live subscription acceptance. The exact pins
+and qualification evidence are recorded in [README](README.md).
+
+`QUALIFIED_INPUTS = true` enables this reviewed packet. **Start still requires
+the operator's fresh post-upgrade handoff and the router rollout below.** Do not
+run it against the old e843 holder, which drops Pi's tool-input description.
+The e843 hub/API and schema 93 stay in place; the holder/Pi update is separate.
+An empty permission description is a stop, never an approval shortcut. Do not
+edit pins, revisions, qualification flags or run UUIDs locally.
 
 The owner can paste the entire reviewed [owner-phase-a.js](owner-phase-a.js) into
 the browser console at `https://relay.chifor.me`. It installs a panel without
@@ -26,7 +31,13 @@ saved run cannot silently restart work. The panel deliberately does not offer a
 
 ## Before Start
 
-The operator must provide the current deployment, holder and route handoff from
+After normal packet review and merge, the operator must complete
+[the stopped-idle upgrade](UPGRADE-IDLE.md), stage the revision-3 profiles and
+verify the new holder. Router [PR2019](https://git.chifor.me/cchifor/ailab/pulls/2019)
+must be deployed and read back at source
+`4af66b8c7c3cc83ddd10e326c554ad728caad72e` before Start; its source merge and
+published image alone do not prove deployment. The operator must provide the
+current deployment, holder and route handoff from
 [activation](ACTIVATE-CODEX-QWEN.md). The holder starts with no sessions; its hello
 precedes the first real launch. Credential rendering and installation occur
 after the launch is offered and must complete before the first prompt. There is
@@ -132,8 +143,8 @@ After all three phase-A runs pass and their sessions close, the separate **Revie
 final grant revocation** button becomes available. It never runs automatically
 on success, Stop, failure or reload. Keep both grants if later authorized work
 still needs them; coordinate that dependency before confirming. Claude's binding
-is outside this action. The checked-in draft remains disabled until qualified
-successor inputs are reviewed.
+is outside this action. Packet qualification does not authorize revocation or
+replace that explicit owner decision.
 
 The panel inventories both bindings and every credential generation, refuses
 truncated inventories, gaps, active consumers or changed current credentials,

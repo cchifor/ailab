@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const { webcrypto } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 const a = require("./owner-phase-a.js");
 const NOW = Date.parse("2026-11-26T12:00:00Z");
 const SID = "11111111-1111-4111-8111-111111111111";
@@ -166,12 +167,84 @@ test("requiring the browser script does not dispatch work", () => {
 });
 test("unqualified draft start refuses before network, checkpoints or saved-run mutation", async () => {
   const h = harness();
+  // Exercise the disabled packet even when the reviewed successor is enabled.
+  // This keeps the no-dispatch regression without editing runtime authority.
+  const source = fs.readFileSync(
+    path.join(__dirname, "owner-phase-a.js"),
+    "utf8",
+  );
+  assert.match(source, /const QUALIFIED_INPUTS = (?:true|false);/);
+  const context = { module: { exports: {} }, TextEncoder };
+  vm.runInNewContext(
+    source.replace(
+      /const QUALIFIED_INPUTS = (?:true|false);/,
+      "const QUALIFIED_INPUTS = false;",
+    ),
+    context,
+    { filename: "disabled-owner-phase-a.js", timeout: 1000 },
+  );
+  h.runner = new context.module.exports.Runner(h.runner.env);
   h.runner.env.ask = () => {
     throw Error("Draft must not ask to activate");
   };
   await assert.rejects(h.runner.start(), /draft|qualified|publication|pins/i);
   assert.equal(h.calls.length, 0);
   assert.equal(h.saves.length, 0);
+  assert.equal(h.runner.state.completed, false);
+});
+test("qualified packet refuses absent or invalid holder handoff before any request", async () => {
+  const valid = {
+    holderId: SID,
+    journalId: OTHER,
+    nativeRecovery: 2,
+    nativeStateReady: true,
+    qualifiedRelease: "v0.13.1",
+    operatorVerified: true,
+  };
+  for (const input of [
+    null,
+    {},
+    { ...valid, holderId: "unknown" },
+    { ...valid, journalId: "unknown" },
+    { ...valid, nativeRecovery: 1 },
+    { ...valid, nativeStateReady: false },
+    { ...valid, qualifiedRelease: "v0.13.0" },
+    { ...valid, operatorVerified: false },
+  ]) {
+    const h = harness();
+    let asked = 0;
+    h.runner.env.ask = async (title, _instructions, validate) => {
+      assert.equal(title, "Fresh patched-holder handoff");
+      asked++;
+      return validate(input);
+    };
+    await assert.rejects(h.runner.start(), /Qualified holder handoff missing/);
+    assert.equal(asked, 1);
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.runner.state.operations.length, 0);
+    assert.equal(h.runner.state.runs.length, 0);
+    assert.equal(h.runner.state.completed, false);
+  }
+});
+test("qualified packet keeps incarnation separate from surviving journal identity", async () => {
+  const h = harness(() => {
+    throw Error("Stop at first metadata read");
+  });
+  h.runner.env.ask = async (_title, _instructions, validate) =>
+    validate({
+      holderId: SID,
+      journalId: OTHER,
+      nativeRecovery: 2,
+      nativeStateReady: true,
+      qualifiedRelease: "v0.13.1",
+      operatorVerified: true,
+    });
+  await assert.rejects(h.runner.start(), /Stop at first metadata read/);
+  assert.equal(h.runner.holderId, SID);
+  assert.equal(h.runner.journalId, OTHER);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].method, "GET");
+  assert.equal(h.runner.state.operations.length, 0);
   assert.equal(h.runner.state.completed, false);
 });
 test("profile hashes bind reviewed definitions after deployed schema defaults", async () => {
@@ -1016,7 +1089,7 @@ function phaseServer({
       if (pathName === "/api/agent-profiles")
         result = definitions.map((d) => ({
           id: d.holder.id,
-          revision: 2,
+          revision: 3,
           enabled: true,
           definition: d,
         }));
@@ -1056,7 +1129,7 @@ function phaseServer({
           id: id(),
           operation_id: body.operationId,
           profile_id: pp.id,
-          profile_revision: 2,
+          profile_revision: 3,
           cwd: "/home/c4/.local/state/relay-holder/workspaces/" + pp.id,
           state: "pending",
           session_id: sid,
