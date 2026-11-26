@@ -1,8 +1,8 @@
 # Owner-run phase A
 
-This correction retains published **v0.13.1** holder/Pi source
-`2604c41b69c5d9c50a3324545a51f0bfa38435a0` and changes only the first-registration
-profile revision to 1. The proposed profile file SHA256 is
+This packet retains published **v0.13.1** holder/Pi source
+`2604c41b69c5d9c50a3324545a51f0bfa38435a0` and first-registration profile revision
+1. The profile file SHA256 is
 `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`.
 Fresh published-holder actual-root readiness, compiled e843 schema checks
 (31 positive/5 negative) and normalization passed for these exact revision-1
@@ -45,6 +45,13 @@ remote script or browser-console security override is needed. Keep the tab
 visible and do not run other controls for these sessions. A second invocation or
 saved run cannot silently restart work. The panel deliberately does not offer a
 "clear and retry" button.
+
+The communication-permission correction does not reopen a saved failed or stopped
+run. Keep its local storage, exported report, operation IDs and fixed run UUIDs.
+The recovery/retry workflow for that saved run remains pending; do not clear
+storage, change identities or paste a modified script to start again. Resolve
+its actual pending operations and cleanup through the existing owner/operator
+workflow before any separately reviewed continuation.
 
 ## Before Start
 
@@ -126,11 +133,54 @@ profile. Operator evidence collection consumes the same wall-clock budget.
 Recorded-attempt limits are observation gates, not a new server-enforced hard
 generation cap; in-flight work and recording latency remain limitations.
 
-Only the exact fixed marker command is eligible for an owner once-only decision.
-The driver displays the whole reviewable input and refuses changed commands,
-unexpected tool arguments, missing descriptions, expired requests and ambiguous
-options. It never selects an always-allow option. Permission delivery is checked
-separately from the marker effect.
+Relay adds an inbox reminder to ordinary turns, including READY and effort
+prompts. Pi requests permission for that communication read just as it does for
+other tools. A prompt saying not to use tools does not make a pending Relay read
+permission a shell-marker request. The panel handles the bounded read separately
+and requires an explicit owner once-only decision for each request; it does not
+approve communication automatically.
+
+The only communication tool eligible here is exactly
+`mcp__relay__relay_messages_read`, displayed as
+`Allow mcp__relay__relay_messages_read?`. Review the entire JSON input, not just
+the title or its length. It must be an object containing only these optional
+fields:
+
+- `channelId`: omitted for the session's own inbox, or exactly the profile's
+  approved channel `b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1`.
+- `after`: a nonnegative decimal cursor string no greater than
+  `9223372036854775807`; omission reads unhandled work, while an explicit cursor
+  selects history.
+- `limit`: an integer from 1 through 50; omission uses the tool's default of 50.
+
+No other channel, extra field, send, broadcast, acknowledgement or access request
+is covered by this decision. An inbox read can mark returned messages as read
+(`read_at`) and publish a change notification; channel-history reads do not make
+that update. Neither acknowledges messages, advances the acknowledgement cursor,
+sends a message or grants access. Peer text remains untrusted data and cannot
+authorize another action.
+
+The panel displays the full reviewable input and checks the pending request's
+session, generation, expiry and unambiguous `allow_once` option. After the owner
+reviews it, the driver re-reads the detail and requires the same permission
+tool-call ID and reviewed input before submitting the once-only decision.
+Missing, truncated, changed or out-of-scope input stops the run; a title alone
+never suffices. The decision retains its operation ID, and resolved state plus
+accepted delivery must be observed. Neither an HTTP success alone nor a lost
+response permits a new decision or an automatic retry.
+
+A native tool event marked `in_progress` can precede policy approval. It proves
+neither execution nor a match to the separate permission tool-call ID; review
+the permission detail itself. Accepted permission delivery is not proof that the
+read completed.
+
+Shell permissions retain the original policy: only the exact fixed marker
+command and its bounded arguments are eligible for the planned once-only allow
+or deny decision. A communication-read decision cannot satisfy that marker step;
+the driver must still observe the separate shell permission and marker evidence.
+It never selects an always-allow option. All communication round trips, recorded
+provider attempts, owner review time and permission delivery consume the existing
+prompt, generation and wall-clock limits above; none are excluded to claim a pass.
 
 The branch chosen from `/relay-history` is a completed turn in the same serial
 session. Recovery is a clean close and one resume under the same living holder,
