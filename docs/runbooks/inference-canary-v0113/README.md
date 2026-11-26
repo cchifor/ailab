@@ -262,11 +262,15 @@ made no provider request and does not establish current quota availability,
 credential delivery or live Pi acceptance. Refresh the scoped route readback
 before the owner launch as required by [live acceptance](LIVE-ACCEPTANCE.md).
 
-The operator subsequently reported an owner-directed retarget from `codex-3`
-to `codex` at configuration revision **2883**. A separate
+The [operator report (reply2014, relayed as bus2015)](https://git.chifor.me/cchifor/ailab/pulls/2023#issuecomment-145310)
+records an owner-directed retarget from `codex-3` to `codex` at configuration
+revision **2883**. This is attributed operator testimony about the owner decision,
+not an independently observed owner approval. A separate
 [read-only observation at 2026-11-26 17:32:53 UTC](https://git.chifor.me/cchifor/ailab/pulls/2023#issuecomment-145310)
 confirmed the table's current target `codex / gpt-6-astra`, with one enabled
-target, `maxAttempts:1` and no fallback, on the deployed `4af66b8c` Router.
+target, `maxAttempts:1` and no fallback. The deployed Router reported source
+`4af66b8c7c3cc83ddd10e326c554ad728caad72e` and image
+`registry.chifor.me/llm-router/router@sha256:e98a8e189ce9d6fe2d6c2bd206594bb47922de0a49acafb82b3ff77fde471d69`.
 This observation establishes current routing only; quota availability and live
 acceptance remain separate. The owner's pre-launch checkpoint must verify the
 account against the current owner-approved route readback. The driver names the
