@@ -58,7 +58,7 @@ After authorization, use the operator's existing authenticated Router workflow:
    invalidate this two-session comparison.
 4. Prepare a private copy of that exact fresh config. Leave its `revision` equal
    to the fresh value; change only `accounts[indexOfExactClaude].concurrency`
-   from4 to1. Compare the complete input objects: exactly this one scalar must
+   from 4 to 1. Compare the complete input objects: exactly this one scalar must
    differ. Do not reconstruct a partial accounts list, overwrite settings, or
    copy the historical revision 2882 config.
 
@@ -84,7 +84,7 @@ bounded capacity metadata. Require selected/effective capacity 1, one member and
 queue disabled; compare the complete config against the prepared baseline,
 allowing only concurrency and server-managed revision. Any additional follower
 change requires review before prompts; do not silently accept it or overwrite it.
-Verify global `maxRunning` remains8 through the existing settings readback.
+Verify global `maxRunning` remains 8 through the existing settings readback.
 
 An alternative **existing Router Assistant tool**, not an HTTP endpoint, is
 `update_account` with the exact proposed arguments below. It creates a change
@@ -118,10 +118,13 @@ After the planned requests settle and the test's session/permission cleanup is
 accounted for, keep the exclusive window held and obtain a **new full config
 snapshot**. Match the same account/namespace/pool identity and the recorded
 temporary change. Require current concurrency 1; prepare a private copy of the
-**latest** config changing only that scalar back to the recorded original4.
+**latest** config changing only that scalar back to the recorded original 4.
 Use `PUT /admin/v1/config` with this latest integer `If-Match`. This preserves
 intervening legitimate changes instead of restoring a stale whole-config image.
-The existing `update_account` tool alternative is:
+For the existing `update_account` tool alternative, create the restoration plan
+only after this post-test fresh snapshot; do not pre-stage it before the window.
+Require its `baseRevision` to equal that snapshot's revision and inspect its
+field-only diff before the normal authorized apply:
 
 ```json
 {"account":"claude","concurrency":4}
@@ -131,7 +134,7 @@ Do not use whole-config `revert_config`/historical restore: that can undo unrela
 intervening changes. A 409 stops this attempt; an operator may inspect the new
 revision and prepare a newly reviewed field-only restoration, with no automatic
 retry loop. A lost write response requires config/history readback before any
-further write. If current concurrency is already4, verify the corresponding
+further write. If current concurrency is already 4, verify the corresponding
 restoration and record it instead of writing again. Any other value, identity
 change or ambiguous outcome requires operator resolution; do not guess.
 
@@ -176,7 +179,7 @@ These observations do not prove occupancy, an exclusive window, or live refusal.
 Exact deployed-source references:
 
 - [Config GET/PUT](https://git.chifor.me/cchifor/llm-router/src/commit/4af66b8c7c3cc83ddd10e326c554ad728caad72e/packages/plugins/api-admin/index.ts#L24):
-  full config body, admin write, integer If-Match and428 for an invalid revision.
+  full config body, admin write, integer If-Match and 428 for an invalid revision.
 - [Serialized update and followers](https://git.chifor.me/cchifor/llm-router/src/commit/4af66b8c7c3cc83ddd10e326c554ad728caad72e/packages/plugins/config-store/index.ts#L67),
   [revision conflict, validation and audit](https://git.chifor.me/cchifor/llm-router/src/commit/4af66b8c7c3cc83ddd10e326c554ad728caad72e/packages/plugins/config-store/index.ts#L92).
 - [update_account arguments](https://git.chifor.me/cchifor/llm-router/src/commit/4af66b8c7c3cc83ddd10e326c554ad728caad72e/packages/plugins/config-store/tools.ts#L378),

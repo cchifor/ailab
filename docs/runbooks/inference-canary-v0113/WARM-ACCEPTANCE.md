@@ -126,8 +126,8 @@ unexercised and retain the existing isolated automated capacity evidence.
 
 Keep existing limits in this default procedure. The optional
 [Claude account-capacity window](CLAUDE-CAPACITY-WINDOW.md) documents a separate
-operator-approved exception for the observed account limit4: temporarily1, then
-restore4 using fresh revisions. It retains the two-session/five-minute budget
+operator-approved exception for the observed account limit 4: temporarily 1, then
+restore 4 using fresh revisions. It retains the two-session/five-minute budget
 and global run cap; documentation merge does not authorize execution. Without
 that explicit window decision, this default remains unchanged and the row stays
 unexercised when the existing limit is unreachable.
