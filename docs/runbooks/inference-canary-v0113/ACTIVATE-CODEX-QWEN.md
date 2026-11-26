@@ -2,9 +2,12 @@
 
 First-registration correction from AILab main `7ad457775daa397fcc529fa3aa348e2a2e6a4f34`.
 This is a proposed operator procedure, not approval or evidence of activation.
-Keep the activation PR held with `no-automerge` until the operator confirms
-the gates below. Merging these opt-in inputs does not run either playbook; no
-inventory imports them. This change starts no service and creates no key itself.
+The prior owner-held activation [PR2022](https://git.chifor.me/cchifor/ailab/pulls/2022)
+was merged. This correction follows ordinary CI and reviewer merge; it adds no
+source-merge hold. Merging these opt-in inputs does not run either playbook, and
+no inventory imports them. The actual configuration replacement remains an
+operator-coordinated action subject to all existing gates below. This source
+change starts no service and creates no key itself.
 
 **First-registration hold:** holder/Pi v0.13.1 source
 `2604c41b69c5d9c50a3324545a51f0bfa38435a0` and all run150672 artifact pins remain
