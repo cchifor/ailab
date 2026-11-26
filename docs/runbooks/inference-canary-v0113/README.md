@@ -17,6 +17,23 @@ permission-review and structured configuration-refusal corrections. Publication
 completed in [run150672](https://git.chifor.me/cchifor/relay/actions/runs/150672).
 The checked-in profiles now use **first hub approval revision1**, SHA256
 `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`. Published runtime artifacts are unchanged.
+
+The deployed e843 approval schema produces these normalized definition digests
+for revision1 after applying the four `session.communication` defaults. These
+are approval-definition digests, distinct from the profile-file SHA above and
+the installed holder digests.
+
+| Profile | Normalized approval-definition SHA256 |
+| --- | --- |
+| pi-canary-codex | `0e15b7e39b0241c692b305c6c8d2f4579843c8e7fcfb86ea37534ab996fd194d` |
+| pi-canary-qwen | `4ceab5d4122eab6b54ae04196feea258d4d290be381d6c018186f982c8081928` |
+| pi-canary-claude | `b1fdad80cf111a6aa1123139ee9dbcb8bd060a8b423ea427d1d43205915ac01d` |
+
+The [qualification evidence index](https://git.chifor.me/cchifor/ailab/pulls/2023#issuecomment-144787)
+records `.data/pi-v0131-first-registration-root-20261126/normalized-definition-hashes.json`
+in the Relay workspace, SHA256
+`1bcc82812c70d00a15d255ff90a8831bb3ab605e5fb199dacbd7a83a0b7a19ed`.
+
 The [operator's PR2022 upgrade readback at14:20:17 UTC](https://git.chifor.me/cchifor/ailab/pulls/2022#issuecomment-144744)
 and a separate independent SSH readback at14:22:37 UTC confirmed installed
 revision3 bytes `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`,

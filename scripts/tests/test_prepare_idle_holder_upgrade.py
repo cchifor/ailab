@@ -316,7 +316,7 @@ class IdleUpgrade(unittest.TestCase):
                 dict(kind='holder-maintenance-seal', operationId=next_seal, revision=6,
                      expectedIncarnation=next_incarnation, sealId=next_seal, sealed=True)]
         records.extend(dict(version=1, sequence=i, incarnation=next_incarnation, event=event)
-                       for i, event in enumerate(tail, 4))
+                       for i, event in enumerate(tail, len(records) + 1))
         self.value['operationId'] = str(uuid.uuid4())
         self.value['journal'].update(incarnation=next_incarnation, sealId=next_seal)
         second_backup = first_backup.parent / self.value['operationId']
@@ -324,7 +324,7 @@ class IdleUpgrade(unittest.TestCase):
         # A later seal or an existing successful backup never excuses worker events.
         for kind in ('command-accepted', 'command-preflight-rejected'):
             with self.subTest(kind=kind):
-                invalid = records + [dict(version=1, sequence=9, incarnation=next_incarnation,
+                invalid = records + [dict(version=1, sequence=len(records) + 1, incarnation=next_incarnation,
                                           event=dict(kind=kind))]
                 refused_journal = self.write_journal(invalid)
                 before = upgrade.identity(journal_path)
@@ -345,7 +345,7 @@ class IdleUpgrade(unittest.TestCase):
         self.assertEqual(result['journal']['incarnation'], next_incarnation)
         self.assertEqual(result['journal']['sealId'], next_seal)
         self.assertEqual(result['journal']['admissionRevision'], 6)
-        self.assertEqual(result['journal']['records'], 8)
+        self.assertEqual(result['journal']['records'], len(records))
         self.assertEqual(journal_path.read_bytes(), journal)
         self.assertEqual(upgrade.identity(journal_path), before)
         self.assertEqual(before[:2], original_journal_inode)
