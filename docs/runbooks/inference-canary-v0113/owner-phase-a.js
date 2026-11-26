@@ -16,12 +16,12 @@
   const CLOCK_SKEW_MS = 5000;
   const HOLDER = "bbe0a6fb-25ea-44f8-8c21-5cba89f07aeb";
   const PROFILES_SHA256 =
-    "58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39";
+    "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4";
   const HOLDER_BINARY_SHA256 =
     "0b1a7907f6da2ef6b5794621d87c55c2e0ee6d5aeb1c4e0fdf35c9031a127003";
-  // Published v0.13.1 artifacts and revision-3 definitions passed installation,
-  // deployed-hub schema checks and five synthetic wire cases. This enables the
-  // packet, not a host: Start still requires the fresh operator handoff below.
+  // First-registration revision-1 bytes passed fresh published-holder root,
+  // deployed-hub schema/normalization and offline registration-boundary checks.
+  // Start still requires actual installed hashes and separate owner approval.
   const QUALIFIED_INPUTS = true;
   const CONFIGURATION_CHANGED_NOTICE =
     "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used.";
@@ -36,7 +36,7 @@
       key: "key_d72ca9b617b83281d4a2706393693b61",
       protocol: "openai-responses",
       definitionHash:
-        "dd75adac76ccb5433d513ed8aa8dde4bbf8e7307f760c277bd108a31cc942b53",
+        "0e15b7e39b0241c692b305c6c8d2f4579843c8e7fcfb86ea37534ab996fd194d",
     },
     qwen: {
       id: "f25c187b-1e50-4c7c-860e-52947bfdf39e",
@@ -46,7 +46,7 @@
       key: "key_9b01832ad0609853be340e03968b7d50",
       protocol: "openai-chat",
       definitionHash:
-        "cdb4cff238224f06d70869446eb23fa169d199d21d3531e2d9c27bb1033c19f8",
+        "4ceab5d4122eab6b54ae04196feea258d4d290be381d6c018186f982c8081928",
     },
   };
   const EFFORT_RUN = "45027fc9-083b-41ff-8cc7-a46a98ae510e";
@@ -734,7 +734,7 @@
         : {
             operationId,
             profileId: p.id,
-            revision: 3,
+            revision: 1,
             cwd: "/home/c4/.local/state/relay-holder/workspaces/" + p.id,
           };
       const first = await this.mutate(path, body);
@@ -761,7 +761,7 @@
         if (l.state === "open") {
           need(
             l.profile_id === p.id &&
-              l.profile_revision === 3 &&
+              l.profile_revision === 1 &&
               l.cwd === "/home/c4/.local/state/relay-holder/workspaces/" + p.id,
             "Launch profile/workspace changed",
           );
@@ -1203,7 +1203,7 @@
       this.save();
       const profiles = await this.api("/api/agent-profiles");
       const match = profiles.filter(
-        (r) => r.id === p.id && r.revision === 3 && r.enabled === true,
+        (r) => r.id === p.id && r.revision === 1 && r.enabled === true,
       );
       need(
         match.length === 1 &&
