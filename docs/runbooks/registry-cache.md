@@ -140,13 +140,20 @@ consulting `keepTags`. So, for every repo before it goes on the list:
 
 **htpasswd changes reload in place too** (since 2026-11-26): adding a scoped push user, removing an optional one, or
 rotating a password. zot v2.1.23 watches the htpasswd file whenever htpasswd auth is on (`pkg/api/htpasswd.go`
-HTPasswdWatcher) and logs `loaded htpasswd file` with the user count on each reload. The role snapshots zot's
-MainPID and journal cursor before the htpasswd tasks; after a change, `files/zot-htpasswd-proof.py` waits for that
-line written after the file's last write, with the file's user count, from the same MainPID, and then every user
-(ci, pull, each scoped user with a key) must log in on `/v2/`. An unproven reload FAILS the play and restarts
-nothing; `-e registry_zot_config_allow_restart=true` accepts the restart instead. A stopped zot is simply started
-by "Enable + start zot" and reads the file then. Measured on the v2.1.23 binary (2026-11-26): a user added by an
-in-place write and by temp+rename logged in within 1 s, same PID; a wrong password stayed 401.
+HTPasswdWatcher) and logs `loaded htpasswd file` with the user count on each reload. Measured on the v2.1.23 binary
+(2026-11-26): a user added by an in-place write and by temp+rename logged in within 1 s, same PID; a wrong password
+stayed 401. On EVERY apply against a running zot (not only when the file changed), the role:
+- snapshots zot's MainPID, journal cursor and the file's content digest before the htpasswd tasks;
+- runs `files/zot-htpasswd-proof.py prove`: "unchanged" when the digest is the same, else it waits for the LATEST
+  reload outcome logged after the file's last write to be a load with the file's user count, from the same MainPID.
+  That shows zot reloaded after the write, not which bytes it read;
+- then ci, pull and each scoped user with a key log in on `/v2/`, retried within the proof timeout. These logins are
+  the ground truth for added and rotated users, and they also catch a zot left stale by an earlier failed run.
+  (Removals rely on zot's final reload; there is no password to test a removed user with.)
+
+Anything unproven FAILS the play and restarts nothing; `-e registry_zot_config_allow_restart=true` accepts the
+restart instead. The check is skipped when the config apply already queued a restart (e.g. a port change), and on a
+stopped zot, which "Enable + start zot" starts and which reads the file then.
 
 **Everything else the role converges still restarts zot**: certs, sync credentials, the unit and the binary.
 Batch those changes into one apply, in a quiet window.

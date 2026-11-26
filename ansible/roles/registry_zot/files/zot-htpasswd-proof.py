@@ -8,14 +8,19 @@ backstop). Each reload logs {"message": "loaded htpasswd file", "users": <n>, "t
 credentials atomically; a failed open logs "failed to reload htpasswd" and keeps the old ones. Measured 2026-11-26 on
 the v2.1.23 binary: a user added by an in-place write and by temp+rename could log in within 1 s, same PID.
 
-  snapshot --unit U
-      Prints {"pid": <MainPID or 0>, "cursor": <journal cursor or null>}: the state BEFORE the htpasswd tasks.
-  prove --unit U --file F --pid P --cursor C [--timeout S]
-      Waits up to S seconds for a "loaded htpasswd file" line in U's journal AFTER cursor C whose time is not earlier
-      than F's last modification and whose user count equals F's; and checks that U's MainPID is still P.
-      Prints {"mode": "reloaded", ...} and exits 0, or {"mode": "unproven", "reason": ...} and exits 2.
-It prints counts and times only, never a user name or hash.
+  snapshot --unit U --file F
+      Prints {"pid": <MainPID or 0>, "cursor": <journal cursor or null>, "sha256": <F's content digest or null>}:
+      the state BEFORE the htpasswd tasks.
+  prove --unit U --file F --pid P --cursor C --before-sha256 H [--timeout S]
+      If F's content still hashes to H (nothing written, or only owner/mode changed), prints {"mode": "unchanged"} and
+      exits 0: the caller's login checks then verify the credentials zot holds. Otherwise waits up to S seconds for a
+      "loaded htpasswd file" line in U's journal AFTER cursor C whose time is not earlier than F's last modification
+      and whose user count equals F's, and checks that U's MainPID is still P. A "failed to reload htpasswd" line does
+      not end the wait: a later successful reload still wins. Prints {"mode": "reloaded", ...} and exits 0, or
+      {"mode": "unproven", "reason": ...} and exits 2.
+It prints counts, times and the MainPID only, never a user name, hash or file digest.
 """
+import hashlib
 import argparse
 import datetime as dt
 import json
@@ -97,34 +102,53 @@ def parse_time_ns(value):
 
 
 def verdict(records, users, mtime_ns):
-    """Judge the journal records after the cursor. Returns ("reloaded", detail) when one 'loaded' record is at or
-    after the file's last write with the expected user count; ("failed", detail) when zot reported a failed reload
-    after the last write and nothing loaded since; else ("pending", detail)."""
-    last_failed = None
+    """Judge the LATEST reload outcome zot logged at or after the file's last write (journal order). Returns
+    ("reloaded", detail) when it is a 'loaded' record with the file's user count; ("failed", detail) when it is a
+    failed reload; else ("pending", detail): nothing yet, or a load with another count (an earlier write's).
+    A matching line shows that zot reloaded after the last write, not which bytes it read: a reload that started
+    before a same-count rotation can log after it. The role's login checks are therefore the ground truth for added
+    and rotated users; this verdict only rules out "no reload at all" and a restart."""
+    latest = None
     for rec in records:
         msg = rec.get("message", "")
         t = parse_time_ns(rec.get("time"))
-        if t is None or t < mtime_ns:
+        if t is None or t < mtime_ns or msg not in (MSG_LOADED, MSG_FAILED):
             continue
-        if msg == MSG_LOADED and rec.get("users") == users:
-            return "reloaded", {"users": users, "loadedAt": rec.get("time")}
-        if msg == MSG_FAILED:
-            last_failed = rec.get("time")
-    if last_failed:
-        return "failed", {"failedAt": last_failed}
-    return "pending", {}
+        latest = rec
+    if latest is None:
+        return "pending", {}
+    if latest.get("message") == MSG_FAILED:
+        return "failed", {"failedAt": latest.get("time")}
+    if latest.get("users") == users:
+        return "reloaded", {"users": users, "loadedAt": latest.get("time")}
+    return "pending", {"lastLoadedUsers": latest.get("users")}
 
 
-def prove(unit, path, pid, cursor, timeout, sleep=time.sleep, clock=time.time):
+def file_sha256(path):
+    """The content digest of `path`, or None when it cannot be read (e.g. not created yet)."""
+    try:
+        with open(path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def prove(unit, path, pid, cursor, before_sha256, timeout, sleep=time.sleep, clock=time.time):
     if pid <= 0:
-        return 2, {"mode": "unproven", "reason": "zot was not running before the change (nothing to prove)"}
+        return 2, {"mode": "unproven", "reason": "zot was not running before the htpasswd tasks (nothing to prove)"}
+    if before_sha256 and file_sha256(path) == before_sha256:
+        now_pid = main_pid(unit)
+        if now_pid != pid:
+            return 2, {"mode": "unproven", "reason": f"zot MainPID changed ({pid} -> {now_pid}) during the htpasswd tasks"}
+        return 0, {"mode": "unchanged", "pid": pid}
     if not cursor:
         return 2, {"mode": "unproven", "reason": "no journal cursor from the snapshot"}
     deadline = clock() + timeout
     while True:
         try:
             st = os.stat(path)
-            text = open(path, encoding="utf-8", errors="replace").read()
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read()
         except OSError as e:
             return 2, {"mode": "unproven", "reason": f"cannot read the htpasswd file: {e.strerror}"}
         users = count_users(text)
@@ -134,9 +158,10 @@ def prove(unit, path, pid, cursor, timeout, sleep=time.sleep, clock=time.time):
         state, detail = verdict(journal_records(unit, cursor), users, st.st_mtime_ns)
         if state == "reloaded":
             return 0, {"mode": "reloaded", "pid": pid, **detail}
-        if state == "failed":
-            return 2, {"mode": "unproven", "reason": "zot logged a failed htpasswd reload", **detail}
         if clock() >= deadline:
+            if state == "failed":
+                return 2, {"mode": "unproven", "reason": "zot logged a failed htpasswd reload and no later success",
+                           **detail}
             return 2, {"mode": "unproven", "users": users,
                        "reason": f"no 'loaded htpasswd file' line with {users} users after the last write within {timeout}s"}
         sleep(1)
@@ -147,17 +172,19 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("snapshot")
     s.add_argument("--unit", required=True)
+    s.add_argument("--file", required=True)
     p = sub.add_parser("prove")
     p.add_argument("--unit", required=True)
     p.add_argument("--file", required=True)
     p.add_argument("--pid", type=int, required=True)
     p.add_argument("--cursor", required=True)
+    p.add_argument("--before-sha256", default="")
     p.add_argument("--timeout", type=int, default=30)
     a = ap.parse_args(argv)
     if a.cmd == "snapshot":
-        print(json.dumps({"pid": main_pid(a.unit), "cursor": journal_cursor(a.unit)}))
+        print(json.dumps({"pid": main_pid(a.unit), "cursor": journal_cursor(a.unit), "sha256": file_sha256(a.file)}))
         return 0
-    rc, out = prove(a.unit, a.file, a.pid, a.cursor, a.timeout)
+    rc, out = prove(a.unit, a.file, a.pid, a.cursor, a.before_sha256, a.timeout)
     print(json.dumps(out))
     return rc
 

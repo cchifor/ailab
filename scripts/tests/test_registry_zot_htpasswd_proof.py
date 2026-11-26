@@ -84,6 +84,20 @@ class VerdictTest(unittest.TestCase):
     def test_records_without_a_time_are_ignored(self):
         self.assertEqual(zhp.verdict([{"message": zhp.MSG_LOADED, "users": 7}], 7, 0)[0], "pending")
 
+    def test_the_latest_outcome_decides(self):
+        later = "2026-11-26T20:11:28.000000000Z"
+        # a failure after a good load: zot's last attempt failed, so it is not proven
+        self.assertEqual(zhp.verdict([rec(zhp.MSG_LOADED, 7), rec(zhp.MSG_FAILED, time=later)], 7, T0_NS - 1)[0],
+                         "failed")
+        # a later load with another count (an earlier write's content) is not proof of the final file
+        state, detail = zhp.verdict([rec(zhp.MSG_LOADED, 7), rec(zhp.MSG_LOADED, 6, later)], 7, T0_NS - 1)
+        self.assertEqual((state, detail), ("pending", {"lastLoadedUsers": 6}))
+
+    def test_unrelated_messages_do_not_hide_the_outcome(self):
+        later = "2026-11-26T20:11:28.000000000Z"
+        records = [rec(zhp.MSG_LOADED, 7), {"message": "some other zot line", "time": later}]
+        self.assertEqual(zhp.verdict(records, 7, T0_NS - 1)[0], "reloaded")
+
 
 class ProveTest(unittest.TestCase):
     def setUp(self):
@@ -95,16 +109,33 @@ class ProveTest(unittest.TestCase):
     def tearDown(self):
         os.unlink(self.path)
 
-    def _prove(self, records, pids, timeout=0):
+    def _prove(self, records, pids, timeout=0, before="", cursor="c1"):
         clock = iter(range(0, 1000))
-        with mock.patch.object(zhp, "journal_records", return_value=records), \
+        journal = records if callable(records) else (lambda unit, cur: records)
+        with mock.patch.object(zhp, "journal_records", side_effect=journal), \
              mock.patch.object(zhp, "main_pid", side_effect=pids):
-            return zhp.prove("zot.service", self.path, 4242, "c1", timeout, sleep=lambda s: None,
+            return zhp.prove("zot.service", self.path, 4242, cursor, before, timeout, sleep=lambda s: None,
                              clock=lambda: next(clock))
 
     def test_reloaded(self):
         rc, out = self._prove([rec(zhp.MSG_LOADED, 3)], [4242])
         self.assertEqual((rc, out["mode"], out["pid"]), (0, "reloaded", 4242))
+
+    def test_unchanged_content_needs_no_reload_line(self):
+        # An owner/mode-only htpasswd fix (or a re-run after an earlier write) leaves the digest as it was: no reload
+        # line is expected, and the role's login checks verify what zot holds.
+        before = zhp.file_sha256(self.path)
+        rc, out = self._prove([], [4242], timeout=30, before=before, cursor="")
+        self.assertEqual((rc, out["mode"]), (0, "unchanged"))
+
+    def test_unchanged_content_still_requires_the_same_pid(self):
+        rc, out = self._prove([], [4243], before=zhp.file_sha256(self.path))
+        self.assertEqual(rc, 2)
+        self.assertIn("MainPID changed", out["reason"])
+
+    def test_changed_content_needs_the_reload_line(self):
+        rc, out = self._prove([], [4242] * 5, timeout=2, before="0" * 64)
+        self.assertEqual((rc, out["mode"]), (2, "unproven"))
 
     def test_a_changed_pid_is_a_restart_not_a_reload(self):
         rc, out = self._prove([rec(zhp.MSG_LOADED, 3)], [4243])
@@ -116,20 +147,47 @@ class ProveTest(unittest.TestCase):
         self.assertEqual((rc, out["mode"]), (2, "unproven"))
         self.assertIn("3 users", out["reason"])
 
-    def test_a_failed_reload_stops_at_once(self):
-        rc, out = self._prove([rec(zhp.MSG_FAILED)], [4242], timeout=60)
+    def test_a_failed_reload_waits_for_a_later_success(self):
+        later = "2026-11-26T20:11:29.000000000Z"
+        calls = {"n": 0}
+
+        def journal(unit, cursor):
+            calls["n"] += 1
+            return [rec(zhp.MSG_FAILED)] + ([rec(zhp.MSG_LOADED, 3, later)] if calls["n"] >= 3 else [])
+
+        rc, out = self._prove(journal, [4242] * 10, timeout=60)
+        self.assertEqual((rc, out["mode"]), (0, "reloaded"))
+        self.assertGreaterEqual(calls["n"], 3)
+
+    def test_a_failed_reload_with_no_later_success_fails_at_the_deadline(self):
+        rc, out = self._prove([rec(zhp.MSG_FAILED)], [4242] * 10, timeout=3)
         self.assertEqual(rc, 2)
         self.assertIn("failed htpasswd reload", out["reason"])
 
     def test_nothing_to_prove_without_a_running_zot_or_a_cursor(self):
-        self.assertEqual(zhp.prove("zot.service", self.path, 0, "c1", 1)[0], 2)
-        self.assertEqual(zhp.prove("zot.service", self.path, 4242, "", 1)[0], 2)
+        self.assertEqual(zhp.prove("zot.service", self.path, 0, "c1", "", 1)[0], 2)
+        with mock.patch.object(zhp, "main_pid", return_value=4242):
+            self.assertEqual(zhp.prove("zot.service", self.path, 4242, "", "", 1)[0], 2)
 
-    def test_output_never_names_a_user(self):
-        for records, pids in (([rec(zhp.MSG_LOADED, 3)], [4242]), ([], [4242] * 5)):
-            _, out = self._prove(records, pids, timeout=1)
+    def test_output_never_names_a_user_or_a_digest(self):
+        digest = zhp.file_sha256(self.path)
+        for records, pids, before in (([rec(zhp.MSG_LOADED, 3)], [4242], ""), ([], [4242] * 5, ""),
+                                      ([], [4242], digest)):
+            _, out = self._prove(records, pids, timeout=1, before=before)
             self.assertNotIn("specpulse-ci", json.dumps(out))
             self.assertNotIn("$2y$", json.dumps(out))
+            self.assertNotIn(digest, json.dumps(out))
+
+    def test_snapshot_cli_reports_pid_cursor_and_digest(self):
+        with mock.patch.object(zhp, "main_pid", return_value=4242), \
+             mock.patch.object(zhp, "journal_cursor", return_value="s=abc;i=1"), \
+             mock.patch("builtins.print") as printed:
+            self.assertEqual(zhp.main(["snapshot", "--unit", "zot.service", "--file", self.path]), 0)
+        out = json.loads(printed.call_args[0][0])
+        self.assertEqual(out, {"pid": 4242, "cursor": "s=abc;i=1", "sha256": zhp.file_sha256(self.path)})
+
+    def test_snapshot_of_a_missing_file_has_no_digest(self):
+        self.assertIsNone(zhp.file_sha256(self.path + ".absent"))
 
 
 def _flatten(tasks):
@@ -139,78 +197,93 @@ def _flatten(tasks):
             yield from _flatten(task.get(key) or [])
 
 
-HTPASSWD_TASKS = {
-    "Generate bcrypt htpasswd for the push user": "registry_zot_htpasswd_ci",
-    "Generate bcrypt htpasswd for the read-only pull user": "registry_zot_htpasswd_pull",
-    "Remove the htpasswd line of an optional scoped push user with no SOPS password": "registry_zot_htpasswd_removed",
-    "Generate bcrypt htpasswd for the scoped per-project push users": "registry_zot_htpasswd_scoped",
-}
+HTPASSWD_TASKS = (
+    "Generate bcrypt htpasswd for the push user",
+    "Generate bcrypt htpasswd for the read-only pull user",
+    "Remove the htpasswd line of an optional scoped push user with no SOPS password",
+    "Generate bcrypt htpasswd for the scoped per-project push users",
+)
 SNAPSHOT = "Snapshot zot before the htpasswd changes (MainPID and journal cursor)"
-NOTE = "Note whether this play changed the htpasswd file"
+NOTE = "Note the zot state the htpasswd check compares against"
+VERIFY = "Verify the running zot serves the current htpasswd (reloaded in place, never restarted)"
 PROVE = "Prove the running zot reloaded the htpasswd file in place (no restart)"
-RESTART = "Restart zot when its htpasswd reload was not proven and a restart is allowed"
-LOGIN_CI = "The ci and pull users log in after the in-place htpasswd reload"
-LOGIN_SCOPED = "Every scoped push user with a SOPS password logs in after the in-place htpasswd reload"
+LOGIN_CI = "The ci and pull users log in on the running zot"
+LOGIN_SCOPED = "Every scoped push user with a SOPS password logs in on the running zot"
+RESTART = "Restart zot because its htpasswd state was not proven and a restart is allowed"
+STOP = "Stop because the htpasswd state was not proven (no restart without registry_zot_config_allow_restart)"
 
 
 class TaskWiringTest(unittest.TestCase):
     def setUp(self):
-        raw = yaml.safe_load((ROLE_DIR / "tasks" / "main.yml").read_text(encoding="utf-8"))
-        tasks = list(_flatten(raw))
+        self.raw = yaml.safe_load((ROLE_DIR / "tasks" / "main.yml").read_text(encoding="utf-8"))
+        tasks = list(_flatten(self.raw))
         self.names = [t["name"] for t in tasks]
         self.tasks = {t["name"]: t for t in tasks}
+        self.verify = next(t for t in self.raw if t["name"] == VERIFY)
 
     def test_no_htpasswd_task_restarts_zot(self):
-        for name, reg in HTPASSWD_TASKS.items():
+        for name in HTPASSWD_TASKS:
             self.assertNotIn("notify", self.tasks[name], name)
-            self.assertEqual(self.tasks[name]["register"], reg)
-        for task in self.tasks.values():
-            if "community.general.htpasswd" in task:
-                self.assertIn(task["name"], HTPASSWD_TASKS)
+        writers = [t["name"] for t in self.tasks.values() if "community.general.htpasswd" in t]
+        self.assertEqual(sorted(writers), sorted(HTPASSWD_TASKS))
 
-    def test_order_snapshot_writes_note_prove_restart_logins_then_flush(self):
-        order = [SNAPSHOT, *HTPASSWD_TASKS, NOTE, PROVE, RESTART, LOGIN_CI, LOGIN_SCOPED,
+    def test_order_snapshot_writes_verify_then_flush(self):
+        order = [SNAPSHOT, *HTPASSWD_TASKS, NOTE, VERIFY, PROVE, LOGIN_CI, LOGIN_SCOPED, RESTART, STOP,
                  "Flush handlers so the unit is registered before enable/start", "Enable + start zot"]
         idx = [self.names.index(n) for n in order]
         self.assertEqual(idx, sorted(idx))
+        # the config apply (which may queue a restart the verify must defer to) runs before it
+        self.assertLess(self.names.index("Apply the zot config (reload in place when only reload-safe keys changed)"),
+                        self.names.index(VERIFY))
 
-    def test_note_covers_every_htpasswd_task(self):
-        expr = self.tasks[NOTE]["ansible.builtin.set_fact"]["registry_zot_htpasswd_changed"]
-        for reg in HTPASSWD_TASKS.values():
-            self.assertIn(f"{reg} is changed", expr)
-
-    def test_snapshot_runs_in_check_mode_and_changes_nothing(self):
+    def test_snapshot_records_pid_cursor_and_digest_in_check_mode_too(self):
         t = self.tasks[SNAPSHOT]
         self.assertIs(t["check_mode"], False)
         self.assertIs(t["changed_when"], False)
-        self.assertEqual(t["ansible.builtin.command"]["argv"][2:], ["snapshot", "--unit", "zot.service"])
-
-    def test_prove_only_after_a_change_on_a_running_zot_outside_check_mode(self):
-        t = self.tasks[PROVE]
-        self.assertEqual(t["when"], ["registry_zot_htpasswd_changed | bool",
-                                     "registry_zot_htpasswd_running_pid | int > 0", "not ansible_check_mode"])
-        self.assertNotIn("notify", t)
-        self.assertEqual(t["failed_when"],
-                         "registry_zot_htpasswd_proof.rc != 0 and not (registry_zot_config_allow_restart | bool)")
         argv = t["ansible.builtin.command"]["argv"]
+        self.assertEqual(argv[2:5], ["snapshot", "--unit", "zot.service"])
         self.assertEqual(argv[argv.index("--file") + 1], "{{ registry_zot_config_dir }}/htpasswd")
 
-    def test_only_an_allowed_unproven_reload_restarts(self):
-        t = self.tasks[RESTART]
-        self.assertEqual(t["notify"], "restart zot")
-        self.assertEqual(t["when"], ["registry_zot_htpasswd_proof is not skipped", "registry_zot_htpasswd_proof.rc != 0"])
-        # without registry_zot_config_allow_restart the prove task already failed the play, so this never runs
+    def test_verify_runs_every_apply_on_a_running_zot_unless_a_restart_is_queued(self):
+        when = self.verify["when"]
+        self.assertEqual(when[0], "(registry_zot_htpasswd_before.pid | int) > 0")
+        self.assertEqual(when[1], "not ansible_check_mode")
+        self.assertIn("registry_zot_config_apply", when[2])
+        self.assertIn("!= 'restart'", when[2])
+        # never gated on "this run changed the file": an earlier unproven write must still be caught
+        self.assertNotIn("changed", " ".join(when))
+        self.assertEqual([t["name"] for t in self.verify["block"]], [PROVE, LOGIN_CI, LOGIN_SCOPED])
+        self.assertEqual([t["name"] for t in self.verify["rescue"]], [RESTART, STOP])
 
-    def test_logins_are_secret_and_follow_a_proven_reload(self):
+    def test_prove_passes_the_snapshot_and_fails_on_a_nonzero_rc(self):
+        t = self.tasks[PROVE]
+        self.assertNotIn("failed_when", t)  # rc != 0 fails the task, and the rescue decides
+        self.assertNotIn("notify", t)
+        argv = t["ansible.builtin.command"]["argv"]
+        for flag, value in (("--pid", "registry_zot_htpasswd_before.pid"),
+                            ("--cursor", "registry_zot_htpasswd_before.cursor"),
+                            ("--before-sha256", "registry_zot_htpasswd_before.sha256"),
+                            ("--file", "registry_zot_config_dir")):
+            self.assertIn(value, argv[argv.index(flag) + 1], flag)
+
+    def test_logins_are_secret_retried_and_strict(self):
         for name in (LOGIN_CI, LOGIN_SCOPED):
             t = self.tasks[name]
-            self.assertIs(t["no_log"], True)
-            self.assertEqual(t["when"][:2], ["registry_zot_htpasswd_proof is not skipped",
-                                             "registry_zot_htpasswd_proof.rc == 0"])
+            self.assertIs(t["no_log"], True, name)
             self.assertEqual(t["ansible.builtin.uri"]["status_code"], 200)
             self.assertIs(t["ansible.builtin.uri"]["force_basic_auth"], True)
+            self.assertIn("== 200", t["until"])
+            self.assertIn("registry_zot_htpasswd_proof_timeout", t["retries"])
         self.assertEqual(self.tasks[LOGIN_SCOPED]["loop"], "{{ registry_zot_scoped_push_users }}")
-        self.assertIn("item.user in (registry_scoped_push_passwords", self.tasks[LOGIN_SCOPED]["when"][2])
+        self.assertIn("item.user in (registry_scoped_push_passwords", self.tasks[LOGIN_SCOPED]["when"])
+
+    def test_rescue_restarts_only_when_allowed_and_otherwise_fails(self):
+        restart, stop = self.tasks[RESTART], self.tasks[STOP]
+        self.assertEqual(restart["notify"], "restart zot")
+        self.assertEqual(restart["when"], "registry_zot_config_allow_restart | bool")
+        self.assertIn("ansible.builtin.fail", stop)
+        self.assertEqual(stop["when"], "not (registry_zot_config_allow_restart | bool)")
+        self.assertNotIn("notify", stop)
 
     def test_timeout_default(self):
         defaults = yaml.safe_load((ROLE_DIR / "defaults" / "main.yml").read_text(encoding="utf-8"))
