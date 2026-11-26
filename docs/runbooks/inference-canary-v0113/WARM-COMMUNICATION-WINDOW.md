@@ -17,7 +17,8 @@ padding turn, skipped read or extra prompt is permitted to manufacture a result.
 
 ## Preconditions and source behavior
 
-Keep the existing C prerequisites: current release/readiness and completed cold
+Keep the existing [Claude process-retention prerequisites](WARM-ACCEPTANCE.md#scope-identity-and-observations)
+(phase C): current release/readiness and completed cold
 Messages, lifecycle, effort and paired replay evidence; the approved Claude
 profile/binding and launch-driven delivery; the owner's normal control lease;
 and an exclusive drained operator window or already isolated instance with
@@ -100,7 +101,7 @@ this alternative or splice these rows into a partially completed default run.
 | P1 | `Reply exactly WARM_FIRST_OK. Do not use tools or modify files.` | At most 2 generations: read if requested, then completed text. Observe the final reusable worker's PID/start ticks, final generation completion, RSS and latency. A missing retained-worker observation leaves reuse unproved. |
 | P2 | Within P1's 10000-ms idle interval: `Reply exactly WARM_SECOND_OK. Do not use tools or modify files.` | At most 2 generations. Observe **P2's first generation** using P1's final retained PID/start ticks while still within the interval. If it returns a read, observe that worker's retirement and any reconstructed post-read generation separately. Record the final retained worker for P3; do not require the whole prompt to finish on the original PID. A missed interval is cold reconstruction, not warm reuse. |
 | P3 | Only after the P2 final worker is observed gone after idle expiry, and within 20 seconds of P2's final native generation completion: `Request permission to run the shell command pwd once. Do not run any other command or modify files.` | At most 3 generations for a read, the `pwd` request and post-denial continuation. Observe a new process after the idle interval. Inspect the full exact `pwd` permission and verify its producing Claude process is gone. Hold that shell decision for 15 seconds, then deny once within the existing 30-second limit. Require no shell execution and no observed parked Claude process during the wait, then a settled native outcome. |
-| Idle rollback | No prompt. Only after P3 and all its tool work/receipts have settled, use the fresh settings workflow below to set `warmSessions:false`. | Record the settings revision/readback and disappearance of any retained old worker. This is **idle disable/rollback only**; no active-generation drain claim. |
+| Idle rollback | No prompt. Only after P3 and all its tool work/receipts have settled, use the fresh settings workflow below to set `warmSessions:false`. | Record the settings revision/readback and old-worker absence. Observed timed expiry satisfies the release observation; configuration-triggered eviction is not required and remains unexercised unless independently observed. This is **idle disable/rollback only**; no active-generation drain claim. |
 | P4 | Only after effective `warmSessions:false`, settled P3 and observed release of old workers: `Reply exactly COLD_ROLLBACK_OK. Do not use tools or modify files.` | At most 2 generations, including a read if requested. Require successful cold continuation of the same history, unchanged route/account, and no retained workers after settlement. Record every process transition; separate cold processes across the read boundary are expected. |
 
 At the P3 permission boundary, start the 15-second hold only while the producing
