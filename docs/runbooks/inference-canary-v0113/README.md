@@ -10,17 +10,42 @@ router-ab gate with route changes or new inference qualification workloads.
 
 ## Fixed scope
 
-**Successor hold (2026-11-26):** holder/Pi v0.13.1 source
+**First-registration hold (2026-11-26):** holder/Pi v0.13.1 source
 `2604c41b69c5d9c50a3324545a51f0bfa38435a0` is reviewed and merged in
 [Relay PR705](https://git.chifor.me/cchifor/relay/pulls/705). It contains the
 permission-review and structured configuration-refusal corrections. Publication
 completed in [run150672](https://git.chifor.me/cchifor/relay/actions/runs/150672).
-The checked-in successor profiles are revision3, SHA256
-`58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`.
-Published-artifact root/profile and deployed-hub schema qualification passed
-offline, along with five published-Pi wire cases. The idle upgrade, exact
-successor approval readbacks and live acceptance remain pending; publication
-and offline qualification are not activation.
+The checked-in profiles now use **first hub approval revision1**, SHA256
+`928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`. Published runtime artifacts are unchanged.
+The operator's 14:22 UTC readback of [PR2022](https://git.chifor.me/cchifor/ailab/pulls/2022)
+confirmed installed revision3 bytes `58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39`,
+the published holder, recovery2/readiness, resumed admission and zero sessions.
+That is an installation result, not a hub profile approval. A tenant-scoped
+14:26 UTC read found no approval rows for any of the three exact profile IDs.
+
+The deployed hub [requires the first revision to be1](https://git.chifor.me/cchifor/relay/src/commit/e843921b7cff76406b7da0b5b35cf653c7e458c5/server/agent-sessions/profiles.ts#L240);
+the holder and session revisions must match, and revision participates in the
+installed holder digest. These prepared revision numbers never created approval
+history. This correction changes nine revision values from3 to1 and the two
+matching file-hash references, across four JSON files. It does not replace an
+approved revision or create placeholder approvals. Runtime pins, IDs, bindings,
+scopes, settings and budgets stay unchanged.
+
+Before the new configuration replacement, refresh the existing authorized
+tenant-scoped readback for these same three profile IDs, including revoked
+revisions. The 14:26 snapshot is not continuing proof of absence. The prepared
+operator helper is `.data/observe-pi-profile-approvals-e843-20261126.mjs` in the
+Relay workspace; it uses the existing read-only tenant context, not a new API.
+`GET /api/agent-profiles` is capped at200: absence from a full list cannot prove
+that an ID has no history. If any revision now exists, stop and derive the next
+revision from that actual history; never downgrade or invent approval history.
+Also recheck the never-launched journal and stopped-idle eligibility below.
+
+New exact revision1 root/profile and schema qualification, a second sealed-idle
+configuration replacement, first approval readbacks and live acceptance remain
+pending. Prior revision3 root/schema proof and the unchanged runtime's five
+synthetic wire cases remain evidence for their stated scope; neither is live
+acceptance or authority to launch.
 
 The deployed hub remains v0.13.0/source
 `e843921b7cff76406b7da0b5b35cf653c7e458c5`, with the
@@ -31,9 +56,10 @@ The required Router correction is merged source
 actual deployment/readiness separately. Updating the holder installer image
 does not imply another hub rollout.
 
-Operator bus1967 reports the canary has started but remains idle, with no prior
-launches or native homes. Before replacing its pins, prove eligibility through
-the complete journal and use [the sealed idle upgrade](UPGRADE-IDLE.md). The
+The canary remains started but never launched in the reported readback. Before
+replacing the installed revision3 configuration, prove eligibility through the
+complete journal and use [the sealed idle upgrade](UPGRADE-IDLE.md) with a fresh
+preparation operation and current pause/seal. Preserve the first upgrade backup. The
 never-started restaging helper is no longer applicable. Publication, offline
 qualification, exact successor approvals, preserved-seal activation, managed
 readiness and live acceptance remain distinct steps. No inference is authorized
@@ -45,7 +71,7 @@ job781668; see the [deployment receipt](https://git.chifor.me/cchifor/relay/rele
 The historical revision2 profile SHA256 is `665e380e584bd2a1886291d82adfed667419e34d4d8ded0e912b9c3f4b79c42e`.
 Its published-runtime root/profile proof and five published-Pi wire/replay cases
 passed offline. Those results do not qualify the replacement artifacts.
-Earlier revision1 and
+The earlier prepared v0.11.3 revision1 and
 layout/pins-only preapproval did not cover effort. Operator bus1861 relays the
 owner's 15:30 decision **Covered**, extending that approval to Claude/Codex
 `off/low/high`. Before apply, the operator must verify the complete diff from
@@ -73,7 +99,7 @@ The [v0.13.1 deployment receipt](https://git.chifor.me/cchifor/relay/releases/do
 has SHA256 `96efee03a390918917ecd5d88c008e3df6c96c6276870e93e1ed7d6c3ff6d318`.
 It binds source2604c41, the installer image and control-plane manifest above.
 Archive bytes, inner manifests and selected runtime entries were independently
-checked against those published hashes. The candidate report SHA256 is
+checked against those published hashes. The historical revision3 candidate report SHA256 is
 `2901990c87d782de1f7e5583a97944505c3aec4037e8048a6e8f36776c287b2f`.
 Comparison with the eight frozen revision2 Git blobs found exactly four changed
 files and 50 reported JSON-pointer changes: artifact/runtime pins and matching
@@ -83,13 +109,13 @@ remain unchanged. Source digests are authenticated through the receipt-bound
 manifest, not independently recomputed from the build closure. This comparison
 does not itself grant profile approval.
 
-The v0.13.1 root qualification used these exact archives and revision3 profiles,
+The earlier v0.13.1 root qualification used these exact archives and revision3 profiles,
 UID1000 and the actual `/home/c4/.local/state/relay-holder` paths in an isolated
 offline container. Installation and repeat verification passed using packaged
 Node22.23.2. Holder hello reported `nativeRecovery:2`, `nativeStateReady:true`,
 all three profiles, zero sessions/children and empty native homes; shutdown
 exited0. The unchanged e843 hub image's compiled schemas passed **31 positive
-and five negative cases** against the successor inputs. Approval-definition
+and five negative cases** against those revision3 inputs. Approval-definition
 hashes were computed after the deployed `ApproveLaunchProfile` defaults, not
 from unnormalized input JSON. Evidence in the Relay workspace is
 `.data/pi-v0131-root-qualification-20261126/`: `qualification-summary.json`,
@@ -355,7 +381,7 @@ operator subsequently reported the holder started and idle (bus1945/1967).
 That historical startup does not authorize the successor upgrade or acceptance;
 preserve the operator's owner-approved window and shared-UID constraints.
 Its original revision1 hash and v0.11.3 staging references are historical inputs,
-not approval to activate the successor revision3 definitions. The deployment hold above
+not a hub approval or permission to launch the corrected first-registration definitions. The deployment hold above
 also applies to that workflow. Before publishing the final activation change,
 verify the integrated published pins and activation procedure's exact-profile
 references against the final reviewed bytes and record the completed offline qualification and remaining live gates.
