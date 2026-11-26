@@ -354,3 +354,223 @@ test("lost close POST cleanup inspects same close and never creates replacement"
   assert.equal(h.calls.filter(c => c.method === "POST").length, 1);
   assert.equal(h.runner.state.evidence.at(-1).status, "closed-and-released");
 });
+
+// A stateful HTTP boundary fixture: actual Runner methods remain untouched.
+// No live runtime is claimed. Responses use the audited hub field names and
+// independent queued/accepted/completed states, not a stubbed phase result.
+function phaseServer() {
+  let clock = NOW, serial = 100, sequence = 0;
+  const sessions = new Map(), launches = [], commands = new Map(), permissions = new Map();
+  const calls = [], checkpoints = [], attempts = [], effects = new Map();
+  const id = () => `00000000-0000-4000-8000-${String(++serial).padStart(12, "0")}`;
+  const definitions = JSON.parse(fs.readFileSync(path.join(__dirname, "launch-definitions.json"), "utf8"));
+  for (const d of definitions) Object.assign(d.session.communication, {
+    directWake: true, broadcastWake: false, maxWakesPerHour: 10, maxCausalHops: 4,
+  });
+  const profile = sid => a.PROFILES[sessions.get(sid).provider];
+  function observeTrajectory(provider) {
+    const pp = a.PROFILES[provider], rows = attempts.filter(r => r.route === "canary-pi-" + provider);
+    clock += 10;
+    return { version: 1, source: a.ROUTER, origin: "http://127.0.0.1:8787",
+      scope: { namespace: "default", principal: "key:" + pp.key, route: "canary-pi-" + provider, since: NOW },
+      requestedAt: clock, observedAt: clock + 1, fetchedRows: rows.length, rows: clone(rows), totalAttempts: rows.length };
+  }
+  function observeMarker(provider, runId, phase) {
+    const count = effects.get(runId) || 0;
+    return { version: 1, provider, profileId: a.PROFILES[provider].id, runId, phase,
+      state: "observed", phaseChecksPass: true, observedUtc: date(clock),
+      commands: { denied: a.markerCommand(provider, runId, "denied"), effects: a.markerCommand(provider, runId, "effects") },
+      files: { denied: { state: "absent" }, effects: count ? { state: "present", bytes: 88,
+        exactlyOneMarker: count === 1, markerOccurrences: count, sha256: "a".repeat(64) } : { state: "absent" } } };
+  }
+  function message(s, text) {
+    s.events.push({ sequence: String(++sequence), createdAt: date(clock), event: { kind: "update", type: "agent_message_chunk", text } });
+  }
+  function finish(c) {
+    const s = sessions.get(c.session_id);
+    c.state = "completed";
+    c.receipt = { status: "completed", result: {} };
+    if (c.kind === "prompt") {
+      c.receipt.result.stopReason = c.cancelled ? "cancelled" : c.refusal ? "refusal" : "end_turn";
+      message(s, c.response);
+    } else if (c.kind === "close") { s.state = "closed"; s.lease = null; c.receipt.result = { cancelSent: true, execution: "unknown" }; }
+    else if (c.kind === "cancel") {
+      const prompt = [...commands.values()].find(x => x.session_id === c.session_id && x.kind === "prompt" && x.state === "accepted");
+      assert(prompt, "Cancel must target actual accepted work"); prompt.cancelled = true;
+      c.receipt.result = { cancelSent: true, execution: "unknown" };
+    } else if (c.kind === "set-config") { s.effort = c.payload.value; s.revision++; c.receipt.result.settingsApplied = true; }
+  }
+  function publicSession(s) { return session({ id: s.id, state: s.state, control_epoch: s.epoch }); }
+  const runner = new a.Runner({ origin: a.ORIGIN, crypto: webcrypto, now: () => clock,
+    sleep: async ms => { clock += ms; }, load: () => null, save: () => {},
+    ask: async (title, instructions, validate) => {
+      checkpoints.push(title); clock += 20;
+      let value = true;
+      if (title === "Inspect retained branch before continuation") value = { reconcile: true };
+      else if (title.includes("pre-launch handoff")) value = { trajectory: observeTrajectory(runner.run.provider),
+        marker: observeMarker(runner.run.provider, runner.run.runId, "baseline"), coverageConfirmed: true, holderReadyConfirmed: true, routeConfirmed: true };
+      else if (title.startsWith("Open complete:")) value = { marker: observeMarker(runner.run.provider, runner.run.runId, "baseline"), deliveryConfirmed: true };
+      else if (instructions.startsWith("Paste operator JSON:")) {
+        const phase = /Marker phase=(\w+)/.exec(instructions)?.[1];
+        value = { trajectory: observeTrajectory(runner.run.provider), coverageConfirmed: true,
+          ...(phase ? { marker: observeMarker(runner.run.provider, runner.run.runId, phase) } : {}) };
+      }
+      return validate(value);
+    },
+    fetch: async (url, init) => {
+      clock += 5;
+      const u = new URL(url, a.ORIGIN), pathName = u.pathname, body = init.body && JSON.parse(init.body);
+      calls.push({ path: pathName, method: init.method, body: body && clone(body) });
+      let result;
+      if (pathName === "/api/agent-profiles") result = definitions.map(d => ({ id: d.holder.id, revision: 2, enabled: true, definition: d }));
+      else if (init.method === "POST" && (pathName === "/api/agent-launches" || pathName.endsWith("/resume"))) {
+        const previous = pathName.endsWith("/resume") ? sessions.get(pathName.split("/")[3]) : null;
+        if (previous) { assert.equal(previous.state, "closed"); assert.equal(body.acknowledgeUnknownToolEffects, undefined); }
+        const provider = previous?.provider || Object.keys(a.PROFILES).find(k => a.PROFILES[k].id === body.profileId);
+        assert(provider); const pp = a.PROFILES[provider];
+        const sid = id(), native = previous?.native || id();
+        const s = { id: sid, provider, native, state: "open", epoch: 0, lease: null, events: [], effort: "off", revision: 1 };
+        sessions.set(sid, s);
+        const l = { id: id(), operation_id: body.operationId, profile_id: pp.id, profile_revision: 2,
+          cwd: "/home/c4/.local/state/relay-holder/workspaces/" + pp.id,
+          state: "pending", session_id: sid, holder_id: a.HOLDER, holder_journal_id: a.HOLDER,
+          native_recovery_version: 2, expires_at: date(clock + 120000), resume_from: previous?.id || null,
+          receipt: null, polls: 0 };
+        launches.unshift(l); result = l;
+      } else if (pathName === "/api/agent-launches") {
+        const l = launches[0];
+        if (++l.polls >= 2) {
+          l.state = "open"; l.receipt = { status: "completed", result: { sessionId: l.session_id,
+            nativeSessionId: sessions.get(l.session_id).native, nativeRecoveryVersion: 2 } };
+        } else l.state = "offered";
+        result = launches;
+      } else if (pathName.startsWith("/api/router-credentials/keys/")) {
+        const pp = Object.values(a.PROFILES).find(x => x.credential === pathName.split("/").at(-1)); assert(pp);
+        result = { credential: { id: pp.credential, bindingId: pp.binding, routerKeyId: pp.key, namespace: "default", state: "ready" }, binding: { currentCredentialId: pp.credential } };
+      } else if (pathName.startsWith("/api/agent-permissions/")) {
+        const req = permissions.get(pathName.split("/")[3]); assert(req);
+        if (init.method === "POST") {
+          assert.equal(req.state, "pending"); req.state = "decided"; req.delivery = "pending"; req.decision = body.outcome; req.polls = 0;
+          result = { commandId: id(), requestId: req.id, delivery: "pending", execution: "unknown" };
+        } else {
+          if (req.state === "decided" && ++req.polls >= 2) {
+            req.state = "resolved"; req.delivery = "accepted";
+            if (req.decision.optionId === "yes") {
+              const runId = /acceptance-([a-f0-9-]+)\.effects/.exec(JSON.parse(req.context.description).command)?.[1];
+              assert(runId, "Allow must address effects marker only"); effects.set(runId, (effects.get(runId) || 0) + 1);
+            }
+          }
+          result = req;
+        }
+      } else {
+        const sid = pathName.includes("/conversations/") ? pathName.split("/")[4] : pathName.split("/")[3];
+        const s = sessions.get(sid); assert(s, "Unknown endpoint/session " + pathName);
+        const pp = profile(sid), tail = pathName.split("/").slice(pathName.includes("/conversations/") ? 5 : 4).join("/");
+        if (!tail) result = publicSession(s);
+        else if (tail === "router") result = { sessionId: sid, generation: 1, connection: { enabled: true },
+          binding: { id: pp.binding, enabled: true, state: "ready" }, credential: { id: pp.credential, state: "ready" },
+          consumer: { credentialId: pp.credential, state: "active", credentialState: "ready", remoteAcknowledged: true,
+            revokeRequested: false, credentialExpiresAt: date(a.EXPIRES), leaseExpiresAt: date(clock + 60000) } };
+        else if (tail === "communication") result = { sessionId: sid, status: "ready" };
+        else if (tail === "control") {
+          if (init.method === "POST") { assert.equal(body.generation, 1); s.lease = { id: body.leaseId || id(), generation: 1, expires_at: date(clock + 60000) }; result = s.lease; }
+          else result = { lease: s.lease && { ...s.lease, owned: true } };
+        } else if (tail === "permissions") result = [...permissions.values()].filter(q => q.session_id === sid).map(q => ({ id: q.id, state: q.state, delivery: q.delivery, execution: "unknown" }));
+        else if (tail === "native-recovery") { assert.equal(s.state, "closed"); result = { available: true, kind: "pi", profileName: "pi-canary-" + s.provider }; }
+        else if (tail === "settings") result = { generation: 1, controlEpoch: s.epoch, snapshot: { version: 1, revision: s.revision,
+          modes: null, configOptions: [{ id: "thought_level", name: "Effort", currentValue: s.effort,
+            options: ["off", "low", "high"].map(x => ({ id: x, name: x })) }] } };
+        else if (tail === "timeline") {
+          const active = [...commands.values()].find(c => c.session_id === sid && c.counting && c.state === "accepted");
+          if (active && !active.streaming) { active.streaming = true; message(s, "1\n2\n"); }
+          result = { sessionId: sid, generation: 1, state: s.state, text: true, events: s.events,
+            prompts: [...commands.values()].filter(c => c.session_id === sid && c.kind === "prompt").map(c => ({ id: c.id, state: c.state, text: c.payload.text })),
+            nextAfter: null, nextPromptsAfter: null };
+        } else if (tail === "commands" && init.method === "POST") {
+          assert.equal(body.leaseId, s.lease.id); assert.equal(body.generation, 1);
+          const c = { id: id(), operation_id: body.operationId, session_id: sid, kind: body.kind,
+            generation: 1, state: "pending", payload: body, polls: 0, receipt: null };
+          if (c.kind === "prompt") {
+            const text = body.text;
+            c.counting = text.includes("count upward");
+            c.refusal = text.includes("EFFORT_HIGH_PROBE");
+            const fixed = {
+              "/relay-history": "Completed turns: aabbccdd, 1234abcd",
+              "/relay-branch 1234abcd": "Independent branch selected.",
+              "/relay-compact": "History compacted.",
+              "/relay-reconcile confirmed": "Previous branch retired.",
+            };
+            if (Object.hasOwn(fixed, text)) c.response = fixed[text];
+            else if (text.startsWith("Request permission")) {
+              const cmd = text.split("COMMAND: ")[1]; assert(cmd);
+              const q = detail({ id: id(), session_id: sid, expires_at: date(clock + 120000) });
+              q.context.description = JSON.stringify({ command: cmd, timeout: 30 });
+              permissions.set(q.id, q); c.permission = q.id; c.response = "Decision handled.";
+            } else if (c.counting) c.response = "";
+            else {
+              const expected = /Reply exactly ([A-Z_]+)\./.exec(text); assert(expected, "Unexpected prompt " + text);
+              c.response = c.refusal ? "Model backend unavailable. No provider or model fallback was used." : expected[1];
+            }
+            if (!c.refusal && (!text.startsWith("/relay-") || text === "/relay-compact")) attempts.push({
+              id: id(), requestId: id(), namespace: "default", principalId: "key:" + pp.key, route: "canary-pi-" + s.provider,
+              startedAt: clock, endedAt: clock + 1, incomplete: false, status: "complete", attempts: 1, configRevision: 2882 });
+          } else if (["cancel", "close"].includes(c.kind)) s.epoch++;
+          else assert.equal(c.kind, "set-config");
+          commands.set(body.operationId, c); result = c;
+        } else if (tail.startsWith("operations/")) {
+          const c = commands.get(tail.slice(11)); assert(c);
+          if (c.state !== "completed") {
+            if (++c.polls === 1) c.state = "accepted";
+            else if ((!c.permission || permissions.get(c.permission).state === "resolved") && (!c.counting || c.cancelled)) finish(c);
+          }
+          result = { command: c };
+        } else throw Error("Unimplemented endpoint " + pathName + " " + init.method);
+      }
+      // Browser receives serialized values; no aliasing mutable server state.
+      const raw = JSON.stringify(result);
+      return { ok: true, status: init.method === "POST" ? 202 : 200, headers: { get: () => "application/json" }, text: async () => raw };
+    },
+  });
+  return { runner, calls, sessions, launches, commands, permissions, checkpoints, effects, attempts };
+}
+
+test("full lifecycle phase crosses queued hub contracts through recovery without hidden mutations", async () => {
+  for (const provider of ["codex", "qwen"]) {
+    const f = phaseServer(); await f.runner.phase(provider);
+    const writes = f.calls.filter(c => c.method !== "GET");
+    const prompts = writes.filter(c => c.body?.kind === "prompt");
+    assert.equal(prompts.length, 11);
+    assert.deepEqual(prompts.map(c => c.body.text.startsWith("/relay-") ? c.body.text : c.body.text.split(".")[0]), [
+      "Reply exactly READY", "Request permission to run exactly the following shell command once",
+      "Request permission to run exactly the following shell command once", "/relay-history", "/relay-branch 1234abcd",
+      "Reply exactly BRANCH_OK", "/relay-compact", "Reply exactly COMPACT_OK",
+      "Without using tools or modifying files, count upward from 1, one integer per line, until 500",
+      "/relay-reconcile confirmed", "Reply exactly RECOVERED_OK",
+    ]);
+    assert.deepEqual(writes.filter(c => c.path.endsWith("/decision")).map(c => c.body.outcome.optionId), ["no", "yes"]);
+    assert.equal(writes.filter(c => c.path === "/api/agent-launches").length, 1);
+    assert.equal(writes.filter(c => c.path.endsWith("/resume")).length, 1);
+    assert.equal(writes.filter(c => c.body?.kind === "close").length, 2);
+    assert.equal(writes.filter(c => c.body?.kind === "cancel").length, 1);
+    assert.equal(writes.length, 20); // launch + two leases + 11 prompts + two decisions + cancel + twoClose + resume
+    assert.equal(new Set(writes.filter(c => c.body.operationId).map(c => c.body.operationId)).size, 18);
+    assert.equal(f.effects.get(a.PROFILES[provider].run), 1);
+    assert([...f.sessions.values()].every(s => s.state === "closed" && s.lease === null));
+    assert.equal(new Set([...f.sessions.values()].map(s => s.native)).size, 1);
+    assert.equal(f.runner.state.runs[0].status, "passed-with-live-wire-unobserved");
+    assert.equal(f.runner.state.completed, false); // one phase is not full plan completion
+    assert(f.attempts.length <= 20); assert.equal(f.runner.session, null);
+  }
+});
+
+test("full effort phase uses fresh session low/high refusal and explicit reconstruction within four prompts", async () => {
+  const f = phaseServer(); await f.runner.phase("codex", true);
+  const writes = f.calls.filter(c => c.method !== "GET");
+  assert.deepEqual(writes.filter(c => c.body?.kind === "set-config").map(c => c.body.value), ["low", "high"]);
+  const texts = writes.filter(c => c.body?.kind === "prompt").map(c => c.body.text);
+  assert.equal(texts.length, 4); assert(texts[0].includes("EFFORT_LOW_OK"));
+  assert(texts[1].includes("EFFORT_HIGH_PROBE")); assert.equal(texts[2], "/relay-reconcile confirmed"); assert(texts[3].includes("EFFORT_HIGH_OK"));
+  assert.equal(f.attempts.length, 2); assert.equal(f.permissions.size, 0); assert.equal(f.effects.size, 0);
+  assert.equal(writes.length, 9); assert.equal(f.launches.length, 1);
+  assert.equal(f.runner.state.runs[0].status, "passed-with-live-wire-unobserved");
+});
