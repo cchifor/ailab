@@ -88,6 +88,13 @@ Read output using `GET /api/conversations/sessions/<S>/timeline?after=0&limit=20
 
 For each permission, list `GET /api/agent-sessions/<S>/permissions`, then inspect `GET /api/agent-permissions/<R>`. Match `session_id`, current generation, pending state and expiry. Check `context` title/toolCallId/options and `description` against the actual tool call. The v0.13.1 pinned Pi confirmation bridge preserves a validated JSON input object in `description` (at most 4000 UTF-8 bytes); titles remain bounded to 500 characters. Parse that object and compare its complete `command` to the observer-generated command before deciding. Missing, invalid, filtered or incomplete input is a stop condition; never infer the command from the prompt or title. Other adapter descriptions remain minimized.
 
+The 4000-byte limit includes the JSON syntax. Over-limit or invalid Pi input is
+rejected in full, never truncated for approval: the holder responds `cancelled`
+to ACP before registering a pending permission or writing a `permission-request`
+event. Its [request handler](https://git.chifor.me/cchifor/relay/src/commit/2604c41b69c5d9c50a3324545a51f0bfa38435a0/holder/src/runtime.rs#L1597)
+instead emits a `permission-unavailable` update. Stop that acceptance phase;
+there is no partial-input permission to approve.
+
 `POST /api/agent-permissions/<R>/decision`:
 
 ```json
