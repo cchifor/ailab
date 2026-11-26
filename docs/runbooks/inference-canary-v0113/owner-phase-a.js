@@ -497,6 +497,7 @@
         current.lease === null,
         "Existing control lease; inspect it instead of taking over",
       );
+      this.check(); // Stop may have arrived during the read-only preflight.
       const intent = {
         kind: "lease-acquisition",
         path: "/api/agent-sessions/" + s.id + "/control",

@@ -2097,3 +2097,34 @@ test("Stop after verified closure does not mislabel historical launches unresolv
     0,
   );
 });
+
+test("Stop during control GET prevents acquisition intent and POST", async () => {
+  const arrived = deferred(),
+    response = deferred();
+  const h = harness((c) => {
+    assert.equal(c.method, "GET");
+    if (c.path.endsWith("/control")) {
+      arrived.resolve();
+      return response.promise;
+    }
+    return session();
+  });
+  h.runner.session = session();
+  const action = h.runner.runExclusive(() => h.runner.acquire());
+  const failed = assert.rejects(action, /Stopped/);
+  await arrived.promise;
+  const stop = h.runner.stop();
+  assert.equal(h.runner.cleanupAttempted, undefined);
+  response.resolve({ lease: null });
+  await failed;
+  await stop;
+  assert.equal(h.calls.filter((c) => c.method !== "GET").length, 0);
+  assert.equal(h.runner.state.controlAcquisition, undefined);
+  assert.equal(h.runner.state.operations.length, 0);
+  assert.equal(h.runner.lease, null);
+  assert.equal(
+    h.runner.state.evidence.at(-1).status,
+    "open-session-without-lease; operator-close-required",
+  );
+  assert.equal(h.runner.state.evidence.at(-1).sessionId, SID);
+});
