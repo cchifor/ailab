@@ -43,8 +43,9 @@ def utc(ms: int) -> str:
 
 
 def runner_floor(host, gate_now: int) -> int:
-    """A proven lower bound of the Runner's clock now (see the module docstring)."""
-    return now_ms() + (gate_now - host.recv_ms)
+    """A proven lower bound of the Runner's clock now: gateNow was stamped before the reader received the frame, so
+    runner_now >= gateNow + (monotonic time elapsed since that receipt). No host wall clock is involved."""
+    return gate_now + int((time.monotonic() - host.recv_mono) * 1000)
 
 
 # ------------------------------------------------------------------------------------------ config
@@ -257,16 +258,25 @@ def holder_record(host, budget, obs) -> dict:
 
 
 def clocks(host, budget, obs) -> None:
-    """C5: every pair of clocks provably within 4 s. Each remote sample is bracketed by host monotonic-derived
-    stamps; the Runner's clock comes from a measured round trip to the gate (Host.clock_probe)."""
+    """C5: every pair of clocks provably within 4 s. ONE wall/monotonic anchor for the whole exchange: every bracket
+    stamp is anchor + monotonic elapsed, so a host wall-clock step cannot hide skew (a detected step is refused).
+    The Runner's clock comes from a measured round trip to the gate (Host.clock_probe)."""
+    w_anchor, m_anchor = now_ms(), time.monotonic()
+
+    def stamp():
+        return w_anchor + int((time.monotonic() - m_anchor) * 1000)
+
     def bracket(fn):
-        w0, m0 = now_ms(), time.monotonic()
+        a = stamp()
         v = fn()
-        return v, w0, w0 + int((time.monotonic() - m0) * 1000)
+        return v, a, stamp()
 
     pod, a0, a1 = bracket(lambda: host.remote.router(["identity"], budget, obs, "clock:router")["podNow"])
     dwn, b0, b1 = bracket(lambda: host.remote.dw(["clock"], budget, obs, "clock:dw")["now"])
-    c0, gate_now, c1 = host.clock_probe(budget)
+    m0 = stamp()
+    _w0, gate_now, _w1, rtt_ms = host.clock_probe(budget)
+    c0, c1 = m0, m0 + rtt_ms + 50
+    need(abs(now_ms() - stamp()) < 1000, "the host wall clock stepped during the exchange", Failed)
     # remote - host lies in [sample - stamp_after, sample - stamp_before]
     iv = {"router": (pod - a1, pod - a0), "devWorker": (dwn - b1, dwn - b0), "runner": (gate_now - c1, gate_now - c0),
           "host": (0, 0)}
@@ -396,6 +406,12 @@ def c_stopped_replacement(host, req, ctx, budget, gate_now, obs):
     end = min(start + 900_000, host.state.expires_at - 60_000, host.runner_cutoff_ms())
     need(end > start + 300_000, "less than 5 minutes left for the replacement window", Failed)
     host.state.window = (start, end)
+    # The same window in HOST MONOTONIC time, conservatively: it opens no earlier than now and closes as early as
+    # the Runner's clock could reach `end` (its upper bound: floor + the measured probe round trip).
+    _w0, g, _w1, rtt = host.clock_probe(budget)
+    mono = time.monotonic()
+    runner_hi = g + rtt + 50
+    host.state.window_mono = (mono, mono + (end - runner_hi) / 1000.0)
     host.state.historical = {"trajectory": env, "marker": m}
     obs["window"] = {"start": start, "end": end}
     return {"confirmReplacement": True, "reportDownloaded": True, "operatorVerified": True,
@@ -549,7 +565,9 @@ def c_permission(host, req, ctx, budget, gate_now, obs):
     pctx = r["context"] or {}
     options = [o for o in pctx.get("options") or [] if isinstance(o, dict)]
     of_kind = [o for o in options if o.get("kind") == kind]
-    need(len(of_kind) == 1 and of_kind[0].get("optionId") == opt, "the option is not the one of that kind", Failed)
+    by_id = [o for o in options if o.get("optionId") == opt]
+    need(len(of_kind) == 1 and len(by_id) == 1 and by_id[0] is of_kind[0],
+         "the option ID is not the single option of that kind", Failed)
     title, desc = pctx.get("title"), pctx.get("description")
     obs["permission"] = {"id": perm["id"], "title": safe_text(title), "description": safe_text(desc), "kind": kind}
     purpose = ctx.get("purpose")
@@ -642,12 +660,14 @@ def c_recover_history(host, req, ctx, budget, gate_now, obs):
         raise Unsupported("the native transcript source is not established")
     need(t["unsettled"] == [] and t["duplicateResults"] == [], "a native tool call is unsettled or duplicated", Failed)
     outcome = {sha256_bytes(host.marker_command(run.provider, run.run_id, k).encode()): k for k in ("denied", "effects")}
-    shells = {s["sha256"]: s["results"] for s in t["shellCommands"]}
-    need(set(shells) == set(outcome), "shell calls are not exactly the two markers", Failed)
-    for sha, step in outcome.items():
-        res = shells[sha]
+    calls = t["shellCommands"]  # every call, in order: multiplicity matters (a repeat is never merged away)
+    need(len(calls) == 2 and sorted(c["sha256"] for c in calls) == sorted(outcome),
+         "shell calls are not exactly one denied and one effects marker call", Failed)
+    for c in calls:
+        res, step = c["results"], outcome[c["sha256"]]
         need(len(res) == 1 and isinstance(res[0], bool), "a marker call's native outcome is unknown", Unsupported)
         need(res[0] is (step == "denied"), "a marker call's native outcome differs from the decision", Failed)
+    shells = calls
     m = marker(host, run.provider, run.run_id, "approved", 0, budget, obs)
     need(m["files"]["effects"].get("sha256") == run.approved_marker_sha, "the approved marker changed", Failed)
     obs["recovery"] = {"permissions": len(run.confirmed), "shellCalls": len(shells)}

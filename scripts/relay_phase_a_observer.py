@@ -65,6 +65,10 @@ class Fault(Exception):
     code = "observer-down"
 
 
+class LeaseLostError(Fault):
+    """The run's Lease is no longer held: the broker's Lease path (exit 7), not an observer fault."""
+
+
 class Deadline(Exception):
     code = "deadline"
 
@@ -114,17 +118,26 @@ def js_number(x) -> str:
     return sign + ds[0] + tail + "e" + ("+" if e2 >= 0 else "-") + str(abs(e2))
 
 
+def js_string(s: str) -> str:
+    """JSON.stringify(string): like json.dumps(ensure_ascii=False), with a lone surrogate written as a lowercase
+    backslash-u escape."""
+    out = json.dumps(s, ensure_ascii=False)
+    if any(0xD800 <= ord(c) <= 0xDFFF for c in out):
+        out = "".join(chr(92) + "u%04x" % ord(c) if 0xD800 <= ord(c) <= 0xDFFF else c for c in out)
+    return out
+
+
 def canonical(v) -> str:
     """Byte-identical to the driver's canonical(): keys sorted by UTF-16 code units (Array.prototype.sort), values
     as JSON.stringify writes them (JavaScript number formatting, the same string escapes)."""
     if isinstance(v, bool) or v is None:
         return json.dumps(v)
-    if isinstance(v, int):
-        return str(v)
+    if isinstance(v, int):  # a JavaScript Number: exact up to 2**53, rounded (and 1e+21 style) beyond
+        return str(v) if abs(v) <= 2 ** 53 else js_number(float(v))
     if isinstance(v, float):
         return js_number(v)
     if isinstance(v, str):
-        return json.dumps(v, ensure_ascii=False)
+        return js_string(v)
     if isinstance(v, (list, tuple)):
         return "[" + ",".join(canonical(x) for x in v) + "]"
     if isinstance(v, dict):
@@ -232,12 +245,14 @@ class ObserverState:
     counts: dict = field(default_factory=dict)
     renewed: dict | None = None  # provider -> {key, credentialId, bindingId, generation, revision, expiresAt}
     expires_at: int | None = None
-    window: tuple | None = None  # (start_ms, end_ms)
+    window: tuple | None = None  # (start_ms, end_ms) on the Runner's clock, as returned to the driver
+    window_mono: tuple | None = None  # the same window in host monotonic seconds, conservatively narrowed
     holder: dict | None = None  # measured at the pre-run step: incarnation, journal, mainpid
     router_pod: dict | None = None  # uid, restarts, configDigest
     historical: dict | None = None  # {"trajectory", "marker"} from C3
     bootstrap_end: int | None = None  # epoch ms: the shared C1/C2 budget's end
     preservation: dict | None = None  # the pre-run's verified preservation facts (C4's preservedOldStateConfirmed)
+    handoff_outcome: dict | None = None  # the last pre-run/C4 outcome (classified on failure), for result.json
     runs: list = field(default_factory=list)  # RunState, in RUN_ORDER
     pending: RunState | None = None  # C5's run, appended when its reply is sent
     sessions: dict = field(default_factory=dict)  # sessionId -> RunState
@@ -348,16 +363,17 @@ def check_request(frame: dict) -> tuple[int, int, dict]:
     return seq, gate_now, req
 
 
-def clamp_ms(req: dict, gate_now: int, recv_ms: int, now_ms: int, st: "ObserverState") -> int:
+def clamp_ms(req: dict, gate_now: int, recv_mono: float, st: "ObserverState") -> int:
     """The remaining host-owned budget, measured from the reader's receipt (queueing and transit already spent):
     min(the per-kind cap, the Runner's own deadline, the shared C1/C2 bootstrap budget)."""
     key = req.get("kind") if req["call"] == "checkpoint" else req["call"]
-    spent = max(0, now_ms - recv_ms)
+    now_mono = time.monotonic()
+    spent = max(0, int((now_mono - recv_mono) * 1000))
     left = min(MAX_MS.get(key, DEFAULT_MAX_MS), req["deadline"] - gate_now) - spent
     if key in ("renewal-deployment", "renewed-credentials"):
         if st.bootstrap_end is None:
-            st.bootstrap_end = recv_ms + BOOTSTRAP_MS
-        left = min(left, st.bootstrap_end - now_ms)
+            st.bootstrap_end = recv_mono + BOOTSTRAP_MS / 1000.0
+        left = min(left, int((st.bootstrap_end - now_mono) * 1000))
     return max(0, left)
 
 
@@ -390,6 +406,7 @@ class Host:
         self.threads = []
         self.clock_waits = {}  # probe id -> [threading.Event, gateNow]
         self.recv_ms = 0
+        self.recv_mono = time.monotonic()
 
     # -------------------------------------------------------------- lifecycle
     def start(self, ready_timeout: float = 10.0) -> None:
@@ -428,14 +445,14 @@ class Host:
                 self.fault_reason = reason
         self.down.set()
         self.cancelled.set()
-        if first:
-            if not evidence:
-                try:
-                    self.ev.write(event="observer-fault", reason=reason)
-                except Fault:
-                    evidence = True
+        if first and not evidence:
             try:
-                self.on_fault(reason, evidence)
+                self.ev.write(event="observer-fault", reason=reason)
+            except Fault:
+                evidence = True
+        if first or evidence:  # a durability failure is ALWAYS reported, even after an earlier fault (code 6)
+            try:
+                self.on_fault(reason, evidence, isinstance(reason, str) and reason.startswith("lease:"))
             except Exception:  # noqa: BLE001 - the orchestrator's callback must never kill the supervisor
                 pass
 
@@ -466,9 +483,10 @@ class Host:
             line = (json.dumps({"seq": seq, "v": 1, "ok": False, "code": "failed"}) + "\n").encode()
         self._write(line)
 
-    def clock_probe(self, budget) -> tuple[int, int, int]:
-        """A measured round trip to the gate's clock (the Runner's): (host wall before, gateNow, host wall after),
-        the 'after' derived from monotonic elapsed time so a host wall-clock step cannot hide skew."""
+    def clock_probe(self, budget) -> tuple[int, int, int, int]:
+        """A measured round trip to the gate's clock (the Runner's): (host wall before, gateNow, host wall after,
+        round trip ms); the 'after' and the round trip come from monotonic time, so a wall-clock step cannot hide
+        skew."""
         pid = uuid_hex()
         ev = threading.Event()
         self.clock_waits[pid] = [ev, None]
@@ -478,7 +496,8 @@ class Host:
         m1 = time.monotonic()
         gate_now = self.clock_waits.pop(pid)[1]
         need(ok and is_int(gate_now, 1), "no clock reply from the gate", Failed)
-        return w0, gate_now, w0 + int((m1 - m0) * 1000)
+        rtt = int((m1 - m0) * 1000)
+        return w0, gate_now, w0 + rtt, rtt
 
     def _reader(self) -> None:
         while not self.stopping.is_set():
@@ -522,20 +541,20 @@ class Host:
             self._reply(seq, {"v": 1, "ok": False, "code": "observer-down"})
             return
         try:
-            self.work.put_nowait((seq, frame, int(time.time() * 1000)))  # receipt stamped HERE, in the reader
+            self.work.put_nowait((seq, frame, time.monotonic()))  # receipt stamped HERE, in the reader (monotonic)
         except queue.Full:
             self.fault("second-outstanding-request")
 
     def _worker(self) -> None:
         while not self.stopping.is_set():
             try:
-                seq, frame, recv_ms = self.work.get(timeout=0.5)
+                seq, frame, recv_mono = self.work.get(timeout=0.5)
             except queue.Empty:
                 continue
             with self.lock:
                 self.inflight = (seq, time.monotonic() + DEFAULT_MAX_MS / 1000.0)
             try:
-                self.handle(seq, frame, recv_ms)
+                self.handle(seq, frame, recv_mono)
             finally:
                 with self.lock:
                     self.inflight = None
@@ -564,9 +583,10 @@ class Host:
                 return
 
     # -------------------------------------------------------------- one request
-    def handle(self, seq: int, frame: dict, recv_ms: int | None = None) -> None:
+    def handle(self, seq: int, frame: dict, recv_mono: float | None = None) -> None:
         started = time.time()
-        self.recv_ms = recv_ms if recv_ms is not None else int(started * 1000)
+        self.recv_mono = recv_mono if recv_mono is not None else time.monotonic()
+        self.recv_ms = int(started * 1000) - int((time.monotonic() - self.recv_mono) * 1000)  # evidence only
         rec = {"event": "request", "seq": seq, "recvMs": self.recv_ms}
         obs: dict = {}
         try:
@@ -577,8 +597,8 @@ class Host:
                        instructionsSha256=req.get("instructionsSha256"), gateNow=gate_now, hostNow=int(started * 1000))
             admit(self.state, call, kind, ctx, self.cfg)
             if self.lease_ok is not None and not self.lease_ok():
-                raise Fault("the Lease is no longer held: no further dispatch")
-            ms = clamp_ms(req, gate_now, self.recv_ms, int(time.time() * 1000), self.state)
+                raise LeaseLostError("the Lease is no longer held: no further dispatch")
+            ms = clamp_ms(req, gate_now, self.recv_mono, self.state)
             need(ms > 1500, "deadline already elapsed", Deadline)
             fn = self.collectors.get((call, kind))
             need(fn is not None, "no collector", Unsupported)
@@ -595,6 +615,8 @@ class Host:
         except EvidenceFailure as e:
             self.fault(str(e), evidence=True)
         except Fault as e:
+            if isinstance(e, LeaseLostError):
+                e = Fault("lease: " + str(e))
             rec.update(outcome="fault", reason=str(e)[:200], observations=obs)
             try:
                 self.ev.write(**rec)
