@@ -51,6 +51,18 @@ function writeExclusive(file, content) {
 }
 
 function createStore(directory, predecessorRaw, onSnapshot) {
+  return createRunStore(
+    directory,
+    "predecessor",
+    predecessorRaw,
+    onSnapshot,
+    () => predecessorRaw,
+  );
+}
+
+// Only the two named entries below choose the immutable input and runner.
+// There is no caller-supplied runner, start method or input filename.
+function createRunStore(directory, inputName, inputRaw, onSnapshot, load) {
   need(
     onSnapshot === undefined || typeof onSnapshot === "function",
     "Snapshot callback must be a function",
@@ -68,14 +80,14 @@ function createStore(directory, predecessorRaw, onSnapshot) {
     path.join(directory, "run.lock"),
     JSON.stringify({ pid: process.pid }) + "\n",
   );
-  writeExclusive(path.join(directory, "predecessor.json"), predecessorRaw);
+  writeExclusive(path.join(directory, `${inputName}.json`), inputRaw);
   writeExclusive(
-    path.join(directory, "predecessor.sha256"),
-    createHash("sha256").update(predecessorRaw).digest("hex") + "\n",
+    path.join(directory, `${inputName}.sha256`),
+    createHash("sha256").update(inputRaw).digest("hex") + "\n",
   );
   let sequence = 0;
   return {
-    load: () => predecessorRaw,
+    load,
     save(state) {
       const content = JSON.stringify(state);
       need(
@@ -111,9 +123,85 @@ function abortable(promise, signal) {
 }
 
 function createAutomation(options) {
+  const { predecessorRaw } = options;
+  need(
+    typeof predecessorRaw === "string" &&
+      Buffer.byteLength(predecessorRaw) <= 1024 * 1024,
+    "Bounded original raw report required",
+  );
+  driver.stoppedPredecessor(predecessorRaw); // No partial successor or fresh-start reset.
+  return createHost(options, {
+    store: (directory, onSnapshot) =>
+      createStore(directory, predecessorRaw, onSnapshot),
+    runner: (env) => new driver.Runner(env),
+    start: (runner) => runner.replaceStopped(),
+  });
+}
+
+function createClaudePhaseBAutomation(options) {
+  const b = require("./owner-phase-b.js");
+  const phaseInputs = b.inputs(options.phaseInputs, Date.now());
+  need(
+    typeof options.phaseAReportSha256 === "string" &&
+      /^[a-f0-9]{64}$/.test(options.phaseAReportSha256),
+    "Phase A report hash required; its report is never imported or reset",
+  );
+  for (const field of [
+    "predecessorRaw",
+    "readPredecessorEvidence",
+    "predecessorEvidencePin",
+    "renewalPrelude",
+    "observeDeployment",
+  ])
+    need(
+      !Object.hasOwn(options, field),
+      "Phase A bootstrap is not a Phase B operation",
+    );
+  const maxDurationMs = options.maxDurationMs ?? 1800000;
+  need(
+    Number.isInteger(maxDurationMs) &&
+      maxDurationMs > 0 &&
+      maxDurationMs <= 1800000,
+    "Phase B host deadline exceeds thirty minutes",
+  );
+  need(
+    options.deadline === undefined || Number.isSafeInteger(options.deadline),
+    "Phase B absolute deadline invalid",
+  );
+  const inputRaw = JSON.stringify({
+    kind: "claude-phase-b-inputs",
+    version: 1,
+    phaseAReportSha256: options.phaseAReportSha256,
+    inputs: phaseInputs,
+  });
+  return createHost(
+    {
+      ...options,
+      maxDurationMs,
+      deadline: Math.min(
+        options.deadline ?? Infinity,
+        phaseInputs.window.expiresAt,
+        Date.now() + maxDurationMs,
+      ),
+    },
+    {
+      store: (directory, onSnapshot) =>
+        createRunStore(
+          directory,
+          "phase-b-inputs",
+          inputRaw,
+          onSnapshot,
+          () => null,
+        ),
+      runner: (env) => b.createClaudePhaseBRunner(env, phaseInputs),
+      start: (runner) => runner.start(),
+    },
+  );
+}
+
+function createHost(options, entry) {
   const {
     directory,
-    predecessorRaw,
     authenticatedFetch,
     collectCheckpoint,
     signal,
@@ -126,12 +214,6 @@ function createAutomation(options) {
     observeDeployment,
     deadline,
   } = options;
-  need(
-    typeof predecessorRaw === "string" &&
-      Buffer.byteLength(predecessorRaw) <= 1024 * 1024,
-    "Bounded original raw report required",
-  );
-  driver.stoppedPredecessor(predecessorRaw); // No partial successor or fresh-start reset.
   need(
     typeof authenticatedFetch === "function" &&
       typeof collectCheckpoint === "function",
@@ -167,7 +249,7 @@ function createAutomation(options) {
       typeof readPredecessorEvidence === "function",
     "Predecessor evidence reader must be a function",
   );
-  const store = createStore(directory, predecessorRaw, onSnapshot);
+  const store = entry.store(directory, onSnapshot);
   const active = new AbortController(),
     cleanup = new AbortController();
   const transports = new Set();
@@ -325,7 +407,7 @@ function createAutomation(options) {
       checkpoint?.abort();
     },
   };
-  runner = new driver.Runner(env);
+  runner = entry.runner(env);
   const stop = () => {
     if (finished) return Promise.resolve();
     if (stopping) return stopping;
@@ -433,7 +515,7 @@ function createAutomation(options) {
             });
           }
           active.signal.throwIfAborted();
-          return runner.replaceStopped();
+          return entry.start(runner);
         })();
         await abortable(runPromise, active.signal);
         need(!stopping, "Automation stopped");
@@ -472,4 +554,9 @@ function createAutomation(options) {
   };
 }
 
-module.exports = { createAutomation, createStore, abortable };
+module.exports = {
+  createAutomation,
+  createClaudePhaseBAutomation,
+  createStore,
+  abortable,
+};
