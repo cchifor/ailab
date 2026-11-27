@@ -462,12 +462,14 @@ class GiteaOwnerMergeTest(unittest.TestCase):
 
     def test_shipped_context_files_are_lf_and_match_the_live_lists(self):
         d = os.path.join(REPO, "scripts", "owner-ops")
-        for repo in ("platform", "ailab"):
+        # workbricks: GET /branches/main on 2026-11-27 (enable_status_check, one required context).
+        expected = {"platform": REQUIRED_PLATFORM, "ailab": [], "workbricks": ["CI / verify (pull_request)"]}
+        for repo, want in expected.items():
             with open(os.path.join(d, f"required-contexts-{repo}.txt"), "rb") as f:
                 raw = f.read()
             self.assertNotIn(b"\r", raw, repo)
             patterns = [l for l in raw.decode("utf-8").splitlines() if l.strip() and not l.startswith("#")]
-            self.assertEqual(patterns, REQUIRED_PLATFORM if repo == "platform" else [], repo)
+            self.assertEqual(patterns, want, repo)
 
     # -- the gate refuses before minting ---------------------------------------------------------------------
     def test_refuses_when_the_head_moved(self):
