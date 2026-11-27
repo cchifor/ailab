@@ -114,12 +114,14 @@
   ansible.builtin.assert:
     that:
       - gitea_runner_extra_labels is sequence and gitea_runner_extra_labels is not string
-      - gitea_runner_extra_labels | select('match', '^[a-z0-9][a-z0-9-]{0,62}$') | list | length == gitea_runner_extra_labels | length
+      # strings first: `match` on an unquoted number would raise inside the expression, not give fail_msg
+      - gitea_runner_extra_labels | select('string') | list | length == gitea_runner_extra_labels | length
+      - gitea_runner_extra_labels | select('match', '^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$') | list | length == gitea_runner_extra_labels | length
       - gitea_runner_label not in gitea_runner_extra_labels
       - gitea_runner_extra_labels | unique | length == gitea_runner_extra_labels | length
     fail_msg: >-
-      gitea_runner_extra_labels must be a list of distinct lowercase names (letters, digits, dashes), none
-      equal to gitea_runner_label ({{ gitea_runner_label }}); got {{ gitea_runner_extra_labels }}.
+      gitea_runner_extra_labels must be a list of distinct lowercase names (letters, digits, inner dashes),
+      none equal to gitea_runner_label ({{ gitea_runner_label }}); got {{ gitea_runner_extra_labels }}.
 
 - name: Lay down act_runner config.yaml (labels, capacity, host-mode, cache)
   ansible.builtin.template:

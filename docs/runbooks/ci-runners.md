@@ -212,9 +212,11 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   - The repo should still bound its own cache. This keeps a runner alive when one does not.
 - **workbricks push runners** (`workbricks-push` label, ci-runner-3 and ci-runner-6, 2026-11-27).
   - **What.** Those two runners declare a second label, `workbricks-push`, through
-    `gitea_runner_extra_labels` in their host_vars. workbricks' `ci.yml` sends its `push` (main) jobs there.
-    Every other job, workbricks' pull requests included, still runs on `self-hosted-hv`, which all runners
-    keep.
+    `gitea_runner_extra_labels` in their host_vars.
+    - The label exists for workbricks' `ci.yml`, whose `runs-on` names it for the `push` event. That is a
+      workbricks change, opened only once the label was live here, so it routes nothing until it merges.
+    - Every other job, workbricks' pull requests included, still runs on `self-hosted-hv`, which all
+      runners keep.
   - **Why.** workbricks keeps one cache per event (`~/.cache/workbricks-ci/<event>`, so a push to main
     never runs what a pull request wrote). Each event's Cargo target pair is about 34 GiB. Its own
     `scripts/ci/sweep_cache.sh` caps all events together at 45 GiB, so a runner serving both held about
@@ -228,6 +230,10 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
       workbricks' own least-recently-used cap.
     - ci-runner-3/-6 still take workbricks pull requests now and then, so they can still churn. Removing
       that needs a workbricks pull-request label the push runners lack.
+  - **One node.** Both push runners are on ai-node3, the least-worn NVMe. While that node is down or in
+    maintenance, every workbricks push job waits; pull requests keep running elsewhere.
+    - **Fallback:** add `workbricks-push` to a runner on another node (its host_vars, then a drained converge).
+    - The cost is a cold push cache there: its first push job builds about 34 GiB of targets.
   - **Changing the set.** Edit the two host_vars, converge those runners after a drained stop, and check
     the label in Gitea (Site/Org settings → Actions → Runners) before workbricks' `runs-on` relies on it.
     Removing the label from a runner while workbricks still names it leaves push jobs waiting.
