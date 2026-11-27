@@ -91,3 +91,44 @@ tests:
               description: 100% of the loki/loki targets in monitoring namespace are down.
               runbook_url: https://runbooks.prometheus-operator.dev/runbooks/general/targetdown
               summary: One or more targets are unreachable.
+
+  - name: the mute arriving a few minutes late (CloudlabAsleep's for:2m plus eval lag) still keeps it quiet
+    interval: 1m
+    input_series:
+      - series: up{job="cloud-node",namespace="monitoring",service="cloud-node",instance="192.168.0.20:9100"}
+        values: 0+0x20
+      - series: ALERTS{alertname="CloudlabAsleep",alertstate="pending",severity="none"}
+        values: _x1 1+0x3
+      - series: ALERTS{alertname="CloudlabAsleep",alertstate="firing",severity="none"}
+        values: _x5 1+0x15
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: TargetDown
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: TargetDown
+        exp_alerts: []
+
+  - name: a mute arriving AFTER the 10m hold is too late - pins why CloudlabAsleep's for must stay short
+    interval: 1m
+    input_series:
+      - series: up{job="cloud-node",namespace="monitoring",service="cloud-node",instance="192.168.0.20:9100"}
+        values: 0+0x20
+      - series: ALERTS{alertname="CloudlabAsleep",alertstate="firing",severity="none"}
+        values: _x12 1+0x8
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cloud-node
+              namespace: monitoring
+              service: cloud-node
+            exp_annotations:
+              description: 100% of the cloud-node/cloud-node targets in monitoring namespace are down.
+              runbook_url: https://runbooks.prometheus-operator.dev/runbooks/general/targetdown
+              summary: One or more targets are unreachable.
+      - eval_time: 15m
+        alertname: TargetDown
+        exp_alerts: []

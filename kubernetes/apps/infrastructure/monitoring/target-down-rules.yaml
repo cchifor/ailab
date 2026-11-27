@@ -12,6 +12,13 @@
 # The muted set is a PATTERN (cloud-.+ and ci-runner-cloud), not a list, so a future cloudlab job is
 # covered without editing this file - the list is how vllm/llama-swap slipped through. On 2026-11-26
 # it matched exactly cloud-node, cloud-pve, cloud-vllm, cloud-llama-swap and ci-runner-cloud.
+# THE `cloud-` SCRAPE-JOB PREFIX IS RESERVED FOR CLOUDLAB: a non-cloudlab job named cloud-* (a cloud
+# controller or provider exporter, say) would silently lose TargetDown every night. Name such a job
+# differently, or tighten this pattern in the same change.
+# ORDERING: the mute reads ALERTS written by CloudlabAsleep (another group, so >= 1 evaluation late).
+# CloudlabAsleep has `for: 2m` and its inputs drop within a scrape of the power-off, so it fires ~3-4
+# min in - well inside this rule's `for: 10m`, which resets the moment the mute applies. Keep
+# CloudlabAsleep's `for` well under 10m: the "mute arrives after 12m" fixture shows what happens if not.
 # Nothing else is muted: CloudlabAsleep is bounded (every host down AND one up within the last 11h,
 # or every host booted <15m ago; see ci-runners-cloud-rules.yaml), so a failure to wake or an
 # unplanned all-host outage un-mutes this after at most 11h, and an awake cloudlab still fires.
