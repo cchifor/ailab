@@ -51,11 +51,16 @@ function fresh(value, now, notBefore) {
 }
 function qualified(observer) {
   const q = QUALIFIED_FINALIZATION;
+  const source = (s) => typeof s === "string" && /^[a-f0-9]{40}$/.test(s);
+  const reportSources = (pins) =>
+    pins &&
+    eq(Object.keys(pins).sort(), ["a", "b", "c"]) &&
+    Object.values(pins).every(source);
   need(
     q &&
-      [q.hubSource, q.phaseARouterSource, q.routerSource].every(
-        (s) => typeof s === "string" && /^[a-f0-9]{40}$/.test(s),
-      ) &&
+      [q.hubSource, q.routerSource].every(source) &&
+      reportSources(q.reportHubSources) &&
+      reportSources(q.reportRouterSources) &&
       hash(q.observerQualificationSha256),
     "Finalization source/adapters are not qualified",
   );
@@ -95,9 +100,8 @@ function parseReports(raws, manifest, now, q) {
   for (const name of ["a", "b", "c"])
     need(
       r[name]?.version === 1 &&
-        r[name].relay === q.hubSource &&
-        r[name].router ===
-          (name === "a" ? q.phaseARouterSource : q.routerSource) &&
+        r[name].relay === q.reportHubSources[name] &&
+        r[name].router === q.reportRouterSources[name] &&
         r[name].completed === false,
       "Report source/shape differs",
     );

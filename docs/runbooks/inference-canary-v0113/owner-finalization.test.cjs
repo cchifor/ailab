@@ -14,9 +14,15 @@ const { createSessionFetch } = require("./owner-phase-a-socket.cjs");
 const hash = (v) => createHash("sha256").update(v).digest("hex"),
   clone = (v) => structuredClone(v);
 const q = {
-  hubSource: a.RUN_SOURCE,
-  phaseARouterSource: a.ROUTER,
-  routerSource: "0bc835ab72fb9ea03b2b3ea51bba7a9789a5e171",
+  // Synthetic cleanup deployments differ from every immutable historical pin.
+  hubSource: "c".repeat(40),
+  routerSource: "d".repeat(40),
+  reportHubSources: { a: a.RUN_SOURCE, b: a.RUN_SOURCE, c: a.RUN_SOURCE },
+  reportRouterSources: {
+    a: a.ROUTER,
+    b: "0bc835ab72fb9ea03b2b3ea51bba7a9789a5e171",
+    c: "0bc835ab72fb9ea03b2b3ea51bba7a9789a5e171",
+  },
   observerQualificationSha256: "a".repeat(64),
 };
 // Explicit synthetic qualification: change ONE source pin only, no Runner or
@@ -237,8 +243,8 @@ function fixture({ live = false } = {}) {
   }
   const ar = {
     version: 1,
-    relay: q.hubSource,
-    router: q.phaseARouterSource,
+    relay: q.reportHubSources.a,
+    router: q.reportRouterSources.a,
     status: "phase-a-passed",
     phaseACompleted: true,
     completed: false,
@@ -269,8 +275,8 @@ function fixture({ live = false } = {}) {
   const br = {
     version: 1,
     kind: "claude-phase-b",
-    relay: q.hubSource,
-    router: q.routerSource,
+    relay: q.reportHubSources.b,
+    router: q.reportRouterSources.b,
     status: "phase-b-passed",
     phaseBCompleted: true,
     completed: false,
@@ -310,8 +316,8 @@ function fixture({ live = false } = {}) {
   const cr = {
     version: 1,
     kind: "claude-phase-c",
-    relay: q.hubSource,
-    router: q.routerSource,
+    relay: q.reportHubSources.c,
+    router: q.reportRouterSources.c,
     status: "phase-c-passed",
     phaseCCompleted: true,
     completed: false,
@@ -482,14 +488,12 @@ function fixture({ live = false } = {}) {
           c.state = "revoked";
           c.revoke_requested = true;
         });
-        operations
-          .get(cs[0].id)
-          .push({
-            id: body.operationId,
-            kind: "revoke-binding",
-            state: "revoked",
-            failureCode: null,
-          });
+        operations.get(cs[0].id).push({
+          id: body.operationId,
+          kind: "revoke-binding",
+          state: "revoked",
+          failureCode: null,
+        });
       }
       if (lose) {
         lose = false;
@@ -652,7 +656,7 @@ test("public unqualified entry and missing adapter refuse before I/O", () => {
   );
   assert.equal(f.requests.length, 0);
 });
-test("synthetic-qualified actual finalizer revokes all three fixed bindings after inference expiry", async () => {
+test("synthetic cleanup deployments finalize unchanged historical reports after inference expiry", async () => {
   const f = fixture();
   f.onPost = (_t, body) =>
     assert.ok(
@@ -671,6 +675,14 @@ test("synthetic-qualified actual finalizer revokes all three fixed bindings afte
   assert.equal(result.capacity, "unexercised");
   assert.equal(result.activeDrain, "unexercised");
   assert.deepEqual(f.reports, raw);
+  for (const name of ["a", "b", "c"]) {
+    const report = JSON.parse(raw[name]);
+    assert.equal(report.relay, q.reportHubSources[name]);
+    assert.equal(report.router, q.reportRouterSources[name]);
+    assert.notEqual(report.relay, result.sources.hubSource);
+    assert.notEqual(report.router, result.sources.routerSource);
+  }
+  assert.deepEqual(result.reportPins, f.manifest.pins);
   assert.equal(result.evidence.at(-1).launches.length, 10);
   assert.equal(result.evidence.at(-1).markers.length, 4);
   assert.equal(
@@ -680,6 +692,44 @@ test("synthetic-qualified actual finalizer revokes all three fixed bindings afte
     1,
   );
 });
+
+for (const field of ["reportHubSources", "reportRouterSources"])
+  for (const [name, mutate] of [
+    ["missing map", (pins) => delete pins[field]],
+    ["missing artifact", (pins) => delete pins[field].b],
+    ["extra artifact", (pins) => (pins[field].other = "1".repeat(40))],
+    ["malformed source", (pins) => (pins[field].c = "invalid")],
+  ])
+    test(field + " " + name + " refuses before I/O", () => {
+      const pins = clone(q),
+        f = fixture();
+      mutate(pins);
+      const invalid = load("owner-finalization.cjs", {}, [
+        "const QUALIFIED_FINALIZATION = null;",
+        "const QUALIFIED_FINALIZATION = " + JSON.stringify(pins) + ";",
+      ]);
+      assert.throws(
+        () => invalid.createFinalization(f.options()),
+        /not qualified/,
+      );
+      assert.equal(f.requests.length, 0);
+    });
+
+for (const name of ["a", "b", "c"])
+  for (const field of ["relay", "router"])
+    test(
+      name + " wrong historical " + field + " refuses before transport",
+      () => {
+        const f = fixture();
+        f[name + "r"][field] = field === "relay" ? q.hubSource : q.routerSource;
+        f.repin();
+        assert.throws(
+          () => candidate.createFinalization(f.options()),
+          /Report source/,
+        );
+        assert.equal(f.requests.length, 0);
+      },
+    );
 test("retired enabled FAILED/null-pointer binding uses normal revoke; already disabled/revoked is verified without POST", async () => {
   const f = fixture();
   for (const [i, t] of f.bindings.entries())
@@ -760,13 +810,6 @@ for (const [name, mutate] of [
     "report hash",
     (f) => {
       f.manifest.pins.a = "0".repeat(64);
-    },
-  ],
-  [
-    "source",
-    (f) => {
-      f.ar.relay = "0".repeat(40);
-      f.repin();
     },
   ],
   [
@@ -883,6 +926,17 @@ for (const [name, mutate] of [
       };
     },
   ],
+  ...["hubSource", "routerSource"].map((field) => [
+    "historical source substituted for current " + field,
+    (f) => {
+      f.onObserve = (v) => {
+        v[field] =
+          field === "hubSource"
+            ? q.reportHubSources.c
+            : q.reportRouterSources.c;
+      };
+    },
+  ]),
   [
     "pending permission",
     (f) => {

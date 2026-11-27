@@ -78,6 +78,16 @@ remain strict; an arbitrary success flag is insufficient. Exact final compiled
 source pins are still unassigned. Synthetic test substitutions are qualification
 fixtures, not executable live inputs.
 
+The qualified bundle separates immutable report provenance from the cleanup
+deployment. `reportHubSources:{a,b,c}` and `reportRouterSources:{a,b,c}` each pin
+the exact source for every historical report. `hubSource` and `routerSource`
+instead pin the current deployment required in both observer stages. Every
+source is a full commit SHA; missing or additional artifact entries refuse.
+There is no source allowlist fallback. Deploying the required Hub fix never
+rewrites report bytes, changes their retained hashes or relabels their sources.
+The bundle and observer still require qualification against the actual cleanup
+deployment before the public NULL gate can be replaced.
+
 The CLI uses six fixed path pairs:
 
 ```text
