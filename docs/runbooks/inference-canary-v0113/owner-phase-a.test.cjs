@@ -402,6 +402,146 @@ function renewedFixture(state = "installing", now = POST_EXPIRY) {
   return { inventory, details };
 }
 
+// Captured normal HTTP responses from the pinned hub with a private PostgreSQL
+// fixture. The generation recipe and source provenance live beside the payloads;
+// unlike renewedFixture(), these response shapes were not authored by the driver.
+const hubProjection = JSON.parse(
+  fs.readFileSync(
+    path.join(__dirname, "owner-phase-a.hub-74d1.fixture.json"),
+    "utf8",
+  ),
+);
+const hubObservation = Date.parse(hubProjection.observedAt);
+
+test("renewed credentials accept the exact 74d1 HTTP inventory and detail projections", () => {
+  assert.equal(hubProjection.version, 1);
+  assert.equal(hubProjection.sourceCommit, a.RUN_SOURCE);
+  assert.equal(
+    hubProjection.provenance.sourceBlobs["server/router-credentials/service.ts"]
+      .gitBlob,
+    "beadba8563481fabf7af7f2079ffda9876106aa9",
+  );
+  assert.equal(
+    hubProjection.provenance.sourceBlobs["server/agent-sessions/routes.ts"]
+      .gitBlob,
+    "9c19c29cb2fc4bb3d48bc74d89f1a461e4b5a6ea",
+  );
+  assert(Number.isFinite(hubObservation));
+  const { inventory, details } = hubProjection.bootstrap;
+  const renewed = a.renewedCredentials(inventory, details, hubObservation);
+  for (const provider of ["codex", "qwen"]) {
+    const binding = inventory.bindings.find(
+      (b) => b.id === a.PROFILES[provider].binding,
+    );
+    assert.equal(binding.canRenew, false);
+    assert.equal(Object.hasOwn(binding, "can_renew"), false);
+    assert.equal(details[provider].binding.canRenew, false);
+    assert.equal(renewed.profiles[provider].generation, 2);
+    assert.equal(
+      renewed.profiles[provider].credential,
+      details[provider].credential.id,
+    );
+    assert.equal(
+      renewed.profiles[provider].expiresAt,
+      Date.parse(details[provider].credential.expiresAt),
+    );
+  }
+});
+
+test("captured hub metadata never permits a missing or alternate canRenew spelling", () => {
+  for (const provider of ["codex", "qwen"]) {
+    for (const view of ["inventory", "detail"]) {
+      for (const rename of [false, true]) {
+        const { inventory, details } = clone(hubProjection.bootstrap);
+        const binding =
+          view === "inventory"
+            ? inventory.bindings.find(
+                (b) => b.id === a.PROFILES[provider].binding,
+              )
+            : details[provider].binding;
+        delete binding.canRenew;
+        if (rename) binding.can_renew = false;
+        assert.throws(() =>
+          a.renewedCredentials(inventory, details, hubObservation),
+        );
+      }
+    }
+  }
+});
+
+function capturedDelivery(provider, payload) {
+  const renewed = a.renewedCredentials(
+    hubProjection.bootstrap.inventory,
+    hubProjection.bootstrap.details,
+    hubObservation,
+  );
+  const id = payload.router.sessionId;
+  const h = harness(({ path: url }) => {
+    if (url === "/api/agent-sessions/" + id + "/router") return payload.router;
+    if (
+      url ===
+      "/api/router-credentials/keys/" + renewed.profiles[provider].credential
+    )
+      return payload.detail;
+    if (url === "/api/agent-sessions/" + id) return payload.session;
+    // Communication readiness alone is stubbed; this fixture qualifies metadata
+    // projections, not communication, provider execution or live readiness.
+    if (url === "/api/agent-sessions/" + id + "/communication")
+      return { sessionId: id, status: "ready" };
+    throw Error("Unexpected captured delivery request " + url);
+  });
+  h.runner.now = () => hubObservation;
+  h.runner.profiles = renewed.profiles;
+  h.runner.effectiveExpiry = renewed.expiresAt;
+  h.runner.state.successorCredentials = renewed;
+  h.runner.run = { provider };
+  h.runner.session = { id, generation: payload.router.generation };
+  return h;
+}
+
+test("renewed delivery accepts actual 74d1 HTTP router and active-consumer detail", async () => {
+  for (const provider of ["codex", "qwen"]) {
+    const payload = hubProjection.delivery[provider];
+    const h = capturedDelivery(provider, payload);
+    await h.runner.checkDelivery();
+    assert.equal(payload.router.consumer.state, "active");
+    assert.equal(h.calls.length, 4);
+    assert(h.calls.every((c) => c.method === "GET"));
+    assert.equal(h.runner.state.operations.length, 0);
+    assert.equal(h.runner.state.evidence.length, 1);
+    assert.equal(h.runner.state.evidence[0].credentialGeneration, 2);
+    assert.equal(
+      h.runner.state.evidence[0].expiresAt,
+      Date.parse(payload.router.credential.expiresAt),
+    );
+  }
+});
+
+test("captured router responses refuse missing delivery identity and authority fields", async () => {
+  const required = {
+    connection: ["id"],
+    binding: ["revision", "generation"],
+    credential: [
+      "generation",
+      "expiresAt",
+      "remoteAcknowledged",
+      "revokeRequested",
+    ],
+    consumer: ["generation", "failureCode", "credentialExpiresAt"],
+  };
+  for (const [section, fields] of Object.entries(required)) {
+    for (const field of fields) {
+      const payload = clone(hubProjection.delivery.codex);
+      delete payload.router[section][field];
+      const h = capturedDelivery("codex", payload);
+      await assert.rejects(h.runner.checkDelivery(), /not ready|changed/);
+      assert(h.calls.every((c) => c.method === "GET"));
+      assert.equal(h.runner.state.operations.length, 0);
+      assert.equal(h.runner.state.evidence.length, 0);
+    }
+  }
+});
+
 test("renewed credential projection preserves reviewed scope and selects the earlier expiry", () => {
   const installing = renewedFixture(),
     ready = renewedFixture("ready");

@@ -1,0 +1,1017 @@
+{
+  "version": 1,
+  "sourceCommit": "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613",
+  "observedAt": "2026-11-27T04:03:21.811Z",
+  "bootstrap": {
+    "inventory": {
+      "bindings": [
+        {
+          "id": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "name": "Worker fixture",
+          "connection_id": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "host_id": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+          "execution_identity": "c4",
+          "grant_spec": {
+            "access": [
+              "local"
+            ],
+            "routes": [
+              "canary-pi-qwen"
+            ],
+            "lifetimeSeconds": 86400
+          },
+          "enabled": true,
+          "revision": 2,
+          "generation": 2,
+          "state": "ready",
+          "current_credential_id": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "pending_credential_id": null,
+          "updated_at": "2026-11-27T04:03:21.778Z",
+          "canRenew": false
+        },
+        {
+          "id": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "name": "Worker fixture",
+          "connection_id": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "host_id": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+          "execution_identity": "c4",
+          "grant_spec": {
+            "access": [
+              "subscription"
+            ],
+            "routes": [
+              "canary-pi-codex"
+            ],
+            "lifetimeSeconds": 86400
+          },
+          "enabled": true,
+          "revision": 2,
+          "generation": 2,
+          "state": "ready",
+          "current_credential_id": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "pending_credential_id": null,
+          "updated_at": "2026-11-27T04:03:21.500Z",
+          "canRenew": false
+        }
+      ],
+      "credentials": [
+        {
+          "id": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "binding_id": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "generation": 2,
+          "router_key_id": "key_17e9e7a0be43d0c7d28859d500d9941f",
+          "prefix": "lrk_CANA",
+          "namespace": "default",
+          "expires_at": "2026-11-28T04:03:21.679Z",
+          "state": "ready",
+          "revoke_requested": false,
+          "remote_acknowledged": true,
+          "cleanup_pending": false,
+          "retire_after": null,
+          "failure_code": null,
+          "creation_operation_id": "61f5d89d-819e-4275-b4d9-0c3a1b085708",
+          "updated_at": "2026-11-27T04:03:21.778Z"
+        },
+        {
+          "id": "5e7019ce-8fae-4468-941a-7d0b8c02a93c",
+          "binding_id": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "generation": 1,
+          "router_key_id": "key_9b01832ad0609853be340e03968b7d50",
+          "prefix": "lrk_CANA",
+          "namespace": "default",
+          "expires_at": "2026-11-27T04:03:20.579Z",
+          "state": "revoked",
+          "revoke_requested": true,
+          "remote_acknowledged": true,
+          "cleanup_pending": false,
+          "retire_after": null,
+          "failure_code": null,
+          "creation_operation_id": "bd1e78ea-d66e-4825-99da-0f8fc8b80519",
+          "updated_at": "2026-11-27T04:03:21.645Z"
+        },
+        {
+          "id": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "binding_id": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "generation": 2,
+          "router_key_id": "key_fc3ac5fae214a86c1570bb7b36a296dd",
+          "prefix": "lrk_CANA",
+          "namespace": "default",
+          "expires_at": "2026-11-28T04:03:21.437Z",
+          "state": "ready",
+          "revoke_requested": false,
+          "remote_acknowledged": true,
+          "cleanup_pending": false,
+          "retire_after": null,
+          "failure_code": null,
+          "creation_operation_id": "c0cacf26-56e7-450d-854e-05eaabac5ca1",
+          "updated_at": "2026-11-27T04:03:21.500Z"
+        },
+        {
+          "id": "87482892-42ab-40a5-aa03-01c41ec5f6df",
+          "binding_id": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "generation": 1,
+          "router_key_id": "key_d72ca9b617b83281d4a2706393693b61",
+          "prefix": "lrk_CANA",
+          "namespace": "default",
+          "expires_at": "2026-11-27T04:03:20.291Z",
+          "state": "revoked",
+          "revoke_requested": true,
+          "remote_acknowledged": true,
+          "cleanup_pending": false,
+          "retire_after": null,
+          "failure_code": null,
+          "creation_operation_id": "0068e7a3-a09c-4bb9-a913-f9293ba18d2e",
+          "updated_at": "2026-11-27T04:03:21.379Z"
+        }
+      ],
+      "consumers": []
+    },
+    "details": {
+      "codex": {
+        "credential": {
+          "id": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "bindingId": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "generation": 2,
+          "routerKeyId": "key_fc3ac5fae214a86c1570bb7b36a296dd",
+          "prefix": "lrk_CANA",
+          "namespace": "default",
+          "expiresAt": "2026-11-28T04:03:21.437Z",
+          "state": "ready",
+          "revokeRequested": false,
+          "remoteAcknowledged": true,
+          "cleanupPending": false,
+          "retireAfter": null,
+          "failureCode": null,
+          "creationOperationId": "c0cacf26-56e7-450d-854e-05eaabac5ca1",
+          "updatedAt": "2026-11-27T04:03:21.500Z"
+        },
+        "binding": {
+          "id": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "name": "Worker fixture",
+          "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+          "executionIdentity": "c4",
+          "enabled": true,
+          "state": "ready",
+          "revision": 2,
+          "generation": 2,
+          "currentCredentialId": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "pendingCredentialId": null,
+          "canRenew": false
+        },
+        "operations": [
+          {
+            "id": "c0cacf26-56e7-450d-854e-05eaabac5ca1",
+            "kind": "rotate",
+            "state": "ready",
+            "failureCode": null,
+            "createdAt": "2026-11-27T04:03:21.417Z",
+            "updatedAt": "2026-11-27T04:03:21.501Z"
+          }
+        ],
+        "consumers": []
+      },
+      "qwen": {
+        "credential": {
+          "id": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "bindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "generation": 2,
+          "routerKeyId": "key_17e9e7a0be43d0c7d28859d500d9941f",
+          "prefix": "lrk_CANA",
+          "namespace": "default",
+          "expiresAt": "2026-11-28T04:03:21.679Z",
+          "state": "ready",
+          "revokeRequested": false,
+          "remoteAcknowledged": true,
+          "cleanupPending": false,
+          "retireAfter": null,
+          "failureCode": null,
+          "creationOperationId": "61f5d89d-819e-4275-b4d9-0c3a1b085708",
+          "updatedAt": "2026-11-27T04:03:21.778Z"
+        },
+        "binding": {
+          "id": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "name": "Worker fixture",
+          "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+          "executionIdentity": "c4",
+          "enabled": true,
+          "state": "ready",
+          "revision": 2,
+          "generation": 2,
+          "currentCredentialId": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "pendingCredentialId": null,
+          "canRenew": false
+        },
+        "operations": [
+          {
+            "id": "61f5d89d-819e-4275-b4d9-0c3a1b085708",
+            "kind": "rotate",
+            "state": "ready",
+            "failureCode": null,
+            "createdAt": "2026-11-27T04:03:21.661Z",
+            "updatedAt": "2026-11-27T04:03:21.779Z"
+          }
+        ],
+        "consumers": []
+      }
+    }
+  },
+  "delivery": {
+    "codex": {
+      "router": {
+        "sessionId": "5e37205a-e741-49d1-8b11-6356d20fc151",
+        "state": "open",
+        "generation": 1,
+        "inference": {
+          "kind": "llm-router",
+          "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "credentialBindingId": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "protocol": "openai-responses",
+          "selection": {
+            "kind": "model",
+            "model": "canary-pi-codex"
+          }
+        },
+        "status": "ready",
+        "connection": {
+          "id": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "name": "Fixture router",
+          "origin": "https://router.example",
+          "enabled": true
+        },
+        "binding": {
+          "id": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "name": "Worker fixture",
+          "state": "ready",
+          "revision": 2,
+          "generation": 2,
+          "enabled": true
+        },
+        "credential": {
+          "id": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "generation": 2,
+          "state": "ready",
+          "expiresAt": "2026-11-28T04:03:21.437Z",
+          "remoteAcknowledged": true,
+          "revokeRequested": false
+        },
+        "consumer": {
+          "credentialId": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "generation": 2,
+          "state": "active",
+          "failureCode": null,
+          "lastUsedAt": "2026-11-27T04:03:21.975Z",
+          "leaseExpiresAt": "2026-11-27T04:18:21.975Z",
+          "credentialState": "ready",
+          "credentialExpiresAt": "2026-11-28T04:03:21.437Z",
+          "remoteAcknowledged": true,
+          "revokeRequested": false
+        },
+        "rotation": {
+          "state": "stable",
+          "sessionGeneration": 2,
+          "currentGeneration": 2
+        }
+      },
+      "detail": {
+        "credential": {
+          "id": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "bindingId": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "generation": 2,
+          "routerKeyId": "key_fc3ac5fae214a86c1570bb7b36a296dd",
+          "prefix": "lrk_CANA",
+          "namespace": "default",
+          "expiresAt": "2026-11-28T04:03:21.437Z",
+          "state": "ready",
+          "revokeRequested": false,
+          "remoteAcknowledged": true,
+          "cleanupPending": false,
+          "retireAfter": null,
+          "failureCode": null,
+          "creationOperationId": "c0cacf26-56e7-450d-854e-05eaabac5ca1",
+          "updatedAt": "2026-11-27T04:03:21.902Z"
+        },
+        "binding": {
+          "id": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "name": "Worker fixture",
+          "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+          "executionIdentity": "c4",
+          "enabled": true,
+          "state": "ready",
+          "revision": 2,
+          "generation": 2,
+          "currentCredentialId": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "pendingCredentialId": null,
+          "canRenew": false
+        },
+        "operations": [
+          {
+            "id": "c0cacf26-56e7-450d-854e-05eaabac5ca1",
+            "kind": "rotate",
+            "state": "ready",
+            "failureCode": null,
+            "createdAt": "2026-11-27T04:03:21.417Z",
+            "updatedAt": "2026-11-27T04:03:21.903Z"
+          }
+        ],
+        "consumers": [
+          {
+            "id": "5e37205a-e741-49d1-8b11-6356d20fc151",
+            "kind": "holder-session",
+            "generation": 2,
+            "state": "active",
+            "failureCode": null,
+            "createdAt": "2026-11-27T04:03:21.975Z",
+            "lastUsedAt": "2026-11-27T04:03:21.975Z",
+            "leaseExpiresAt": "2026-11-27T04:18:21.975Z",
+            "endedAt": null
+          }
+        ]
+      },
+      "session": {
+        "id": "5e37205a-e741-49d1-8b11-6356d20fc151",
+        "kind": "holder",
+        "connector_id": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+        "parent_session_id": null,
+        "authority_expires_at": null,
+        "profile": {
+          "id": "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "harness": "pi",
+          "revision": 1,
+          "inference": {
+            "kind": "llm-router",
+            "protocol": "openai-responses",
+            "selection": {
+              "kind": "model",
+              "model": "canary-pi-codex"
+            },
+            "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+            "credentialBindingId": "a0f57684-747f-4c3e-8d90-e684b7262590"
+          },
+          "adapterDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "communication": {
+            "version": 1,
+            "channels": [
+              "b3b1be1a-275c-4a2e-b515-428b39c43171"
+            ],
+            "required": true,
+            "directWake": true,
+            "broadcastWake": false,
+            "maxCausalHops": 4,
+            "maxWakesPerHour": 10,
+            "defaultChannelId": "b3b1be1a-275c-4a2e-b515-428b39c43171"
+          },
+          "executionIdentity": "c4",
+          "maxRequestSeconds": 300
+        },
+        "generation": 1,
+        "control_epoch": 0,
+        "rebinding": false,
+        "state": "open",
+        "created_at": "2026-11-27T04:03:21.811Z"
+      }
+    },
+    "qwen": {
+      "router": {
+        "sessionId": "71f171d2-f83f-4212-9f12-77614ac4dda1",
+        "state": "open",
+        "generation": 1,
+        "inference": {
+          "kind": "llm-router",
+          "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "credentialBindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "protocol": "openai-chat",
+          "selection": {
+            "kind": "model",
+            "model": "canary-pi-qwen"
+          }
+        },
+        "status": "ready",
+        "connection": {
+          "id": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "name": "Fixture router",
+          "origin": "https://router.example",
+          "enabled": true
+        },
+        "binding": {
+          "id": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "name": "Worker fixture",
+          "state": "ready",
+          "revision": 2,
+          "generation": 2,
+          "enabled": true
+        },
+        "credential": {
+          "id": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "generation": 2,
+          "state": "ready",
+          "expiresAt": "2026-11-28T04:03:21.679Z",
+          "remoteAcknowledged": true,
+          "revokeRequested": false
+        },
+        "consumer": {
+          "credentialId": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "generation": 2,
+          "state": "active",
+          "failureCode": null,
+          "lastUsedAt": "2026-11-27T04:03:22.193Z",
+          "leaseExpiresAt": "2026-11-27T04:18:22.193Z",
+          "credentialState": "ready",
+          "credentialExpiresAt": "2026-11-28T04:03:21.679Z",
+          "remoteAcknowledged": true,
+          "revokeRequested": false
+        },
+        "rotation": {
+          "state": "stable",
+          "sessionGeneration": 2,
+          "currentGeneration": 2
+        }
+      },
+      "detail": {
+        "credential": {
+          "id": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "bindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "generation": 2,
+          "routerKeyId": "key_17e9e7a0be43d0c7d28859d500d9941f",
+          "prefix": "lrk_CANA",
+          "namespace": "default",
+          "expiresAt": "2026-11-28T04:03:21.679Z",
+          "state": "ready",
+          "revokeRequested": false,
+          "remoteAcknowledged": true,
+          "cleanupPending": false,
+          "retireAfter": null,
+          "failureCode": null,
+          "creationOperationId": "61f5d89d-819e-4275-b4d9-0c3a1b085708",
+          "updatedAt": "2026-11-27T04:03:22.139Z"
+        },
+        "binding": {
+          "id": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "name": "Worker fixture",
+          "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+          "executionIdentity": "c4",
+          "enabled": true,
+          "state": "ready",
+          "revision": 2,
+          "generation": 2,
+          "currentCredentialId": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "pendingCredentialId": null,
+          "canRenew": false
+        },
+        "operations": [
+          {
+            "id": "61f5d89d-819e-4275-b4d9-0c3a1b085708",
+            "kind": "rotate",
+            "state": "ready",
+            "failureCode": null,
+            "createdAt": "2026-11-27T04:03:21.661Z",
+            "updatedAt": "2026-11-27T04:03:22.139Z"
+          }
+        ],
+        "consumers": [
+          {
+            "id": "71f171d2-f83f-4212-9f12-77614ac4dda1",
+            "kind": "holder-session",
+            "generation": 2,
+            "state": "active",
+            "failureCode": null,
+            "createdAt": "2026-11-27T04:03:22.193Z",
+            "lastUsedAt": "2026-11-27T04:03:22.193Z",
+            "leaseExpiresAt": "2026-11-27T04:18:22.193Z",
+            "endedAt": null
+          }
+        ]
+      },
+      "session": {
+        "id": "71f171d2-f83f-4212-9f12-77614ac4dda1",
+        "kind": "holder",
+        "connector_id": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+        "parent_session_id": null,
+        "authority_expires_at": null,
+        "profile": {
+          "id": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "harness": "pi",
+          "revision": 1,
+          "inference": {
+            "kind": "llm-router",
+            "protocol": "openai-chat",
+            "selection": {
+              "kind": "model",
+              "model": "canary-pi-qwen"
+            },
+            "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+            "credentialBindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d"
+          },
+          "adapterDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "communication": {
+            "version": 1,
+            "channels": [
+              "b3b1be1a-275c-4a2e-b515-428b39c43171"
+            ],
+            "required": true,
+            "directWake": true,
+            "broadcastWake": false,
+            "maxCausalHops": 4,
+            "maxWakesPerHour": 10,
+            "defaultChannelId": "b3b1be1a-275c-4a2e-b515-428b39c43171"
+          },
+          "executionIdentity": "c4",
+          "maxRequestSeconds": 300
+        },
+        "generation": 1,
+        "control_epoch": 0,
+        "rebinding": false,
+        "state": "open",
+        "created_at": "2026-11-27T04:03:22.061Z"
+      }
+    }
+  },
+  "closed": {
+    "codex": {
+      "router": {
+        "sessionId": "5e37205a-e741-49d1-8b11-6356d20fc151",
+        "state": "closed",
+        "generation": 1,
+        "inference": {
+          "kind": "llm-router",
+          "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "credentialBindingId": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "protocol": "openai-responses",
+          "selection": {
+            "kind": "model",
+            "model": "canary-pi-codex"
+          }
+        },
+        "status": "released",
+        "connection": {
+          "id": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "name": "Fixture router",
+          "origin": "https://router.example",
+          "enabled": true
+        },
+        "binding": {
+          "id": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "name": "Worker fixture",
+          "state": "ready",
+          "revision": 2,
+          "generation": 2,
+          "enabled": true
+        },
+        "credential": {
+          "id": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "generation": 2,
+          "state": "ready",
+          "expiresAt": "2026-11-28T04:03:21.437Z",
+          "remoteAcknowledged": true,
+          "revokeRequested": false
+        },
+        "consumer": {
+          "credentialId": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "generation": 2,
+          "state": "released",
+          "failureCode": null,
+          "lastUsedAt": "2026-11-27T04:03:21.975Z",
+          "leaseExpiresAt": "2026-11-27T04:18:21.975Z",
+          "credentialState": "ready",
+          "credentialExpiresAt": "2026-11-28T04:03:21.437Z",
+          "remoteAcknowledged": true,
+          "revokeRequested": false
+        },
+        "rotation": {
+          "state": "stable",
+          "sessionGeneration": 2,
+          "currentGeneration": 2
+        }
+      },
+      "detail": {
+        "credential": {
+          "id": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "bindingId": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "generation": 2,
+          "routerKeyId": "key_fc3ac5fae214a86c1570bb7b36a296dd",
+          "prefix": "lrk_CANA",
+          "namespace": "default",
+          "expiresAt": "2026-11-28T04:03:21.437Z",
+          "state": "ready",
+          "revokeRequested": false,
+          "remoteAcknowledged": true,
+          "cleanupPending": false,
+          "retireAfter": null,
+          "failureCode": null,
+          "creationOperationId": "c0cacf26-56e7-450d-854e-05eaabac5ca1",
+          "updatedAt": "2026-11-27T04:03:21.902Z"
+        },
+        "binding": {
+          "id": "a0f57684-747f-4c3e-8d90-e684b7262590",
+          "name": "Worker fixture",
+          "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+          "executionIdentity": "c4",
+          "enabled": true,
+          "state": "ready",
+          "revision": 2,
+          "generation": 2,
+          "currentCredentialId": "5aaa8e84-06f5-474c-8246-8cfda56a807e",
+          "pendingCredentialId": null,
+          "canRenew": false
+        },
+        "operations": [
+          {
+            "id": "c0cacf26-56e7-450d-854e-05eaabac5ca1",
+            "kind": "rotate",
+            "state": "ready",
+            "failureCode": null,
+            "createdAt": "2026-11-27T04:03:21.417Z",
+            "updatedAt": "2026-11-27T04:03:21.903Z"
+          }
+        ],
+        "consumers": [
+          {
+            "id": "5e37205a-e741-49d1-8b11-6356d20fc151",
+            "kind": "holder-session",
+            "generation": 2,
+            "state": "released",
+            "failureCode": null,
+            "createdAt": "2026-11-27T04:03:21.975Z",
+            "lastUsedAt": "2026-11-27T04:03:21.975Z",
+            "leaseExpiresAt": "2026-11-27T04:18:21.975Z",
+            "endedAt": "2026-11-27T04:03:22.011Z"
+          }
+        ]
+      },
+      "session": {
+        "id": "5e37205a-e741-49d1-8b11-6356d20fc151",
+        "kind": "holder",
+        "connector_id": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+        "parent_session_id": null,
+        "authority_expires_at": null,
+        "profile": {
+          "id": "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "harness": "pi",
+          "revision": 1,
+          "inference": {
+            "kind": "llm-router",
+            "protocol": "openai-responses",
+            "selection": {
+              "kind": "model",
+              "model": "canary-pi-codex"
+            },
+            "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+            "credentialBindingId": "a0f57684-747f-4c3e-8d90-e684b7262590"
+          },
+          "adapterDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "communication": {
+            "version": 1,
+            "channels": [
+              "b3b1be1a-275c-4a2e-b515-428b39c43171"
+            ],
+            "required": true,
+            "directWake": true,
+            "broadcastWake": false,
+            "maxCausalHops": 4,
+            "maxWakesPerHour": 10,
+            "defaultChannelId": "b3b1be1a-275c-4a2e-b515-428b39c43171"
+          },
+          "executionIdentity": "c4",
+          "maxRequestSeconds": 300
+        },
+        "generation": 1,
+        "control_epoch": 0,
+        "rebinding": false,
+        "state": "closed",
+        "created_at": "2026-11-27T04:03:21.811Z"
+      }
+    },
+    "qwen": {
+      "router": {
+        "sessionId": "71f171d2-f83f-4212-9f12-77614ac4dda1",
+        "state": "closed",
+        "generation": 1,
+        "inference": {
+          "kind": "llm-router",
+          "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "credentialBindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "protocol": "openai-chat",
+          "selection": {
+            "kind": "model",
+            "model": "canary-pi-qwen"
+          }
+        },
+        "status": "released",
+        "connection": {
+          "id": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "name": "Fixture router",
+          "origin": "https://router.example",
+          "enabled": true
+        },
+        "binding": {
+          "id": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "name": "Worker fixture",
+          "state": "ready",
+          "revision": 2,
+          "generation": 2,
+          "enabled": true
+        },
+        "credential": {
+          "id": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "generation": 2,
+          "state": "ready",
+          "expiresAt": "2026-11-28T04:03:21.679Z",
+          "remoteAcknowledged": true,
+          "revokeRequested": false
+        },
+        "consumer": {
+          "credentialId": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "generation": 2,
+          "state": "released",
+          "failureCode": null,
+          "lastUsedAt": "2026-11-27T04:03:22.193Z",
+          "leaseExpiresAt": "2026-11-27T04:18:22.193Z",
+          "credentialState": "ready",
+          "credentialExpiresAt": "2026-11-28T04:03:21.679Z",
+          "remoteAcknowledged": true,
+          "revokeRequested": false
+        },
+        "rotation": {
+          "state": "stable",
+          "sessionGeneration": 2,
+          "currentGeneration": 2
+        }
+      },
+      "detail": {
+        "credential": {
+          "id": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "bindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+          "generation": 2,
+          "routerKeyId": "key_17e9e7a0be43d0c7d28859d500d9941f",
+          "prefix": "lrk_CANA",
+          "namespace": "default",
+          "expiresAt": "2026-11-28T04:03:21.679Z",
+          "state": "ready",
+          "revokeRequested": false,
+          "remoteAcknowledged": true,
+          "cleanupPending": false,
+          "retireAfter": null,
+          "failureCode": null,
+          "creationOperationId": "61f5d89d-819e-4275-b4d9-0c3a1b085708",
+          "updatedAt": "2026-11-27T04:03:22.139Z"
+        },
+        "binding": {
+          "id": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+          "name": "Worker fixture",
+          "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+          "executionIdentity": "c4",
+          "enabled": true,
+          "state": "ready",
+          "revision": 2,
+          "generation": 2,
+          "currentCredentialId": "1fd2e3dc-f4b6-4569-b04d-fa89d697f0e5",
+          "pendingCredentialId": null,
+          "canRenew": false
+        },
+        "operations": [
+          {
+            "id": "61f5d89d-819e-4275-b4d9-0c3a1b085708",
+            "kind": "rotate",
+            "state": "ready",
+            "failureCode": null,
+            "createdAt": "2026-11-27T04:03:21.661Z",
+            "updatedAt": "2026-11-27T04:03:22.139Z"
+          }
+        ],
+        "consumers": [
+          {
+            "id": "71f171d2-f83f-4212-9f12-77614ac4dda1",
+            "kind": "holder-session",
+            "generation": 2,
+            "state": "released",
+            "failureCode": null,
+            "createdAt": "2026-11-27T04:03:22.193Z",
+            "lastUsedAt": "2026-11-27T04:03:22.193Z",
+            "leaseExpiresAt": "2026-11-27T04:18:22.193Z",
+            "endedAt": "2026-11-27T04:03:22.221Z"
+          }
+        ]
+      },
+      "session": {
+        "id": "71f171d2-f83f-4212-9f12-77614ac4dda1",
+        "kind": "holder",
+        "connector_id": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+        "parent_session_id": null,
+        "authority_expires_at": null,
+        "profile": {
+          "id": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "harness": "pi",
+          "revision": 1,
+          "inference": {
+            "kind": "llm-router",
+            "protocol": "openai-chat",
+            "selection": {
+              "kind": "model",
+              "model": "canary-pi-qwen"
+            },
+            "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+            "credentialBindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d"
+          },
+          "adapterDigest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "communication": {
+            "version": 1,
+            "channels": [
+              "b3b1be1a-275c-4a2e-b515-428b39c43171"
+            ],
+            "required": true,
+            "directWake": true,
+            "broadcastWake": false,
+            "maxCausalHops": 4,
+            "maxWakesPerHour": 10,
+            "defaultChannelId": "b3b1be1a-275c-4a2e-b515-428b39c43171"
+          },
+          "executionIdentity": "c4",
+          "maxRequestSeconds": 300
+        },
+        "generation": 1,
+        "control_epoch": 0,
+        "rebinding": false,
+        "state": "closed",
+        "created_at": "2026-11-27T04:03:22.061Z"
+      }
+    }
+  },
+  "eligibility": {
+    "codex": {
+      "credential": {
+        "id": "87482892-42ab-40a5-aa03-01c41ec5f6df",
+        "bindingId": "a0f57684-747f-4c3e-8d90-e684b7262590",
+        "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+        "generation": 1,
+        "routerKeyId": "key_d72ca9b617b83281d4a2706393693b61",
+        "prefix": "lrk_CANA",
+        "namespace": "default",
+        "expiresAt": "2026-11-27T04:03:20.291Z",
+        "state": "revoked",
+        "revokeRequested": true,
+        "remoteAcknowledged": true,
+        "cleanupPending": false,
+        "retireAfter": null,
+        "failureCode": null,
+        "creationOperationId": "0068e7a3-a09c-4bb9-a913-f9293ba18d2e",
+        "updatedAt": "2026-11-27T04:03:21.379Z"
+      },
+      "binding": {
+        "id": "a0f57684-747f-4c3e-8d90-e684b7262590",
+        "name": "Worker fixture",
+        "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+        "executionIdentity": "c4",
+        "enabled": true,
+        "state": "failed",
+        "revision": 1,
+        "generation": 1,
+        "currentCredentialId": null,
+        "pendingCredentialId": null,
+        "canRenew": true
+      },
+      "operations": [
+        {
+          "id": "992bf311-2d6c-40b9-8c16-e8d15ef0d832",
+          "kind": "revoke",
+          "state": "revoked",
+          "failureCode": null,
+          "createdAt": "2026-11-27T04:03:21.312Z",
+          "updatedAt": "2026-11-27T04:03:21.363Z"
+        },
+        {
+          "id": "0068e7a3-a09c-4bb9-a913-f9293ba18d2e",
+          "kind": "issue",
+          "state": "revoked",
+          "failureCode": null,
+          "createdAt": "2026-11-27T04:03:21.108Z",
+          "updatedAt": "2026-11-27T04:03:21.363Z"
+        }
+      ],
+      "consumers": []
+    },
+    "qwen": {
+      "credential": {
+        "id": "5e7019ce-8fae-4468-941a-7d0b8c02a93c",
+        "bindingId": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+        "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+        "generation": 1,
+        "routerKeyId": "key_9b01832ad0609853be340e03968b7d50",
+        "prefix": "lrk_CANA",
+        "namespace": "default",
+        "expiresAt": "2026-11-27T04:03:20.579Z",
+        "state": "revoked",
+        "revokeRequested": true,
+        "remoteAcknowledged": true,
+        "cleanupPending": false,
+        "retireAfter": null,
+        "failureCode": null,
+        "creationOperationId": "bd1e78ea-d66e-4825-99da-0f8fc8b80519",
+        "updatedAt": "2026-11-27T04:03:21.645Z"
+      },
+      "binding": {
+        "id": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+        "name": "Worker fixture",
+        "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+        "executionIdentity": "c4",
+        "enabled": true,
+        "state": "failed",
+        "revision": 1,
+        "generation": 1,
+        "currentCredentialId": null,
+        "pendingCredentialId": null,
+        "canRenew": true
+      },
+      "operations": [
+        {
+          "id": "3ce06bdf-e5b6-4a3b-b13a-bc1a6ff6d5c5",
+          "kind": "revoke",
+          "state": "revoked",
+          "failureCode": null,
+          "createdAt": "2026-11-27T04:03:21.593Z",
+          "updatedAt": "2026-11-27T04:03:21.633Z"
+        },
+        {
+          "id": "bd1e78ea-d66e-4825-99da-0f8fc8b80519",
+          "kind": "issue",
+          "state": "revoked",
+          "failureCode": null,
+          "createdAt": "2026-11-27T04:03:21.504Z",
+          "updatedAt": "2026-11-27T04:03:21.633Z"
+        }
+      ],
+      "consumers": []
+    }
+  },
+  "provenance": {
+    "kind": "offline-synthetic-real-PostgreSQL-normal-HTTP-projection",
+    "sourceBlobs": {
+      "server/router-credentials/service.ts": {
+        "gitBlob": "beadba8563481fabf7af7f2079ffda9876106aa9",
+        "sha256": "8c92d29d6dd97ecff039f3b605155b4f074651249859c88dcd52b6594a819cf5"
+      },
+      "server/router-credentials/expired-renewal.ts": {
+        "gitBlob": "56ccc143f1e50724f082e8cab6f2b2221f47681f",
+        "sha256": "5462353175179b65c08842aca110e0f8a6ba8fa3a4b0e9107c48a254ce518665"
+      },
+      "server/router-credentials/routes.ts": {
+        "gitBlob": "4d341f64a3c20f51c996c894b84fd99b47ef94c2",
+        "sha256": "8386fbeadca4c32394f0f29c2b07e244ea9daff155d8b83be1853dcb6219da91"
+      },
+      "server/router-credentials/consumers.ts": {
+        "gitBlob": "f483a7be7dd1531da4598ccc3b948aec9b1aed89",
+        "sha256": "ec73d28713ce6fe9a33442d104679be8b3285717a20710d937620eec3808bf25"
+      },
+      "server/agent-sessions/routes.ts": {
+        "gitBlob": "9c19c29cb2fc4bb3d48bc74d89f1a461e4b5a6ea",
+        "sha256": "a67c0b589c824079025c7e77e40a2f4cef79ba91af864eba474093f9f2c5cd18"
+      },
+      "server/agent-sessions/journal.ts": {
+        "gitBlob": "349b0d04076247861f59f29738ab2684da7a486d",
+        "sha256": "26e4bcd07cf1f31014367d1191fb1e31ba4d4baadfbd4c7cb9101c6496935594"
+      },
+      "server/authorized-transaction.ts": {
+        "gitBlob": "24426446c5dd225ca1b05806d3c54041a0be84a0",
+        "sha256": "19c652ae5194f4a2c7d2471a4c0511da4bece6dc4d0efdc5a246e38bd69c2c95"
+      },
+      "server/auth.ts": {
+        "gitBlob": "a22a7e4812f9be9d4b1e0b34da63d4d42e0ab18d",
+        "sha256": "a3d1f92d8876e3ca5b39e881cd5b59d1afe0a59f3eb9607a1f58f98df487e2cd"
+      },
+      "server/db.ts": {
+        "gitBlob": "d067667765611a03a3842c696ae76b6f6fb84d5b",
+        "sha256": "2c7ecb2aba4dff59a9c7f655970b8c280b9d4c2354a534190471fb5f803e8934"
+      },
+      "packages/contracts/router-credentials.ts": {
+        "gitBlob": "ee20e919065b6b4cb58ccf922be532ff05928583",
+        "sha256": "22c7318d650a52137e17b2f3635c8c082c5ccfabc14334891d47f05eb55366d5"
+      }
+    },
+    "generatorSha256": "914714482184cec33c5f510cf3ebb88d85801ecabb23ac9a1a657c510d6d7220",
+    "probeSha256": "2425d9bcedc4b26966430834b6e6d5e67182dc7680ea6fae6a2ad5938d897e1c",
+    "evidenceHashes": {
+      "source.tar": "a583b26aca841ddd643add2f1f5d31f616b6ffa734d506f378f7f24739d16619",
+      "generate.cjs": "914714482184cec33c5f510cf3ebb88d85801ecabb23ac9a1a657c510d6d7220",
+      "probe-append.ts": "2425d9bcedc4b26966430834b6e6d5e67182dc7680ea6fae6a2ad5938d897e1c",
+      "probe-r2.log": "36adc51c6787bc1bb93203b4d3ab1fb5efa971c8bb4cc06b420d8d03de7969b4",
+      "api-projections.json": "80738df8f97d4730f9e86135b3d5e1c5a0387c5a9bd9e7026ea5691db366be71"
+    },
+    "recipe": [
+      "Extract git -c core.autocrlf=false archive exact74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613 into an isolated Linux volume; reuse matching cached node_modules. Runtime source remains unchanged.",
+      "generate.cjs appends probe-append.ts to the existing router-credentials test harness. Only synthetic fixture host/connection inputs and deterministic first credential UUID/key/default namespace are substituted. No response fields are generated by the owner driver.",
+      "Run npm test -- tests/router-credentials.test.ts -t \"captures actual 74d1 renewed owner API projections\" against disposable PostgreSQL. One focused test passes;59 unrelated tests filtered. RouterBridge/escrow/catalog are synthetic; no real provider/network subscription.",
+      "For each fixed binding: real CredentialManager create/install; age the synthetic key issuance and matching DB expiry; real reconcile revokes and cleans; HTTP inspect reports canRenew=true; authenticated HTTP rotate issues generation2; installed receipt makes it ready.",
+      "Capture normal authenticated HTTP GET list/inspect after both renewals and before consumers. Register synthetic holder sessions through real journal, acquire consumers through actual RouterConsumers with fake catalog transport, capture real session/router+inspect+session GETs.",
+      "Close each synthetic session through real endSession, capture released consumers. No API body mapping, manual canRenew fields, runtime patches, live tenant/actions, deployment authority or full holder launch/recovery claim.",
+      "Envelope observedAt is ISO rendering of captured Date.now; raw api-projections.json retained. All bootstrap/delivery/closed/eligibility objects remain exactly captured JSON."
+    ]
+  }
+}
