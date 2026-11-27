@@ -24,12 +24,27 @@ Owner decisions (2026-11-26, operator session):
 
 ## Update to a new specpulse release
 1. specpulse merges to `main`. Run `publish.yml` (workflow_dispatch on `main`) and note the run and the commit.
-2. Resolve the digest from the registry, not from logs:
-   `curl -sI -H 'Accept: application/vnd.oci.image.index.v1+json' https://registry.chifor.me/v2/specpulse/specpulse/manifests/sha-<commit> | grep -i docker-content-digest`.
+2. Resolve the digest from the registry, not from logs (accept every manifest type, so the digest is the one kubelet pulls):
+   `curl -sI -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' https://registry.chifor.me/v2/specpulse/specpulse/manifests/sha-<commit> | grep -i docker-content-digest`.
 3. Copy `deploy/manifests/manifests.yaml` from that commit over `kubernetes/apps/apps/specpulse/manifests.yaml`. Set
    `images[0].digest` in `kustomization.yaml`. Check that the specpulse README lists no new placeholder.
 4. `kubectl kustomize` the directory with a dummy Secret: no `PLACEHOLDER` may remain.
 5. Open the PR. Flux rolls it as a Recreate, and the `backup` init container copies the database before migrations.
+
+## Dependencies to keep in mind
+- **The Router seat hairpins through Cloudflare.** `https://router.chifor.me` resolves from pods to Cloudflare public addresses
+  (checked 2026-11-26), which the NetworkPolicy's 443 egress allows; it excludes 10/8, 172.16/12, 192.168/16 and
+  169.254/16. If the cluster resolver ever returned the edge VIP (192.168.0.51) for it, every Router call would fail.
+  The Router admits only its own edge component, so an in-cluster path would be an architected Router change
+  (a policy plus a cluster-local URL), not a specpulse one.
+- **Changing the seats patch:** update the `checksum/seats` value in `kustomization.yaml` in the same change (the comment
+  there gives the command), or the pod keeps the old seat until `kubectl -n specpulse rollout restart deploy/specpulse`.
+- **The ingress rule** in the rendered manifests admits namespace `edge`, pods `app.kubernetes.io/name=edge-proxy`
+  (the chart's defaults, verified against the live proxy pods on 2026-11-27). If the edge proxy is ever relabelled,
+  change the chart values in specpulse, not this copy.
+- **The DNS record** for specpulse is already in `kubernetes/edge/dns-records.json` (the renderer emits every registry host;
+  `lan_dns` only governs the gateway's local record). A private A record to the VIP serves only the admin tier, so an
+  earlier `just edge-dns-apply` for another host publishing it is harmless; the planned apply follows the LAN smoke.
 
 ## First admin (the owner)
 The password is read from stdin, never from the command line:

@@ -33,3 +33,12 @@ patches:
           route = "claude-sub-opus"
           key_file = "/run/specpulse/keys/router-key"
           billing = "included"
+  # The chart rolls the pod when seats.toml changes through the checksum/seats annotation, which it computed from the
+  # PLACEHOLDER content; the prepare init copies seats.toml only at pod start. So the annotation is set here to the
+  # sha256 of the RENDERED seats.toml (kubectl kustomize, then sha256 of data["seats.toml"]): CHANGE IT TOGETHER
+  # WITH THAT PATCH, or a Router change would wait for a manual restart. docs/runbooks/specpulse.md.
+  - target: { kind: Deployment, name: specpulse }
+    patch: |
+      - op: replace
+        path: /spec/template/metadata/annotations/checksum~1seats
+        value: "8f1cac92baccbe2ec13f7b0dd053add6f2839f17aa0eabb7df2cfd35d6e52a3c"
