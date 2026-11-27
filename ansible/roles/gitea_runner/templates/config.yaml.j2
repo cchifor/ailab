@@ -25,6 +25,9 @@ runner:
   # and drive the host Docker daemon. Keep in sync with the label passed to `act_runner register`.
   labels:
     - "{{ gitea_runner_label }}:{{ gitea_runner_label_schema }}"
+{% for label in gitea_runner_extra_labels %}
+    - "{{ label }}:{{ gitea_runner_label_schema }}"
+{% endfor %}
 
 cache:
   # Built-in Actions cache server (serves actions/cache + setup-uv/setup-node/setup-python caches).
