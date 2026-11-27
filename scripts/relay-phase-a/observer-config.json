@@ -101,7 +101,8 @@
    "relay-holder-control-plane.service": "ea017251d189982632ef9a7e8e40b1cfabbf3de8a742113da25240590e4d4550",
    "service.json": "61cbe6c3926a48ec683e5174e617c9454dfc11284967ab5e2690d1d8199d4ca1",
    "profiles.json": "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4"
-  }
+  },
+  "newJournalSha256": "8c4de447fae5ddf60b98b9cdeb0076063741d2ebc881e8f413ae04311e502d01"
  },
  "historicalRows": [
   {
