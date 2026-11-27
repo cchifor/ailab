@@ -286,7 +286,11 @@ spec:
         # projection (one account burning ~9 %/h, the next reset 2 h after its wall) is exactly this
         # shape. Same mechanics as the Claude rule: `or vector(0)` so "none below 90 %" is 0, a stale
         # reading (own reset already past: codex-4, disabled) is NOT headroom, and the `and on()` gate
-        # needs >= 2 accounts with a reading so a one-account pool stays with the per-account rules.
+        # needs >= 2 accounts with a reading so a pool that has only ever had one account stays with the
+        # per-account rules. The gate counts stale readings ON PURPOSE (as Claude's does, #1432): one
+        # usable account plus a disabled one IS a pool with no fallback - re-enable the account, add
+        # capacity, or delete the dead account so its series goes away. Excluding stale readings from
+        # the gate would leave exactly that pool with NO warning, now that per-account Codex rules are info.
         - alert: LlmRouterCodexPoolHeadroomLow
           expr: |
             (

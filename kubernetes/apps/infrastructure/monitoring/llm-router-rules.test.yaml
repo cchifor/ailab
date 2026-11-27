@@ -1106,6 +1106,10 @@ tests:
         values: "600x60"
     alert_rule_test:
       # time() starts at 0 in promtool: the 600 s reset is only PAST from 10m, so the 30m hold ends at 40m.
+      # 39m proves the stale account counted as headroom until its reset passed (pending from 10m, not 0m).
+      - eval_time: 39m
+        alertname: LlmRouterCodexPoolHeadroomLow
+        exp_alerts: []
       - eval_time: 45m
         alertname: LlmRouterCodexPoolHeadroomLow
         exp_alerts:
