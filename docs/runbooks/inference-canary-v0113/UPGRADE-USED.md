@@ -15,10 +15,15 @@ rename or archive native homes to make that old state appear empty.
 
 The operator must have a qualified successor holder, published archive/image
 receipts and independent evidence that it supports the unchanged published Pi
-runtime and profiles. This document assigns no release version or artifact pin.
-Use the existing exact installer inputs with only the separately reviewed
-holder/image changes and the state-path overrides below. Retain the connector,
-Pi and renderer pins unless a separate compatibility review requires a change.
+runtime and profiles. The reviewed [successor inputs](holder-used-handoff-inputs.json)
+select holder v0.13.4/source `64dc50f47a4867a6d9a7afc2e7d5ae24068c59af`
+from [release2278](https://git.chifor.me/cchifor/relay/releases/tag/v0.13.4).
+Authenticate its [deployment receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.13.4/deployment-images-152719.json)
+(SHA256 `e7c76bb384cc575093060a42dd2748d2ad89317b688f133e39d03a5c89b218e6`)
+and control-plane manifest before staging. The input file retains the Pi v0.13.1
+archive, connector and profile pins; renderer inputs are unchanged.
+The v0.13.4 image is the holder installer. It does not change the deployed hub's
+v0.13.2/source `74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613`.
 
 The split is:
 
@@ -131,7 +136,9 @@ recovery. A missing `complete.json` cannot authorize the next step.
 
 ## Stage through the normal role, without activation
 
-Use the reviewed published holder installation inputs. Override only:
+Use [holder-used-handoff-inputs.json](holder-used-handoff-inputs.json), not the
+historical `holder-inputs.json`. Supply the actual preparation values in a
+separate private operator overlay, applied after that input file. Override only:
 
 ```yaml
 relay_holder_start: false
@@ -140,6 +147,10 @@ relay_holder_profile_state: /home/c4/.local/state/relay-holder
 relay_holder_handoff_receipt: /home/c4/.config/relay-holder/used-handoffs/PREPARATION_UUID/complete.json
 relay_holder_handoff_receipt_sha256: OBSERVED_COMPLETE_RECEIPT_SHA256
 ```
+
+The preparation UUID, path and receipt hash come from the completed helper run.
+Placeholders are not installation inputs. Keep `relay_holder_start:false` in
+both files; this staging operation does not authorize activation or acceptance.
 
 The role first transfers the self-contained verifier and authenticates this
 receipt, exact scope, old retained evidence, original profile bytes and empty

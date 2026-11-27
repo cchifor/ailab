@@ -23,16 +23,21 @@
   const COMMUNICATION_TOOL = "mcp__relay__relay_messages_read";
   const PROFILES_SHA256 =
     "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4";
-  // Filled only from the corrected holder's authenticated publication and
-  // retained-Pi qualification. A debug binary cannot qualify this input.
-  const QUALIFIED_HOLDER = null;
+  // Authenticated v0.13.4 publication; actual published-holder controls and
+  // preserving state handoff passed with the retained published Pi runtime.
+  const QUALIFIED_HOLDER = {
+    release: "v0.13.4",
+    source: "64dc50f47a4867a6d9a7afc2e7d5ae24068c59af",
+    binarySha256:
+      "d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926",
+  };
   // Existing revision-1 profiles stay unchanged.
   // Qualification does not supply a deployed hub, credentials or owner window.
   const QUALIFIED_INPUTS = true;
-  // Published holder 2604 appends a communication block to Pi local commands,
-  // which the published launcher rejects. Keep live entry points disabled until
-  // corrected holder artifacts and a preserving post-use handoff are qualified.
-  const HOLDER_CONTROLS_QUALIFIED = false;
+  // The offline handoff used this published binary on both sides with synthetic
+  // services. Fresh installed pins, host preservation and owner authority are
+  // still required by the public replacement checkpoints below.
+  const HOLDER_CONTROLS_QUALIFIED = true;
   const CONFIGURATION_CHANGED_NOTICE =
     "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used.";
   const HOST = "b3b1be1a-275c-4a2e-b515-428b39c43171";

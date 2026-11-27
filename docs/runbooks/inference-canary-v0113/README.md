@@ -1,30 +1,57 @@
 # Exact dev-worker-1 Pi canary inputs
 
-**Current operational hold (2026-11-27): Phase A is not runnable.** The
+**Published and offline-qualified successor (2026-11-27); operator handoff pending.**
+Holder v0.13.4, source `64dc50f47a4867a6d9a7afc2e7d5ae24068c59af`,
+was published in [run152719](https://git.chifor.me/cchifor/relay/actions/runs/152719).
+Its Linux amd64 binary SHA256 is
+`d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926`.
+Use [holder-used-handoff-inputs.json](holder-used-handoff-inputs.json) and
+[UPGRADE-USED.md](UPGRADE-USED.md), with the separate actual preparation-UUID
+and receipt overlay. Historical `holder-inputs.json` still selects v0.13.1.
+
+Actual published-holder controls passed one case (nine filtered), including
+four controls, 13 malformed refusals and the same pending inbox ID reaching an
+ordinary prompt. Published-holder preserving handoff passed one case, with two
+synthetic requests, fresh delivery/readiness, old-resume refusal and retained
+old state. Both sides of that handoff use the new published binary; this is not
+an old2604-to-new runtime migration proof. Systemd and connector-lock observations
+are fixture seams. Reconciliation proves synthetic dispatch, not Router settlement.
+These results do not establish operator staging, owner authority or live acceptance.
+The [owner procedure](OWNER-PHASE-A.md) records the exact qualification paths
+and hashes; publication and those offline checks do not complete the live plan.
+
+Retain Pi source `2604c41b69c5d9c50a3324545a51f0bfa38435a0`, manifest
+`d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d`,
+and profile SHA256 `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`.
+Only the reviewed stopped-run replacement can be enabled after final driver
+qualification; initial **Start phase A** remains disabled. Fresh operator
+handoff, deployment readback, owner window and credential delivery remain required.
+
+**Historical control hold, resolved by the successor above:** the
 published holder at source `2604c41b69c5d9c50a3324545a51f0bfa38435a0` appends
 an inbox reminder to local slash commands as a second ACP text block; the
 pinned Pi launcher rejects that shape. Correct renewal
 metadata and passing API contract tests do not qualify those holder controls.
-The driver keeps `HOLDER_CONTROLS_QUALIFIED = false` and
-`QUALIFIED_HOLDER = null`. The corrected holder artifact is unassigned; do not
-change those inputs locally or execute the candidate workflow below. The Pi
+The driver previously kept `HOLDER_CONTROLS_QUALIFIED = false` and
+`QUALIFIED_HOLDER = null` until published qualification. Do not change those
+inputs locally. The Pi
 runtime remains source2604 and the revision-1 profile file remains SHA256
 `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`.
 
-Resumption requires a published, qualified corrected holder, a reviewed
+Resumption requires the published, qualified corrected holder and reviewed
 post-use handoff that preserves the old journal, native homes and seal intact,
 and reviewed replacement inputs. Its new holder uses a fresh sibling state
 directory, a new journal and a new incarnation. Each new identity must differ
 from its respective predecessor; the new journal and incarnation may equal
-one another. No corrected holder pin is declared here. This holder has already
+one another. The successor pin is recorded above. The old holder has already
 run commands; the [idle upgrade helper](UPGRADE-IDLE.md) is ineligible.
 Do not erase retained
 state, replay that helper or reset the saved report, marker identities or the
 stopped run's **one prompt and two attempts**. The remainder of this packet is
-candidate procedure and historical evidence, not a runnable handoff; see the
-[owner procedure's hold and handoff](OWNER-PHASE-A.md#before-start) before use.
+reviewed procedure and historical evidence, not proof of live handoff; see the
+[owner procedure](OWNER-PHASE-A.md#before-start) before use.
 
-The candidate handoff binds an actual preparation UUID to
+The preserving handoff binds an actual preparation UUID to
 `/home/c4/.local/state/relay-holder-handoff-<preparationId>` and the receipt
 `/home/c4/.config/relay-holder/used-handoffs/<preparationId>/complete.json`,
 including that receipt's SHA256. Fresh operator evidence must identify the
@@ -52,9 +79,10 @@ The first communication correction merged in
 pins expired on November 26. The [post-expiry owner replacement](OWNER-PHASE-A.md#review-the-known-stopped-run-replacement)
 targets reviewed Relay release source `74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613`
 from [PR717](https://git.chifor.me/cchifor/relay/pulls/717), with offline checks
-against that actual pin. Live use still requires this packet's normal review and
-merge, successful release publication, the reviewed hub rollout and fresh
-deployment verification, separate owner renewals and an explicit owner window.
+against that actual pin. The operator rollout/readback in
+[PR2042](https://git.chifor.me/cchifor/ailab/pulls/2042) confirms that hub source.
+Live use still requires this packet's normal review and merge, fresh deployment
+verification, separate owner renewals and an explicit owner window.
 The stopped run's one prompt and two attempts carry forward without resetting
 its report or markers. Follow the [scoped communication-read rule](LIVE-ACCEPTANCE.md#scoped-relay-communication-reads);
 it adds no budget, automatic approval or authority to resume stopped work.
@@ -119,7 +147,7 @@ acceptance remain pending. Prior revision3 root/schema proof and the unchanged
 runtime's five synthetic wire cases remain evidence for their stated scope;
 none is live acceptance or authority to launch.
 
-The deployed hub remains v0.13.0/source
+At that historical first-registration stage, the deployed hub was v0.13.0/source
 `e843921b7cff76406b7da0b5b35cf653c7e458c5`, with the
 [schema93 rollout recorded](https://git.chifor.me/cchifor/ailab/pulls/2009#issuecomment-142980).
 The required Router correction is merged source
@@ -156,7 +184,7 @@ not a requirement to ask again for the same covered scope. Other changes are
 not covered. No routes, grants, identities, output/time budgets or Qwen effort
 capability may be added under this decision.
 
-Published v0.13.1 successor pins (JSON inputs remain authoritative):
+Historical v0.13.1 holder pins and retained Pi pins (original JSON inputs remain authoritative):
 
 | Item | Exact value |
 | --- | --- |
@@ -286,7 +314,7 @@ canary used [UPGRADE-IDLE.md](UPGRADE-IDLE.md): normal pause/seal, stopped
 services, exact old-file/journal proof, four-file backup and a role run with
 `start:false` before activation. Neither procedure is eligible after the
 recorded commands.
-The current candidate [post-use handoff](OWNER-PHASE-A.md#before-start) keeps
+The reviewed [post-use handoff](OWNER-PHASE-A.md#before-start) keeps
 that old state and seal intact and qualifies a separate new state directory;
 it is not an instruction to empty a native-home directory or release the old
 seal.

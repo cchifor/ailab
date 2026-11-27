@@ -1,36 +1,75 @@
 # Owner-run phase A
 
-**Current operational hold (2026-11-27): do not run this driver.** The published
+**Published and offline-qualified successor (2026-11-27); operator handoff pending.**
+Holder v0.13.4, source `64dc50f47a4867a6d9a7afc2e7d5ae24068c59af`,
+was published in [run152719](https://git.chifor.me/cchifor/relay/actions/runs/152719).
+Its Linux amd64 binary SHA256 is
+`d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926`.
+The [release receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.13.4/deployment-images-152719.json)
+and [holder-used-handoff-inputs.json](holder-used-handoff-inputs.json) bind the
+installer image and archive. Use [UPGRADE-USED.md](UPGRADE-USED.md) with the
+separate actual preparation-UUID/receipt overlay; historical `holder-inputs.json`
+still selects v0.13.1.
+
+Actual published-holder controls passed one case (nine filtered): four exact
+controls, 13 malformed refusals, inbox-ID preservation and zero MCP/permission
+calls. Published-holder preserving handoff passed one case with two synthetic
+requests, fresh delivery/readiness, old-resume refusal and old-state preservation.
+That test uses the new published binary on both sides, not an old2604-to-new
+runtime migration. Systemd and connector-lock observations are fixture seams;
+reconciliation proves synthetic dispatch, not real Router settlement. Operator
+staging, fresh identity readbacks and live acceptance remain unproven by these tests.
+
+Qualification records in the Relay workspace are
+`.data/v0134-published-controls-20261127-r2/evidence/qualification.json`
+(SHA256 `a41e8bbd4a022b72095a0a778cf8b56de4b3adac0e86ec9fdc9fa439bb52b022`)
+and `.data/v0134-published-handoff-20261127T092434Z/evidence/qualification.json`
+(SHA256 `1d3eb98c160440d702eb6c9df82a1de5c575fc5520a6e64ef0a2fcefe79f477e`).
+The controls run's earlier Vitest startup failure is retained separately; no
+case ran in that attempt. The passing attempt changed only fixture HOME and
+the recipe mount, with the same authenticated artifacts and frozen test.
+
+The actual owner-driver module passed 99 offline tests plus its Python wrapper.
+The public stopped-run replacement exercises three phases and five launches,
+checks delivery before prompting, retains the predecessor and its accounting,
+and refuses stale or mismatched handoff evidence. These simulated API/operator
+responses qualify the driver contract, not owner authentication or live providers.
+The local record is `.data/pi-owner-public-replacement-qualification-20261127-r1.json`
+in the implementation workstation's Relay checkout.
+
+The reviewed driver now pins this holder and lifts its control-qualification
+hold. Only the known stopped-run replacement is eligible; initial **Start phase A**
+remains disabled. Final driver checks, normal review/merge and all fresh operator
+and owner checkpoints below still apply. Do not edit qualification inputs locally.
+
+**Historical control hold, resolved by this successor:** the published
 holder at source `2604c41b69c5d9c50a3324545a51f0bfa38435a0` appends an inbox
 reminder to local slash commands as a second ACP text block; the pinned Pi
 launcher rejects that shape. The renewal-metadata and
 actual-API projection qualification below remains evidence only for that
 boundary. It does not qualify the complete Phase A workflow. The separate
-`HOLDER_CONTROLS_QUALIFIED = false` gate refuses the public start entry and
-disables the Start and replacement controls in the panel.
-`QUALIFIED_HOLDER = null`: the corrected holder artifact is not assigned.
-`QUALIFIED_INPUTS` does not override either condition. Do not edit these inputs
-locally.
+`HOLDER_CONTROLS_QUALIFIED = false` gate previously refused the public start entry
+while `QUALIFIED_HOLDER = null`. Renewal/API qualification alone could not lift
+that hold; the published-holder evidence above addresses it.
 
-Before this procedure can become runnable, qualify and publish a corrected
-holder and review its replacement inputs together with a post-use upgrade
+Use the qualified published holder and reviewed replacement inputs with a post-use
 handoff that preserves the old journal, native homes and seal intact. A fresh
 sibling state directory receives the new incarnation and journal; it does not
-reuse or empty the old root. No corrected holder artifact pin is supplied by
-this hold notice. The old [stopped-idle helper](UPGRADE-IDLE.md) requires a
+reuse or empty the old root. The old [stopped-idle helper](UPGRADE-IDLE.md) requires a
 holder that has never run a command or session; this holder is ineligible.
 Do not rerun that helper or
 erase retained state to meet its conditions. Preserve the stopped report,
 operation IDs, marker identities and the **one prompt/two attempts** already
 charged.
 
-Everything below is candidate procedure or historical evidence until that
-qualification and reviewed handoff are complete. Existing publication,
-deployment, credential-renewal and owner-window requirements still apply;
-their completion alone does not lift this holder-control hold.
+Everything below remains a procedure or historical evidence, not proof of an
+executed operator handoff. Deployment, credential-renewal and owner-window
+requirements still apply; offline qualification does not authorize a launch.
 
 This packet retains the published **v0.13.1 Pi runtime** at source
 `2604c41b69c5d9c50a3324545a51f0bfa38435a0` and approved profile revision 1.
+The retained Pi manifest SHA256 is
+`d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d`.
 The profile file SHA256 remains
 `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`.
 Historical v0.13.1 holder actual-root readiness, compiled e843 schema checks
@@ -49,8 +88,9 @@ This post-expiry successor targets renewal-capable hub source
 Its metadata paths are qualified offline using this actual source pin;
 `QUALIFIED_INPUTS` does not
 establish publication, deployment, owner authority or a live acceptance result.
-Before use, require successful release publication, the reviewed hub rollout and
-the operator's fresh deployment readback for that exact source. The bootstrap
+The operator rollout/readback in [PR2042](https://git.chifor.me/cchifor/ailab/pulls/2042)
+confirms that deployed hub source. Before use, still require the operator's fresh
+deployment readback for that exact source. The bootstrap
 then verifies both renewed credential references through the normal API before
 any replacement launch. Do not edit the source pin or qualification flag locally.
 The earlier merged 7dff6049 driver was qualified only for the original credentials
@@ -69,8 +109,9 @@ handoff and router rollout below. Do not run it against the old e843 holder,
 which drops Pi's tool-input description.
 The historical report names the e843 hub. The successor requires the separately
 deployed renewal-capable hub named by `RUN_SOURCE`; schema 93, retained Pi and
-profile inputs remain unchanged. The corrected holder is a separate unassigned
-input. The operator must verify the hub deployment before the credential
+profile inputs remain unchanged. The corrected v0.13.4 holder is a separate
+artifact and does not change the hub source. The operator must verify the hub
+deployment before the credential
 metadata review. An API response is not an independent
 measurement of the deployed binary.
 An empty permission description is a stop, never an approval shortcut. Do not
@@ -78,9 +119,8 @@ edit pins, revisions, qualification flags or run UUIDs locally.
 
 The owner can paste the entire reviewed [owner-phase-a.js](owner-phase-a.js) into
 the browser console at `https://relay.chifor.me`. It installs a panel without
-making requests, with Start and replacement held as described above. Once the
-corrected holder inputs and handoff are qualified and reviewed, only the
-stopped-run replacement described below can be enabled; the initial
+making requests. With the qualified holder pins, only the known
+stopped-run replacement described below is eligible; the initial
 **Start phase A** button stays disabled even if browser storage is empty.
 After its explicit review and checkpoints, the driver
 runs Codex lifecycle, Qwen lifecycle, then fresh Codex effort, in that order.
@@ -124,8 +164,10 @@ The operator must provide the
 current deployment, route and new-holder handoff, with the previous session
 closed and no work in flight. The [original activation](ACTIVATE-CODEX-QWEN.md)
 readbacks describe the earlier empty-holder startup; they do not authorize
-restarting that old root. Use the candidate preserving handoff below only after
-its corrected inputs qualify. Credential rendering and installation for
+restarting that old root. Use [UPGRADE-USED.md](UPGRADE-USED.md) and the new
+[holder-used-handoff-inputs.json](holder-used-handoff-inputs.json), with the
+actual operator preparation-UUID/receipt overlay. Credential rendering and
+installation for
 the replacement occur after its launch is offered and must complete before its
 first prompt. There is no probe launch. Missing or drifted profile definitions
 stop the driver; it does not approve or replace a profile.
@@ -146,8 +188,8 @@ Keep the old state and maintenance seal intact throughout this handoff.
 
 `qualifiedRelease`, `holderSource` and `holderBinarySha256` must match the
 corrected published holder's reviewed `QUALIFIED_HOLDER` inputs
-(`release`, `source`, `binarySha256`). Those inputs are currently null, so this
-checkpoint cannot yet pass. Historical v0.13.1 holder pins are not a fallback.
+(`release`, `source`, `binarySha256`): v0.13.4 and the full source/binary hashes
+recorded above. Historical v0.13.1 holder pins are not a fallback.
 `profilesSha256` must still equal the unchanged revision-1 profile SHA256 above.
 Measure the installed files; a release label alone is insufficient.
 

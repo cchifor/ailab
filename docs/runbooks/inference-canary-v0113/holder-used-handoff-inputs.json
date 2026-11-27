@@ -1,0 +1,27 @@
+{
+  "relay_holder_enabled": true,
+  "relay_holder_start": false,
+  "relay_holder_image": "registry.chifor.me/relay/control-plane@sha256:7fce02539992382d946ce523ead109cd3a325a8112fe60b619ed783cef7295ed",
+  "relay_holder_source_commit": "64dc50f47a4867a6d9a7afc2e7d5ae24068c59af",
+  "relay_holder_binary_sha256": "d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926",
+  "relay_holder_connector_version": "0.11.3",
+  "relay_holder_connector_sha256": "bc2a0b69aa763ffcf9182d1d6ffc8fc25862cf325d7baa66982d989a4a1defe6",
+  "relay_holder_connector_source": "/evidence/v0.11.3/relay-connector-linux-amd64",
+  "relay_holder_archives": [
+    {
+      "source": "/evidence/v0.13.4/relay-holder-64dc50f47a4867a6d9a7afc2e7d5ae24068c59af.tar.gz",
+      "component": "holder",
+      "sha256": "b6823c3db3687d0de3f5e992ce0800372ab668458f4b5c81b6c044c89773b17d",
+      "manifestSha256": "216d338b6cfb8bddfb1ccc5f7bbb999386084d4257de9a9e9639e348e8499caf"
+    },
+    {
+      "source": "/evidence/v0.13.1/relay-pi-linux-x64-2604c41b69c5d9c50a3324545a51f0bfa38435a0.tar.gz",
+      "component": "pi-linux-x64",
+      "sha256": "096ea187814a4332898751ae4e5dbfaac2455369624d30d6e9a2190c8f7df4cd",
+      "manifestSha256": "d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d",
+      "nodeVersion": "22.23.2"
+    }
+  ],
+  "relay_holder_profiles_source": "/repo/docs/runbooks/inference-canary-v0113/profiles.json",
+  "relay_holder_profiles_sha256": "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4"
+}

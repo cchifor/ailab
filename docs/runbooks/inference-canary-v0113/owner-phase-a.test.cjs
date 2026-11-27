@@ -11,27 +11,31 @@ const driverSource = fs.readFileSync(
   path.join(__dirname, "owner-phase-a.js"),
   "utf8",
 );
-// Metadata, lifecycle and pure handoff cases exercise the actual pinned module.
-// One retained historical owner-decline case simulates removal of the holder
-// hold; it does not qualify the known-broken published holder.
+// Positive entry, metadata, lifecycle and handoff cases use the actual module.
+// Only negative hold cases evaluate an explicitly disabled module variant.
+// Published v0.13.4 pins bind the separately qualified holder artifacts.
+// These actual-module tests run offline; they do not prove live readiness.
+const PUBLISHED_HOLDER_TEST_PINS = Object.freeze({
+  release: "v0.13.4",
+  source: "64dc50f47a4867a6d9a7afc2e7d5ae24068c59af",
+  binarySha256:
+    "d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926",
+});
 assert.equal(a.RUN_SOURCE, "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613");
-assert.equal(a.HOLDER_CONTROLS_QUALIFIED, false);
-const historicalWrapperModule = { exports: {} };
+assert.equal(a.HOLDER_CONTROLS_QUALIFIED, true);
+assert.match(PUBLISHED_HOLDER_TEST_PINS.binarySha256, /^[a-f0-9]{64}$/);
+const holderDisabledModule = { exports: {} };
+assert.match(driverSource, /const HOLDER_CONTROLS_QUALIFIED = (?:true|false);/);
 vm.runInThisContext(
   "(function(module){" +
     driverSource.replace(
+      /const HOLDER_CONTROLS_QUALIFIED = (?:true|false);/,
       "const HOLDER_CONTROLS_QUALIFIED = false;",
-      "const HOLDER_CONTROLS_QUALIFIED = true;",
     ) +
     "\n})",
-  { filename: "historical-entrypoint-simulation.js", timeout: 1000 },
-)(historicalWrapperModule);
-function historicalWrapper(runner) {
-  Object.setPrototypeOf(
-    runner,
-    historicalWrapperModule.exports.Runner.prototype,
-  );
-}
+  { filename: "disabled-holder-entrypoint.js", timeout: 1000 },
+)(holderDisabledModule);
+const holderDisabled = holderDisabledModule.exports;
 const heldModule = { exports: {} };
 vm.runInThisContext(
   "(function(module){" +
@@ -756,49 +760,49 @@ test("new-principal snapshots cannot rewrite or delta against the old predecesso
   );
 });
 
+function predecessorResponse(prior, c) {
+  assert.equal(c.method, "GET", "Replacement preflight must not dispatch work");
+  const prefix = "/api/agent-sessions/" + a.STOPPED_SESSION;
+  if (c.path === prefix + "/control") return { lease: null };
+  if (c.path.startsWith(prefix + "/operations/")) {
+    const op = prior.commands.find((o) => c.path.endsWith(o.body.operationId));
+    assert(op);
+    return {
+      command: {
+        id: OP,
+        operation_id: op.body.operationId,
+        session_id: a.STOPPED_SESSION,
+        kind: op.body.kind,
+        generation: 1,
+        state: "completed",
+        receipt: {
+          status: "completed",
+          result:
+            op.body.kind === "prompt"
+              ? { stopReason: "end_turn" }
+              : { cancelSent: true },
+        },
+      },
+    };
+  }
+  if (c.path === "/api/agent-permissions/" + a.STOPPED_PERMISSION)
+    return {
+      id: a.STOPPED_PERMISSION,
+      session_id: a.STOPPED_SESSION,
+      generation: 1,
+      state: "resolved",
+      decision: { outcome: "cancelled" },
+      context: { title: "Allow mcp__relay__relay_messages_read?" },
+    };
+  assert.equal(c.path, prefix, "Unexpected predecessor endpoint");
+  return session({ id: a.STOPPED_SESSION, state: "closed" });
+}
+
 async function replacementHarness({ drift, approval } = {}) {
   const raw = JSON.stringify(stoppedReport(), null, 2);
   const prior = a.stoppedPredecessor(raw);
   const h = harness((c) => {
-    assert.equal(
-      c.method,
-      "GET",
-      "Replacement preflight must not dispatch work",
-    );
-    let value;
-    if (c.path.endsWith("/control")) value = { lease: null };
-    else if (c.path.includes("/operations/")) {
-      const op = prior.commands.find((o) =>
-        c.path.endsWith(o.body.operationId),
-      );
-      assert(op);
-      value = {
-        command: {
-          id: OP,
-          operation_id: op.body.operationId,
-          session_id: a.STOPPED_SESSION,
-          kind: op.body.kind,
-          generation: 1,
-          state: "completed",
-          receipt: {
-            status: "completed",
-            result:
-              op.body.kind === "prompt"
-                ? { stopReason: "end_turn" }
-                : { cancelSent: true },
-          },
-        },
-      };
-    } else if (c.path.startsWith("/api/agent-permissions/"))
-      value = {
-        id: a.STOPPED_PERMISSION,
-        session_id: a.STOPPED_SESSION,
-        generation: 1,
-        state: "resolved",
-        decision: { outcome: "cancelled" },
-        context: { title: "Allow mcp__relay__relay_messages_read?" },
-      };
-    else value = session({ id: a.STOPPED_SESSION, state: "closed" });
+    const value = predecessorResponse(prior, c);
     if (drift) drift(value, c);
     return value;
   });
@@ -1108,13 +1112,12 @@ test("replacement declines or changed closure/receipts/permission never dispatch
   }
 });
 
-test("historical entry-point simulation preserves the raw predecessor when owner declines", async () => {
+test("actual public entry preserves the raw predecessor when owner declines", async () => {
   const h = await renewalReviewHarness({
     approval: (v) => {
       v.confirmReplacement = false;
     },
   });
-  historicalWrapper(h.runner);
   h.runner.env.load = () => h.raw;
   // Exercise the actual wrapper, not merely a pre-populated predecessor state.
   delete h.runner.state.predecessor;
@@ -1211,7 +1214,7 @@ test("replacement final cleanup requires the old sixth launch as well as the fiv
   assert.notEqual(missing.runner.state.finalRevocation.status, "confirmed");
 });
 
-test("holder hold disables replacement for every saved-report state without effects", () => {
+test("explicit disabled-holder fixture blocks replacement for every saved-report state without effects", () => {
   for (const [raw, savedSuccessor] of [
     [null],
     ["{invalid"],
@@ -1240,7 +1243,7 @@ test("holder hold disables replacement for every saved-report state without effe
       return node;
     };
     const body = createElement("body");
-    a.mount({
+    holderDisabled.mount({
       location: { origin: a.ORIGIN },
       crypto: webcrypto,
       document: { createElement, body, getElementById: () => null },
@@ -1305,9 +1308,10 @@ test("requiring the browser script does not dispatch work", () => {
   assert.equal(h.saves.length, 0);
   assert.equal(h.runner.state.completed, false);
 });
-test("actual holder hold rejects both entry points before storage, owner questions or requests", async () => {
+test("explicit disabled-holder fixture rejects both entry points before storage, owner questions or requests", async () => {
   for (const entry of ["startRun", "replaceStopped"]) {
     const h = harness();
+    h.runner = new holderDisabled.Runner(h.runner.env);
     const initial = clone(h.runner.state);
     h.runner.env.load = () => {
       throw Error("Hold must precede storage read");
@@ -1357,7 +1361,7 @@ test("unqualified draft start refuses before network, checkpoints or saved-run m
 });
 function preservingHandoffFixture() {
   // Synthetic pins exercise the pure validator only. They are not publication
-  // evidence and never enable a Runner or replace the production null pins.
+  // evidence and never enable a Runner or replace the production pins.
   const pins = {
     release: "v9.9.9",
     source: "a".repeat(40),
@@ -2904,12 +2908,16 @@ function phaseServer({
   clocksWithin5s = true,
   approvedRevision = 1,
   renewal = null,
+  preloadRenewal = true,
+  holderId = a.HOLDER,
+  journalId = a.HOLDER,
 } = {}) {
   const projection =
     renewal &&
     a.renewedCredentials(renewal.inventory, renewal.details, POST_EXPIRY);
   const profiles = projection ? projection.profiles : a.PROFILES;
   let clock = renewal ? POST_EXPIRY : NOW,
+    trajectorySince = clock,
     serial = 100,
     sequence = 0;
   const sessions = new Map(),
@@ -2917,6 +2925,7 @@ function phaseServer({
     commands = new Map(),
     permissions = new Map();
   const calls = [],
+    saves = [],
     checkpoints = [],
     attempts = [],
     consumerReads = [],
@@ -2968,7 +2977,7 @@ function phaseServer({
         namespace: "default",
         principal: "key:" + pp.key,
         route: "canary-pi-" + provider,
-        since: renewal ? POST_EXPIRY : NOW,
+        since: trajectorySince,
       },
       requestedAt: clock,
       observedAt: clock + 1,
@@ -3069,7 +3078,7 @@ function phaseServer({
       clock += ms;
     },
     load: () => null,
-    save: () => {},
+    save: (state) => saves.push(clone(state)),
     ask: async (title, instructions, validate) => {
       checkpoints.push(title);
       clock += 20;
@@ -3187,8 +3196,8 @@ function phaseServer({
           cwd: "/home/c4/.local/state/relay-holder/workspaces/" + pp.id,
           state: "pending",
           session_id: sid,
-          holder_id: a.HOLDER,
-          holder_journal_id: a.HOLDER,
+          holder_id: holderId,
+          holder_journal_id: journalId,
           native_recovery_version: 2,
           expires_at: date(clock + 120000),
           resume_from: previous?.id || null,
@@ -3522,7 +3531,7 @@ function phaseServer({
       };
     },
   });
-  if (projection) {
+  if (projection && preloadRenewal) {
     runner.profiles = projection.profiles;
     runner.effectiveExpiry = projection.expiresAt;
     runner.state.successorCredentials = projection;
@@ -3538,8 +3547,420 @@ function phaseServer({
     effects,
     attempts,
     consumerReads,
+    saves,
+    advance: (ms) => {
+      clock += ms;
+    },
+    setTrajectorySince: (since) => {
+      trajectorySince = since;
+    },
   };
 }
+
+function publicReplacementHarness({
+  mutateHandoff,
+  expireDuringHandoff = false,
+  refuseDelivery = false,
+} = {}) {
+  const renewal = renewedFixture("ready");
+  const f = phaseServer({
+    renewal,
+    preloadRenewal: false,
+    // Independently supplied server identities, never read back from Runner.
+    // A new root can legitimately have equal incarnation and journal UUIDs.
+    holderId: SID,
+    journalId: SID,
+  });
+  const raw = JSON.stringify(stoppedReport(), null, 2);
+  const prior = a.stoppedPredecessor(raw);
+  const trace = [],
+    entry = {};
+  const fetch = f.runner.env.fetch,
+    ask = f.runner.env.ask;
+  f.runner.env.load = () => raw;
+  f.runner.env.fetch = async (url, init) => {
+    const c = {
+      path: new URL(url, a.ORIGIN).pathname,
+      method: init.method,
+      body: init.body && JSON.parse(init.body),
+    };
+    trace.push({ kind: "request", ...c });
+    if (
+      c.path.startsWith("/api/agent-sessions/" + a.STOPPED_SESSION) ||
+      c.path.startsWith("/api/agent-permissions/" + a.STOPPED_PERMISSION)
+    ) {
+      f.calls.push(c);
+      f.advance(5);
+      const result = predecessorResponse(prior, c);
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify(result),
+      };
+    }
+    return fetch(url, init);
+  };
+  f.runner.env.ask = async (title, instructions, validate, timeout) => {
+    const accept = (value) => {
+      const result = validate(value);
+      trace.push({ kind: "checkpoint-accepted", title });
+      return result;
+    };
+    let value;
+    if (title === "Review already-renewed phase-A credentials") {
+      assert.equal(f.runner.state.successorCredentials, undefined);
+      assert(timeout <= 120000);
+      value = {
+        confirmMetadataReview: true,
+        reportDownloaded: true,
+        operatorVerified: true,
+        deploymentVerified: true,
+        observedUtc: date(f.runner.now()),
+        hubSource: a.RUN_SOURCE,
+      };
+    } else if (
+      title === "Confirm exact renewed credentials for all three phases"
+    ) {
+      value = {
+        confirmRenewedCredentials: true,
+        ...a.renewedCredentials(
+          renewal.inventory,
+          renewal.details,
+          f.runner.now(),
+        ),
+      };
+    } else if (
+      title === "Assign one bounded replacement for the stopped Codex run"
+    ) {
+      f.advance(6000);
+      const rows = ["338869f5-complete", "811cab9f-cancelled"].map((id, i) => ({
+        ...trajectoryRow(),
+        id,
+        status: i ? "cancelled" : "complete",
+        startedAt: NOW - 50 + i,
+        endedAt: NOW - 20 + i,
+      }));
+      value = {
+        confirmReplacement: true,
+        reportDownloaded: true,
+        operatorVerified: true,
+        priorReportCanonicalSha256: f.runner.state.predecessor.canonicalSha256,
+        windowStartUtc: date(f.runner.now()),
+        windowEndUtc: date(f.runner.now() + 900000),
+        trajectory: trajectory(f.runner.now(), rows),
+        marker: { ...marker(), observedUtc: date(f.runner.now()) },
+      };
+      entry.window = {
+        start: Date.parse(value.windowStartUtc),
+        deadline: Date.parse(value.windowEndUtc),
+      };
+    } else if (title === "Fresh preserving-holder handoff") {
+      f.advance(expireDuringHandoff ? 900001 : 20);
+      value = {
+        holderId: SID,
+        journalId: SID,
+        oldHolderId: prior.launch.holderId,
+        oldJournalId: prior.launch.journalId,
+        preparationId: OP,
+        stateDirectory: "/home/c4/.local/state/relay-holder-handoff-" + OP,
+        handoffReceipt: {
+          path:
+            "/home/c4/.config/relay-holder/used-handoffs/" +
+            OP +
+            "/complete.json",
+          sha256: "c".repeat(64),
+        },
+        observedUtc: date(f.runner.now()),
+        qualifiedRelease: PUBLISHED_HOLDER_TEST_PINS.release,
+        holderSource: PUBLISHED_HOLDER_TEST_PINS.source,
+        holderBinarySha256: PUBLISHED_HOLDER_TEST_PINS.binarySha256,
+        profilesSha256: holderInputs.relay_holder_profiles_sha256,
+        nativeRecovery: 2,
+        nativeStateReady: true,
+        activeSessions: 0,
+        pendingCommands: 0,
+        admissionPaused: false,
+        preservedOldStateConfirmed: true,
+        operatorVerified: true,
+      };
+      if (mutateHandoff) mutateHandoff(value, f);
+      entry.handoff = clone(value);
+      // The fresh principal/window starts after the old accounting observation.
+      f.setTrajectorySince(f.runner.now());
+    } else {
+      return ask(
+        title,
+        instructions,
+        (result) =>
+          accept(
+            refuseDelivery && title.startsWith("Open complete:")
+              ? { ...result, deliveryConfirmed: false }
+              : result,
+          ),
+        timeout,
+      );
+    }
+    f.checkpoints.push(title);
+    return accept(value);
+  };
+  assert.equal(Object.getPrototypeOf(f.runner), a.Runner.prototype);
+  assert.equal(f.runner.state.predecessor, undefined);
+  assert.equal(f.runner.state.replacement, undefined);
+  assert.equal(f.runner.state.successorCredentials, undefined);
+  return { ...f, raw, prior, trace, entry };
+}
+
+test("actual public replacement uses published holder pins through all phases without resetting history", async () => {
+  const f = publicReplacementHarness();
+  await f.runner.replaceStopped();
+  assert.equal(f.runner.state.status, "phase-a-passed");
+  assert.equal(f.runner.state.phaseACompleted, true);
+  assert.equal(f.runner.state.completed, false);
+  assert.equal(f.runner.state.predecessor.raw, f.raw);
+  assert.equal(
+    f.runner.state.predecessor.canonicalSha256,
+    await a.digest(webcrypto, JSON.parse(f.raw)),
+  );
+  assert(f.saves.length > 0);
+  assert(f.saves.every((s) => s.predecessor.raw === f.raw));
+  const replacement = f.runner.state.replacement;
+  assert.equal(replacement.carriedPrompts, 1);
+  assert.equal(replacement.carriedAttempts, 2);
+  assert.equal(replacement.originalDeadline, f.prior.run.deadline);
+  assert.equal(replacement.start, f.entry.window.start);
+  assert.equal(replacement.deadline, f.entry.window.deadline);
+  assert.equal(f.runner.state.runs[0].deadline, f.entry.window.deadline);
+  assert(replacement.deadline <= f.runner.effectiveExpiry);
+  const handoffs = f.runner.state.evidence.filter(
+    (e) => e.kind === "operator-holder-handoff",
+  );
+  assert.equal(handoffs.length, 1);
+  assert.equal(f.entry.handoff.operatorVerified, true);
+  // The validator requires this input attestation but saves only its documented
+  // projection and provenance; it does not copy arbitrary input fields.
+  for (const key of [
+    "holderId",
+    "journalId",
+    "oldHolderId",
+    "oldJournalId",
+    "preparationId",
+    "stateDirectory",
+    "handoffReceipt",
+    "observedUtc",
+    "qualifiedRelease",
+    "holderSource",
+    "profilesSha256",
+    "holderBinarySha256",
+    "nativeRecovery",
+    "nativeStateReady",
+    "activeSessions",
+    "pendingCommands",
+    "admissionPaused",
+    "preservedOldStateConfirmed",
+  ])
+    assert.deepEqual(handoffs[0][key], f.entry.handoff[key]);
+  assert.equal(handoffs[0].operatorVerified, undefined);
+  assert.equal(
+    handoffs[0].provenance,
+    "operator-reported installed hashes, receipt and fresh hello; not a browser host measurement or a new acceptance window",
+  );
+  assert.equal(f.runner.holderId, SID);
+  assert.equal(f.runner.journalId, SID);
+  assert.equal(f.launches.length, 5);
+  assert.equal(f.launches.filter((l) => l.resume_from).length, 2);
+  assert(
+    f.launches.every((l) => l.holder_id === SID && l.holder_journal_id === SID),
+  );
+  assert.deepEqual(
+    f.runner.state.runs.map((r) => [r.provider, r.effort, r.prompts]),
+    [
+      ["codex", false, 12],
+      ["qwen", false, 11],
+      ["codex", true, 4],
+    ],
+  );
+  assert.equal(f.runner.state.runs[0].carriedAttempts, 2);
+  assert(
+    f.runner.state.runs.every(
+      (r) => r.status === "passed-with-live-wire-unobserved",
+    ),
+  );
+  assert(
+    f.runner.state.runs[0].firstSnapshot.scope.since >
+      replacement.priorObservation.observedAt,
+  );
+  assert.equal(replacement.priorObservation.scope.principal, "key:" + p.key);
+  assert.equal(
+    f.runner.state.runs[0].firstSnapshot.scope.principal,
+    "key:" + f.runner.profiles.codex.key,
+  );
+  const deliveries = f.runner.state.evidence.filter(
+    (e) => e.kind === "delivery",
+  );
+  assert(deliveries.length >= 5);
+  assert(deliveries.every((e) => e.credentialGeneration === 2));
+  assert(
+    [...f.sessions.values()].every(
+      (s) => s.state === "closed" && s.lease === null,
+    ),
+  );
+  assert.equal(f.effects.get(a.PROFILES.codex.run), 1);
+  assert.equal(f.effects.get(a.PROFILES.qwen.run), 1);
+  const handoffAt = f.trace.findIndex(
+    (e) => e.title === "Fresh preserving-holder handoff",
+  );
+  const launchAt = f.trace.findIndex(
+    (e) => e.method === "POST" && e.path === "/api/agent-launches",
+  );
+  const deliveryAt = f.trace.findIndex(
+    (e) => e.title === "Open complete: verify delivery before prompting",
+  );
+  const promptAt = f.trace.findIndex(
+    (e) => e.method === "POST" && e.body?.kind === "prompt",
+  );
+  assert(
+    handoffAt >= 0 &&
+      handoffAt < launchAt &&
+      launchAt < deliveryAt &&
+      deliveryAt < promptAt,
+  );
+});
+
+test("actual public replacement refuses changed handoff pins, identity, provenance and expired window before dispatch", async () => {
+  for (const [name, options, expected] of [
+    [
+      "old holder release",
+      {
+        mutateHandoff: (v) => {
+          v.qualifiedRelease = "v0.13.1";
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "wrong source",
+      {
+        mutateHandoff: (v) => {
+          v.holderSource = "a".repeat(40);
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "wrong binary",
+      {
+        mutateHandoff: (v) => {
+          v.holderBinarySha256 = "b".repeat(64);
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "old incarnation",
+      {
+        mutateHandoff: (v) => {
+          v.holderId = v.oldHolderId;
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "old journal",
+      {
+        mutateHandoff: (v) => {
+          v.journalId = v.oldJournalId;
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "different preparation receipt",
+      {
+        mutateHandoff: (v) => {
+          v.handoffReceipt.path = v.handoffReceipt.path.replace(OP, REQUEST);
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "stale observation",
+      {
+        mutateHandoff: (v, f) => {
+          v.observedUtc = date(f.runner.now() - 120000);
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "unready native state",
+      {
+        mutateHandoff: (v) => {
+          v.nativeStateReady = false;
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "expired owner window",
+      { expireDuringHandoff: true },
+      /Replacement window expired/,
+    ],
+  ]) {
+    const f = publicReplacementHarness(options);
+    await assert.rejects(f.runner.replaceStopped(), expected, name);
+    assert(f.calls.length > 0, name);
+    assert(
+      f.calls.every((c) => c.method === "GET"),
+      name,
+    );
+    assert.equal(f.launches.length, 0, name);
+    assert.equal(f.attempts.length, 0, name);
+    assert.equal(f.runner.state.predecessor.raw, f.raw, name);
+    assert.equal(
+      f.runner.state.predecessor.canonicalSha256,
+      await a.digest(webcrypto, JSON.parse(f.raw)),
+      name,
+    );
+    assert(
+      f.saves.every((s) => s.predecessor.raw === f.raw),
+      name,
+    );
+    assert.equal(f.runner.state.replacement.carriedPrompts, 1, name);
+    assert.equal(f.runner.state.replacement.carriedAttempts, 2, name);
+    assert.equal(
+      f.runner.state.replacement.deadline,
+      f.entry.window.deadline,
+      name,
+    );
+    assert.equal(f.runner.state.status, "stopped", name);
+    assert.equal(f.runner.state.completed, false, name);
+  }
+});
+
+test("actual public replacement never prompts when the post-Open delivery handoff is refused", async () => {
+  const f = publicReplacementHarness({ refuseDelivery: true });
+  await assert.rejects(f.runner.replaceStopped(), /Delivery handoff missing/);
+  assert.equal(f.launches.length, 1);
+  assert.equal(f.attempts.length, 0);
+  assert(
+    !f.calls.some(
+      (c) =>
+        c.method === "POST" &&
+        (c.body?.kind === "prompt" || c.path.includes("/agent-permissions/")),
+    ),
+  );
+  assert(
+    [...f.sessions.values()].every(
+      (s) => s.state === "closed" && s.lease === null,
+    ),
+  );
+  assert.equal(f.runner.state.predecessor.raw, f.raw);
+  assert.equal(f.runner.state.replacement.carriedPrompts, 1);
+  assert.equal(f.runner.state.replacement.carriedAttempts, 2);
+  assert.equal(f.runner.state.replacement.deadline, f.entry.window.deadline);
+  assert.equal(f.runner.state.status, "stopped");
+});
 
 test("renewed generation two runs all three phases with fresh principals and historical budget carried", async () => {
   const renewal = renewedFixture("ready"),
