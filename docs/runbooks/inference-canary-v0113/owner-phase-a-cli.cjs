@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { createAutomation } = require("./owner-phase-a-automation.cjs");
 const { createSessionFetch } = require("./owner-phase-a-socket.cjs");
+const { parseRunnerDeadline } = require("./owner-phase-a-deadline.cjs");
 
 function need(value, message) {
   if (!value) throw Error(message);
@@ -93,17 +94,7 @@ async function runCli({
         argv[2] === "--output",
       "Expected --predecessor ABS_PATH --output ABS_DIRECTORY",
     );
-    need(
-      typeof env.RUNNER_DEADLINE === "string" &&
-        /^[0-9]{13}$/.test(env.RUNNER_DEADLINE),
-      "RUNNER_DEADLINE epoch milliseconds required",
-    );
-    const deadline = Number(env.RUNNER_DEADLINE);
-    const remaining = deadline - Date.now();
-    need(
-      Number.isSafeInteger(deadline) && remaining > 0 && remaining <= 2700000,
-      "Runner deadline outside bound",
-    );
+    const deadline = parseRunnerDeadline(env.RUNNER_DEADLINE, 2700000);
     // No observer wire protocol or automatic approval is supplied by this slice.
     need(
       typeof collectCheckpoint === "function",
@@ -114,7 +105,10 @@ async function runCli({
       "Reviewed deployment observer is not linked",
     );
     const predecessorRaw = readPredecessor(argv[1]);
-    const authenticatedFetch = createSessionFetch(env.RELAY_SESSION_SOCKET);
+    const authenticatedFetch = createSessionFetch(
+      env.RELAY_SESSION_SOCKET,
+      env.RELAY_SESSION_CONTROL_SOCKET,
+    );
     need(deadline > Date.now(), "Runner deadline elapsed during preparation");
     host = createAutomation({
       directory: argv[3],

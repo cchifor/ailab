@@ -16,6 +16,7 @@ const OLD_OPERATION = "22222222-2222-4222-8222-222222222222";
 const FOREIGN = "33333333-3333-4333-8333-333333333333";
 const COOKIE = "relay_session=synthetic-proxy-session-only";
 const PROXY_SOCKET = "/run/relay-session/proxy.sock";
+const CONTROL_SOCKET = "/run/relay-session/control.sock";
 
 function request(socketPath, method, target, body) {
   return new Promise((resolve, reject) => {
@@ -56,6 +57,7 @@ async function createFixture(directory, outputDirectory) {
     "requires fresh private /run/relay-session tmpfs",
   );
   assert.equal(fs.statSync(path.dirname(PROXY_SOCKET)).mode & 0o777, 0o700);
+  assert.equal(fs.existsSync(CONTROL_SOCKET), false);
   const f = await createDirectFixture(directory, outputDirectory);
   const upstreamPath = path.join(directory, "proxy-upstream.sock");
   const trace = [],
@@ -100,6 +102,7 @@ async function createFixture(directory, outputDirectory) {
       try {
         assert.equal(req.headers.cookie, COOKIE);
         assert.equal(req.headers.authorization, undefined);
+        assert.equal(req.headers.host, "relay.chifor.me");
         if (req.method !== "GET")
           assert.equal(req.headers.origin, "https://relay.chifor.me");
         const body = raw ? JSON.parse(raw) : undefined;
@@ -205,8 +208,10 @@ async function createFixture(directory, outputDirectory) {
     ready = JSON.parse(stdout.trim().slice(6));
     assert.equal(ready.actor, ACTOR);
     assert.equal(ready.socket, PROXY_SOCKET);
+    assert.equal(ready.controlSocket, CONTROL_SOCKET);
     assert.equal(trace[0].path, "/api/agent-launches");
     assert.equal(fs.statSync(PROXY_SOCKET).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(CONTROL_SOCKET).mode & 0o777, 0o600);
   } catch (error) {
     child.kill("SIGTERM");
     const forced = setTimeout(() => child.kill("SIGKILL"), 15000);
@@ -239,7 +244,7 @@ async function createFixture(directory, outputDirectory) {
     }
     throw error;
   }
-  const fetch = createSessionFetch(PROXY_SOCKET);
+  const fetch = createSessionFetch(PROXY_SOCKET, CONTROL_SOCKET);
   const refusals = [];
   async function refused(method, target, body) {
     const before = trace.length;
@@ -299,6 +304,7 @@ async function createFixture(directory, outputDirectory) {
   return {
     ...f,
     socketPath: PROXY_SOCKET,
+    controlSocketPath: CONTROL_SOCKET,
     deadline,
     initialRefusals,
     finalRefusals,
@@ -320,6 +326,7 @@ async function createFixture(directory, outputDirectory) {
         assert.equal(logoutCount, 1);
         assert.equal(meAfterLogout, 1);
         assert.equal(fs.existsSync(PROXY_SOCKET), false);
+        assert.equal(fs.existsSync(CONTROL_SOCKET), false);
         assert.deepEqual(failures, []);
       } finally {
         clearTimeout(timer);

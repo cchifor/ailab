@@ -35,7 +35,9 @@ test(
         argv: ["--predecessor", reportFile, "--output", outputDirectory],
         env: {
           RELAY_SESSION_SOCKET: f.socketPath,
-          RUNNER_DEADLINE: String(f.deadline),
+          RELAY_SESSION_CONTROL_SOCKET: f.controlSocketPath,
+          // Match relay_operator_session.py's decimal epoch-seconds environment.
+          RUNNER_DEADLINE: String(f.deadline / 1000),
         },
         signals,
         collectCheckpoint: async (options) => {
