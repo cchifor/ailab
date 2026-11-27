@@ -179,6 +179,42 @@ class UsedHandoff(unittest.TestCase):
                 self.prepare()
             self.value['journal'][field] = saved
 
+    def test_restart_cannot_inherit_old_incarnation_seal(self):
+        path = self.state / 'journal.jsonl'
+        incarnation = str(uuid.uuid4())
+        record = dict(version=1, sequence=len(self.events) + 1, incarnation=incarnation,
+                      event=dict(kind='holder-started', version=1))
+        data = path.read_bytes() + json.dumps(record).encode() + b'\n'
+        self.put(path, data)
+        self.value['journal'].update(sha256=hashlib.sha256(data).hexdigest(), incarnation=incarnation)
+        original_files = {name: (self.home / rel).read_bytes() for name, (rel, _) in h.FILES.items()}
+        before = h.stamp(path.stat())
+        with self.assertRaisesRegex(ValueError, 'must have produced its own seal'):
+            self.prepare()
+        self.assertFalse(self.next.exists())
+        self.assertFalse(self.backup.parent.exists())
+        self.assertEqual(path.read_bytes(), data)
+        self.assertEqual(h.stamp(path.stat()), before)
+        for name, (rel, _) in h.FILES.items():
+            self.assertEqual((self.home / rel).read_bytes(), original_files[name])
+
+    def test_new_incarnation_requires_explicit_release_and_new_seal(self):
+        path = self.state / 'journal.jsonl'
+        incarnation, seal = str(uuid.uuid4()), str(uuid.uuid4())
+        tail = [dict(kind='holder-started', version=1),
+                dict(kind='holder-maintenance-seal', operationId=str(uuid.uuid4()), revision=3,
+                     expectedIncarnation=incarnation, sealId=self.seal, sealed=False),
+                dict(kind='holder-maintenance-seal', operationId=seal, revision=4,
+                     expectedIncarnation=incarnation, sealId=seal, sealed=True)]
+        data = path.read_bytes() + b''.join(json.dumps(dict(version=1, sequence=i,
+               incarnation=incarnation, event=event)).encode() + b'\n'
+               for i, event in enumerate(tail, len(self.events) + 1))
+        self.put(path, data)
+        self.value['journal'].update(sha256=hashlib.sha256(data).hexdigest(), incarnation=incarnation, sealId=seal)
+        result = self.prepare()
+        self.assertTrue(self.verify(result)['verified'])
+        self.assertEqual(path.read_bytes(), data)
+
     def test_terminal_unknown_remains_unknown_and_never_grants_recovery(self):
         self.events[3]['status'] = 'unknown'
         self.write_journal()

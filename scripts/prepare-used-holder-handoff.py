@@ -157,6 +157,7 @@ def journal_proof(data, expected, preparation_id=None):
     require(0 < len(data) <= MAX_JOURNAL and data.endswith(b'\n'), 'Invalid journal size or tail')
     require(hashlib.sha256(data).hexdigest() == expected['sha256'], 'Journal SHA mismatch')
     revision, paused, seal, current, first = 0, False, None, None, None
+    seal_incarnation = None
     operations, incarnations = set(), set()
     count = 0
     commands, sessions, opened = {}, set(), set()
@@ -209,15 +210,18 @@ def journal_proof(data, expected, preparation_id=None):
                 require(not sessions and all(s != 'accepted' for s in commands.values()),
                         'Seal requires drained sessions and commands')
                 seal = seal_id
+                seal_incarnation = incarnation
             else:
                 require(seal == seal_id, 'Invalid seal release')
                 seal = None
+                seal_incarnation = None
         operations.add(operation)
         revision = event['revision']
     require(not sessions and all(s != 'accepted' for s in commands.values()), 'Undrained journal')
     require(first == expected['journalId'] and current == expected['incarnation'],
             'Journal identity mismatch')
     require(paused and seal == expected['sealId'], 'Holder must remain durably paused and sealed')
+    require(seal_incarnation == current, 'Final holder incarnation must have produced its own seal')
     require(preparation_id not in operations, 'Preparation operation already appears in the journal')
     return dict(journalId=first, incarnation=current, sealId=seal,
                 admissionRevision=revision, records=count, sha256=expected['sha256'],
