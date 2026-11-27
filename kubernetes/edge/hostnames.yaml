@@ -335,6 +335,6 @@ hosts:
     exposure: private
     auth: native # specpulse's own login (owner decision 2026-11-26: private, the app's login, no Authelia)
     access_gated: false
-    lan_dns: false # true once `just edge-smoke --host specpulse` passes from the LAN (edge-ingress runbook "Add a hostname")
+    lan_dns: true # LAN smoke passed 2026-11-27 08:00Z (303 -> /login via the VIP, admin tier)
     backend: { url: "http://specpulse.specpulse.svc.cluster.local:8000" }
     smoke: { status: 303, location_contains: "/login" } # anonymous / redirects to the sign-in page
