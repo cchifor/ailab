@@ -6,29 +6,25 @@ const { webcrypto } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const held = require("./owner-phase-a.js");
+const a = require("./owner-phase-a.js");
 const driverSource = fs.readFileSync(
   path.join(__dirname, "owner-phase-a.js"),
   "utf8",
 );
-// Only this offline module gets a synthetic qualified hub identity. The shipped
-// module remains held; never rewrite its source or publication qualification.
-const qualifiedModule = { exports: {} };
+// Positive paths exercise the actual pinned module. Only the disabled-path
+// regression uses a copy with qualification withheld; its source pin is unchanged.
+assert.equal(a.RUN_SOURCE, "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613");
+const heldModule = { exports: {} };
 vm.runInThisContext(
   "(function(module){" +
-    driverSource
-      .replace(
-        /const QUALIFIED_INPUTS = (?:true|false);/,
-        "const QUALIFIED_INPUTS = true;",
-      )
-      .replace(
-        /const RUN_SOURCE = null;/,
-        'const RUN_SOURCE = "' + "a".repeat(40) + '";',
-      ) +
+    driverSource.replace(
+      /const QUALIFIED_INPUTS = (?:true|false);/,
+      "const QUALIFIED_INPUTS = false;",
+    ) +
     "\n})",
-  { filename: "offline-qualified-owner-phase-a.js", timeout: 1000 },
-)(qualifiedModule);
-const a = qualifiedModule.exports;
+  { filename: "offline-held-owner-phase-a.js", timeout: 1000 },
+)(heldModule);
+const held = heldModule.exports;
 const NOW = Date.parse("2026-11-26T12:00:00Z");
 const SID = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
@@ -720,7 +716,7 @@ async function renewalReviewHarness(options = {}) {
   };
 }
 
-test("held published module refuses renewal review before metadata or storage mutation", async () => {
+test("held module variant refuses renewal review before metadata or storage mutation", async () => {
   const h = await renewalReviewHarness();
   const runner = new held.Runner(h.runner.env);
   runner.state.predecessor = { raw: h.raw };

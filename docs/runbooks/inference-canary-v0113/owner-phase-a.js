@@ -10,9 +10,9 @@
 })(typeof window === "object" ? window : globalThis, function () {
   "use strict";
   const SOURCE = "e843921b7cff76406b7da0b5b35cf653c7e458c5";
-  // SOURCE/PROFILES/EXPIRES describe the immutable stopped predecessor. Pin
-  // the reviewed, deployed renewal hub here only after final qualification.
-  const RUN_SOURCE = null;
+  // SOURCE/PROFILES/EXPIRES describe the immutable stopped predecessor.
+  // The target release still requires fresh operator deployment verification.
+  const RUN_SOURCE = "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613";
   const ROUTER = "4e4bb34e2f968f9450aabe9cf228d3e70c8bab71";
   const ORIGIN = "https://relay.chifor.me";
   const EXPIRES = Date.parse("2026-11-26T21:27:37Z");
@@ -25,9 +25,9 @@
     "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4";
   const HOLDER_BINARY_SHA256 =
     "0b1a7907f6da2ef6b5794621d87c55c2e0ee6d5aeb1c4e0fdf35c9031a127003";
-  // Existing revision-1 profiles and v0.13.1 holder pins stay unchanged. This
-  // successor remains disabled until the renewal hub and driver are qualified.
-  const QUALIFIED_INPUTS = false;
+  // Existing revision-1 profiles and v0.13.1 holder pins stay unchanged.
+  // Qualification does not supply a deployed hub, credentials or owner window.
+  const QUALIFIED_INPUTS = true;
   const CONFIGURATION_CHANGED_NOTICE =
     "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used.";
   const HOST = "b3b1be1a-275c-4a2e-b515-428b39c43171";

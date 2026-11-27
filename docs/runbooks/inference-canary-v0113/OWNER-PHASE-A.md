@@ -13,9 +13,15 @@ not live API authority or real database transactions. The runtime artifacts
 are unchanged; the earlier five synthetic wire cases remain runtime evidence,
 not live subscription acceptance. Evidence is recorded in [README](README.md).
 
-This post-expiry successor is being qualified. `QUALIFIED_INPUTS = false` and an
-unset `RUN_SOURCE` keep it unavailable until the reviewed renewal-capable hub
-release and this packet have been qualified. Do not change either locally.
+This post-expiry successor targets renewal-capable hub source
+`74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613`, the reviewed release merge in
+[Relay PR717](https://git.chifor.me/cchifor/relay/pulls/717). Its enabled paths are
+qualified offline using this actual source pin; `QUALIFIED_INPUTS` does not
+establish publication, deployment, owner authority or a live acceptance result.
+Before use, require successful release publication, the reviewed hub rollout and
+the operator's fresh deployment readback for that exact source. The bootstrap
+then verifies both renewed credential references through the normal API before
+any replacement launch. Do not edit the source pin or qualification flag locally.
 The earlier merged 7dff6049 driver was qualified only for the original credentials
 and their November 26 deadline; it cannot be reused after renewal. Qualification
 does not perform profile approval or authorize live work by itself. The previously
@@ -40,7 +46,7 @@ edit pins, revisions, qualification flags or run UUIDs locally.
 
 The owner can paste the entire reviewed [owner-phase-a.js](owner-phase-a.js) into
 the browser console at `https://relay.chifor.me`. It installs a panel without
-making requests. Once qualified, this successor enables only the reviewed stopped-run replacement
+making requests. This successor enables only the reviewed stopped-run replacement
 described below; the initial **Start phase A** button stays disabled even if
 browser storage is empty. After its explicit review and checkpoints, the driver
 runs Codex lifecycle, Qwen lifecycle, then fresh Codex effort, in that order.

@@ -17,9 +17,12 @@ effect. This is not Pi lifecycle or warm acceptance. The 4af prerequisites and
 proofs below remain historical; they do not identify the current Router.
 The first communication correction merged in
 [PR2031](https://git.chifor.me/cchifor/ailab/pulls/2031). Its original credential
-pins expire on November 26. The [post-expiry owner replacement](OWNER-PHASE-A.md#review-the-known-stopped-run-replacement)
-remains disabled pending its qualification, normal review/merge, deployment of
-the renewal-capable hub, separate owner renewals and an explicit owner window.
+pins expired on November 26. The [post-expiry owner replacement](OWNER-PHASE-A.md#review-the-known-stopped-run-replacement)
+targets reviewed Relay release source `74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613`
+from [PR717](https://git.chifor.me/cchifor/relay/pulls/717), with offline checks
+against that actual pin. Live use still requires this packet's normal review and
+merge, successful release publication, the reviewed hub rollout and fresh
+deployment verification, separate owner renewals and an explicit owner window.
 The stopped run's one prompt and two attempts carry forward without resetting
 its report or markers. Follow the [scoped communication-read rule](LIVE-ACCEPTANCE.md#scoped-relay-communication-reads);
 it adds no budget, automatic approval or authority to resume stopped work.
