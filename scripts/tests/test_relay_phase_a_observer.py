@@ -191,7 +191,7 @@ class HostProtocol(unittest.TestCase):
         self.gate = FakeGate()
         self.faults = []
         host = O.Host(gate=self.gate, collectors=collectors or {}, cfg=cfg_obj(), evidence=O.Evidence(self.ev_path),
-                      on_fault=lambda r, e=False: self.faults.append(r), heartbeat_s=0.2)
+                      on_fault=lambda r, e=False, lease=False: self.faults.append(r), heartbeat_s=0.2)
         self.gate.frame({"ready": True})
         host.start(ready_timeout=3)
         return host
@@ -346,6 +346,7 @@ class FakeHost:
         self.cfg, self.remote, self.state = cfg_obj(), remote, O.ObserverState()
         self.run_start_ms = 1_000
         self.recv_ms = int(time.time() * 1000)
+        self.recv_mono = time.monotonic()
         self.ledger = None
         self.lease_ok = lambda: True
         self.ev = type("E", (), {"write": lambda *a, **k: None})()
@@ -592,6 +593,58 @@ class Delivery(unittest.TestCase):
                           and c[1] == "delivery.sql"], [CFG["hostId"]])
 
 
+class RoundTwo(unittest.TestCase):
+    def test_an_option_id_shared_by_two_kinds_is_refused(self):
+        h = FakeHost(None)
+        r = bound_run(h)
+        denied = h.marker_command("codex", r.run_id, "denied")
+        d = json.dumps({"command": denied})
+        rows = perm_row("reject_once", d, C.MARKER_TITLE)
+        rows[0]["context"]["options"].append({"optionId": "o1", "kind": "allow_once", "name": "same id"})
+        h.remote = FakeRemote({"sql:permission.sql": rows, "sql:session-state.sql": sess()})
+        with self.assertRaises(O.Failed):
+            C.c_permission(h, {}, perm_ctx(r, "marker", "reject_once", d, C.MARKER_TITLE, expected=denied), budget(),
+                           0, {})
+
+    def test_a_repeated_marker_call_is_never_merged_away(self):
+        rec = Recovery()
+        rec.setUp()
+        t = dict(rec.answers["transcript"])
+        t["shellCommands"] = t["shellCommands"] + [dict(t["shellCommands"][1])]  # effects twice
+        with self.assertRaises(O.Failed):
+            rec.c9(transcript=t)
+
+    def test_an_evidence_failure_after_an_earlier_fault_is_still_reported(self):
+        seen = []
+        host = O.Host(gate=FakeGate(), collectors={}, cfg=cfg_obj(),
+                      evidence=O.Evidence(os.path.join(tempfile.mkdtemp(), "ev.jsonl")),
+                      on_fault=lambda r, e=False, lease=False: seen.append((r, e)))
+        host.fault("first")
+        host.fault("disk full", evidence=True)
+        self.assertEqual(seen, [("first", False), ("disk full", True)])
+
+    def test_runner_floor_uses_monotonic_elapsed_time_only(self):
+        h = FakeHost(None)
+        h.recv_mono = time.monotonic() - 2.0
+        self.assertGreaterEqual(C.runner_floor(h, 1_000_000), 1_000_000 + 1990)
+
+    def test_javascript_integers_and_lone_surrogates(self):
+        self.assertEqual(O.canonical(10 ** 21), "1e+21")
+        self.assertEqual(O.canonical(9007199254740993), "9007199254740992")
+        self.assertEqual(O.canonical("a" + chr(0xD800)), '"a' + chr(92) + 'ud800"')
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX") and os.name == "posix", "posix")
+    def test_gate_admission_is_released_only_by_its_owner(self):
+        G = gate_module()
+        g = G.Gate("/nonexistent", io.BytesIO(), io.BytesIO())
+        first, second = object(), object()
+        g.busy = second  # the successor already holds admission
+        g.release(first)  # the previous handler finishing must not clear it
+        self.assertIs(g.busy, second)
+        g.release(second)
+        self.assertIsNone(g.busy)
+
+
 class Gates(unittest.TestCase):
     def test_c10_c11_and_the_projection_stay_unsupported(self):
         for fn in (C.c_reconcile_choice, C.c_retire_branch, C.c_predecessor):
@@ -644,7 +697,9 @@ def prerun_facts():
             "units": {"relay-holder.service": {"active": "inactive", "argv": h["holderArgv"], "dropIns": ""},
                       "relay-holder-control-plane.service": {"active": "inactive", "argv": h["reconciliationArgv"],
                                                              "dropIns": ""}},
-            "journal": {"lastStartedIncarnation": h["newJournalId"],
+            "binarySha256": h["qualified"]["binarySha256"],
+            "journal": {"lastStartedIncarnation": h["newJournalId"], "sha256": h["newJournalSha256"],
+                        "kinds": ["holder-started", "holder-admission"],
                         "admission": {"paused": True, "operationId": h["pauseOperationId"], "revision": 1}}}
 
 
@@ -668,22 +723,22 @@ class PreRun(unittest.TestCase):
 
     def test_starts_paused_pins_the_router_and_records(self):
         h = self.host({"prerun": prerun_facts(), "mutate-start-holder": started()})
-        self.assertEqual(H.prerun(h, budget())["journal"], CFG["holder"]["newJournalId"])
+        self.assertEqual(H.prerun(h, budget(200_000))["journal"], CFG["holder"]["newJournalId"])
         self.assertEqual([r["phase"] for r in h.ledger.records()], ["intent", "receipt"])
         self.assertEqual(h.state.router_pod["uid"], POD["uid"])
 
     def test_an_unpaused_start_is_contained_on_the_host(self):
         h = self.host({"prerun": prerun_facts(), "mutate-start-holder": started(paused=False, contained=True)})
         with self.assertRaises(O.Fault):
-            H.prerun(h, budget())
+            H.prerun(h, budget(200_000))
         self.assertEqual(h.ledger.records()[-1]["outcome"], "contained-unpaused")
 
     def test_a_lost_start_response_is_classified_and_contained(self):
         h = self.host({"prerun": prerun_facts(), "mutate-start-holder": O.Deadline("ssh timed out"),
                        "classify-holder": holder_rec(paused=False), "mutate-stop-holder (containment)":
-                       {"stopped": True}})
+                       {"stopped": True, "contained": True}})
         with self.assertRaises(O.Fault):
-            H.prerun(h, budget())
+            H.prerun(h, budget(200_000))
         self.assertIn("mutate-stop-holder (containment)", h.remote.calls)
         self.assertEqual(h.ledger.records()[-1]["outcome"], "contained-unpaused")
 
@@ -692,12 +747,15 @@ class PreRun(unittest.TestCase):
                        lambda f: f.update(oldJournalSha256="0" * 64),
                        lambda f: f["oldJournalLast"].update(sealed=False),
                        lambda f: f["receipt"]["preservedJournal"].update(unknownCommands=1),
-                       lambda f: f["artifacts"].update({"service.json": "0" * 64})):
+                       lambda f: f["artifacts"].update({"service.json": "0" * 64}),
+                       lambda f: f["journal"].update(sha256="0" * 64),  # anything appended to the new root
+                       lambda f: f["journal"].update(kinds=["holder-started", "holder-admission", "seal"]),
+                       lambda f: f.update(binarySha256="0" * 64)):  # the executable systemd would start
             f = prerun_facts()
             mutate(f)
             h = self.host({"prerun": f})
             with self.assertRaises(O.Failed):
-                H.prerun(h, budget())
+                H.prerun(h, budget(200_000))
             self.assertNotIn("mutate-start-holder", h.remote.calls)
             self.assertFalse(h.ledger.path.exists())
 
@@ -705,7 +763,7 @@ class PreRun(unittest.TestCase):
         h = self.host({"prerun": prerun_facts()})
         h.lease_ok = lambda: False
         with self.assertRaises(O.Fault):
-            H.prerun(h, budget())
+            H.prerun(h, budget(200_000))
         self.assertFalse(h.ledger.path.exists())
 
 
@@ -715,7 +773,9 @@ class Handoff(unittest.TestCase):
         h.ledger = H.Ledger(tempfile.mkdtemp(), CFG["holder"]["preparationId"])
         h.ledger.reserve(op="pre-run-start", phase="intent")
         now = int(time.time() * 1000)
-        h.state.window = window or (now - 1000, now + 600_000)
+        h.state.window = (now - 1000, now + 600_000)
+        mono = time.monotonic()
+        h.state.window_mono = window or (mono - 1, mono + 600)
         jid = CFG["holder"]["newJournalId"]
         h.state.holder = {"incarnation": u(7), "journal": jid, "mainPid": 42, "revision": 1}
         h.state.preservation = {"sealId": CFG["holder"]["sealId"]}
@@ -753,8 +813,9 @@ class Handoff(unittest.TestCase):
         h.remote.answers["sql:holder-health.sql"] = [{"journal_id": CFG["holder"]["newJournalId"],
                                                       "admission_paused": False, "native_state_ready": True,
                                                       "observed_ms": int(time.time() * 1000) + 60_000}]
-        v = H.c_preserving_holder(h, {}, self.ctx(), budget(), 0, {})
+        v = H.c_preserving_holder(h, {}, self.ctx(), budget(), int(time.time() * 1000), {})
         self.assertTrue(v["preservedOldStateConfirmed"])
+        Handoff.last_value = v  # checked by the pinned driver's own preservingHandoff() below
         ops = [(r["op"], r["phase"], r.get("outcome")) for r in h.ledger.records()]
         self.assertEqual(ops[1:], [("resume", "intent", None), ("resume", "receipt", "ok"),
                                    ("enable-start", "intent", None), ("enable-start", "receipt", "ok"),
@@ -890,6 +951,20 @@ class DriverAgreement(unittest.TestCase):
         js = self.node("const d=require(process.env.DRIVER); console.log(JSON.stringify(d.canonical("
                        + json.dumps(doc) + ")));")
         self.assertEqual(O.canonical(doc), js)
+
+    def test_the_c4_handoff_passes_the_drivers_preserving_handoff(self):
+        v = getattr(Handoff, "last_value", None)
+        if v is None:
+            t = Handoff("test_success_records_every_stage")
+            t.test_success_records_every_stage()
+            v = Handoff.last_value
+        js = ("const d=require(process.env.DRIVER); const v=" + json.dumps(v) + ";"
+              "const Q={release:'v0.13.4',source:'64dc50f47a4867a6d9a7afc2e7d5ae24068c59af',"
+              "binarySha256:'d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926'};"
+              "const prior={holderId:'" + CFG["holder"]["oldHolderId"] + "',journalId:d.HOLDER};"
+              "const out=d.preservingHandoff(v,prior,Q,Date.parse(v.observedUtc)-1000,Date.parse(v.observedUtc)+1000);"
+              "console.log(JSON.stringify(out.holderId===v.holderId));")
+        self.assertTrue(self.node(js))
 
     def test_marker_report_from_dw_passes_the_driver(self):
         dw = (SCRIPTS / "relay-phase-a" / "remote" / "dw.py").read_text()
