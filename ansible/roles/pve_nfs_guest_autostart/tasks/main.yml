@@ -1,7 +1,8 @@
 ---
-# Starts onboot containers whose /mnt/pve NFS bind-mount source was late at boot (the shared
-# power feed with the QNAP). files/pve-nfs-guest-autostart.sh has the why.
-- name: Install the late-NFS container starter
+# Starts onboot guests whose NFS storage was late at boot: containers with a /mnt/pve bind mount,
+# and VMs with a disk on an NFS storage (the Talos control planes, ADR 0043).
+# files/pve-nfs-guest-autostart.sh has the why.
+- name: Install the late-NFS guest starter
   ansible.builtin.copy:
     src: pve-nfs-guest-autostart.sh
     dest: /usr/local/sbin/pve-nfs-guest-autostart
@@ -18,7 +19,7 @@
     mode: "0644"
 
 # Enabled, not started: it is a once-per-boot pass, and on a running host every onboot
-# container it could act on is already up.
+# guest it could act on is already up.
 - name: Enable it for the next boot
   ansible.builtin.systemd:
     name: pve-nfs-guest-autostart.service
