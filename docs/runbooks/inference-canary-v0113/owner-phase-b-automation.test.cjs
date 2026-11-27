@@ -320,7 +320,7 @@ test(
       ],
       env: {
         RELAY_SESSION_SOCKET: socket,
-        RUNNER_DEADLINE: String(Date.now() + 60000),
+        RUNNER_DEADLINE: String((Date.now() + 60000) / 1000),
       },
       signals,
       attemptFence: f.options.attemptFence,
