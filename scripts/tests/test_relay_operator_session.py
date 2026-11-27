@@ -375,5 +375,127 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(run(w, self.tmp, self.dir)[0], 2)
 
 
+class LeaseAndEvidence(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dir, self.files = bundle(self.tmp, {"main.cjs": b"main"})
+
+    def test_lease_secure_never_shortens_a_longer_own_lease(self):
+        w = World(self.files)
+        ros.lease_acquire(w.ops, "me", w.clock.now() + 3600)
+        self.assertTrue(ros.lease_secure(w.ops, "me", 60))
+        self.assertGreaterEqual(float(w.lease["metadata"]["annotations"]["chifor.me/expires-at"]),
+                                w.clock.now() + 3599)
+
+    def test_read_failure_sets_the_evidence_flag(self):
+        w = World(self.files)
+        r = ros.Run(w.ops, "x", "y", 1, os.path.join(self.tmp, "e3"))
+
+        class BadPipe:
+            def readline(self):
+                raise OSError("broken pipe")
+
+        class Sink:
+            def write(self, b):
+                return len(b)
+        r._stream(BadPipe(), Sink())
+        self.assertTrue(r.evidence_failed.is_set())
+
+    def test_evidence_failure_before_the_runner_starts_stops_the_run(self):
+        w = World(self.files)
+        orig = w.popen
+
+        def popen(args, **kw):
+            p = orig(args, **kw)
+            if "/tool/relay-session-proxy.py" in args:
+                class BadErr:  # the proxy's stderr pipe fails at once
+                    def readline(self):
+                        raise OSError("gone")
+                p.stderr = BadErr()
+            return p
+        w.ops.popen = popen
+        rc, _ = run(w, self.tmp, self.dir)
+        self.assertEqual(rc, 6)
+        self.assertFalse(any(c[0] == "popen" and "--network" in c[1] for c in w.calls))  # no Runner started
+        self.assertEqual(w.revokes, 2)
+
+
+class CallLifecycle(unittest.TestCase):
+    """relay-operator.py call() with every collaborator faked."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("relay_operator", ROOT / "scripts" / "relay-operator.py")
+        self.m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.m)
+        self.w = World({})
+        m, w = self.m, self.w
+        self.events = []
+        m.ops = lambda: (ros, w.ops)
+        m.creds = w.creds
+        m.revoke = lambda s: (self.events.append("revoke"), ros.REVOKED)[1]
+        m.grant = lambda s: self.events.append("grant")
+        m.counts = lambda s: "1 memberships, 1 sessions"
+        m.end_sso = lambda uid: self.events.append("sso")
+        m.run = lambda args, stdin=None, check=True, timeout=120: (self.events.append(" ".join(args[:3])), b"")[1]
+
+    def fake_docker(self, behaviour):
+        import subprocess as sp
+
+        class P:
+            returncode, stdout, stderr = 0, b"ok", b""
+
+        def runner(args, **kw):
+            self.events.append("docker-run")
+            return behaviour(args, **kw) or P()
+        self.m.subprocess.run = runner
+
+    def tearDown(self):
+        import subprocess as sp
+        self.m.subprocess.run = sp.run
+
+    def test_happy_call(self):
+        self.fake_docker(lambda a, **k: None)
+        self.assertEqual(self.m.call(["me"]), 0)
+        self.assertEqual(self.events[:3], ["revoke", "grant", "docker-run"])
+        self.assertIn("docker rm -f", self.events)
+        self.assertEqual(self.events[-2:], ["revoke", "sso"])
+        self.assertEqual(self.w.lease["spec"]["holderIdentity"], "")
+
+    def test_successor_during_the_call_is_never_revoked(self):
+        def steal(args, **kw):
+            self.w.lease = {"metadata": {"name": ros.LEASE, "resourceVersion": "99",
+                                         "annotations": {"chifor.me/expires-at": str(int(self.w.clock.now() + 9999))}},
+                            "spec": {"holderIdentity": "session-successor"}}
+        self.fake_docker(steal)
+        self.assertEqual(self.m.call(["me"]), 7)
+        self.assertEqual(self.events.count("revoke"), 1)  # only the orphan clear
+        self.assertNotIn("sso", self.events)
+
+    def test_timed_out_container_is_removed_before_the_revoke(self):
+        import subprocess as sp
+
+        def hang(args, **kw):
+            raise sp.TimeoutExpired(args, 300)
+        self.fake_docker(hang)
+        rc = self.m.call(["me"])
+        self.assertNotEqual(rc, 0)
+        i_rm, i_revoke = self.events.index("docker rm -f"), len(self.events) - 1 - self.events[::-1].index("revoke")
+        self.assertLess(i_rm, i_revoke)
+
+    def test_signal_during_cleanup_is_deferred(self):
+        import signal as sig
+        self.fake_docker(lambda a, **k: None)
+        orig_sso = self.m.end_sso
+
+        def sso(uid):
+            sig.getsignal(sig.SIGTERM)(sig.SIGTERM, None)  # arrives mid-cleanup
+            orig_sso(uid)
+        self.m.end_sso = sso
+        self.assertEqual(self.m.call(["me"]), 0)
+        self.assertIn("sso", self.events)
+        self.assertEqual(self.w.lease["spec"]["holderIdentity"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -200,6 +200,8 @@ def lease_secure(ops: Ops, holder: str, extend_s: float) -> bool | None:
         if cur is not None and _lease_holder(cur) not in ("", holder) and not _lease_expired(cur, now):
             return False
         want = now + extend_s
+        if cur is not None and _lease_holder(cur) == holder:
+            want = max(want, _lease_exp(cur))  # never shorten this holder's own, longer Lease
         if cur is None:
             ops.kubectl(["create", "-f", "-"], stdin=_lease_doc(holder, want, now), timeout=30)
         else:
@@ -251,13 +253,25 @@ class Run:
     # ---------------- streaming evidence: never stops draining the producer
     def _stream(self, pipe, sink, ready: threading.Event | None = None, ready_line: list | None = None):
         broken = False
-        for line in iter(pipe.readline, b""):
+        while True:
+            try:
+                line = pipe.readline()
+            except (OSError, ValueError):  # the pipe itself failed: the capture is incomplete
+                self.evidence_failed.set()
+                return
+            if not line:
+                return
             if ready is not None and not ready.is_set() and line.startswith(b"READY "):
                 ready_line.append(line)
                 ready.set()
             if not broken:
                 try:
-                    sink.write(line)
+                    view = memoryview(line)
+                    while view:  # an unbuffered write may be short
+                        n = sink.write(view)
+                        if not n:
+                            raise OSError("short write")
+                        view = view[n:]
                 except (OSError, ValueError):
                     broken = True
                     self.evidence_failed.set()
@@ -359,7 +373,7 @@ class Run:
         self.note(stage="state-volume", volume=names["state"])
         proxy = ctx["proxy"] = ops.popen(
             ["docker", "run", "-i", "--name", names["proxy"], "--read-only", "--cap-drop", "ALL",
-             "--security-opt", "no-new-privileges", "--user", UID, "--pids-limit", "64", "--memory", "256m",
+             "--security-opt", "no-new-privileges", "--user", UID, "--pids-limit", "128", "--memory", "256m",
              "--mount", f"type=bind,src={ops.tool_dir},dst=/tool,readonly",
              "--mount", f"type=volume,src={names['volume']},dst={SOCKET_DIR}",
              PROXY_IMAGE, "python3", "-I", "/tool/relay-session-proxy.py"],
@@ -378,6 +392,9 @@ class Run:
             self.fail(8, stage="proxy", reason="no READY")
             return
         self.note(stage="proxy-ready", ready=ready_line[0].decode(errors="replace").strip()[:300])
+        if self.evidence_failed.is_set():  # never start authorized work without its audit trail
+            self.fail(6, stage="evidence", reason="the proxy's evidence stream failed before the Runner started")
+            return
         runner = ctx["runner"] = ops.popen(
             ["docker", "run", "--name", names["runner"], "--network", "none", "--read-only",
              "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", UID, "--pids-limit", "256",
@@ -385,7 +402,8 @@ class Run:
              "--mount", f"type=bind,src={bundle_copy},dst=/bundle,readonly",
              "--mount", f"type=volume,src={names['state']},dst=/state",
              "--mount", f"type=volume,src={names['volume']},dst={SOCKET_DIR}",
-             "-e", f"RELAY_SESSION_SOCKET={SOCKET_DIR}/proxy.sock", "-e", f"RUNNER_DEADLINE={runner_deadline}",
+             "-e", f"RELAY_SESSION_SOCKET={SOCKET_DIR}/proxy.sock",
+             "-e", f"RELAY_SESSION_CONTROL_SOCKET={SOCKET_DIR}/control.sock", "-e", f"RUNNER_DEADLINE={runner_deadline}",
              "-e", f"CLEANUP_DEADLINE={cleanup_deadline}", "-e", "AUTOMATION_DIR=/state/run",
              "--entrypoint", manifest["entrypoint"][0], manifest["image"], *manifest["entrypoint"][1:]],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -443,8 +461,8 @@ class Run:
         if runner is not None and runner.poll() is None:
             self._stage("runner-kill", lambda: ops.docker(["kill", names["runner"]], timeout=20, check=False))
             self._stage("runner-wait", lambda: self._until(lambda: runner.poll() is not None, ops.now() + 20))
-        if proxy is not None and proxy.poll() is None:  # SIGTERM -> the proxy logs out within its 20 s budget
-            self._stage("proxy-stop", lambda: ops.docker(["stop", "-t", "30", names["proxy"]], timeout=45,
+        if proxy is not None and proxy.poll() is None:  # SIGTERM -> drain 5 s + logout 20 s, inside a 45 s grace
+            self._stage("proxy-stop", lambda: ops.docker(["stop", "-t", "45", names["proxy"]], timeout=70,
                                                           check=False))
             self._stage("proxy-wait", lambda: self._until(lambda: proxy.poll() is not None, ops.now() + 15))
         if proxy is not None:
@@ -452,10 +470,19 @@ class Run:
             self.note(stage="proxy-exited", exit=prc)
             if prc != 0:  # 4 = logout not confirmed; None = unknown termination; anything else = failure
                 self.fail(4, stage="proxy-logout", exit=prc)
+        incomplete = False
         for t in ctx["threads"]:  # drain the evidence before anything is removed
             self._stage("evidence-join", lambda t=t: t.join(timeout=JOIN_TIMEOUT_S))
-            if t.is_alive():
-                self.fail(6, stage="evidence", reason="a log stream did not finish draining")
+            incomplete = incomplete or t.is_alive()
+        if incomplete or self.evidence_failed.is_set():
+            self.fail(6, stage="evidence", reason="a log stream failed or did not finish draining")
+            for key in ("proxy", "runner"):  # recover what Docker kept, before the containers are removed
+                if ctx[key] is not None:
+                    def recover(k=key):
+                        out = ops.docker(["logs", names[k]], timeout=60, check=False)
+                        (Path(self.evidence_dir) / f"{k}.recovered").write_bytes(out or b"")
+                        return True
+                    self._stage(f"{key}-logs-recover", recover)
         for s in sinks.values():
             self._stage("evidence-close", s.close)
         for key in ("runner", "proxy"):

@@ -889,17 +889,23 @@ python scripts/relay-operator.py session --manifest-ref <FULL_COMMIT>:<path/to/m
     and cwd). A lost POST response is reconciled read-only through the inventory, never resent. Operation IDs that
     existed at login are refused, and once-only routes reserve the operation and the binding or permission
     atomically.
+  - **Two sockets.** `proxy.sock` serves every allowed call except the control lease. `control.sock` serves ONLY
+    control-lease acquire, renew and release, and each socket refuses the other's routes. Each has its own reader
+    pool (24 and 4) with an absolute 5 s request deadline, then its own handler slots (6 and 2), so nothing on the
+    general socket can starve renewal.
   - Bounds:
-    - a reader pool (32) with an absolute 5 s deadline per request, then handler slots, 2 of them reserved for
-      control-lease requests so renewal cannot starve;
+    - one deadline thread for every request and upstream call;
     - a listen backlog of 64;
-    - an absolute upstream deadline (a timer closes the transport), capped by the phase's own deadline;
-    - prompts of at most 16 KiB UTF-8.
+    - DNS resolved off the request path;
+    - connect, TLS, send and the whole response under one absolute deadline, capped by the phase's own deadline,
+      with nothing sent once it has expired;
+    - prompts of at most 16 KiB of UTF-8 (the server's own byte limit).
 
-    The evidence logs fixed reason codes and route shapes only, never a raw target, query value or client key.
-- **The Runner** runs with `--network none` and is hardened. It shares only the proxy's socket
-  (`RELAY_SESSION_SOCKET`), and its durable store is a named volume `relay-state-<run>` (`AUTOMATION_DIR`), kept
-  after the run and exported to `state.tar`.
+    The evidence logs fixed reason codes and route shapes from a fixed vocabulary only, never a raw target, query
+    value, client key or client-chosen path word.
+- **The Runner** runs with `--network none` and is hardened. It shares only the proxy's two sockets
+  (`RELAY_SESSION_SOCKET` and `RELAY_SESSION_CONTROL_SOCKET`). Its durable store is a named volume
+  `relay-state-<run>` (`AUTOMATION_DIR`), kept after the run and exported to `state.tar`.
 - **Deadlines.** `RUNNER_DEADLINE`, then `CLEANUP_DEADLINE` (10 min later).
   - After the runner deadline the Runner gets SIGTERM. The proxy then passes only cleanup-shaped calls: reads,
     renewal of an existing lease and its release, `cancel` / `close`, and cancelled permission decisions.

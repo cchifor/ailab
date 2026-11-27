@@ -74,7 +74,8 @@ authority is removed, and report unresolved outcomes as such.
     - POST `/api/agent-sessions/:sid/control` `{generation}` or `{generation, leaseId}`, a lease of that sid;
     - DELETE `/api/agent-sessions/:sid/control/:lease`;
     - POST `/api/agent-sessions/:sid/commands` `{operationId, leaseId, generation, kind}`. `kind` is one of:
-      - `prompt`, with `controlEpoch` and `text` (≤ 8 KiB);
+      - `prompt`, with `controlEpoch` and `text` (≤ 16 KiB of UTF-8, the server's own byte limit in control.ts;
+        revised during impl review round 2 from a drafting value of 8 KiB);
       - `set-config`, with `controlEpoch`, `settingsRevision`, `configId: "thought_level"` and `value` from a
         fixed set;
       - `cancel`;

@@ -27,6 +27,7 @@ import hashlib
 import json
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -202,60 +203,102 @@ def ops():
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0)
 
 
-CALL_LEASE_S = 900  # far longer than the bounded call below (docker 300 s + grant/revoke stages)
 CALL_DOCKER_TIMEOUT_S = 300
+# Worst case of everything a call may spend while holding authority: creds, orphan revoke, grant and counts
+# (4 x 120 s), the admin container (300 s) plus its stop/remove (75 s), then cleanup (revoke, readback, SSO:
+# 3 x 120 s). The Lease must outlive all of it.
+CALL_LEASE_S = 1800
+CLEANUP_SECURE_S = 600  # the validity re-secured before destructive cleanup (cleanup's worst case is ~360 s)
+
+
+class _Interrupted(BaseException):
+    pass
 
 
 def call(op_args: list[str]) -> int:
     ros, o = ops()
     holder = "call-" + secrets.token_hex(6)
-    try:  # the same fenced Lease as `session`: a call never overlaps a run, and the reaper waits for it
-        ros.lease_acquire(o, holder, time.time() + CALL_LEASE_S)
-    except (ros.LeaseLost, SystemExit) as e:
-        print(f"relay-operator: {e}; refusing (a session or reaper holds the identity)", file=sys.stderr)
-        return 7
-    subject = uid = None
+    container = "relay-admin-" + holder
+    state = {"cleanup": False, "deferred": 0}
+
+    def on_signal(*_):  # the same lifecycle as `session`: interrupt the work, never the cleanup
+        if state["cleanup"]:
+            state["deferred"] += 1
+            return
+        raise _Interrupted()
+
+    prev = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+    for s in prev:
+        signal.signal(s, on_signal)
     rc = 1
-    try:  # credentials, the grant and the call are all INSIDE the cleanup + Lease-release scope
-        c = creds()
-        subject, username, pw, uid = c["subject"], c["username"], c["password"], c["keycloak_user_id"]
-        c = None
-        tool = str(Path(__file__).resolve().parent)
-        orphan = revoke(subject)
-        if orphan != REVOKED:
-            raise SystemExit(f"orphan authority not cleared ({orphan})")
-        grant(subject)
-        print(f"relay-operator: granted admin ({counts(subject)})", file=sys.stderr)
-        try:
-            p = subprocess.run(["docker", "run", "--rm", "-i", "--network", "bridge", "-v", f"{tool}:/tool:ro", IMAGE,
-                                "python3", "-I", "/tool/relay-admin-call.py", "--username", username, *op_args],
-                               input=(pw + "\n").encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               timeout=CALL_DOCKER_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            raise SystemExit(f"the admin call exceeded {CALL_DOCKER_TIMEOUT_S}s")
-        pw = None
-        sys.stderr.write(p.stderr.decode("utf-8", "replace"))
-        sys.stdout.buffer.write(p.stdout)
-        sys.stdout.flush()
-        rc = p.returncode
-    except BaseException as e:  # noqa: BLE001 - grant/count/docker/signal: report it; cleanup's verdict decides
-        print(f"relay-operator: {type(e).__name__}: {e}", file=sys.stderr)
-        rc = 1
-    finally:
-        if subject is not None:
-            owned = ros.lease_secure(o, holder, 300)  # destructive cleanup only while this call still owns the Lease
-            if owned is True:
-                rc = cleanup(subject, uid, rc)
-            else:
-                print("relay-operator: Lease ownership NOT confirmed (" + ("a successor holds it" if owned is False
-                      else "unknown") + "); not revoking: run `relay-operator.py revoke` once the Lease is free",
+    try:
+        try:  # the same fenced Lease as `session`: a call never overlaps a run, and the reaper waits for it
+            ros.lease_acquire(o, holder, time.time() + CALL_LEASE_S)
+        except (ros.LeaseLost, SystemExit) as e:
+            print(f"relay-operator: {e}; refusing (a session or reaper holds the identity)", file=sys.stderr)
+            return 7
+        subject = uid = None
+        try:  # credentials, the grant and the call are all INSIDE the cleanup + Lease-release scope
+            c = creds()
+            subject, username, pw, uid = c["subject"], c["username"], c["password"], c["keycloak_user_id"]
+            c = None
+            tool = str(Path(__file__).resolve().parent)
+            orphan = revoke(subject)
+            if orphan != REVOKED:
+                raise SystemExit(f"orphan authority not cleared ({orphan})")
+            grant(subject)
+            print(f"relay-operator: granted admin ({counts(subject)})", file=sys.stderr)
+            try:
+                p = subprocess.run(["docker", "run", "--rm", "-i", "--name", container, "--network", "bridge",
+                                    "-v", f"{tool}:/tool:ro", IMAGE, "python3", "-I", "/tool/relay-admin-call.py",
+                                    "--username", username, *op_args],
+                                   input=(pw + "\n").encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   timeout=CALL_DOCKER_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                raise SystemExit(f"the admin call exceeded {CALL_DOCKER_TIMEOUT_S}s")
+            pw = None
+            sys.stderr.write(p.stderr.decode("utf-8", "replace"))
+            sys.stdout.buffer.write(p.stdout)
+            sys.stdout.flush()
+            rc = p.returncode
+        except BaseException as e:  # noqa: BLE001 - grant/count/docker/signal: report it; cleanup's verdict decides
+            print(f"relay-operator: {type(e).__name__}: {e}", file=sys.stderr)
+            rc = 1
+        finally:
+            state["cleanup"] = True
+            # 1. the admin container: gone before anything else (a timed-out docker client leaves it running)
+            try:
+                run(["docker", "rm", "-f", container], check=False, timeout=75)
+            except BaseException as e:  # noqa: BLE001
+                print(f"relay-operator: could not remove {container} ({type(e).__name__})", file=sys.stderr)
+                rc = rc or 1
+            # 2. destructive cleanup only while this call still owns the Lease, with enough validity for it
+            if subject is not None:
+                owned = ros.lease_secure(o, holder, CLEANUP_SECURE_S)
+                if owned is True:
+                    try:
+                        rc = cleanup(subject, uid, rc)
+                    except BaseException as e:  # noqa: BLE001 - cleanup() never raises by contract; be sure
+                        print(f"relay-operator: cleanup raised {type(e).__name__}; REVOKE NOT CONFIRMED",
+                              file=sys.stderr)
+                        rc = 3
+                else:
+                    print("relay-operator: Lease ownership NOT confirmed (" + ("a successor holds it"
+                          if owned is False else "unknown") + "); not revoking: run `relay-operator.py revoke` "
+                          "once the Lease is free (the reaper also clears it)", file=sys.stderr)
+                    rc = rc if rc == 3 else 7
+            # 3. the Lease
+            try:
+                ros.lease_release(o, holder)
+            except BaseException as e:  # noqa: BLE001 - the Lease expires on its own; report it
+                print(f"relay-operator: Lease release failed ({type(e).__name__}); it expires on its own",
                       file=sys.stderr)
-                rc = 7
-        try:
-            ros.lease_release(o, holder)
-        except BaseException as e:  # noqa: BLE001 - the Lease expires on its own; report it
-            print(f"relay-operator: Lease release failed ({type(e).__name__}); it expires on its own",
-                  file=sys.stderr)
+                rc = rc or 7
+            if state["deferred"]:
+                print(f"relay-operator: {state['deferred']} signal(s) deferred until cleanup finished", file=sys.stderr)
+    finally:
+        for s, h in prev.items():
+            signal.signal(s, h)
     return rc
 
 

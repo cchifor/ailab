@@ -16,8 +16,13 @@ the whole run; nothing else about it is general-purpose.
 Scope is pinned in this file (SCOPE). Request bodies are rebuilt from validated fields; client headers are never
 forwarded. Dynamic IDs are usable only once this run's own responses produced them (provenance rules in learn_*).
 After runner_deadline only cleanup-shaped calls pass (rechecked at dispatch); at cleanup_deadline everything is refused
-and the proxy logs out. Connections are admitted in two stages: a bounded reader pool with an absolute deadline for the
-request, then a handler slot, some of which are reserved for control-lease requests.
+and the proxy logs out.
+
+TWO sockets: proxy.sock serves every allowed call except the control lease; control.sock serves ONLY control-lease
+acquire/renew/release (POST /api/agent-sessions/:id/control, DELETE .../control/:lease). Each has its own bounded reader
+pool (an absolute deadline per request, fired by one shared deadline thread) and its own handler slots, so nothing on
+the general socket can starve lease renewal. Upstream: DNS is resolved off the request path; connect, TLS, send and
+the whole response run under one absolute deadline, and nothing is sent once it has expired.
 """
 from __future__ import annotations
 
@@ -58,18 +63,25 @@ THOUGHT_LEVELS = {"low", "high"}
 EXPECTED_NAME = "relay-operator (automation)"
 UA = "relay-session-proxy/1 (ailab operator automation)"
 
-SOCKET_PATH = "/run/relay-session/proxy.sock"
+SOCKET_PATH = "/run/relay-session/proxy.sock"  # every allowed call except the control lease
+CONTROL_SOCKET_PATH = "/run/relay-session/control.sock"  # ONLY control-lease acquire/renew/release
 MAX_HEAD = 16 * 1024
 MAX_BODY = 64 * 1024
-MAX_PROMPT_BYTES = 16 * 1024  # UTF-8 bytes (stricter than the server's 16384 UTF-16 units)
+MAX_PROMPT_BYTES = 16 * 1024  # UTF-8 bytes: the server's own limit (control.ts rejects Buffer.byteLength > 16384)
 MAX_RESPONSE = 8 * 1024 * 1024
 REQUEST_DEADLINE = 5.0  # absolute: the whole request (head + body) must arrive within this
 UPSTREAM_CAP = 30.0
+STARTUP_INVENTORY_BUDGET = 15.0
+LOGIN_BUDGET = 60.0
 LOGOUT_BUDGET = 20.0
-DRAIN_ON_SHUTDOWN = 10.0
-READERS = 32  # connections being read at once
-GENERAL_SLOTS = 6  # concurrent non-control handlers
-CONTROL_SLOTS = 2  # reserved for control-lease requests (renewal must never starve)
+DRAIN_ON_SHUTDOWN = 5.0  # drain + logout = 25 s, inside the orchestrator's 45 s docker-stop grace
+GENERAL_READERS, GENERAL_SLOTS = 24, 6  # the general socket: connections being read, then concurrent handlers
+CONTROL_READERS, CONTROL_SLOTS = 4, 2  # the control socket: its own pool, so renewal never starves
+ROUTE_WORDS = {  # the only path words ever logged (anything else becomes "*")
+    "api", "auth", "me", "logout", "agent-sessions", "agent-launches", "agent-profiles", "agent-permissions",
+    "router-credentials", "keys", "rotate", "revoke", "conversations", "sessions", "timeline", "control", "commands",
+    "operations", "settings", "permissions", "router", "communication", "native-recovery", "resume", "decision",
+    "connections", "usage", "retry", "grants"}
 
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 UUID_RE = re.compile(r"^" + UUID + r"$")
@@ -98,11 +110,91 @@ def log(**kv) -> None:
 
 
 def safe_route(path: str) -> str:
-    """A loggable shape of a client path: known words and UUIDs only, anything else becomes '*', no query."""
+    """A loggable shape of a client path: words from the fixed ROUTE_WORDS vocabulary and ':id' for UUIDs; anything
+    else (including any client-chosen word) becomes '*'. No query, at most 8 segments."""
     segs = []
-    for s in path.split("?", 1)[0].split("/")[1:8]:
-        segs.append(":id" if UUID_RE.match(s) else (s if re.fullmatch(r"[a-z][a-z-]{0,30}", s) else "*"))
+    for s in path.split("?", 1)[0].split("/")[1:9]:
+        segs.append(":id" if UUID_RE.match(s) else (s if s in ROUTE_WORDS else "*"))
     return "/" + "/".join(segs)
+
+
+class Deadlines:
+    """ONE thread fires every absolute deadline (request reads and upstream calls): no per-connection Timer threads,
+    so the proxy stays far below the container's pids limit."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.items: dict[int, tuple[float, object]] = {}
+        self.seq = 0
+        self.thread = None
+
+    def add(self, when: float, fn) -> int:
+        with self.lock:
+            if self.thread is None:
+                self.thread = threading.Thread(target=self._loop, daemon=True)
+                self.thread.start()
+            self.seq += 1
+            self.items[self.seq] = (when, fn)
+            return self.seq
+
+    def cancel(self, key: int | None) -> None:
+        if key is not None:
+            with self.lock:
+                self.items.pop(key, None)
+
+    def _loop(self):
+        while True:
+            time.sleep(0.05)
+            now, due = time.monotonic(), []
+            with self.lock:
+                for k, (w, fn) in list(self.items.items()):
+                    if now >= w:
+                        due.append(fn)
+                        del self.items[k]
+            for fn in due:
+                try:
+                    fn()
+                except Exception:  # noqa: BLE001
+                    pass
+
+
+DEADLINES = Deadlines()
+
+
+class Resolver:
+    """DNS off the request path: resolved at startup (a failure there fails startup) and refreshed in the background;
+    a request never blocks on getaddrinfo, which no socket timeout can bound."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.addrs: list = []
+
+    def refresh(self) -> None:
+        infos = socket.getaddrinfo(HOST, 443, type=socket.SOCK_STREAM)
+        addrs = [(fam, sa) for fam, _, _, _, sa in infos]
+        if addrs:
+            with self.lock:
+                self.addrs = addrs
+
+    def start(self) -> None:
+        self.refresh()
+
+        def loop():
+            while True:
+                time.sleep(60)
+                try:
+                    self.refresh()
+                except OSError:
+                    pass  # keep the last good answer
+
+        threading.Thread(target=loop, daemon=True).start()
+
+    def get(self) -> list:
+        with self.lock:
+            return list(self.addrs)
+
+
+RESOLVER = Resolver()
 
 
 # ---------------------------------------------------------------- strict JSON / schema helpers
@@ -558,9 +650,36 @@ class Upstream:
                 with self.lock:
                     self.cookies[name.strip()] = value
 
+    def _open(self, end: float, holder: dict, expired: threading.Event):
+        """TCP connect (to the pre-resolved addresses) and the TLS handshake, all under the absolute deadline: the
+        socket exists BEFORE connect, so the deadline's shutdown interrupts a hanging connect or handshake too."""
+        last = None
+        for fam, addr in RESOLVER.get():
+            left = end - time.monotonic()
+            if left <= 0 or expired.is_set():
+                break
+            s = socket.socket(fam, socket.SOCK_STREAM)
+            holder["sock"] = s
+            s.settimeout(left)
+            try:
+                s.connect(addr)
+            except OSError as e:
+                last = e
+                s.close()
+                continue
+            if expired.is_set():
+                s.close()
+                break
+            s.settimeout(max(0.05, end - time.monotonic()))
+            tls = ssl.create_default_context().wrap_socket(s, server_hostname=HOST)
+            holder["sock"] = tls
+            return tls
+        raise TimeoutError("upstream connect exceeded the deadline") if expired.is_set() or \
+            time.monotonic() >= end else (last or OSError("no upstream address"))
+
     def call(self, method: str, path: str, query: list, body: dict | None, budget: float):
-        """One request under an ABSOLUTE deadline: a timer shuts the transport down when the budget is spent, so
-        trickling headers or bodies cannot outlive it (per-read timeouts alone would)."""
+        """One request under an ABSOLUTE deadline, from connect to the last body byte: the shared deadline thread
+        shuts the transport down when the budget is spent, and nothing is sent once it has expired."""
         budget = min(budget, UPSTREAM_CAP)
         if budget <= 0.05:
             raise TimeoutError("no time left before the deadline")
@@ -573,7 +692,6 @@ class Upstream:
             headers["Content-Length"] = str(len(payload))
         if method != "GET":
             headers["Origin"] = ORIGIN
-        conn = http.client.HTTPSConnection(HOST, 443, timeout=budget, context=ssl.create_default_context())
         expired = threading.Event()
         holder = {}
 
@@ -586,14 +704,14 @@ class Upstream:
                 except OSError:
                     pass
 
-        timer = threading.Timer(budget, cut)
-        timer.daemon = True
-        timer.start()
+        key = DEADLINES.add(end, cut)
+        conn = http.client.HTTPConnection(HOST, 443)  # the transport below is already TLS-wrapped
         try:
-            conn.connect()
-            holder["sock"] = conn.sock  # the transport the response keeps using, even after Connection: close
-            if expired.is_set():
-                cut()
+            sock = self._open(end, holder, expired)
+            if expired.is_set() or time.monotonic() >= end:  # never send after the deadline
+                raise TimeoutError("deadline reached before sending")
+            sock.settimeout(max(0.05, end - time.monotonic()))
+            conn.sock = sock
             conn.request(method, url, body=payload, headers=headers)
             resp = conn.getresponse()
             self.absorb(resp.headers)
@@ -611,12 +729,12 @@ class Upstream:
             if expired.is_set():
                 raise TimeoutError("upstream response exceeded the deadline")
             return resp.status, resp.getheader("Content-Type") or "application/json", b"".join(chunks), resp.headers
-        except (OSError, http.client.HTTPException) as e:
+        except (OSError, http.client.HTTPException, ValueError) as e:
             if expired.is_set():
                 raise TimeoutError("upstream deadline") from e
             raise
         finally:
-            timer.cancel()
+            DEADLINES.cancel(key)
             conn.close()
 
 
@@ -630,11 +748,12 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     block_on_close = False
     request_queue_size = 64  # the default 5 overflows (EAGAIN on connect) when the Runner opens a burst
 
-    def __init__(self, path):
+    def __init__(self, path, *, control: bool):
         super().__init__(path, Handler)
-        self.readers = threading.BoundedSemaphore(READERS)  # stage 1: connections being read
-        self.general = threading.BoundedSemaphore(GENERAL_SLOTS)  # stage 2: handlers, by class
-        self.control = threading.BoundedSemaphore(CONTROL_SLOTS)
+        self.control_socket = control  # the control socket serves ONLY control-lease routes, the general one never
+        readers, slots = (CONTROL_READERS, CONTROL_SLOTS) if control else (GENERAL_READERS, GENERAL_SLOTS)
+        self.readers = threading.BoundedSemaphore(readers)  # stage 1: connections being read
+        self.slots = threading.BoundedSemaphore(slots)  # stage 2: concurrent handlers
 
     def process_request(self, request, client_address):
         if not self.readers.acquire(blocking=False):
@@ -646,25 +765,25 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
             return
         try:
             super().process_request(request, client_address)
-        except Exception:
+        except BaseException:
             self.readers.release()
+            self.shutdown_request(request)
             raise
 
     def process_request_thread(self, request, client_address):
-        # The absolute request deadline: if the whole request has not arrived in time, the read side is shut down.
-        deadline = threading.Timer(REQUEST_DEADLINE, lambda: _shut_read(request))
-        deadline.daemon = True
-        REQUEST_TIMERS[id(request)] = deadline
-        deadline.start()
+        key = None
         try:
+            # The absolute request deadline: if the whole request has not arrived in time, the read side is shut down.
+            key = DEADLINES.add(time.monotonic() + REQUEST_DEADLINE, lambda: _shut_read(request))
+            REQUEST_KEYS[id(request)] = key
             super().process_request_thread(request, client_address)
         finally:
-            deadline.cancel()
-            REQUEST_TIMERS.pop(id(request), None)
+            DEADLINES.cancel(key)
+            REQUEST_KEYS.pop(id(request), None)
             self.readers.release()
 
 
-REQUEST_TIMERS: dict[int, threading.Timer] = {}
+REQUEST_KEYS: dict[int, int] = {}
 
 
 def _shut_read(sock) -> None:
@@ -757,10 +876,10 @@ class Handler(BaseHTTPRequestHandler):
                 body = parse_body(raw)
             elif lengths and lengths != ["0"]:
                 raise Refuse("body-not-allowed", 400)
-            timer = REQUEST_TIMERS.get(id(self.request))
-            if timer is not None:  # the whole request has arrived; the upstream work has its own deadline
-                timer.cancel()
-            slot = self.server.control if _is_control(raw_path) else self.server.general
+            DEADLINES.cancel(REQUEST_KEYS.get(id(self.request)))  # the request has arrived; upstream has its own deadline
+            if _is_control(raw_path) != self.server.control_socket:
+                raise Refuse("use-the-control-socket" if _is_control(raw_path) else "control-socket-is-control-only")
+            slot = self.server.slots
             if not slot.acquire(blocking=False):
                 raise Refuse("busy", 503)
             try:
@@ -857,7 +976,7 @@ def logout() -> bool:
 
 
 def startup_inventory() -> None:
-    st, _, data, _ = UPSTREAM.call("GET", "/api/agent-launches", [], None, UPSTREAM_CAP)
+    st, _, data, _ = UPSTREAM.call("GET", "/api/agent-launches", [], None, STARTUP_INVENTORY_BUDGET)
     rows = json.loads(data) if st == 200 else None
     if not isinstance(rows, list):
         raise RuntimeError(f"startup launch inventory unavailable ({st})")
@@ -882,16 +1001,48 @@ def drain_inflight(bound: float) -> None:
             outcome="uncertain" if r["mutation"] else "abandoned")
 
 
+def _bounded_login(username: str, password: str, stop_requested: threading.Event):
+    """Login in a worker thread, abandoned on a signal or after LOGIN_BUDGET. Returns (result, exception, client):
+    an abandoned login may still complete server-side; the orchestrator's revoke deletes every session of the
+    identity in the database regardless, so a session this process never learned of cannot outlive the run."""
+    box = {}
+
+    def work():
+        try:
+            box["result"] = login(username, password)
+        except BaseException as e:  # noqa: BLE001
+            box["error"] = e
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    end = time.monotonic() + LOGIN_BUDGET
+    while t.is_alive() and not stop_requested.is_set() and time.monotonic() < end:
+        t.join(0.2)
+    if t.is_alive():
+        return None, TimeoutError("login abandoned (signal or budget)"), None
+    err = box.get("error")
+    return box.get("result"), err, getattr(err, "client", None)
+
+
+def _serve(path: str, control: bool) -> Server:
+    if os.path.exists(path):
+        os.unlink(path)
+    old = os.umask(0o177)
+    try:
+        return Server(path, control=control)
+    finally:
+        os.umask(old)
+
+
 def main() -> int:
     global UPSTREAM
     stop_requested = threading.Event()
-    server_box = {}
+    servers: list[Server] = []
 
     def stop(*_):
         stop_requested.set()
         STATE.closed = True
-        srv = server_box.get("server")
-        if srv is not None:
+        for srv in list(servers):
             threading.Thread(target=srv.shutdown, daemon=True).start()
 
     # Installed before ANY authenticated step: a signal during login or startup still reaches the logout below.
@@ -907,16 +1058,19 @@ def main() -> int:
         log(event="startup-failed", reason="deadlines")
         return 2
     try:
-        _client, actor, server_now, cookies = login(cfg["username"], password)
-    except BaseException as e:  # noqa: BLE001 - a session may have been opened: close it with the client's own jar
-        password = ""
-        log(event="startup-failed", reason="login", error=type(e).__name__)
-        c = getattr(e, "client", None)
-        if c is not None and c.has_session():
-            UPSTREAM = Upstream({ck.name: ck.value for ck in c.jar if ck.domain.lstrip(".") == HOST})
-            return 0 if logout() else 4
+        RESOLVER.start()
+    except OSError as e:
+        log(event="startup-failed", reason="dns", error=type(e).__name__)
         return 2
+    result, err, client = _bounded_login(cfg["username"], password, stop_requested)
     password = ""
+    if err is not None:  # a session may have been opened: close it with the client's own jar
+        log(event="startup-failed", reason="login", error=type(err).__name__)
+        if client is not None and client.has_session():
+            UPSTREAM = Upstream({ck.name: ck.value for ck in client.jar if ck.domain.lstrip(".") == HOST})
+            return 0 if logout() else 4
+        return 4 if isinstance(err, TimeoutError) else 2  # abandoned: closure unconfirmed (the DB revoke covers it)
+    _client, actor, server_now, cookies = result
     UPSTREAM = Upstream(cookies)
     with STATE.lock:
         STATE.actor_id, STATE.run_start = actor, server_now
@@ -925,14 +1079,9 @@ def main() -> int:
         if stop_requested.is_set():
             raise InterruptedError("stop requested during login")
         startup_inventory()
-        if os.path.exists(SOCKET_PATH):
-            os.unlink(SOCKET_PATH)
-        old = os.umask(0o177)
-        try:
-            server = Server(SOCKET_PATH)
-        finally:
-            os.umask(old)
-        server_box["server"] = server
+        if stop_requested.is_set():
+            raise InterruptedError("stop requested during startup")
+        servers.extend([_serve(SOCKET_PATH, control=False), _serve(CONTROL_SOCKET_PATH, control=True)])
         if stop_requested.is_set():
             stop()
 
@@ -943,21 +1092,27 @@ def main() -> int:
                     stop()
 
         threading.Thread(target=watchdog, daemon=True).start()
+        control_thread = threading.Thread(target=servers[1].serve_forever, kwargs={"poll_interval": 0.5},
+                                          daemon=True)
+        control_thread.start()
         sys.stdout.write("READY " + json.dumps({"actor": actor, "runStart": server_now.isoformat(),
-                                                "socket": SOCKET_PATH}) + "\n")
+                                                "socket": SOCKET_PATH, "controlSocket": CONTROL_SOCKET_PATH}) + "\n")
         sys.stdout.flush()
-        server.serve_forever(poll_interval=0.5)
-        server.server_close()
+        servers[0].serve_forever(poll_interval=0.5)
+        control_thread.join(timeout=2)
+        for srv in servers:
+            srv.server_close()
         drain_inflight(DRAIN_ON_SHUTDOWN)
     except BaseException as e:  # noqa: BLE001
         log(event="error", error=type(e).__name__)
     finally:
         STATE.closed = True
         closed = logout()
-        try:
-            os.unlink(SOCKET_PATH)
-        except OSError:
-            pass
+        for p in (SOCKET_PATH, CONTROL_SOCKET_PATH):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
     return 0 if closed else 4
 
 

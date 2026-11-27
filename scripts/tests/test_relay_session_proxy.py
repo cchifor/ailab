@@ -322,18 +322,24 @@ class SocketServer(unittest.TestCase):
         P.UPSTREAM = self.fake
         self.dir = tempfile.mkdtemp()
         self.sock = os.path.join(self.dir, "p.sock")
-        self.server = P.Server(self.sock)
-        self.t = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
-        self.t.start()
+        self.csock = os.path.join(self.dir, "c.sock")
+        self.server = P.Server(self.sock, control=False)
+        self.cserver = P.Server(self.csock, control=True)
+        for srv in (self.server, self.cserver):
+            threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
 
     def tearDown(self):
-        self.server.shutdown()
-        self.server.server_close()
+        for srv in (self.server, self.cserver):
+            srv.shutdown()
+            srv.server_close()
 
-    def raw(self, data: bytes, timeout=5.0) -> bytes:
+    def raw(self, data: bytes, timeout=5.0, sock=None) -> bytes:
+        if sock is None:  # control-lease routes go to the control socket, like the real adapter
+            first = data.split(b"\r\n", 1)[0].decode(errors="replace").split(" ")
+            sock = self.csock if len(first) > 1 and P._is_control(first[1]) else self.sock
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(timeout)
-        s.connect(self.sock)
+        s.connect(sock)
         s.sendall(data)
         out = b""
         while True:
@@ -418,16 +424,40 @@ class SocketServer(unittest.TestCase):
         self.assertEqual(st, 504)
         self.assertIn(b"uncertain", resp)
 
-    def test_stalled_clients_and_slow_upstream_do_not_block_lease_renewal(self):
+    def test_general_socket_saturation_does_not_block_lease_renewal(self):
         sid, _ = learn_session()
         lease = u()
         P.learn_lease(sid, {"id": lease, "generation": 1, "expires_at": iso(START)})
         stalled = []
-        for _ in range(10):  # clients that never finish their request head: they hold only reader capacity
+        for _ in range(P.GENERAL_READERS + 4):  # the ENTIRE general reader pool, and more, never finish a request
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.connect(self.sock)
             s.sendall(b"GET /api/agent-profiles HTTP/1.1\r\n")
             stalled.append(s)
+        time.sleep(0.3)
+        st, _ = self.req("POST", f"/api/agent-sessions/{sid}/control", {"generation": 1, "leaseId": lease})
+        self.assertNotEqual(st, 503)  # the control socket has its own pool
+        for s in stalled:
+            s.close()
+
+    def test_control_routes_only_on_the_control_socket(self):
+        sid, _ = learn_session()
+        lease = u()
+        P.learn_lease(sid, {"id": lease, "generation": 1, "expires_at": iso(START)})
+        body = json.dumps({"generation": 1, "leaseId": lease}).encode()
+        head = (f"POST /api/agent-sessions/{sid}/control HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                f"Content-Length: {len(body)}\r\n\r\n").encode()
+        resp = self.raw(head + body, sock=self.sock)  # control on the general socket
+        self.assertIn(b"use-the-control-socket", resp)
+        resp = self.raw(b"GET /api/agent-profiles HTTP/1.1\r\nHost: x\r\n\r\n", sock=self.csock)
+        self.assertIn(b"control-socket-is-control-only", resp)
+        self.assertEqual(self.fake.calls, [])
+
+    def test_slow_upstream_does_not_block_lease_renewal(self):
+        sid, _ = learn_session()
+        lease = u()
+        P.learn_lease(sid, {"id": lease, "generation": 1, "expires_at": iso(START)})
+        stalled = []
 
         def slow(p, b):
             time.sleep(3.0)
@@ -538,28 +568,46 @@ class UpstreamClient(unittest.TestCase):
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
         port = self.httpd.server_address[1]
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
-        self.saved = P.http.client.HTTPSConnection
-        P.http.client.HTTPSConnection = lambda host, p, timeout=None, context=None: http.client.HTTPConnection(
-            "127.0.0.1", port, timeout=timeout)
+
+        class Local(P.Upstream):  # the real call() over a plain local socket (no TLS)
+            def _open(self, end, holder, expired):
+                s = socket.create_connection(("127.0.0.1", port), timeout=max(0.05, end - time.monotonic()))
+                holder["sock"] = s
+                return s
+        self.Local = Local
 
     def tearDown(self):
-        P.http.client.HTTPSConnection = self.saved
         self.httpd.shutdown()
         self.httpd.server_close()
 
     def test_connection_close_response_and_cookie_absorbed(self):
-        up = P.Upstream({"relay_session": "orig"})
+        up = self.Local({"relay_session": "orig"})
         st, _, data, _ = up.call("GET", "/x", [], None, 5)
         self.assertEqual((st, json.loads(data)), (200, {"ok": True}))
         self.assertEqual(up.cookies["relay_session"], "rotated")
 
     def test_trickling_body_hits_the_absolute_deadline(self):
         self.mode = "trickle"
-        up = P.Upstream({"relay_session": "x"})
+        up = self.Local({"relay_session": "x"})
         t0 = time.monotonic()
         with self.assertRaises(TimeoutError):
             up.call("GET", "/x", [], None, 1.0)
         self.assertLess(time.monotonic() - t0, 2.5)
+
+    def test_connect_is_bounded_by_the_deadline(self):
+        saved = P.RESOLVER.addrs
+        P.RESOLVER.addrs = [(socket.AF_INET, ("10.255.255.1", 443))]  # unroutable: connect hangs or fails
+        try:
+            t0 = time.monotonic()
+            with self.assertRaises((TimeoutError, OSError)):
+                P.Upstream({"relay_session": "x"}).call("GET", "/x", [], None, 0.5)
+            self.assertLess(time.monotonic() - t0, 2.0)
+        finally:
+            P.RESOLVER.addrs = saved
+
+    def test_safe_route_logs_only_the_fixed_vocabulary(self):
+        self.assertEqual(P.safe_route("/api/auth/secret-password?token=x"), "/api/auth/*")
+        self.assertEqual(P.safe_route(f"/api/agent-sessions/{u()}/control"), "/api/agent-sessions/:id/control")
 
 
 if __name__ == "__main__":
