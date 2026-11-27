@@ -5,8 +5,10 @@ const test = require("node:test"),
 const { webcrypto, createHash } = require("node:crypto");
 const fs = require("node:fs"),
   path = require("node:path");
-const a = require("./owner-phase-a.js"),
-  b = require("./owner-phase-b.js");
+// The checked-in public B bundle remains held. Only exact source-pin literals
+// are changed in these isolated compiled modules; all Runner methods are real.
+const sourceFixture = require("./owner-phase-b-fence-fixture.cjs");
+const { a, b, proof: sourceProof } = sourceFixture.sourceFixture();
 const NOW = Date.parse("2026-11-27T21:00:00Z");
 const date = (x) => new Date(x).toISOString(),
   clone = (x) => JSON.parse(JSON.stringify(x));
@@ -110,6 +112,7 @@ function ready(now) {
     profilesSha256: b.PINS.profiles,
     holderId: HOLDER,
     journalId: JOURNAL,
+    routerDeploymentId: "11111111-1111-4111-8111-999999999999",
     nativeRecovery: 2,
     nativeStateReady: true,
     activeSessions: 0,
@@ -127,6 +130,8 @@ function ready(now) {
       warmSessions: false,
       trustVerified: true,
       configRevision: 2883,
+      deploymentId: "claude-selected-deployment",
+      providerGeneration: 7,
     },
     cold: {
       reportSha256: "1".repeat(64),
@@ -220,6 +225,10 @@ function phaseServer({
   readInput = { limit: 10 },
   settledCancel = false,
   configurationNotice = a.CONFIGURATION_CHANGED_NOTICE,
+  mutateFence,
+  loseFence,
+  failFence,
+  meterUsage,
 } = {}) {
   const renewal = metadata();
   const projection = {
@@ -248,7 +257,28 @@ function phaseServer({
     checkpoints = [],
     attempts = [],
     consumerReads = [],
-    effects = new Map();
+    effects = new Map(),
+    dispatchOrder = [];
+  const managedFence = sourceFixture.transport({
+    now: () => clock,
+    keyId: KEY,
+    tenantId: "00000000-0000-4000-8000-000000000001",
+    saves,
+    usage: () =>
+      meterUsage
+        ? meterUsage(attempts, commands)
+        : {
+            attempts: attempts.reduce((n, r) => n + r.attempts, 0),
+            tokenUsageUnknown: [...commands.values()].filter(
+              (c) =>
+                c.kind === "prompt" && c.cancelled && c.state === "completed",
+            ).length,
+          },
+    mutate: mutateFence,
+    lose: loseFence,
+    fail: failFence,
+    observeCall: (c) => dispatchOrder.push("fence:" + c.method),
+  });
   function consumerRows() {
     return [...sessions.values()].map((s) => {
       const pp = profiles[s.provider];
@@ -411,6 +441,8 @@ function phaseServer({
       },
       load: () => null,
       save: (state) => saves.push(clone(state)),
+      executionDeadline: INPUT.window.expiresAt,
+      attemptFence: managedFence.port,
       ask: async (title, instructions, validate, _timeout, context) => {
         checkpoints.push({ title, instructions, context });
         clock += 20;
@@ -457,6 +489,28 @@ function phaseServer({
           };
         }
         if (context?.kind === "claude-readiness") value = ready(clock);
+        if (context?.kind === "claude-attempt-drain")
+          value = {
+            version: 1,
+            observedAt: clock,
+            scope: context.scope,
+            completedOperationIds: context.completedOperationIds,
+            terminalPrompts: context.terminalPrompts,
+            pendingPermissions: [...permissions.values()]
+              .filter((p) => p.state === "pending")
+              .map((p) => p.id),
+            pendingTools: [],
+            pendingControls: [...commands.values()]
+              .filter((c) => c.state !== "completed")
+              .map((c) => c.operation_id),
+            nativeRequests: [],
+            clientRequests: [],
+            provenance: {
+              nativeSha256: "6".repeat(64),
+              clientSha256: "7".repeat(64),
+              operationsSha256: "8".repeat(64),
+            },
+          };
         if (context?.kind === "claude-branch") {
           const s = sessions.get(context.sessionId);
           value = branch(
@@ -475,6 +529,9 @@ function phaseServer({
         const u = new URL(url, a.ORIGIN),
           pathName = u.pathname,
           body = init.body && JSON.parse(init.body);
+        dispatchOrder.push(
+          "http:" + pathName + ":" + (body?.kind || init.method),
+        );
         if (init.method === "POST" && body?.operationId)
           assert(
             saves
@@ -972,6 +1029,8 @@ function phaseServer({
     attempts,
     consumerReads,
     saves,
+    managedFence,
+    dispatchOrder,
     advance: (ms) => {
       clock += ms;
     },
@@ -981,11 +1040,62 @@ function phaseServer({
   };
 }
 
-test("actual public Claude entry completes lifecycle recovery and fresh effort without modifying A", async () => {
+test("synthetic source-pin fixture: actual public Claude entry fences lifecycle/recovery/effort without modifying A", async () => {
   const original = clone(a.PROFILES),
     f = phaseServer();
   await f.runner.start();
   assert.equal(f.runner.state.status, "phase-b-passed");
+  if (process.env.PHASE_B_FENCE_EVIDENCE) {
+    fs.writeFileSync(
+      path.join(
+        process.env.PHASE_B_FENCE_EVIDENCE,
+        "synthetic-contract-transcript.json",
+      ),
+      JSON.stringify(
+        {
+          sourceProof,
+          sourceSchemaSha256:
+            "79316b299abc9b94262de060dda408c2e4f9f419a63f40731b148aaf02af22ee",
+          requests: f.managedFence.calls.map((c) => c.body),
+          receipts: [...f.managedFence.operations.values()],
+        },
+        null,
+        2,
+      ) + "\n",
+      { flag: "wx" },
+    );
+  }
+  assert.equal(require("./owner-phase-b.js").QUALIFIED_FENCE_ROUTER, null);
+  assert.equal(sourceProof.qualifiedLiveBundle, false);
+  assert.equal(sourceProof.files.length, 2);
+  const phases = f.runner.state.attemptFence.phases;
+  assert.equal(phases.length, 2);
+  assert.deepEqual(
+    phases.map((p) => p.rows.map((r) => r.maximum)),
+    [
+      [2, 3, 3, 2, 2, 2, 2, 2],
+      [2, 2],
+    ],
+  );
+  assert(phases.every((p) => p.closed && p.rows.every((r) => r.settled)));
+  const mutations = f.managedFence.calls.filter((c) =>
+    ["arm", "advance", "close"].includes(c.method),
+  );
+  assert.deepEqual(
+    mutations.map((c) => c.method),
+    ["arm", ...Array(7).fill("advance"), "close", "arm", "advance", "close"],
+  );
+  const arms = mutations.filter((c) => c.method === "arm");
+  assert.deepEqual(
+    arms.map((c) => c.body.phaseLimit),
+    [20, 6],
+  );
+  assert.equal(arms[1].body.predecessorFenceId, arms[0].body.fenceId);
+  assert.equal(
+    arms[1].body.expectedUnknownUsage,
+    1,
+    "cancelled known admission retains unknown token usage",
+  );
   assert.equal(f.runner.state.completed, false);
   assert.equal(f.runner.state.phaseACompleted, undefined);
   assert.deepEqual(a.PROFILES, original);
@@ -1227,12 +1337,15 @@ test("branch projection checks stale scope, active turns and exact retirement, n
   assert.throws(() => b.branchEvidence(true, ctx, NOW));
 });
 
-test("observed overrun stops after first prompt without treating reservations as a hard fence", async () => {
+test("an impossible over-admitted synthetic meter stops after first prompt and does not claim a qualified cap", async () => {
   const f = phaseServer({ extraReadyAttempts: 2 });
-  await assert.rejects(f.runner.start(), /exceeded reservation/);
+  await assert.rejects(
+    f.runner.start(),
+    /admitted row\/phase ceiling exceeded/,
+  );
   assert.equal(f.calls.filter((c) => c.body?.kind === "prompt").length, 1);
   assert.equal(f.runner.state.runs[0].reservations[0].state, "reserved");
-  assert.match(f.runner.state.accounting, /not a hard/);
+  assert.match(f.runner.state.accounting, /publication held/);
   assert(
     f.sessions.values().every((s) => s.state === "closed"),
     JSON.stringify(f.runner.state.evidence.filter((e) => e.kind === "cleanup")),
@@ -1336,4 +1449,240 @@ test("reservation refuses before dispatch when remaining phase budget cannot fit
   assert.equal(posts, 0);
   assert.equal(r.run.prompts, 0);
   assert.equal(r.reservation, undefined);
+});
+
+test("unchanged public bundle refuses missing port and unqualified release before any launch or observation", async () => {
+  const production = require("./owner-phase-b.js");
+  for (const withPort of [false, true]) {
+    let io = 0;
+    const blocked = () => {
+      io++;
+      throw Error("must not dispatch");
+    };
+    const runner = production.createClaudePhaseBRunner(
+      {
+        origin: a.ORIGIN,
+        crypto: webcrypto,
+        now: () => NOW,
+        load: () => null,
+        save: () => {},
+        executionDeadline: NOW + 10000,
+        fetch: blocked,
+        ask: blocked,
+        ...(withPort
+          ? {
+              attemptFence: Object.fromEntries(
+                ["inspect", "arm", "advance", "close", "readOperation"].map(
+                  (k) => [k, blocked],
+                ),
+              ),
+            }
+          : {}),
+      },
+      INPUT,
+    );
+    await assert.rejects(
+      runner.start(),
+      withPort ? /release is not assigned/ : /port missing/,
+    );
+    assert.equal(io, 0);
+    assert.equal(runner.state.status, "stopped");
+  }
+});
+
+test("signed inspection rejects wrong source, key, coverage, freshness and extra fields before launch", async () => {
+  const { digest } = require("./owner-phase-b-fence.cjs");
+  const changes = [
+    (v) => {
+      v.routerSource = "1".repeat(40);
+    },
+    (v) => {
+      v.observedAt = NOW - 1;
+    },
+    (v) => {
+      v.response.keyId = "key_aaaaaaaaaaaa";
+    },
+    (v) => {
+      v.response.coveredFrom--;
+    },
+    (v) => {
+      v.response.staleOpenRequests = 1;
+    },
+    (v) => {
+      v.response.unattributed = 1;
+    },
+    (v) => {
+      v.response.tokenUsageUnknown = 1;
+    },
+    (v) => {
+      v.response.unrecognized = true;
+    },
+  ];
+  for (const change of changes) {
+    const f = phaseServer({
+      mutateFence: (v) => {
+        change(v);
+        v.projectionSha256 = digest(v.response);
+        return v;
+      },
+    });
+    await assert.rejects(f.runner.start(), /Attempt fence:/);
+    assert.equal(f.launches.length, 0);
+    assert.equal(f.calls.filter((c) => c.method === "POST").length, 0);
+  }
+});
+
+test("full arm receipt binds plan, principal, generation and digest before first prompt", async () => {
+  const { digest } = require("./owner-phase-b-fence.cjs");
+  for (const change of [
+    (r) => {
+      r.requestDigest = "1".repeat(64);
+    },
+    (r) => {
+      r.fence.plan.selection.providerGeneration++;
+    },
+    (r) => {
+      r.fence.plan.principalId = "key:key_aaaaaaaaaaaa";
+    },
+    (r) => {
+      r.fence.plan.phaseLimit++;
+    },
+    (r) => {
+      r.fence.plan.rows[0].limit++;
+    },
+    (r) => {
+      r.fence.tenant = ID(99);
+    },
+    (r) => {
+      r.attempts++;
+    },
+    (r) => {
+      r.tokenUsageUnknown++;
+    },
+  ]) {
+    const f = phaseServer({
+      mutateFence: (v, c) => {
+        if (c.method === "arm") {
+          change(v.response);
+          v.projectionSha256 = digest(v.response);
+        }
+        return v;
+      },
+    });
+    await assert.rejects(f.runner.start(), /Attempt fence:/);
+    assert.equal(f.calls.filter((c) => c.body?.kind === "prompt").length, 0);
+    assert.equal(
+      f.managedFence.calls.filter((c) => c.method === "arm").length,
+      1,
+    );
+    assert(f.sessions.values().every((s) => s.state === "closed"));
+  }
+});
+
+test("missing native/client drain fails despite zero Router opens and closes fence before Relay cleanup", async () => {
+  let observations = 0;
+  const f = phaseServer({
+    mutateCheckpoint: (ctx, value) => {
+      if (ctx.kind === "claude-attempt-drain" && ++observations === 2)
+        value.clientRequests = ["unproved-late-request"];
+      return value;
+    },
+  });
+  await assert.rejects(f.runner.start(), /native\/client work remains/);
+  assert.equal(
+    f.managedFence.calls.filter((c) => c.method === "advance").length,
+    0,
+  );
+  const fenceClose = f.dispatchOrder.indexOf("fence:close");
+  const relayClose = f.dispatchOrder.findIndex(
+    (x) => x.startsWith("http:") && x.endsWith(":close"),
+  );
+  assert(fenceClose >= 0 && relayClose > fenceClose);
+  assert.equal(f.calls.filter((c) => c.body?.kind === "prompt").length, 1);
+  assert(f.sessions.values().every((s) => s.state === "closed"));
+});
+
+for (const method of ["arm", "advance", "close"])
+  test(`lost committed ${method} is resolved only by original-operation read, never mutation resend`, async () => {
+    let lost = false;
+    const f = phaseServer({
+      loseFence: (called) => called === method && !lost && (lost = true),
+    });
+    await f.runner.start();
+    assert.equal(f.runner.state.status, "phase-b-passed");
+    const lookup = f.managedFence.calls.filter(
+      (c) => c.method === "readOperation",
+    );
+    const arm = f.managedFence.calls.find((c) => c.method === method);
+    assert.equal(lookup.length, 1);
+    assert.equal(lookup[0].body.targetOperationId, arm.body.operationId);
+    assert.notEqual(lookup[0].body.operationId, arm.body.operationId);
+    assert.equal(lookup[0].request.deadline, arm.request.deadline);
+    assert.equal(
+      f.managedFence.calls.filter((c) => c.method === "arm").length,
+      2,
+      "one arm for each fixed phase",
+    );
+    assert(
+      f.runner.state.attemptFence.operations.every(
+        (o) => o.status === "committed",
+      ),
+    );
+  });
+
+test("unresolved arm stops before prompt; failed fence close still permits ordinary cleanup", async () => {
+  const unresolved = phaseServer({
+    loseFence: (m) => m === "arm",
+    failFence: (m) => m === "readOperation",
+  });
+  await assert.rejects(unresolved.runner.start(), /unresolved/);
+  assert.equal(
+    unresolved.calls.filter((c) => c.body?.kind === "prompt").length,
+    0,
+  );
+  assert.equal(
+    unresolved.managedFence.calls.filter((c) => c.method === "arm").length,
+    1,
+  );
+  assert(unresolved.sessions.values().every((s) => s.state === "closed"));
+  const closeFailure = phaseServer({
+    mutateCheckpoint: (ctx, v) => {
+      if (ctx.kind === "observation" && ctx.phase === "denied")
+        v.marker.files.denied.state = "present";
+      return v;
+    },
+    failFence: (m) => m === "close" || m === "readOperation",
+  });
+  await assert.rejects(closeFailure.runner.start());
+  assert.equal(
+    closeFailure.managedFence.calls.filter((c) => c.method === "close").length,
+    1,
+  );
+  assert(closeFailure.sessions.values().every((s) => s.state === "closed"));
+  assert(
+    closeFailure.runner.state.evidence.some(
+      (e) =>
+        e.kind === "attempt-fence-cleanup" && e.status.startsWith("unresolved"),
+    ),
+  );
+});
+
+test("raw denied N+1 remains visible and fails phase although only two admissions are charged", async () => {
+  const f = phaseServer({
+    extraReadyAttempts: 2,
+    meterUsage: (rows) => ({
+      attempts: Math.min(
+        2,
+        rows.reduce((n, r) => n + r.attempts, 0),
+      ),
+    }),
+  });
+  await assert.rejects(f.runner.start(), /raw trajectory\/admission mismatch/);
+  assert.equal(f.runner.state.runs[0].lastSnapshot.totalAttempts, 3);
+  assert.equal(f.managedFence.current().closedAttempts, 2);
+  assert.equal(
+    f.managedFence.calls.filter((c) => c.method === "advance").length,
+    0,
+  );
+  assert.equal(f.calls.filter((c) => c.body?.kind === "prompt").length, 1);
 });

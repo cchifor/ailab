@@ -6,15 +6,44 @@ const os = require("node:os");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
-const a = require("./owner-phase-a.js");
-const b = require("./owner-phase-b.js");
-const { runPhaseBCli } = require("./owner-phase-b-cli.cjs");
+const Module = require("node:module");
+const candidate = require("./owner-phase-b-fence-fixture.cjs").sourceFixture();
+const { a, b } = candidate;
+// Host/CLI source bytes unchanged; only their actual dependency modules use
+// the same explicitly recorded candidate source-pin fixture as the core suite.
+const moduleProof = [];
+function load(name, bindings) {
+  const filename = path.join(__dirname, name),
+    raw = fs.readFileSync(filename, "utf8");
+  const mod = new Module(filename, module);
+  mod.filename = filename;
+  mod.paths = Module._nodeModulePaths(__dirname);
+  const originalRequire = mod.require.bind(mod);
+  mod.require = (dependency) =>
+    Object.hasOwn(bindings, dependency)
+      ? bindings[dependency]
+      : originalRequire(dependency);
+  mod._compile(raw, filename);
+  moduleProof.push({
+    file: name,
+    sha256: createHash("sha256").update(raw).digest("hex"),
+    sourceBytesUnchanged: true,
+  });
+  return mod.exports;
+}
+const host = load("owner-phase-a-automation.cjs", {
+  "./owner-phase-a.js": a,
+  "./owner-phase-b.js": b,
+});
+const { runPhaseBCli } = load("owner-phase-b-cli.cjs", {
+  "./owner-phase-a-automation.cjs": host,
+});
 const { createFixture } = require("./owner-phase-b-automation-fixture.cjs");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 
 test(
-  "actual named B CLI and host complete Claude lifecycle and effort over Unix HTTP with real heartbeat",
-  { timeout: 300000 },
+  "candidate-pin actual named B CLI/host fences lifecycle and effort over Unix HTTP with real heartbeat",
+  { timeout: 480000 },
   async (t) => {
     const directory = fs.mkdtempSync(
       path.join(os.tmpdir(), "relay-b-positive-"),
@@ -48,8 +77,11 @@ test(
         ],
         env: {
           RELAY_SESSION_SOCKET: f.socketPath,
-          RUNNER_DEADLINE: String(started + 280000),
+          // Added native/client drain observations keep real 5s barriers.
+          // This fixture ceiling remains below unchanged live phase/host limits.
+          RUNNER_DEADLINE: String(started + 450000),
         },
+        attemptFence: f.attemptFence,
         signals,
         collectCheckpoint: async (options) => {
           const value = await f.collectCheckpoint(options);
@@ -99,7 +131,8 @@ test(
       );
       assert(
         state.runs.every(
-          (r) => r.status === "passed-with-live-wire-unobserved",
+          (r) =>
+            r.status === "passed-with-admission-fence-live-wire-unobserved",
         ),
       );
       for (const run of state.runs) {
@@ -115,6 +148,23 @@ test(
         );
       }
       assert.equal(f.launches.length, 3);
+      const fencePhases = state.attemptFence.phases;
+      assert.deepEqual(
+        fencePhases.map((p) => p.rows.map((r) => r.maximum)),
+        [
+          [2, 3, 3, 2, 2, 2, 2, 2],
+          [2, 2],
+        ],
+      );
+      assert(
+        fencePhases.every((p) => p.closed && p.rows.every((r) => r.settled)),
+      );
+      assert.equal(state.attemptFence.operations.length, 12);
+      assert(
+        state.attemptFence.operations.every((o) => o.status === "committed"),
+      );
+      assert.equal(f.managedFence.current().closedTokenUsageUnknown, 1);
+      assert.equal(require("./owner-phase-b.js").QUALIFIED_FENCE_ROUTER, null);
       const launches = [...f.launches].reverse();
       assert.equal(launches.filter((l) => l.resume_from).length, 1);
       assert.equal(launches[1].resume_from, launches[0].session_id);
@@ -237,8 +287,10 @@ test(
           markerEffects: 1,
           heartbeatRequests: f.heartbeats.length,
           snapshots: snapshots.length,
+          fenceMutations: state.attemptFence.operations.length,
+          candidateOnly: true,
           scope:
-            "actual B CLI/host/ClaudeRunner; synthetic HTTP/readiness/branch/marker/trajectory and completed-A structure; no JIT/provider/holder/live proof; reservations are not a hard upstream fence",
+            "actual B CLI/host/ClaudeRunner with pin-only synthetic candidate modules; synthetic signed-port protocol/HTTP/readiness/drain/branch/marker/trajectory and completed-A structure; no JIT/provider/holder/live proof; checked-in release gate remains NULL",
         }) + "\n",
       );
     } finally {
@@ -255,6 +307,14 @@ test(
           "checkpoints.json": f.checkpoints,
           "fixture-failures.json": f.failures,
           "heartbeat.json": f.heartbeats,
+          "candidate-module-proof.json": {
+            ...candidate.proof,
+            modules: moduleProof,
+          },
+          "fence-contract-transcript.json": {
+            requests: f.managedFence.calls.map((c) => c.body),
+            receipts: [...f.managedFence.operations.values()],
+          },
         }))
           fs.writeFileSync(
             path.join(target, name),
