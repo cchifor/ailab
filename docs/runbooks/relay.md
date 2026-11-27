@@ -992,9 +992,11 @@ Runner stops, and the broker returns 8.
 **Read-only probe:** `python scripts/relay-operator.py observer-probe`. It needs no session, no Lease and no holder
 start. It checks every source with its latency: hub deployment, the Router pod and capture config, the trajectory
 envelopes, the marker baselines, the routes, the clock bounds, every SQL shape, the pre-run facts, the native
-transcript format and the predecessor staging. The 2026-11-27 run: 19/19 checks passed, each call 0.2–1.7 s.
+transcript format and the predecessor staging. The 2026-11-27 run: 22/22 checks passed, each call 0.2–1.3 s. A check passes only when its result establishes the fact.
 
 **Open gates** (the collectors answer `unsupported`, and the run stops there):
 - **C10 (`reconcile-choice`):** the inference session must name the authoritative reconstruction-required field.
+- **C11 (`retire-branch`):** the settings-applied receipt and the probe's refusal must be established from
+  authoritative, correlated records.
 - **The predecessor projection:** it needs the driver change to the pinned-hash contract.
 - **The phase A bundle manifest:** it needs #2060 on main.
