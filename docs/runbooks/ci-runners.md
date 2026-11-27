@@ -232,7 +232,8 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
       that needs a workbricks pull-request label the push runners lack.
   - **One node.** Both push runners are on ai-node3, the least-worn NVMe. While that node is down or in
     maintenance, every workbricks push job waits; pull requests keep running elsewhere.
-    - **Fallback:** add `workbricks-push` to a runner on another node (its host_vars, then a drained converge).
+    - **Fallback:** add `workbricks-push` to a runner on another node (its host_vars, then a converge as under
+      "Changing the set").
     - The cost is a cold push cache there: its first push job builds about 34 GiB of targets.
   - **Changing the set.** Edit the two host_vars, converge those runners one at a time while the queue is
     quiet, and check the label in Gitea (Site/Org settings → Actions → Runners) before workbricks' `runs-on`
@@ -240,6 +241,14 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     - **Converge with the runner running; do not stop it first.** The role restarts act_runner once, from its
       handler at the end of the play. That restart drains the job in flight for up to
       `gitea_runner_shutdown_timeout_min` (10 min), and a job still running then is cut off.
+    - **Before each converge, check that this runner has no job in flight.** On the host:
+      `pgrep -P "$(systemctl show -p MainPID --value gitea-act-runner)"` must print nothing. If a job runs, wait
+      for it to end; do not start the play. A long one, such as a cold workbricks push build (about 34 GiB of
+      targets) or a platform e2e job, can outlast the drain.
+    - **The check is best-effort.** The play takes minutes, and a new job can still land before the handler
+      fires. Watch the drain (`journalctl -u gitea-act-runner -f`: `shutdown initiated, waiting 10m0s for
+      running jobs`). Rerun a job it cuts off: the run's failed jobs, through the forge's
+      `runs/<id>/rerun-failed-jobs`.
     - **Why not stop it first.** The role's "Enable + start the act_runner daemon" task starts a stopped runner
       again mid-play, with the new labels already declared. It can take a job there, and the handler's restart
       then drains that job.
