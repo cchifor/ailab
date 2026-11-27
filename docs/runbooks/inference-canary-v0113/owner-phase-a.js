@@ -11,8 +11,9 @@
   "use strict";
   const SOURCE = "e843921b7cff76406b7da0b5b35cf653c7e458c5";
   // SOURCE/PROFILES/EXPIRES describe the immutable stopped predecessor.
+  // The v0.14.1 API source bridge preserves the captured 74d1 fixture provenance.
   // The target release still requires fresh operator deployment verification.
-  const RUN_SOURCE = "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613";
+  const RUN_SOURCE = "5f90d03a6ed291e6c62dfde75938ba07c20d8902";
   const ROUTER = "4e4bb34e2f968f9450aabe9cf228d3e70c8bab71";
   const ORIGIN = "https://relay.chifor.me";
   const EXPIRES = Date.parse("2026-11-26T21:27:37Z");

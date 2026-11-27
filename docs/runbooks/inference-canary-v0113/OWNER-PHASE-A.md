@@ -1,6 +1,16 @@
 # Owner-run phase A
 
-**Published and offline-qualified successor (2026-11-27); operator handoff pending.**
+**Current continuation is automated.**
+The [noninteractive host](AUTOMATED-PHASE-A.md) reuses this driver's validators
+with reviewed same-session operator access and machine observations. The browser
+instructions below document the original workflow and saved report; they are
+not a request for the owner to execute manual steps. Preserve any partial report
+and its accounting. Authentication and original-state recovery remain required
+integration inputs, not facts established by offline tests.
+The [operator handoff](https://git.chifor.me/cchifor/ailab/pulls/2041#issuecomment-147480)
+has completed; require fresh holder identity/admission after restart.
+
+**Historical publication checkpoint, before the operator handoff.**
 Holder v0.13.4, source `64dc50f47a4867a6d9a7afc2e7d5ae24068c59af`,
 was published in [run152719](https://git.chifor.me/cchifor/relay/actions/runs/152719).
 Its Linux amd64 binary SHA256 is
@@ -82,13 +92,16 @@ are unchanged. The earlier five synthetic wire cases remain evidence for that
 runtime, not qualification of a corrected holder or live acceptance. Historical
 holder pins and evidence remain recorded in [README](README.md).
 
-This post-expiry successor targets renewal-capable hub source
-`74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613`, the reviewed release merge in
-[Relay PR717](https://git.chifor.me/cchifor/relay/pulls/717).
-Its metadata paths are qualified offline using this actual source pin;
+This post-expiry successor targets deployed v0.14.1 hub source
+`5f90d03a6ed291e6c62dfde75938ba07c20d8902`. The
+[source bridge](owner-phase-a.hub-5f90.source-bridge.json) verifies that all ten
+source files bound to the earlier real PostgreSQL/HTTP capture are byte-identical
+at this source. The fixture remains attributed to its original 74d1 capture;
+it is not a new v0.14.1 database or live acceptance run. The offline driver checks
+use the actual `RUN_SOURCE` and retain the captured response bodies.
 `QUALIFIED_INPUTS` does not
 establish publication, deployment, owner authority or a live acceptance result.
-The operator rollout/readback in [PR2042](https://git.chifor.me/cchifor/ailab/pulls/2042)
+The operator rollout/readback in [PR2055](https://git.chifor.me/cchifor/ailab/pulls/2055#issuecomment-147826)
 confirms that deployed hub source. Before use, still require the operator's fresh
 deployment readback for that exact source. The bootstrap
 then verifies both renewed credential references through the normal API before
@@ -227,7 +240,8 @@ Disabled, explicitly revoked, uncertain, worker-managed or otherwise ineligible
 bindings still refuse. Do not race expiry reconciliation or change state to make
 renewal possible. Publication, deployment and renewal are distinct steps.
 
-The driver targets the exact 74d1 API projections. The
+The driver retains the exact API projections captured at 74d1, whose source
+bindings are unchanged at the pinned v0.14.1 hub. The historical
 [inventory query](https://git.chifor.me/cchifor/relay/src/commit/74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613/server/router-credentials/service.ts#L335)
 returns snake_case database fields alongside the quoted computed field
 `canRenew`; [credential inspection](https://git.chifor.me/cchifor/relay/src/commit/74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613/server/router-credentials/service.ts#L395)
@@ -239,12 +253,16 @@ false. The driver retains these exact field checks and refuses incomplete
 delivery or generation metadata.
 
 The [recorded contract fixture](owner-phase-a.hub-74d1.fixture.json) contains
-normal HTTP responses from the exact hub source with an isolated PostgreSQL
+normal HTTP responses from source 74d1 with an isolated PostgreSQL
 database and synthetic credentials. Its provenance records source hashes and
 the generation procedure. The bridge, escrow and model catalog are fakes;
 sessions and consumers are created through server methods. It checks the API
 projection boundary, not a deployed hub, provider or complete holder launch.
-The driver tests consume these recorded bodies without renaming their fields.
+The driver tests consume these recorded bodies without renaming their fields
+and verify the separate ten-file source bridge to `RUN_SOURCE`. Source equality
+does not assert whole-release equivalence: v0.14.1 also changes console features
+and acknowledgement metrics. The session/credential APIs and schema 93 used here
+are unchanged.
 
 Both renewals must use fresh retained operation UUIDs and the observed binding
 revisions through the owner's normal authenticated API workflow. Preserve their

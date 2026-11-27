@@ -23,7 +23,10 @@ Authenticate its [deployment receipt](https://git.chifor.me/cchifor/relay/releas
 and control-plane manifest before staging. The input file retains the Pi v0.13.1
 archive, connector and profile pins; renderer inputs are unchanged.
 The v0.13.4 image is the holder installer. It does not change the deployed hub's
-v0.13.2/source `74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613`.
+v0.14.1/source `5f90d03a6ed291e6c62dfde75938ba07c20d8902`; the separate
+[API source bridge](owner-phase-a.hub-5f90.source-bridge.json) preserves the
+original 74d1 fixture attribution. This hub update changes none of the holder
+artifacts or state-preservation steps below.
 
 The split is:
 

@@ -2,7 +2,7 @@
 // No real fetch, timers, browser state, credentials, provider or host operations.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { webcrypto } = require("node:crypto");
+const { createHash, webcrypto } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
@@ -21,7 +21,7 @@ const PUBLISHED_HOLDER_TEST_PINS = Object.freeze({
   binarySha256:
     "d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926",
 });
-assert.equal(a.RUN_SOURCE, "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613");
+assert.equal(a.RUN_SOURCE, "5f90d03a6ed291e6c62dfde75938ba07c20d8902");
 assert.equal(a.HOLDER_CONTROLS_QUALIFIED, true);
 assert.match(PUBLISHED_HOLDER_TEST_PINS.binarySha256, /^[a-f0-9]{64}$/);
 const holderDisabledModule = { exports: {} };
@@ -419,12 +419,17 @@ function renewedFixture(state = "installing", now = POST_EXPIRY) {
   return { inventory, details };
 }
 
-// Captured normal HTTP responses from the pinned hub with a private PostgreSQL
+// Captured normal HTTP responses from the 74d1 hub with a private PostgreSQL
 // fixture. The generation recipe and source provenance live beside the payloads;
 // unlike renewedFixture(), these response shapes were not authored by the driver.
-const hubProjection = JSON.parse(
+const hubProjectionSource = fs.readFileSync(
+  path.join(__dirname, "owner-phase-a.hub-74d1.fixture.json"),
+  "utf8",
+);
+const hubProjection = JSON.parse(hubProjectionSource);
+const hubSourceBridge = JSON.parse(
   fs.readFileSync(
-    path.join(__dirname, "owner-phase-a.hub-74d1.fixture.json"),
+    path.join(__dirname, "owner-phase-a.hub-5f90.source-bridge.json"),
     "utf8",
   ),
 );
@@ -432,7 +437,33 @@ const hubObservation = Date.parse(hubProjection.observedAt);
 
 test("renewed credentials accept the exact 74d1 HTTP inventory and detail projections", () => {
   assert.equal(hubProjection.version, 1);
-  assert.equal(hubProjection.sourceCommit, a.RUN_SOURCE);
+  assert.equal(
+    hubProjection.sourceCommit,
+    "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613",
+  );
+  assert.equal(hubSourceBridge.version, 1);
+  assert.equal(hubSourceBridge.capturedSource, hubProjection.sourceCommit);
+  assert.equal(hubSourceBridge.targetSource, a.RUN_SOURCE);
+  // Git may convert LF to CRLF in a Windows checkout. Bind the original Git
+  // bytes, allowing only that checkout conversion; never relabel the capture.
+  assert.equal(
+    createHash("sha256")
+      .update(hubProjectionSource.replace(/\r\n/g, "\n"))
+      .digest("hex"),
+    hubSourceBridge.fixture.gitBytesSha256,
+  );
+  assert.equal(hubSourceBridge.files.length, 10);
+  assert.deepEqual(
+    hubSourceBridge.files.map((f) => f.path).sort(),
+    Object.keys(hubProjection.provenance.sourceBlobs).sort(),
+  );
+  for (const file of hubSourceBridge.files) {
+    const captured = hubProjection.provenance.sourceBlobs[file.path];
+    assert.equal(file.capturedGitBlob, captured.gitBlob);
+    assert.equal(file.targetGitBlob, captured.gitBlob);
+    assert.equal(file.capturedSha256, captured.sha256);
+    assert.equal(file.targetSha256, captured.sha256);
+  }
   assert.equal(
     hubProjection.provenance.sourceBlobs["server/router-credentials/service.ts"]
       .gitBlob,

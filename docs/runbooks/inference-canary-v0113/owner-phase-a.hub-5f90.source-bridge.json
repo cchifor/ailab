@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "kind": "captured-api-fixture-source-bridge",
+  "capturedSource": "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613",
+  "targetSource": "5f90d03a6ed291e6c62dfde75938ba07c20d8902",
+  "fixture": {
+    "path": "owner-phase-a.hub-74d1.fixture.json",
+    "gitBytesSha256": "b9adacef86314441918ae399f82f99dc765b490204f01be7360d4006fedb250b",
+    "gitBlob": "ad6afecc32c5d6c4cf4c66fdffde19dbe28ba3fc",
+    "observedAt": "2026-11-27T04:03:21.811Z",
+    "origin": "Existing real PostgreSQL/normal HTTP capture at 74d1; source and response bytes preserved."
+  },
+  "files": [
+    {
+      "path": "server/router-credentials/service.ts",
+      "capturedGitBlob": "beadba8563481fabf7af7f2079ffda9876106aa9",
+      "targetGitBlob": "beadba8563481fabf7af7f2079ffda9876106aa9",
+      "capturedSha256": "8c92d29d6dd97ecff039f3b605155b4f074651249859c88dcd52b6594a819cf5",
+      "targetSha256": "8c92d29d6dd97ecff039f3b605155b4f074651249859c88dcd52b6594a819cf5"
+    },
+    {
+      "path": "server/router-credentials/expired-renewal.ts",
+      "capturedGitBlob": "56ccc143f1e50724f082e8cab6f2b2221f47681f",
+      "targetGitBlob": "56ccc143f1e50724f082e8cab6f2b2221f47681f",
+      "capturedSha256": "5462353175179b65c08842aca110e0f8a6ba8fa3a4b0e9107c48a254ce518665",
+      "targetSha256": "5462353175179b65c08842aca110e0f8a6ba8fa3a4b0e9107c48a254ce518665"
+    },
+    {
+      "path": "server/router-credentials/routes.ts",
+      "capturedGitBlob": "4d341f64a3c20f51c996c894b84fd99b47ef94c2",
+      "targetGitBlob": "4d341f64a3c20f51c996c894b84fd99b47ef94c2",
+      "capturedSha256": "8386fbeadca4c32394f0f29c2b07e244ea9daff155d8b83be1853dcb6219da91",
+      "targetSha256": "8386fbeadca4c32394f0f29c2b07e244ea9daff155d8b83be1853dcb6219da91"
+    },
+    {
+      "path": "server/router-credentials/consumers.ts",
+      "capturedGitBlob": "f483a7be7dd1531da4598ccc3b948aec9b1aed89",
+      "targetGitBlob": "f483a7be7dd1531da4598ccc3b948aec9b1aed89",
+      "capturedSha256": "ec73d28713ce6fe9a33442d104679be8b3285717a20710d937620eec3808bf25",
+      "targetSha256": "ec73d28713ce6fe9a33442d104679be8b3285717a20710d937620eec3808bf25"
+    },
+    {
+      "path": "server/agent-sessions/routes.ts",
+      "capturedGitBlob": "9c19c29cb2fc4bb3d48bc74d89f1a461e4b5a6ea",
+      "targetGitBlob": "9c19c29cb2fc4bb3d48bc74d89f1a461e4b5a6ea",
+      "capturedSha256": "a67c0b589c824079025c7e77e40a2f4cef79ba91af864eba474093f9f2c5cd18",
+      "targetSha256": "a67c0b589c824079025c7e77e40a2f4cef79ba91af864eba474093f9f2c5cd18"
+    },
+    {
+      "path": "server/agent-sessions/journal.ts",
+      "capturedGitBlob": "349b0d04076247861f59f29738ab2684da7a486d",
+      "targetGitBlob": "349b0d04076247861f59f29738ab2684da7a486d",
+      "capturedSha256": "26e4bcd07cf1f31014367d1191fb1e31ba4d4baadfbd4c7cb9101c6496935594",
+      "targetSha256": "26e4bcd07cf1f31014367d1191fb1e31ba4d4baadfbd4c7cb9101c6496935594"
+    },
+    {
+      "path": "server/authorized-transaction.ts",
+      "capturedGitBlob": "24426446c5dd225ca1b05806d3c54041a0be84a0",
+      "targetGitBlob": "24426446c5dd225ca1b05806d3c54041a0be84a0",
+      "capturedSha256": "19c652ae5194f4a2c7d2471a4c0511da4bece6dc4d0efdc5a246e38bd69c2c95",
+      "targetSha256": "19c652ae5194f4a2c7d2471a4c0511da4bece6dc4d0efdc5a246e38bd69c2c95"
+    },
+    {
+      "path": "server/auth.ts",
+      "capturedGitBlob": "a22a7e4812f9be9d4b1e0b34da63d4d42e0ab18d",
+      "targetGitBlob": "a22a7e4812f9be9d4b1e0b34da63d4d42e0ab18d",
+      "capturedSha256": "a3d1f92d8876e3ca5b39e881cd5b59d1afe0a59f3eb9607a1f58f98df487e2cd",
+      "targetSha256": "a3d1f92d8876e3ca5b39e881cd5b59d1afe0a59f3eb9607a1f58f98df487e2cd"
+    },
+    {
+      "path": "server/db.ts",
+      "capturedGitBlob": "d067667765611a03a3842c696ae76b6f6fb84d5b",
+      "targetGitBlob": "d067667765611a03a3842c696ae76b6f6fb84d5b",
+      "capturedSha256": "2c7ecb2aba4dff59a9c7f655970b8c280b9d4c2354a534190471fb5f803e8934",
+      "targetSha256": "2c7ecb2aba4dff59a9c7f655970b8c280b9d4c2354a534190471fb5f803e8934"
+    },
+    {
+      "path": "packages/contracts/router-credentials.ts",
+      "capturedGitBlob": "ee20e919065b6b4cb58ccf922be532ff05928583",
+      "targetGitBlob": "ee20e919065b6b4cb58ccf922be532ff05928583",
+      "capturedSha256": "22c7318d650a52137e17b2f3635c8c082c5ccfabc14334891d47f05eb55366d5",
+      "targetSha256": "22c7318d650a52137e17b2f3635c8c082c5ccfabc14334891d47f05eb55366d5"
+    }
+  ],
+  "verification": {
+    "method": "Read raw git show COMMIT:PATH bytes for both commits, compare bytes, Git blob IDs and SHA-256 with all ten fixture provenance.sourceBlobs entries. No checkout or archive newline conversion.",
+    "fixtureHashInTests": "SHA-256 of the checked-in LF bytes. Tests permit Git checkout CRLF conversion only; the original fixture file is not edited.",
+    "reproduce": "For every files[].path in a Relay clone containing both commits: git show capturedSource:path and git show targetSource:path into byte buffers; compare byte equality and SHA-256, then git rev-parse for the two blob IDs. Compare each to the unchanged fixture provenance.sourceBlobs entry.",
+    "additionalScopedComparison": "The entire server/router-credentials tree, owner agent-session/launch-profile/router-credential contracts, migration tree and transport route registration are unchanged. server/agent-sessions changes only acknowledgement metrics in health.ts.",
+    "schema": 93
+  },
+  "scope": {
+    "newDatabaseCapture": false,
+    "liveProviderAcceptance": false,
+    "wholeReleaseEquivalence": false,
+    "limitations": [
+      "The original fixture captures no active inventory consumers; its detail and session views do capture active consumers. Authored inventory-consumer negatives remain separate.",
+      "v0.14.1 also changes console features and acknowledgement metrics outside these captured API projections.",
+      "Fresh deployed-source verification, owner authority, credential readiness, preserving holder handoff and an explicit owner window remain required."
+    ]
+  }
+}

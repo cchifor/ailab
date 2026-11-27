@@ -1,6 +1,15 @@
 # Exact dev-worker-1 Pi canary inputs
 
-**Published and offline-qualified successor (2026-11-27); operator handoff pending.**
+**Current continuation: automated acceptance against hub v0.14.1.**
+Use the [automation integration contract](AUTOMATED-PHASE-A.md). The bounded
+same-session operator integration and actual saved-run recovery must be ready
+before execution; the library alone supplies neither. No manual owner clicks,
+credential renewals or window assignment are part of this continuation.
+The [operator handoff](https://git.chifor.me/cchifor/ailab/pulls/2041#issuecomment-147480)
+was completed and independently checked. After a host restart, refresh its
+identity/admission and retain both state roots; do not repeat staging.
+
+**Historical publication checkpoint, before the operator handoff.**
 Holder v0.13.4, source `64dc50f47a4867a6d9a7afc2e7d5ae24068c59af`,
 was published in [run152719](https://git.chifor.me/cchifor/relay/actions/runs/152719).
 Its Linux amd64 binary SHA256 is
@@ -77,10 +86,14 @@ proofs below remain historical; they do not identify the current Router.
 The first communication correction merged in
 [PR2031](https://git.chifor.me/cchifor/ailab/pulls/2031). Its original credential
 pins expired on November 26. The [post-expiry owner replacement](OWNER-PHASE-A.md#review-the-known-stopped-run-replacement)
-targets reviewed Relay release source `74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613`
-from [PR717](https://git.chifor.me/cchifor/relay/pulls/717), with offline checks
-against that actual pin. The operator rollout/readback in
-[PR2042](https://git.chifor.me/cchifor/ailab/pulls/2042) confirms that hub source.
+targets Relay v0.14.1 source `5f90d03a6ed291e6c62dfde75938ba07c20d8902`, image
+`registry.chifor.me/relay/control-plane@sha256:eb6a99bf99c0ed2e1a3db3ebe42e93aebf3e0ae3cabe3498ed2a19094e3227da`.
+The operator [PR2055 rollout readback](https://git.chifor.me/cchifor/ailab/pulls/2055#issuecomment-147826)
+confirms that hub source. The [ten-file source bridge](owner-phase-a.hub-5f90.source-bridge.json)
+binds the unchanged credential/session API implementation to the original 74d1
+PostgreSQL/HTTP fixture; its recorded source and response bytes remain unchanged.
+The offline driver checks use the current hub pin. Holder v0.13.4, retained Pi,
+Router and revision-1 profile pins are independent and unchanged.
 Live use still requires this packet's normal review and merge, fresh deployment
 verification, separate owner renewals and an explicit owner window.
 The stopped run's one prompt and two attempts carry forward without resetting
