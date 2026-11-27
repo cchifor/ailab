@@ -1000,11 +1000,7 @@
       };
       const deployment = await this.env.ask(
         "Review already-renewed phase-A credentials",
-        "Preserve/download the original stopped report. This driver issues or rotates no credential. Confirm the operator has deployed qualified hub " +
-          RUN_SOURCE +
-          " and completed normal owner-authorized renewal of BOTH unchanged bindings. Paste {confirmMetadataReview:true,reportDownloaded:true,operatorVerified:true,deploymentVerified:true,observedUtc:ISO,hubSource:'" +
-          RUN_SOURCE +
-          "'}. The deployed-source readback must be collected during this review, not copied from a prior release. Only then will this browser read their nonsecret metadata. No new launch or permission decision is authorized by this checkpoint.",
+        "Preserve/download the original stopped report. This driver issues or rotates no credential. Confirm the operator has deployed the qualified renewal hub and completed normal owner-authorized renewal of BOTH unchanged bindings. Paste {confirmMetadataReview:true,reportDownloaded:true,operatorVerified:true,deploymentVerified:true,observedUtc:ISO,hubSource:OBSERVED_SOURCE_SHA}. Copy the source and observation time from the operator's actual deployment readback collected during this review, not from this script or a prior release. This remains an operator attestation, not a browser measurement of the deployed source. Only then will this browser read their nonsecret metadata. No new launch or permission decision is authorized by this checkpoint.",
         (v) => {
           remaining();
           need(
@@ -1018,7 +1014,7 @@
             "Explicit renewed-credential metadata review required",
           );
           return {
-            hubSource: RUN_SOURCE,
+            hubSource: v.hubSource,
             observedUtc: v.observedUtc,
             deploymentVerified: true,
             operatorVerified: true,
@@ -1380,6 +1376,10 @@
       });
     }
     async launch(recovery = false) {
+      // lifecycle() awaits close() before recovery. Hub journal.endSession()
+      // releases the holder consumer in the same transaction before closing
+      // the source session; native recovery rejects an open source. Keep the
+      // no-active-consumer rule for recovery too, including unrelated consumers.
       if (this.state.successorCredentials)
         await this.refreshRenewedCredentials();
       const p = this.profiles[this.run.provider],
