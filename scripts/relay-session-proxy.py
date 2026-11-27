@@ -692,6 +692,9 @@ class Upstream:
             headers["Content-Length"] = str(len(payload))
         if method != "GET":
             headers["Origin"] = ORIGIN
+        # An explicit Host: HTTPConnection(HOST, 443) has default_port 80 and would send "relay.chifor.me:443", which
+        # differs from the Origin above; http.client omits its own Host when one is supplied.
+        headers["Host"] = HOST
         expired = threading.Event()
         holder = {}
 

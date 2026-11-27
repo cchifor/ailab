@@ -451,6 +451,12 @@ class SocketServer(unittest.TestCase):
         self.assertIn(b"use-the-control-socket", resp)
         resp = self.raw(b"GET /api/agent-profiles HTTP/1.1\r\nHost: x\r\n\r\n", sock=self.csock)
         self.assertIn(b"control-socket-is-control-only", resp)
+        # the live smoke's check: the predecessor's control route on the CONTROL socket reaches the predecessor rule
+        pbody = b'{"generation": 1}'
+        phead = (f"POST /api/agent-sessions/{P.PREDECESSOR_SESSION}/control HTTP/1.1\r\nHost: x\r\n"
+                 f"Content-Type: application/json\r\nContent-Length: {len(pbody)}\r\n\r\n").encode()
+        resp = self.raw(phead + pbody, sock=self.csock)
+        self.assertIn(b'"reason": "predecessor-read-only"', resp)
         self.assertEqual(self.fake.calls, [])
 
     def test_slow_upstream_does_not_block_lease_renewal(self):
@@ -543,7 +549,15 @@ class UpstreamClient(unittest.TestCase):
             def log_message(self, *a):
                 pass
 
+            def do_POST(self):
+                test.seen = (self.headers.get_all("Host"), self.headers.get("Origin"))
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
             def do_GET(self):
+                test.seen = (self.headers.get_all("Host"), self.headers.get("Origin"))
                 if test.mode == "close":
                     body = b'{"ok": true}'
                     self.send_response(200)
@@ -585,6 +599,14 @@ class UpstreamClient(unittest.TestCase):
         st, _, data, _ = up.call("GET", "/x", [], None, 5)
         self.assertEqual((st, json.loads(data)), (200, {"ok": True}))
         self.assertEqual(up.cookies["relay_session"], "rotated")
+
+    def test_host_header_is_the_bare_origin_host(self):
+        up = self.Local({"relay_session": "x"})
+        up.call("GET", "/x", [], None, 5)
+        self.assertEqual(self.seen, ([P.HOST], None))
+        up.call("POST", "/y", [], {"a": 1}, 5)
+        self.assertEqual(self.seen, ([P.HOST], P.ORIGIN))
+        self.assertEqual(P.ORIGIN, "https://" + P.HOST)
 
     def test_trickling_body_hits_the_absolute_deadline(self):
         self.mode = "trickle"

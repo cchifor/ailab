@@ -935,7 +935,8 @@ does not prove issuance: the Runner must read the new credential back to a termi
 
 **Live read-only smoke** (after merge, before any real run): `--manifest-ref <main commit>:scripts/relay-session-smoke/manifest.json
 --bundle scripts/relay-session-smoke/bundle --runner-minutes 2`. Expect `{"smoke": "pass"}` in `runner.jsonl`
-(profiles and credentials 200; local refusals for `/api/auth/me`, an unlearned session and a predecessor mutation;
+(profiles and credentials 200; local refusals for `/api/auth/me` and an unlearned session; the predecessor's control route
+refused on the control socket with reason `predecessor-read-only` and on the general socket with `use-the-control-socket`;
 no network from the Runner), then rc 0 and `status` 0/0.
 
 **Gates before a real phase A run:**
