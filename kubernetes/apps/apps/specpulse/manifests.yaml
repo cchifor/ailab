@@ -1,0 +1,798 @@
+---
+# Source: specpulse/templates/namespace.yaml
+# The release's namespace, under the restricted Pod Security Standard (enforce, audit and warn).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: specpulse
+  labels:
+    app.kubernetes.io/name: specpulse
+    app.kubernetes.io/part-of: specpulse
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+# Source: specpulse/templates/networkpolicy.yaml
+# Ingress only from the proxy pods (their namespace AND their labels) on the container port 8000 (network plugins
+# match the pod's port, not the Service's); egress only DNS to the DNS namespace's pods and HTTPS to public addresses
+# (0.0.0.0/0 except networkPolicy.egressExcept: the private and link-local ranges by default).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: specpulse
+  namespace: specpulse
+  labels:
+    helm.sh/chart: specpulse-0.1.0
+    app.kubernetes.io/name: specpulse
+    app.kubernetes.io/instance: specpulse
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/part-of: specpulse
+    app.kubernetes.io/managed-by: Helm
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: specpulse
+      app.kubernetes.io/instance: specpulse
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "edge"
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: edge-proxy
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: "kube-system"
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+---
+# Source: specpulse/templates/serviceaccount.yaml
+# The pod talks to no Kubernetes API: no token is mounted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: specpulse
+  namespace: specpulse
+  labels:
+    helm.sh/chart: specpulse-0.1.0
+    app.kubernetes.io/name: specpulse
+    app.kubernetes.io/instance: specpulse
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/part-of: specpulse
+    app.kubernetes.io/managed-by: Helm
+automountServiceAccountToken: false
+---
+# Source: specpulse/templates/configmap-scripts.yaml
+# The init containers' scripts (files/), mounted read-only at /opt/specpulse/scripts in every container, so
+# `kubectl exec ... -- sh /opt/specpulse/scripts/backup.sh` also works in the server's container.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: specpulse-scripts
+  namespace: specpulse
+  labels:
+    helm.sh/chart: specpulse-0.1.0
+    app.kubernetes.io/name: specpulse
+    app.kubernetes.io/instance: specpulse
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/part-of: specpulse
+    app.kubernetes.io/managed-by: Helm
+data:
+  prepare.sh: |
+    # The `prepare` init container of the specpulse chart (the server's image and user, before the server starts).
+    #
+    # Kubernetes mounts a Secret or ConfigMap key as a symbolic link into a timestamped directory that the pod's group can
+    # read; specpulse's credential checks (ADR 0007 PD-65: a regular file, owner-only, in an owner-only directory, no
+    # symbolic link) refuse both, and they are not weakened for Kubernetes. This copies each mounted file into an
+    # owner-only directory instead: the directory 0700, each copy a regular file 0600 owned by the process user. It also
+    # creates the process user's home on the data volume. It never prints a value.
+    #
+    # Usage: sh prepare.sh SOURCE NAME [SOURCE NAME ...]
+    #   SOURCE  a mounted file (a symbolic link is followed: its content is copied)
+    #   NAME    the copy's name in $SPECPULSE_KEY_DIR (no slash, not hidden)
+    # Environment:
+    #   SPECPULSE_KEY_DIR  the owner-only directory (the chart: /run/specpulse/keys, on a memory-backed emptyDir)
+    #   HOME               the process user's home (the image: /data/home)
+    set -eu
+    umask 077
+    
+    : "${SPECPULSE_KEY_DIR:?SPECPULSE_KEY_DIR must name the owner-only directory}"
+    : "${HOME:?HOME must name the process user's home}"
+    
+    if ! mkdir -p "$HOME"; then
+        echo "prepare: cannot create $HOME: the data volume is not writable by uid $(id -u) (check fsGroup and the storage class)" >&2
+        exit 1
+    fi
+    mkdir -p "$SPECPULSE_KEY_DIR"
+    # 00700 rather than 0700: GNU chmod keeps a directory's set-group-ID bit (inherited from an fsGroup volume) unless the
+    # numeric mode carries the extra leading zero.
+    chmod 00700 "$SPECPULSE_KEY_DIR"
+    
+    if [ $(($# % 2)) -ne 0 ]; then
+        echo "prepare: give SOURCE NAME pairs" >&2
+        exit 2
+    fi
+    copied=0
+    while [ "$#" -gt 0 ]; do
+        source=$1
+        name=$2
+        shift 2
+        case "$name" in
+            '' | .* | */*)
+                echo "prepare: refusing the copy name '$name' (empty, hidden or holding a slash)" >&2
+                exit 2
+                ;;
+        esac
+        if [ ! -f "$source" ]; then
+            echo "prepare: $source is missing: the Secret or ConfigMap lacks the key $name" >&2
+            exit 1
+        fi
+        partial="$SPECPULSE_KEY_DIR/.$name.partial"
+        rm -f "$partial"
+        cat "$source" > "$partial"
+        chmod 0600 "$partial"
+        mv -f "$partial" "$SPECPULSE_KEY_DIR/$name"
+        copied=$((copied + 1))
+    done
+    echo "prepare: $copied file(s) copied into $SPECPULSE_KEY_DIR (0700, files 0600)"
+    
+  backup.sh: |
+    # An app-consistent backup of the specpulse database, kept on the data volume, and the restore of an uploaded copy.
+    #
+    # `specpulse backup` copies the database through SQLite's online backup API (a read-only connection; the copy is
+    # written to an owner-only temporary file beside the target, then renamed), so the copy is consistent even while the
+    # server runs, unlike a file-level copy of the live database, which can be torn. The backup API copies pages without
+    # validating them, so every new copy must pass `PRAGMA quick_check` before anything is pruned: a copy that fails is
+    # deleted and the script exits non-zero with the older copies untouched. A copy byte-identical to the newest one
+    # (nothing changed since; for example an init container retried) is not kept, so retries never rotate the history
+    # away. The copies land in $SPECPULSE_BACKUP_DIR (0700) as specpulse-<UTC time>.db (0600); only the newest
+    # $SPECPULSE_BACKUP_KEEP of those timestamped names are kept, and any other file there (a hand-made copy, an
+    # unreadable database set aside) is never pruned.
+    #
+    # Every run that has something to copy or restore is serialised with the others: it holds an exclusive lock on
+    # $SPECPULSE_BACKUP_DIR/.lock (flock(1), from util-linux, an essential package of the image's Debian base) from before
+    # it looks at the copies until it exits, across the choice of a name, the copy, its check, the cleanup, the retention
+    # and the restore. So the init container, the pre-backup hook and an on-demand exec started in the same second never
+    # pick the same name, and one run's retention never meets another's copy. The lock belongs to the open file (this shell
+    # and the commands it starts): it ends with the run, also with a killed one, so it never goes stale. A run waits for it
+    # at most $SPECPULSE_BACKUP_LOCK_WAIT seconds, then exits non-zero with nothing changed (the hook waits half its
+    # timeout, so it gives up before the hook does).
+    #
+    # A new copy is written under a temporary name of its own in that directory (.specpulse-new.XXXXXXXX), checked and
+    # compared there, and only then renamed (atomically, in one directory) to its timestamped name, which no file has: the
+    # current second, or the next free one when it is taken. A run that fails removes only its own temporary file, never a
+    # timestamped copy it did not make. Under the lock no other run is alive, so a temporary file found there was left by a
+    # run that was killed: it is removed.
+    #
+    # The chart's `backup` init container runs it before the server starts, and so before `serve` applies a forward-only
+    # migration: every upgrade has a pre-migration copy. The pre-backup hook and `kubectl exec ... -- sh
+    # /opt/specpulse/scripts/backup.sh` run it in the server container. A failure exits non-zero, so the init container
+    # stops the pod from starting (fail closed).
+    #
+    # Restore (only with SPECPULSE_RESTORE set, which only the init container sets): a file at that path, uploaded while
+    # the server ran, is read through SQLite into a fresh owner-only copy that must pass `PRAGMA integrity_check`
+    # (exactly "ok") and hold the schema_migrations table; otherwise nothing changes, the upload stays for the operator
+    # and the script exits non-zero. Then the current database gets its routine copy; when it cannot be copied (an
+    # unreadable database), it is moved aside (its -wal and -shm first) as specpulse-unreadable-<UTC time>.db in the
+    # backups directory and never deleted. Then any -wal and -shm left at the database's path are removed, even when the
+    # database file itself is missing (SQLite would replay a leftover WAL into the restored database), the fresh copy
+    # takes its place, and the upload is removed.
+    #
+    # Environment:
+    #   SPECPULSE_DB                the database (default /data/specpulse.db); absent on a first start: nothing to back up
+    #   SPECPULSE_BACKUP_DIR        the directory of the copies (default /data/backups)
+    #   SPECPULSE_BACKUP_KEEP       how many timestamped copies to keep (default 5, at least 1)
+    #   SPECPULSE_BACKUP_LOCK_WAIT  how many seconds to wait for the lock another run holds (default 60; 0: do not wait)
+    #   SPECPULSE_RESTORE           optional: the path of a copy to restore (the chart: /data/restore.db)
+    set -eu
+    umask 077
+    
+    db=${SPECPULSE_DB:-/data/specpulse.db}
+    dir=${SPECPULSE_BACKUP_DIR:-/data/backups}
+    keep=${SPECPULSE_BACKUP_KEEP:-5}
+    lock_wait=${SPECPULSE_BACKUP_LOCK_WAIT:-60}
+    restore=${SPECPULSE_RESTORE:-}
+    case "$keep" in
+        '' | *[!0-9]*)
+            echo "backup: SPECPULSE_BACKUP_KEEP must be a whole number" >&2
+            exit 2
+            ;;
+    esac
+    if [ "$keep" -lt 1 ]; then
+        echo "backup: SPECPULSE_BACKUP_KEEP must be at least 1" >&2
+        exit 2
+    fi
+    case "$lock_wait" in
+        '' | *[!0-9]*)
+            echo "backup: SPECPULSE_BACKUP_LOCK_WAIT must be a whole number of seconds" >&2
+            exit 2
+            ;;
+    esac
+    lock="$dir/.lock"
+    
+    stamp() { date -u +%Y%m%dT%H%M%SZ; }
+    
+    # Take the lock (see the top), or exit non-zero with nothing changed. File descriptor 9 stays open on the lock file
+    # until this shell exits; the commands it starts inherit it, so the lock outlives no process of this run.
+    serialise() {
+        # 00700: see prepare.sh (GNU chmod keeps an inherited set-group-ID bit unless the mode has the extra leading zero).
+        if ! mkdir -p "$dir" || ! chmod 00700 "$dir"; then
+            echo "backup: cannot create $dir (0700); nothing was changed" >&2
+            exit 1
+        fi
+        if ! command -v flock > /dev/null 2>&1; then
+            echo "backup: flock (util-linux) is missing, and a run is never unserialised; nothing was changed" >&2
+            exit 1
+        fi
+        exec 9>> "$lock"
+        if ! flock -w "$lock_wait" 9; then
+            echo "backup: waited $lock_wait s for $lock, which another backup or restore holds; nothing was changed" >&2
+            exit 1
+        fi
+        for partial in "$dir"/.specpulse-new.* "$dir"/..specpulse-new.*; do
+            if [ -e "$partial" ]; then
+                rm -f -- "$partial"
+                echo "backup: removed $partial, left by a run that was killed"
+            fi
+        done
+    }
+    
+    # A name in $dir for the prefix, at the current second (the next second when one is taken). Only under the lock: no
+    # other run can take the name before this one renames its copy to it.
+    fresh_name() {
+        name="$dir/$1-$(stamp).db"
+        while [ -e "$name" ]; do
+            sleep 1
+            name="$dir/$1-$(stamp).db"
+        done
+        printf '%s' "$name"
+    }
+    
+    # Exit 0 when the database passes the pragma (exactly one row "ok") and, with "migrated", holds schema_migrations.
+    # The file is opened read-only and immutable: no lock, no -wal or -shm file is created next to it.
+    check() {
+        python3 - "$@" <<'PY'
+    import sqlite3
+    import sys
+    from pathlib import Path
+    
+    path, pragma, *need = sys.argv[1:]
+    try:
+        conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro&immutable=1", uri=True)
+        try:
+            rows = conn.execute(f"PRAGMA {pragma}").fetchall()
+            migrated = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        sys.exit(f"backup: {path} fails {pragma} ({type(exc).__name__})")
+    if rows != [("ok",)]:
+        sys.exit(f"backup: {path} fails {pragma} ({len(rows)} problem(s))")
+    if "migrated" in need and migrated is None:
+        sys.exit(f"backup: {path} has no schema_migrations table: not a specpulse database")
+    PY
+    }
+    
+    # The timestamped copies, oldest first (the glob expands in name order); nothing else in $dir matches.
+    newest_copy() {
+        newest=""
+        for copy in "$dir"/specpulse-[0-9]*T[0-9]*Z.db; do
+            if [ -e "$copy" ]; then newest=$copy; fi
+        done
+        printf '%s' "$newest"
+    }
+    
+    prune() {
+        set -- "$dir"/specpulse-[0-9]*T[0-9]*Z.db
+        if [ ! -e "$1" ]; then
+            set --
+        fi
+        while [ "$#" -gt "$keep" ]; do
+            rm -f -- "$1" "$1-wal" "$1-shm"
+            echo "backup: removed the older copy $1"
+            shift
+        done
+    }
+    
+    # One routine copy of the current database (under the lock): written to a temporary file of this run, checked, kept
+    # unless identical to the newest copy, renamed to a free timestamped name, then pruned. Returns non-zero, with only its
+    # own temporary file removed and nothing pruned, when the copy cannot be made or fails its check.
+    copy_current() {
+        previous=$(newest_copy)
+        if ! partial=$(mktemp "$dir/.specpulse-new.XXXXXXXX"); then
+            echo "backup: cannot create a temporary file in $dir" >&2
+            return 1
+        fi
+        # --replace: the temporary file exists (mktemp made it, empty and 0600, so that its name is this run's alone).
+        if ! specpulse backup --db "$db" --to "$partial" --replace; then
+            rm -f -- "$partial"
+            return 1
+        fi
+        if ! check "$partial" quick_check; then
+            rm -f -- "$partial"
+            echo "backup: the new copy failed its check and was deleted; nothing was pruned" >&2
+            return 1
+        fi
+        if [ -n "$previous" ] && cmp -s "$partial" "$previous"; then
+            rm -f -- "$partial"
+            echo "backup: unchanged since $previous; no new copy"
+            return 0
+        fi
+        target=$(fresh_name specpulse)
+        if ! mv -- "$partial" "$target"; then
+            rm -f -- "$partial"
+            echo "backup: cannot rename the new copy to $target; nothing was pruned" >&2
+            return 1
+        fi
+        echo "backup: copied $db to $target"
+        prune
+    }
+    
+    if { [ -n "$restore" ] && [ -e "$restore" ]; } || [ -e "$db" ]; then
+        serialise
+    fi
+    if [ -n "$restore" ] && [ -e "$restore" ]; then
+        fresh="$db.restoring"
+        rm -f "$fresh"
+        if ! specpulse backup --db "$restore" --to "$fresh"; then
+            rm -f "$fresh"
+            echo "backup: $restore cannot be read as a database; nothing was restored (the upload stays)" >&2
+            exit 1
+        fi
+        if ! check "$fresh" integrity_check migrated; then
+            rm -f "$fresh"
+            echo "backup: $restore is damaged or not a specpulse database; nothing was restored (the upload stays)" >&2
+            exit 1
+        fi
+        if [ -e "$db" ] && ! copy_current; then
+            aside=$(fresh_name specpulse-unreadable)
+            # -wal and -shm first: a move cut short never leaves the main file beside a WAL that is not its own.
+            for suffix in -wal -shm ""; do
+                if [ -e "$db$suffix" ]; then mv -f "$db$suffix" "$aside$suffix"; fi
+            done
+            echo "backup: $db could not be copied; it is kept aside as $aside" >&2
+        fi
+        # Always, even without a database file: SQLite would replay a leftover WAL into the restored database.
+        rm -f "$db-wal" "$db-shm"
+        mv -f "$fresh" "$db"
+        rm -f "$restore" "$restore-wal" "$restore-shm"
+        echo "backup: restored $db from $restore"
+    elif [ -e "$db" ]; then
+        if ! copy_current; then
+            echo "backup: no copy of $db was made" >&2
+            exit 1
+        fi
+    else
+        echo "backup: $db does not exist yet (a first start); nothing to back up"
+    fi
+    
+  github-token.sh: |
+    # The `github-token` init container of the specpulse chart: when the Secret holds the key `github-token`, store it in
+    # the database's encrypted secret store (`specpulse secret set github_token`, Fernet with SPECPULSE_SECRET_KEY) on
+    # every start, so the Secret stays the one source of the token. Without the key, the stored token (set on Settings,
+    # if any) is kept as it is.
+    #
+    # Storing the same value again is harmless: it re-encrypts the value, sets the token's update time (Settings shows it)
+    # and bumps the redaction cache's generation; no run input, hash or skip check reads the secrets table. The command
+    # reads the file itself (no owner-only rule applies to this value file), migrates the database first, and prints only
+    # the fingerprint. It runs after the `backup` init container, so its migration never precedes the pre-start copy.
+    #
+    # Environment:
+    #   SPECPULSE_GITHUB_TOKEN_FROM  the mounted token file (optional key of the Secret)
+    #   SPECPULSE_DB                 the database (default /data/specpulse.db)
+    #   SPECPULSE_SECRET_KEY         the Fernet key (from the Secret)
+    set -eu
+    
+    db=${SPECPULSE_DB:-/data/specpulse.db}
+    : "${SPECPULSE_GITHUB_TOKEN_FROM:?SPECPULSE_GITHUB_TOKEN_FROM must name the mounted token file}"
+    
+    if [ ! -f "$SPECPULSE_GITHUB_TOKEN_FROM" ]; then
+        echo "github-token: the Secret has no key github-token; the stored token, if any, is kept"
+        exit 0
+    fi
+    specpulse secret set github_token --value-file "$SPECPULSE_GITHUB_TOKEN_FROM" --db "$db"
+---
+# Source: specpulse/templates/configmap-seats.yaml
+# The seats file (it names files, never a secret): the router seat, whose key the `prepare` init container copies
+# from the Secret's router-key into the owner-only key directory.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: specpulse-seats
+  namespace: specpulse
+  labels:
+    helm.sh/chart: specpulse-0.1.0
+    app.kubernetes.io/name: specpulse
+    app.kubernetes.io/instance: specpulse
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/part-of: specpulse
+    app.kubernetes.io/managed-by: Helm
+data:
+  seats.toml: |
+    [router]
+    url = "ROUTER_ORIGIN_PLACEHOLDER"
+    route = "ROUTER_ROUTE_PLACEHOLDER"
+    key_file = "/run/specpulse/keys/router-key"
+    billing = "included"
+---
+# Source: specpulse/templates/pvc.yaml
+# The data volume: the SQLite database (one writer), the clones, /data/home and /data/backups. ReadWriteOnce, or
+# ReadWriteOncePod where the CSI driver supports it (no second pod can mount it, not even on the same node).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: specpulse-data
+  namespace: specpulse
+  labels:
+    helm.sh/chart: specpulse-0.1.0
+    app.kubernetes.io/name: specpulse
+    app.kubernetes.io/instance: specpulse
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/part-of: specpulse
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: "STORAGE_CLASS_PLACEHOLDER"
+  resources:
+    requests:
+      storage: 5Gi
+---
+# Source: specpulse/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: specpulse
+  namespace: specpulse
+  labels:
+    helm.sh/chart: specpulse-0.1.0
+    app.kubernetes.io/name: specpulse
+    app.kubernetes.io/instance: specpulse
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/part-of: specpulse
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: specpulse
+    app.kubernetes.io/instance: specpulse
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      protocol: TCP
+---
+# Source: specpulse/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: specpulse
+  namespace: specpulse
+  labels:
+    helm.sh/chart: specpulse-0.1.0
+    app.kubernetes.io/name: specpulse
+    app.kubernetes.io/instance: specpulse
+    app.kubernetes.io/version: "0.1.0"
+    app.kubernetes.io/part-of: specpulse
+    app.kubernetes.io/managed-by: Helm
+spec:
+  # One SQLite writer: exactly one pod, and Recreate stops the old pod before the new one opens the database.
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: specpulse
+      app.kubernetes.io/instance: specpulse
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: specpulse
+        app.kubernetes.io/instance: specpulse
+      annotations:
+        checksum/scripts: a246fe0c40cdc63a00f9b44054dcf0e1bcfd51fb35d5a8869fe7430446fd27fb
+        checksum/seats: 7530d247fbd1e1c0e9f26ef805067a36f666b128a88c4bb1255ef8ac237d2b67
+        # Before each volume backup: the app-consistent backup in the server container (exits non-zero on failure).
+        pre.hook.backup.velero.io/container: specpulse
+        pre.hook.backup.velero.io/command: '["env","SPECPULSE_DB=/data/specpulse.db","SPECPULSE_BACKUP_DIR=/data/backups","SPECPULSE_BACKUP_KEEP=5","SPECPULSE_BACKUP_LOCK_WAIT=60","sh","/opt/specpulse/scripts/backup.sh"]'
+        pre.hook.backup.velero.io/on-error: Continue
+        pre.hook.backup.velero.io/timeout: "120s"
+    spec:
+      serviceAccountName: specpulse
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Copies the router key and the seats file from their mounts (group-readable symbolic links) into the
+        # owner-only key directory (0700, files 0600), and creates HOME on the data volume.
+        - name: prepare
+          image: REGISTRY_PLACEHOLDER/specpulse/specpulse@sha256:DIGEST_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "/opt/specpulse/scripts/prepare.sh"]
+          args:
+            - /mnt/router-key/router-key
+            - router-key
+            - /mnt/seats/seats.toml
+            - seats.toml
+          env:
+            - name: SPECPULSE_KEY_DIR
+              value: /run/specpulse/keys
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            limits:
+              cpu: 500m
+              memory: 48Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: runtime
+              mountPath: /run/specpulse
+            - name: scripts
+              mountPath: /opt/specpulse/scripts
+              readOnly: true
+            - name: router-key
+              mountPath: /mnt/router-key
+              readOnly: true
+            - name: seats
+              mountPath: /mnt/seats
+              readOnly: true
+        # An app-consistent copy of the database before the server (and its migrations) starts; then, when a copy was
+        # uploaded to /data/restore.db, the restore.
+        - name: backup
+          image: REGISTRY_PLACEHOLDER/specpulse/specpulse@sha256:DIGEST_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "/opt/specpulse/scripts/backup.sh"]
+          env:
+            - name: SPECPULSE_DB
+              value: /data/specpulse.db
+            - name: SPECPULSE_BACKUP_DIR
+              value: /data/backups
+            - name: SPECPULSE_BACKUP_KEEP
+              value: "5"
+            - name: SPECPULSE_RESTORE
+              value: /data/restore.db
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            limits:
+              cpu: "1"
+              memory: 192Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: scripts
+              mountPath: /opt/specpulse/scripts
+              readOnly: true
+        # Stores the Secret's github-token (when present) in the encrypted secret store, after the backup.
+        - name: github-token
+          image: REGISTRY_PLACEHOLDER/specpulse/specpulse@sha256:DIGEST_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "/opt/specpulse/scripts/github-token.sh"]
+          env:
+            - name: SPECPULSE_DB
+              value: /data/specpulse.db
+            - name: SPECPULSE_GITHUB_TOKEN_FROM
+              value: /mnt/github-token/github-token
+            - name: SPECPULSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: specpulse-secrets
+                  key: secret-key
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            limits:
+              cpu: "1"
+              memory: 192Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: scripts
+              mountPath: /opt/specpulse/scripts
+              readOnly: true
+            - name: github-token
+              mountPath: /mnt/github-token
+              readOnly: true
+      containers:
+        - name: specpulse
+          image: REGISTRY_PLACEHOLDER/specpulse/specpulse@sha256:DIGEST_PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          # The image's entry point is `specpulse`; the server binds 0.0.0.0 in the pod.
+          args:
+            - serve
+            - --db
+            - /data/specpulse.db
+            - --data-dir
+            - /data
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          env:
+            - name: SPECPULSE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: specpulse-secrets
+                  key: secret-key
+            - name: SPECPULSE_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: specpulse-secrets
+                  key: session-secret
+            - name: SPECPULSE_SECURE_COOKIE
+              value: "on"
+            - name: SPECPULSE_SEATS_FILE
+              value: /run/specpulse/keys/seats.toml
+            # `kubectl exec ... -- sh /opt/specpulse/scripts/backup.sh` keeps as many copies as the init container.
+            - name: SPECPULSE_BACKUP_KEEP
+              value: "5"
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            limits:
+              cpu: "2"
+              memory: 768Mi
+            requests:
+              cpu: 100m
+              memory: 512Mi
+          # Writable: only the data volume and /tmp. The key directory and the scripts are read-only here.
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: runtime
+              mountPath: /run/specpulse
+              readOnly: true
+            - name: scripts
+              mountPath: /opt/specpulse/scripts
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: specpulse-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+        # The owner-only key directory lives in memory: the copies never reach the node's disk.
+        - name: runtime
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: scripts
+          configMap:
+            name: specpulse-scripts
+            defaultMode: 292 # 0444
+        - name: seats
+          configMap:
+            name: specpulse-seats
+            defaultMode: 288 # 0440
+        - name: router-key
+          secret:
+            secretName: specpulse-secrets
+            defaultMode: 288 # 0440: the pod's fsGroup reads it; the copy is owner-only
+            items:
+              - key: router-key
+                path: router-key
+        - name: github-token
+          secret:
+            secretName: specpulse-secrets
+            defaultMode: 288 # 0440
+            optional: true
+            items:
+              - key: github-token
+                path: github-token

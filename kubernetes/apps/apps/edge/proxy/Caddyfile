@@ -120,6 +120,7 @@ https://:8443 {
 	@h_relay host relay.chifor.me
 	@h_router host router.chifor.me
 	@h_search host search.chifor.me
+	@h_specpulse host specpulse.chifor.me
 	@h_sso host sso.chifor.me
 	@h_status host status.chifor.me
 	@h_trueswarm host trueswarm.chifor.me
@@ -378,6 +379,14 @@ https://:8443 {
 			route {
 				respond @not_lan 403
 				reverse_proxy http://oauth2-proxy-searxng.dsh.svc.cluster.local:4180 {
+					import edge_upstream
+				}
+			}
+		}
+		handle @h_specpulse {
+			route {
+				respond @not_admin 403
+				reverse_proxy http://specpulse.specpulse.svc.cluster.local:8000 {
 					import edge_upstream
 				}
 			}
@@ -757,7 +766,7 @@ http://:8081 {
 	import edge_log
 	@not_lan not remote_ip 192.168.0.0/32 192.168.0.2/31 192.168.0.4/30 192.168.0.8/29 192.168.0.16/28 192.168.0.32/29 192.168.0.40/32 192.168.0.44/31 192.168.0.46/32 192.168.0.50/31 192.168.0.53/32 192.168.0.54/31 192.168.0.56/29 192.168.0.64/26 192.168.0.128/25 192.168.1.0/24 192.168.50.0/24 192.168.99.0/24
 	@not_admin not remote_ip 192.168.0.38/32 192.168.0.53/32 192.168.0.54/31 192.168.0.56/29 192.168.0.64/26 192.168.0.128/25 192.168.1.0/24 192.168.50.0/24 192.168.99.0/24
-	@unknown_host not host alertmanager.chifor.me api.chifor.me chat.chifor.me dsh.chifor.me dw1.chifor.me dw2.chifor.me dw3.chifor.me dw4.chifor.me edge-canary.chifor.me git.chifor.me grafana.chifor.me home.chifor.me hubble.chifor.me id.chifor.me k8s.chifor.me muse.chifor.me ntfy.chifor.me openbao.chifor.me prometheus.chifor.me proxmox.chifor.me qnap.chifor.me relay.chifor.me router.chifor.me search.chifor.me sso.chifor.me status.chifor.me trueswarm.chifor.me vault.chifor.me
+	@unknown_host not host alertmanager.chifor.me api.chifor.me chat.chifor.me dsh.chifor.me dw1.chifor.me dw2.chifor.me dw3.chifor.me dw4.chifor.me edge-canary.chifor.me git.chifor.me grafana.chifor.me home.chifor.me hubble.chifor.me id.chifor.me k8s.chifor.me muse.chifor.me ntfy.chifor.me openbao.chifor.me prometheus.chifor.me proxmox.chifor.me qnap.chifor.me relay.chifor.me router.chifor.me search.chifor.me specpulse.chifor.me sso.chifor.me status.chifor.me trueswarm.chifor.me vault.chifor.me
 	route {
 		respond @unknown_host 404
 		respond @not_lan 403
