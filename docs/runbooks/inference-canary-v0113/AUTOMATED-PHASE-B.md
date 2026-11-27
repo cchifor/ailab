@@ -240,8 +240,20 @@ passed again. They cover three launches and native UUID retention, direct and
 reconciled recovery, fresh effort, permissions, provenance/configuration drift,
 durable intent and accounting failures. The final shared-host compatibility
 suite also passed all 145 cases (104 Phase A driver, 24 host, seven socket and
-ten renewal); the B host has eight separate negative cases. Full positive Phase
-B host integration remains pending. These fixtures do not
+ten renewal); the B host has eight separate negative cases. The complete named
+B CLI/host/Runner flow passed over Unix HTTP in 209.7 seconds: three launches,
+one native resume, eleven lifecycle and four effort prompts, one approved
+marker effect, ten real lease heartbeats and 206 durable snapshots. Its completed
+A input and HTTP/readiness/branch/marker/trajectory services are synthetic.
+The full Phase A compatibility flow also passed in 297 seconds with the shared
+host, preserving the original one prompt/two attempts and all 286 snapshots.
+
+Both full flows retain real observation barriers. A focused regression proved
+that a single duration timer can wake before a wall-clock boundary; fixture
+collectors now recheck the boundary after each wake without changing observed
+timestamps or production validators. Earlier failed full runs remain recorded;
+their rejected observation was not retained, so the controlled regression does
+not establish their precise cause. These fixtures do not
 claim a live subscription run, published-Pi execution, a qualified operator
 reader or hard budget enforcement. `phase-b-passed` leaves `completed:false`;
 Phase C, paired performance evidence and final cleanup remain outstanding.
