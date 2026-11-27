@@ -1,0 +1,55 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: relay-operator-reaper
+  namespace: relay
+  labels:
+    release: kube-prometheus-stack
+    app.kubernetes.io/part-of: relay
+spec:
+  groups:
+  - name: relay-operator-reaper
+    rules:
+    - alert: RelayOperatorReaperStale
+      expr: >-
+        time() -
+        (kube_cronjob_status_last_successful_time{namespace="relay", cronjob="relay-operator-reaper"}
+        or on (namespace, cronjob)
+        kube_cronjob_created{namespace="relay", cronjob="relay-operator-reaper"}) > 1200
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: The relay-operator reaper has not succeeded for 20+ minutes
+        description: >-
+          The independent backstop that removes a standing JIT admin membership (after a crashed
+          `relay-operator.py session|call`) is not running. Check the CronJob relay/relay-operator-reaper and its last
+          Job's logs; meanwhile run `python scripts/relay-operator.py status` (expect 0 memberships, 0 sessions).
+    - alert: RelayOperatorReaperUnobserved
+      expr: >-
+        absent(kube_cronjob_created{namespace="relay", cronjob="relay-operator-reaper"})
+        and absent(kube_cronjob_status_last_successful_time{namespace="relay", cronjob="relay-operator-reaper"})
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: The relay-operator reaper has no CronJob telemetry
+        description: Check CronJob relay/relay-operator-reaper and kube-state-metrics; absence is not evidence that cleanup succeeded.
+    - alert: RelayOperatorReaperFailing
+      expr: sum(kube_job_status_failed{namespace="relay", job_name=~"relay-operator-reaper-[0-9]+"} > 0) > 0
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: relay-operator reaper Jobs are failing
+        description: >-
+          A relay-operator-reaper Job failed (Lease API, database or image). The reaper cannot be trusted as a
+          backstop until fixed; run `python scripts/relay-operator.py status` and `revoke` by hand if a membership stands.
+    - alert: RelayOperatorReaperSetupFailed
+      expr: kube_job_status_failed{namespace="relay", job_name="relay-operator-reaper-setup"} > 0
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: The relay-operator reaper's database setup Job failed
+        description: The function ops.relay_operator_reap() or the role relay_operator_reaper may be missing; check the Job's logs.

@@ -83,7 +83,7 @@ spec:
         - >-
           for i in $(seq 1 30); do pg_isready -h relay-postgres -p 5432 -q && break; sleep 5; done;
           psql "host=relay-postgres port=5432 dbname=relay user=postgres sslmode=disable" --no-psqlrc
-          -v ON_ERROR_STOP=1 -v pw="$REAPER_PASSWORD" -f /scripts/setup.sql
+          -v ON_ERROR_STOP=1 -f /scripts/setup.sql
         env:
         - name: PGPASSWORD
           valueFrom:
@@ -137,11 +137,13 @@ spec:
         spec:
           restartPolicy: Never
           serviceAccountName: relay-operator-reaper
-          automountServiceAccountToken: true  # the Lease API only (the Role above)
+          automountServiceAccountToken: false
+          terminationGracePeriodSeconds: 30
           securityContext:
             runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65534
+            fsGroup: 65534
             seccompProfile:
               type: RuntimeDefault
           initContainers:
@@ -156,23 +158,35 @@ spec:
             resources: &small
               requests: {cpu: 10m, memory: 32Mi}
               limits: {memory: 64Mi}
-            volumeMounts: &mounts
+            volumeMounts:
             - name: scripts
               mountPath: /scripts
               readOnly: true
             - name: work
               mountPath: /work
-          - name: reap  # only with /work/go; the role can execute ops.relay_operator_reap() and nothing else
+            - name: lease-api
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+          containers:
+          - name: reap  # no API token; the SQL deadline comes from the guard's fresh Lease read
             image: docker.io/library/postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
             command:
             - sh
             - -c
-            - >-
-              if [ ! -f /work/go ]; then echo '{"event":"reap","skipped":true}'; exit 0; fi;
-              out=$(psql "host=relay-postgres port=5432 dbname=relay user=relay_operator_reaper sslmode=disable
-              connect_timeout=10" --no-psqlrc -tA -F ' ' -v ON_ERROR_STOP=1
-              -c 'SELECT sessions_deleted, memberships_deleted FROM ops.relay_operator_reap()') || exit 1;
-              set -- $out; echo "{\"event\":\"reap\",\"sessions_deleted\":$1,\"memberships_deleted\":$2}"
+            - |
+              set -eu
+              if [ ! -f /work/go ]; then echo '{"event":"reap","skipped":true}'; exit 0; fi
+              : > /work/request
+              for i in $(seq 1 45); do [ -f /work/permit ] && break; sleep 1; done
+              [ -f /work/permit ] || exit 1
+              IFS= read -r lease_expires < /work/permit
+              case "$lease_expires" in ''|*[!0-9]*) exit 1;; esac
+              out=$(printf 'SELECT sessions_deleted, memberships_deleted FROM ops.relay_operator_reap(%s);\n' "$lease_expires" |
+                psql "host=relay-postgres port=5432 dbname=relay user=relay_operator_reaper sslmode=disable connect_timeout=10" --no-psqlrc -tA -F ' ' -v ON_ERROR_STOP=1) || exit 1
+              # Only a successful terminal SQL reply permits early release. No signal/EXIT trap writes done.
+              : > /work/done
+              set -- $out
+              echo "{\"event\":\"reap\",\"sessions_deleted\":$1,\"memberships_deleted\":$2}"
             env:
             - name: PGPASSWORD
               valueFrom:
@@ -181,15 +195,39 @@ spec:
                   key: password
             securityContext: *hardened
             resources: *small
-            volumeMounts: *mounts
-          containers:
-          - name: lease-release
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: work
+              mountPath: /work
+          - name: lease-guard
             image: mirror.gcr.io/library/python:3.15-slim@sha256:63bb298d2b7b88f176f51b5189f54ce6535c997682ea70885d2132f5d473a8a5
-            command: ["python3", "-I", "/scripts/lease.py", "release"]
+            command: ["python3", "-I", "/scripts/lease.py", "guard"]
             securityContext: *hardened
             resources: *small
-            volumeMounts: *mounts
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: lease-api
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
           volumes:
+          - name: lease-api
+            projected:
+              defaultMode: 0444
+              sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                  - key: ca.crt
+                    path: ca.crt
           - name: scripts
             configMap:
               name: relay-operator-reaper-scripts
@@ -223,45 +261,3 @@ spec:
     ports:
     - protocol: TCP
       port: 5432
----
-apiVersion: monitoring.coreos.com/v1
-kind: PrometheusRule
-metadata:
-  name: relay-operator-reaper
-  namespace: relay
-  labels:
-    release: kube-prometheus-stack
-    app.kubernetes.io/part-of: relay
-spec:
-  groups:
-  - name: relay-operator-reaper
-    rules:
-    - alert: RelayOperatorReaperStale
-      expr: time() - kube_cronjob_status_last_successful_time{namespace="relay", cronjob="relay-operator-reaper"} > 1200
-      for: 10m
-      labels:
-        severity: warning
-      annotations:
-        summary: The relay-operator reaper has not succeeded for 20+ minutes
-        description: >-
-          The independent backstop that removes a standing JIT admin membership (after a crashed
-          `relay-operator.py session|call`) is not running. Check the CronJob relay/relay-operator-reaper and its last
-          Job's logs; meanwhile run `python scripts/relay-operator.py status` (expect 0 memberships, 0 sessions).
-    - alert: RelayOperatorReaperFailing
-      expr: sum(kube_job_status_failed{namespace="relay", job_name=~"relay-operator-reaper-[0-9]+"} > 0) > 0
-      for: 15m
-      labels:
-        severity: warning
-      annotations:
-        summary: relay-operator reaper Jobs are failing
-        description: >-
-          A relay-operator-reaper Job failed (Lease API, database or image). The reaper cannot be trusted as a
-          backstop until fixed; run `python scripts/relay-operator.py status` and `revoke` by hand if a membership stands.
-    - alert: RelayOperatorReaperSetupFailed
-      expr: kube_job_status_failed{namespace="relay", job_name="relay-operator-reaper-setup"} > 0
-      for: 10m
-      labels:
-        severity: warning
-      annotations:
-        summary: The relay-operator reaper's database setup Job failed
-        description: The function ops.relay_operator_reap() or the role relay_operator_reaper may be missing; check the Job's logs.

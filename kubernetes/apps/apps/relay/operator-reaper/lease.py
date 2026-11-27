@@ -1,16 +1,18 @@
-"""lease.py take|release: the relay-operator-reaper's side of the fenced Lease `relay-operator-jit` (namespace relay).
+"""lease.py take|guard|release: the relay-operator-reaper's side of `relay-operator-jit`.
 
 The same protocol as scripts/relay_operator_session.py: annotation `chifor.me/expires-at` (epoch seconds) plus
 spec.holderIdentity, every write conditioned on metadata.resourceVersion. The reaper NEVER touches a live Lease, so a
 running `session` or `call` excludes it, and while the reaper holds the Lease (for at most HOLD_S) a new run is refused.
 
-    take     acquire the Lease only if it is absent, released or expired; on success write /work/go
+    take     acquire a free Lease; write its exact readback identity and original expiry to /work/go
+    guard    after the DB container requests work, revalidate that identity and issue one deadline permit
     release  if /work/go exists and the reaper still holds the Lease, release it (holder "")
 
 Exit 0 in every expected case (including "skipped: a live holder"); non-zero only on an unexpected API failure.
 stdlib only; talks to the API server with the pod's service-account token.
 """
 import json
+import math
 import os
 import socket
 import ssl
@@ -23,7 +25,8 @@ API = "https://kubernetes.default.svc"
 SA = "/var/run/secrets/kubernetes.io/serviceaccount"
 LEASE_URL = API + "/apis/coordination.k8s.io/v1/namespaces/relay/leases"
 NAME = "relay-operator-jit"
-HOLD_S = 120
+HOLD_S = 180
+MIN_REMAINING_S = 45
 GO = os.environ.get("REAPER_GO_FILE", "/work/go")
 HOLDER = "reaper-" + socket.gethostname()
 
@@ -53,9 +56,12 @@ def doc(holder, expires_at, rv=None):
 
 def expires(lease):
     try:
-        return float(((lease.get("metadata") or {}).get("annotations") or {}).get("chifor.me/expires-at", "0"))
-    except ValueError:
-        return 0.0
+        value = float(((lease.get("metadata") or {}).get("annotations") or {}).get("chifor.me/expires-at", "0"))
+        if not math.isfinite(value) or value < 0 or value != int(value):
+            raise ValueError("invalid Lease expiry")
+        return int(value)
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError("invalid Lease expiry") from None
 
 
 def holder(lease):
@@ -67,11 +73,15 @@ def log(**kv):
 
 
 def take():
+    if os.path.exists(GO):
+        os.unlink(GO)
     st, cur = api("GET", f"{LEASE_URL}/{NAME}")
     now = time.time()
     if st == 404:
         st, _ = api("POST", LEASE_URL, doc(HOLDER, now + HOLD_S))
     elif st == 200:
+        if holder(cur) and expires(cur) <= 0:
+            raise ValueError("held Lease has no expiry")
         if holder(cur) and now < expires(cur):
             log(event="skip", reason="live lease", holder=holder(cur), expires_in=int(expires(cur) - now))
             return 0
@@ -89,9 +99,51 @@ def take():
     if st != 200 or holder(got) != HOLDER:
         log(event="skip", reason="not the holder after the write")
         return 0
-    open(GO, "w").write(HOLDER)
+    if expires(got) < time.time() + MIN_REMAINING_S or expires(got) != int(now + HOLD_S):
+        log(event="error", stage="acquisition-expiry")
+        return 1
+    record = {"holder": HOLDER, "resourceVersion": got["metadata"]["resourceVersion"],
+              "expiresAt": expires(got)}
+    with open(GO, "x") as stream:
+        json.dump(record, stream)
     log(event="taken", holder=HOLDER, hold_s=HOLD_S)
     return 0
+
+
+def permit(record):
+    """Fresh read only: no renewal, reacquisition, or deadline extension."""
+    st, cur = api("GET", f"{LEASE_URL}/{NAME}")
+    if (st != 200 or record.get("holder") != HOLDER or holder(cur) != HOLDER
+            or cur["metadata"].get("resourceVersion") != record.get("resourceVersion")
+            or expires(cur) != record.get("expiresAt")
+            or expires(cur) < time.time() + MIN_REMAINING_S):
+        raise ValueError("Lease permit refused")
+    return expires(cur)
+
+
+def guard():
+    if not os.path.exists(GO):
+        log(event="guard", skipped=True)
+        return 0
+    with open(GO) as stream:
+        record = json.loads(stream.read(4096))
+    root = os.path.dirname(GO)
+    stop = time.monotonic() + 110
+    while not os.path.exists(os.path.join(root, "request")):
+        if time.monotonic() >= stop or time.time() + MIN_REMAINING_S > record["expiresAt"]:
+            raise ValueError("DB request deadline elapsed")
+        time.sleep(0.1)
+    deadline = permit(record)
+    path = os.path.join(root, "permit")
+    with open(path + ".tmp", "x") as stream:
+        stream.write(str(deadline) + "\n")
+    os.replace(path + ".tmp", path)
+    # A failed/lost SQL reply is not proof the backend stopped. Never release on that path.
+    while not os.path.exists(os.path.join(root, "done")):
+        if time.monotonic() >= stop or time.time() >= deadline:
+            raise ValueError("DB completion unobserved; keep original Lease expiry")
+        time.sleep(0.1)
+    return release()
 
 
 def release():
@@ -108,4 +160,8 @@ def release():
 
 
 if __name__ == "__main__":
-    sys.exit({"take": take, "release": release}[sys.argv[1]]())
+    try:
+        sys.exit({"take": take, "guard": guard, "release": release}[sys.argv[1]]())
+    except (OSError, ValueError, KeyError, TypeError):
+        log(event="error", stage="lease-protocol")
+        sys.exit(1)
