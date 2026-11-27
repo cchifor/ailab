@@ -3,6 +3,10 @@
 // Named Claude entry; no browser mounting, credentials, issuance or B0 execution.
 const a = require("./owner-phase-a.js");
 const { createHash } = require("node:crypto");
+const fence = require("./owner-phase-b-fence.cjs");
+// The combined Router release is not published/qualified yet. Tests replace
+// only exact source-pin literals in isolated bytes; this public bundle stays held.
+const QUALIFIED_FENCE_ROUTER = null;
 const PROFILE = Object.freeze({
   id: "fdb56ca5-908b-40ee-94b3-aac735dd8622",
   binding: "a8f6211c-d7e2-4ffd-824d-b158e349a8d4",
@@ -132,7 +136,10 @@ function readiness(v, expected, now, notBefore) {
       r.cliVersion === "2.1.283" &&
       r.warmSessions === false &&
       r.trustVerified === true &&
-      integer(r.configRevision),
+      integer(r.configRevision) &&
+      label(r.deploymentId) &&
+      integer(r.providerGeneration) &&
+      uuid(v.routerDeploymentId),
     "Claude route/cold configuration differs",
   );
   need(
@@ -148,12 +155,15 @@ function readiness(v, expected, now, notBefore) {
     observedUtc: v.observedUtc,
     holderId: v.holderId,
     journalId: v.journalId,
+    routerDeploymentId: v.routerDeploymentId,
     route: {
       alias: r.alias,
       account: r.account,
       model: r.model,
       protocol: r.protocol,
       configRevision: r.configRevision,
+      deploymentId: r.deploymentId,
+      providerGeneration: r.providerGeneration,
       maxAttempts: 1,
       fallbacks: [],
       transport: "sdk-resume",
@@ -452,7 +462,8 @@ class ClaudeRunner extends a.Runner {
     this.state.inputs = this.inputs;
     this.state.b0 = "preserved; not executed by this entry";
     this.state.accounting =
-      "observed router attempts with conservative reservations; not a hard upstream dispatch fence";
+      "fixed ordinary-managed-key admission fence plus separate raw trajectory accounting; publication held until qualified source assigned";
+    this.state.attemptFence = { operations: [], phases: [] };
   }
   phaseText(name) {
     if (name === "routeHandoff")
@@ -568,6 +579,145 @@ class ClaudeRunner extends a.Runner {
     await this.inspectBranch(this.beforeReconcile);
     this.beforeReconcile = null;
   }
+  fenceRow(text, options) {
+    if (options.backendRefusal) {
+      need(
+        this.run.effort && text === TEXT.highProbe,
+        "Unexpected refusal probe",
+      );
+      return null;
+    }
+    if (
+      text === "/relay-history" ||
+      text === "/relay-reconcile confirmed" ||
+      /^\/relay-branch [a-f0-9]{8}$/.test(text)
+    )
+      return null;
+    if (text === "/relay-compact" && !this.run.effort) return "compaction";
+    if (options.tool) {
+      const denied = options.decision === "reject_once";
+      need(
+        !this.run.effort &&
+          (denied || options.decision === "allow_once") &&
+          options.tool ===
+            a.markerCommand(
+              "claude",
+              this.run.runId,
+              denied ? "denied" : "effects",
+              this.profiles,
+            ) &&
+          text === TEXT.markerPrefix + options.tool,
+        "Unexpected fenced marker prompt",
+      );
+      return denied ? "denied" : "approved";
+    }
+    const entries = this.run.effort
+      ? [
+          ["low", TEXT.low],
+          ["high", TEXT.high],
+        ]
+      : [
+          ["ready", TEXT.ready],
+          ["branch", TEXT.branch],
+          ["compacted", TEXT.compact],
+          ["cancel", TEXT.cancel],
+          ["recovered", TEXT.recovered],
+        ];
+    const row = entries.find(([, expected]) => text === expected);
+    need(row, "Prompt is outside the immutable Claude fence plan");
+    return row[0];
+  }
+  async collectFenceDrain() {
+    need(
+      this.session && this.launchRow && !this.pending,
+      "Native prompt is not settled for drain observation",
+    );
+    const boundary = this.collectionBoundary(
+      "Claude native/client attempt drain",
+    );
+    const context = {
+      kind: "claude-attempt-drain",
+      notBefore: boundary.notBefore,
+      scope: {
+        routerSource: QUALIFIED_FENCE_ROUTER,
+        routerDeploymentId: this.fenceController.initial.deploymentId,
+        keyId: this.profiles.claude.key,
+        principalId: "key:" + this.profiles.claude.key,
+        namespace: "default",
+        tenantId: TENANT,
+        bindingId: PROFILE.binding,
+        profileId: PROFILE.id,
+        holderId: this.holderId,
+        journalId: this.journalId,
+        sessionId: this.session.id,
+        generation: this.session.generation,
+        nativeSessionId: this.launchRow.receipt.result.nativeSessionId,
+        runId: this.run.runId,
+        fenceId: this.fenceController.current?.plan.fenceId || null,
+      },
+      completedOperationIds: this.state.operations
+        .filter(
+          (op) =>
+            op.path === "/api/agent-sessions/" + this.session.id + "/commands",
+        )
+        .map((op) => op.body.operationId),
+      terminalPrompts: this.state.evidence
+        .filter((e) => e.kind === "prompt" && e.sessionId === this.session.id)
+        .map((e) => ({ operationId: e.operationId, stopReason: e.stopReason })),
+    };
+    const terminal = await super.ask(
+      "Observe actual Claude native/client drain",
+      "Return the exact scoped source observation and completed operation identities. Read native/client pending work; zero Router opens alone is insufficient. Missing, stale or unknown activity stops advancement.",
+      (value) => fence.drain(value, context, this.now()),
+      undefined,
+      context,
+    );
+    this.record("claude-attempt-drain", {
+      terminal,
+      attribution:
+        "operator-attested native/client evidence; hashes do not independently authenticate process state",
+    });
+    return terminal;
+  }
+  async phase(provider, effort = false) {
+    await super.phase(provider, effort);
+    const run = this.state.runs.at(-1);
+    run.status = "relay-complete-fence-close-pending";
+    this.save();
+    await this.fenceController.close(this.fenceTerminal);
+    run.status = "passed-with-admission-fence-live-wire-unobserved";
+    this.save();
+  }
+  async cleanup() {
+    if (!this.fenceCleanupAttempted) {
+      this.fenceCleanupAttempted = true;
+      if (this.fenceController) {
+        try {
+          await this.fenceController.close(
+            {
+              kind: "stopped-cleanup",
+              at: this.now(),
+              sessionId: this.session?.id || null,
+              pendingOperationId: this.pending?.body.operationId || null,
+              evidence: this.fenceTerminal || null,
+            },
+            true,
+          );
+          this.record("attempt-fence-cleanup", {
+            status: "closed-or-never-armed",
+            drained: false,
+          });
+        } catch {
+          this.record("attempt-fence-cleanup", {
+            status: "unresolved; preserve original operation and inspect",
+            drained: false,
+          });
+        }
+      }
+    }
+    // Failed/unknown fence close never suppresses ordinary narrowing cleanup.
+    return super.cleanup();
+  }
   async prompt(text, options = {}) {
     this.check();
     need(!this.reservation, "Previous Claude attempt reservation unsettled");
@@ -598,10 +748,26 @@ class ClaudeRunner extends a.Runner {
     this.run.reservations ??= [];
     this.run.reservations.push(this.reservation);
     this.save();
+    const rowId = this.fenceRow(text, options);
+    need(this.fenceController, "Required attempt fence controller missing");
+    if (rowId)
+      await this.fenceController.row(this.run, rowId, this.fenceTerminal);
+    else
+      need(
+        this.fenceController.current &&
+          this.fenceController.current.closedAt === undefined,
+        "Local-only control requires the existing live fence; it creates no zero-cap row",
+      );
     return super.prompt(text, options);
   }
   async evidence(...args) {
     const value = await super.evidence(...args);
+    this.fenceTerminal = await this.collectFenceDrain();
+    await this.fenceController.settle(
+      this.run,
+      value.trajectory.totalAttempts,
+      this.fenceTerminal,
+    );
     if (this.reservation) {
       const attempts = value.trajectory.totalAttempts - this.reservation.before;
       need(
@@ -626,6 +792,13 @@ class ClaudeRunner extends a.Runner {
     this.state.status = "running";
     this.save();
     try {
+      fence.port(this.env.attemptFence, this.env.executionDeadline, this.now());
+      need(
+        QUALIFIED_FENCE_ROUTER !== null &&
+          QUALIFIED_FENCE_ROUTER === PINS.router &&
+          QUALIFIED_FENCE_ROUTER === a.ROUTER,
+        "Qualified attempt-fence Router release is not assigned; no launch",
+      );
       const boundary = this.collectionBoundary("Claude readiness");
       const ready = await super.ask(
         "Current Claude cold/readiness",
@@ -655,6 +828,46 @@ class ClaudeRunner extends a.Runner {
       );
       this.state.claudeCredential = current;
       this.save();
+      this.fenceController = new fence.Controller({
+        transport: this.env.attemptFence,
+        source: QUALIFIED_FENCE_ROUTER,
+        now: this.now,
+        randomUUID: () => this.crypto.randomUUID(),
+        save: () => this.save(),
+        state: this.state.attemptFence,
+        check: () => this.check(),
+        deadline: Math.min(this.env.executionDeadline, this.effectiveExpiry),
+        scope: {
+          tenantId: TENANT,
+          namespace: current.namespace,
+          principalId: "key:" + current.key,
+          keyId: current.key,
+          credentialId: current.credential,
+          credentialGeneration: current.generation,
+          bindingRevision: current.revision,
+          bindingId: PROFILE.binding,
+          profileId: PROFILE.id,
+          profileRevision: 1,
+          profileDefinitionHash: PROFILE.definitionHash,
+          holderId: this.holderId,
+          journalId: this.journalId,
+          hostId: HOST,
+          routerSource: QUALIFIED_FENCE_ROUTER,
+        },
+        selection: {
+          route: ready.route.alias,
+          accountId: ready.route.account,
+          deploymentId: ready.route.deploymentId,
+          model: ready.route.model,
+          provider: "claude",
+          providerGeneration: ready.route.providerGeneration,
+        },
+      });
+      await this.fenceController.initialize();
+      need(
+        this.fenceController.initial.deploymentId === ready.routerDeploymentId,
+        "Router persistent deployment differs from readiness",
+      );
       await this.phase("claude");
       await this.phase("claude", true);
       this.state.status = "phase-b-passed";
@@ -689,4 +902,5 @@ module.exports = {
   readiness,
   credential,
   branchEvidence,
+  QUALIFIED_FENCE_ROUTER,
 };

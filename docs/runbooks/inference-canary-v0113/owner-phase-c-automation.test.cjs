@@ -193,7 +193,7 @@ test("actual C CLI reads private inputs but retains the source qualification ref
     ],
     env: {
       RELAY_SESSION_SOCKET: socketPath,
-      RUNNER_DEADLINE: String(Date.now() + 30000),
+      RUNNER_DEADLINE: String((Date.now() + 30000) / 1000),
     },
     collectCheckpoint: f.options.collectCheckpoint,
     claudePorts: f.options.claudePorts,

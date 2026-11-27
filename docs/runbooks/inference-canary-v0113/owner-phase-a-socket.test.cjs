@@ -25,6 +25,94 @@ async function fixture(t, handler) {
   return { directory, socketPath, fetch: createSessionFetch(socketPath) };
 }
 
+test("dedicated control socket receives exact lease paths without retrying on general socket", async (t) => {
+  const generalSeen = [],
+    controlSeen = [];
+  const general = await fixture(t, (req, res) => {
+    generalSeen.push([req.method, req.url]);
+    req.resume();
+    res.end("{}");
+  });
+  const control = await fixture(t, (req, res) => {
+    controlSeen.push([req.method, req.url]);
+    req.resume();
+    res.writeHead(403);
+    res.end("{}");
+  });
+  const fetch = createSessionFetch(general.socketPath, control.socketPath);
+  const session = "/api/agent-sessions/11111111-1111-4111-8111-111111111111";
+  for (const [method, target] of [
+    ["GET", session + "/control"],
+    ["POST", session + "/control"],
+    ["DELETE", session + "/control/22222222-2222-4222-8222-222222222222"],
+  ]) {
+    const response = await fetch(target, {
+      method,
+      ...(method === "POST" ? { body: "{}" } : {}),
+    });
+    assert.equal(response.status, 403);
+  }
+  for (const target of [
+    session,
+    session + "/permissions",
+    session + "/control/other",
+  ])
+    assert.equal((await fetch(target)).status, 200);
+  assert.equal(controlSeen.length, 3);
+  assert.deepEqual(
+    generalSeen,
+    [session, session + "/permissions", session + "/control/other"].map((p) => [
+      "GET",
+      p,
+    ]),
+  );
+  assert.throws(
+    () => createSessionFetch(general.socketPath, general.socketPath),
+    /Distinct/,
+  );
+  assert.throws(() =>
+    createSessionFetch(
+      general.socketPath,
+      path.join(general.directory, "absent"),
+    ),
+  );
+});
+
+test(
+  "a pending general request does not prevent a control request",
+  { timeout: 2000 },
+  async (t) => {
+    let entered;
+    const waiting = new Promise((resolve) => {
+      entered = resolve;
+    });
+    const general = await fixture(t, (req) => {
+      req.resume();
+      entered();
+    });
+    const control = await fixture(t, (req, res) => {
+      req.resume();
+      res.end("{}");
+    });
+    const fetch = createSessionFetch(general.socketPath, control.socketPath);
+    const abort = new AbortController();
+    const pending = assert.rejects(
+      fetch("/api/agent-launches", { signal: abort.signal }),
+      /request failed/,
+    );
+    try {
+      await waiting;
+      const response = await fetch(
+        "/api/agent-sessions/11111111-1111-4111-8111-111111111111/control",
+      );
+      assert.equal(response.status, 200);
+    } finally {
+      abort.abort();
+      await pending;
+    }
+  },
+);
+
 test("Unix HTTP preserves path/body and does not forward credentials or response cookies", async (t) => {
   const seen = [];
   const f = await fixture(t, (req, res) => {

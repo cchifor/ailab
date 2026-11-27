@@ -531,8 +531,13 @@
   ) {
     const sha = (value) =>
       typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+    // Only an independently supplied discriminator selects the new mode.
+    // An untagged pin retains the original exact-byte contract, with no fallback.
+    const contentMode = pin?.mode === "canonical-content-v1";
+    const contentDomain = "relay-predecessor-command-projection/content-v1\n";
     need(
       exactProjectionKeys(pin, [
+        ...(contentMode ? ["mode"] : []),
         "sha256",
         "tenantId",
         "databaseIdentity",
@@ -577,7 +582,8 @@
       new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
       (byte) => byte.toString(16).padStart(2, "0"),
     ).join("");
-    need(rawHash === pin.sha256, "Predecessor projection hash changed");
+    if (!contentMode)
+      need(rawHash === pin.sha256, "Predecessor projection hash changed");
     let value;
     try {
       value = JSON.parse(raw);
@@ -647,12 +653,39 @@
       settledPredecessorCommand(row, op);
       return row;
     });
+    if (contentMode) {
+      // Validate the entire bounded schema before canonicalizing it. Only this
+      // top-level observation time is excluded; command order and every receipt
+      // field remain pinned. Freshness above still applies to every new read.
+      const content = { ...value };
+      delete content.observedUtc;
+      const contentHash = Array.from(
+        new Uint8Array(
+          await crypto.subtle.digest(
+            "SHA-256",
+            new TextEncoder().encode(contentDomain + canonical(content)),
+          ),
+        ),
+        (byte) => byte.toString(16).padStart(2, "0"),
+      ).join("");
+      need(
+        contentHash === pin.sha256,
+        "Predecessor projection content hash changed",
+      );
+    }
     return {
       rows,
       provenance: {
         source:
           "operator-attested predecessor command projection; not independent database authentication",
         sha256: rawHash,
+        ...(contentMode
+          ? {
+              pinMode: pin.mode,
+              pinSha256: pin.sha256,
+              hashDomain: contentDomain,
+            }
+          : {}),
         hubSource: value.source,
         schemaVersion: value.schemaVersion,
         observedUtc: value.observedUtc,

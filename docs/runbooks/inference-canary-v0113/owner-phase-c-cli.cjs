@@ -3,6 +3,7 @@
 const fs = require("node:fs");
 const { readPredecessor: readPrivateUtf8 } = require("./owner-phase-a-cli.cjs");
 const { createSessionFetch } = require("./owner-phase-a-socket.cjs");
+const { parseRunnerDeadline } = require("./owner-phase-a-deadline.cjs");
 const {
   createClaudePhaseCAutomation,
 } = require("./owner-phase-a-automation.cjs");
@@ -48,18 +49,7 @@ async function runPhaseCCli({
       typeof collectCheckpoint === "function" && claudePorts,
       "Reviewed Claude observers and service adapters are not linked",
     );
-    need(
-      typeof env.RUNNER_DEADLINE === "string" &&
-        /^[0-9]{13}$/.test(env.RUNNER_DEADLINE),
-      "RUNNER_DEADLINE epoch milliseconds required",
-    );
-    const deadline = Number(env.RUNNER_DEADLINE);
-    need(
-      Number.isSafeInteger(deadline) &&
-        deadline > Date.now() &&
-        deadline - Date.now() <= 900000,
-      "Phase C deadline outside bound",
-    );
+    const deadline = parseRunnerDeadline(env.RUNNER_DEADLINE, 900000);
     const phaseInputs = JSON.parse(readPrivateUtf8(argv[1]));
     need(
       phaseInputs &&
@@ -69,7 +59,11 @@ async function runPhaseCCli({
       "Completed Phase B must come from its separate private report",
     );
     phaseInputs.phaseBReportRaw = readPrivateUtf8(argv[3]);
-    const authenticatedFetch = createSessionFetch(env.RELAY_SESSION_SOCKET);
+    const authenticatedFetch = createSessionFetch(
+      env.RELAY_SESSION_SOCKET,
+      env.RELAY_SESSION_CONTROL_SOCKET,
+    );
+    need(deadline > Date.now(), "Runner deadline elapsed during preparation");
     host = createClaudePhaseCAutomation({
       directory: argv[5],
       phaseInputs,

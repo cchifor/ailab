@@ -141,6 +141,15 @@ function createAutomation(options) {
 function createClaudePhaseBAutomation(options) {
   const b = require("./owner-phase-b.js");
   const phaseInputs = b.inputs(options.phaseInputs, Date.now());
+  const attemptFence = {};
+  for (const name of ["inspect", "arm", "advance", "close", "readOperation"]) {
+    need(
+      typeof options.attemptFence?.[name] === "function",
+      "Fixed signed attempt-fence adapter required",
+    );
+    attemptFence[name] = options.attemptFence[name];
+  }
+  Object.freeze(attemptFence);
   need(
     typeof options.phaseAReportSha256 === "string" &&
       /^[a-f0-9]{64}$/.test(options.phaseAReportSha256),
@@ -195,6 +204,7 @@ function createClaudePhaseBAutomation(options) {
         ),
       runner: (env) => b.createClaudePhaseBRunner(env, phaseInputs),
       start: (runner) => runner.start(),
+      attemptFence,
     },
   );
 }
@@ -546,6 +556,46 @@ function createHost(options, entry) {
       Object.freeze(claudePorts[group]);
     }
     Object.freeze(claudePorts);
+  }
+  if (entry.attemptFence) {
+    // The named B entry has already fixed this absolute deadline. Store setup
+    // and later phase transitions cannot extend its signing authority.
+    env.executionDeadline = deadline;
+    const wrapped = {};
+    for (const [name, callback] of Object.entries(entry.attemptFence)) {
+      wrapped[name] = async (context) => {
+        need(started && !finished, "Attempt-fence adapter is closed");
+        need(
+          context &&
+            context.signal instanceof AbortSignal &&
+            typeof context.cleanup === "boolean",
+          "Attempt-fence cancellation context required",
+        );
+        need(
+          !context.cleanup ||
+            ["inspect", "close", "readOperation"].includes(name),
+          "Attempt-fence method is not available for cleanup",
+        );
+        const combined = AbortSignal.any([
+          context.cleanup ? cleanup.signal : active.signal,
+          context.signal,
+        ]);
+        combined.throwIfAborted();
+        const task = track(
+          collectors,
+          Promise.resolve().then(() => {
+            combined.throwIfAborted();
+            // The adapter signs these exact bytes and resolves only after its
+            // bounded response has been consumed and projected to plain JSON.
+            return callback(Object.freeze({ ...context, signal: combined }));
+          }),
+        );
+        const value = await abortable(task, combined);
+        combined.throwIfAborted();
+        return value;
+      };
+    }
+    env.attemptFence = Object.freeze(wrapped);
   }
   runner = entry.runner(env, claudePorts);
   const stop = () => {

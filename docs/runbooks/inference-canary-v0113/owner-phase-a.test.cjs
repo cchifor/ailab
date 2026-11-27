@@ -4145,6 +4145,275 @@ test("actual public replacement uses only pinned predecessor command projection 
   assert.equal(f.runner.state.completed, false);
 });
 
+function contentProjectionFixture({ mutateValue, mutatePin } = {}) {
+  const projection = predecessorProjectionFixture();
+  const content = clone(projection.value);
+  delete content.observedUtc;
+  // Independent operator input is fixed BEFORE the simulated observer runs.
+  // This is the documented hash recipe, not a digest returned by the reader.
+  projection.pin.mode = "canonical-content-v1";
+  projection.pin.sha256 = createHash("sha256")
+    .update("relay-predecessor-command-projection/content-v1\n")
+    .update(a.canonical(content))
+    .digest("hex");
+  if (mutatePin) mutatePin(projection.pin);
+  if (mutateValue) mutateValue(projection.value);
+  projection.raw = JSON.stringify(projection.value);
+  projection.env.readPredecessorEvidence = async (context) => {
+    projection.contexts.push(context);
+    return projection.raw;
+  };
+  return projection;
+}
+
+test("content-pinned public replacement accepts fresh same-content re-observation and retains raw provenance", async () => {
+  const projection = contentProjectionFixture();
+  const expectedPin = clone(projection.pin);
+  const initiallyPinnedRaw = projection.raw;
+  // A newly observed timestamp, whitespace and object key order may differ.
+  // Arrays (including command order) are deliberately left unchanged.
+  projection.value.observedUtc = date(POST_EXPIRY + 1000);
+  projection.raw = JSON.stringify(
+    Object.fromEntries(Object.entries(projection.value).reverse()),
+    null,
+    2,
+  );
+  assert.notEqual(projection.raw, initiallyPinnedRaw);
+  const f = publicReplacementHarness({ predecessorEvidence: projection.env });
+  await f.runner.replaceStopped();
+  assert.equal(f.runner.state.status, "phase-a-passed");
+  const evidence = f.runner.state.evidence.filter(
+    (e) => e.kind === "operator-predecessor-projection",
+  );
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].pinMode, "canonical-content-v1");
+  assert.equal(evidence[0].pinSha256, expectedPin.sha256);
+  assert.equal(
+    evidence[0].hashDomain,
+    "relay-predecessor-command-projection/content-v1\n",
+  );
+  assert.equal(
+    evidence[0].sha256,
+    createHash("sha256").update(projection.raw).digest("hex"),
+  );
+  assert.notEqual(evidence[0].sha256, expectedPin.sha256);
+  assert.equal(evidence[0].observedUtc, projection.value.observedUtc);
+  assert.equal(projection.contexts.length, 1);
+  assert.equal(f.runner.state.predecessor.raw, f.raw);
+  assert(f.saves.every((s) => s.predecessor.raw === f.raw));
+  assert.equal(f.runner.state.replacement.carriedPrompts, 1);
+  assert.equal(f.runner.state.replacement.carriedAttempts, 2);
+  assert.equal(f.launches.length, 5);
+  assert.equal(f.runner.state.phaseACompleted, true);
+  const oldReads = f.calls.filter(
+    (c) =>
+      c.path.includes(a.STOPPED_SESSION) ||
+      c.path.includes(a.STOPPED_PERMISSION),
+  );
+  assert.equal(oldReads.length, 3);
+  assert(
+    oldReads.every(
+      (c) => c.method === "GET" && !c.path.includes("/operations/"),
+    ),
+  );
+});
+
+test("content-pinned public replacement refuses changed content, invalid mode and stale or future observations before POST", async () => {
+  const cases = [
+    [
+      "different otherwise valid settled receipt",
+      (v) => {
+        assert.equal(v.commands[0].receipt.result.stopReason, "end_turn");
+        v.commands[0].receipt.result.stopReason = "cancelled";
+      },
+      null,
+      /content hash changed/,
+    ],
+    [
+      "different command order",
+      (v) => {
+        v.commands.reverse();
+      },
+      null,
+      /content hash changed/,
+    ],
+    [
+      "source",
+      (v) => {
+        v.source = a.SOURCE;
+      },
+      null,
+      /provenance/,
+    ],
+    [
+      "schema",
+      (v) => {
+        v.schemaVersion = 92;
+      },
+      null,
+      /provenance/,
+    ],
+    [
+      "tenant",
+      (v) => {
+        v.tenantId = SID;
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "database",
+      (v) => {
+        v.databaseIdentity = "different-relay";
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "query",
+      (v) => {
+        v.querySha256 = "c".repeat(64);
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "report",
+      (v) => {
+        v.priorReportCanonicalSha256 = "d".repeat(64);
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "session",
+      (v) => {
+        v.sessionId = SID;
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "generation",
+      (v) => {
+        v.generation = 2;
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "changed command ID",
+      (v) => {
+        v.commands[0].id = LEASE;
+      },
+      null,
+      /command identity/,
+    ],
+    [
+      "unsettled receipt",
+      (v) => {
+        v.commands[1].receipt.result.cancelSent = false;
+      },
+      null,
+      /settled native/,
+    ],
+    [
+      "nested timestamp not excluded",
+      (v) => {
+        v.commands[0].receipt.result.observedUtc = date(POST_EXPIRY);
+      },
+      null,
+      /receipt shape/,
+    ],
+    [
+      "exact stale boundary",
+      (v) => {
+        v.observedUtc = date(POST_EXPIRY - 120000);
+      },
+      null,
+      /freshness/,
+    ],
+    [
+      "future",
+      (v) => {
+        v.observedUtc = date(POST_EXPIRY + 60000);
+      },
+      null,
+      /freshness/,
+    ],
+    [
+      "invalid timestamp",
+      (v) => {
+        v.observedUtc = "invalid";
+      },
+      null,
+      /freshness/,
+    ],
+    [
+      "unknown mode",
+      null,
+      (p) => {
+        p.mode = "canonical-content-v2";
+      },
+      /pinned.*scope/,
+    ],
+    [
+      "no mode cannot infer content hash",
+      null,
+      (p) => {
+        delete p.mode;
+      },
+      /hash changed/,
+    ],
+    [
+      "extra mode parameter",
+      null,
+      (p) => {
+        p.exclude = ["observedUtc", "commands"];
+      },
+      /pinned.*scope/,
+    ],
+    [
+      "missing domain",
+      null,
+      (p) => {
+        const value = clone(predecessorProjectionFixture().value);
+        delete value.observedUtc;
+        p.sha256 = createHash("sha256")
+          .update(a.canonical(value))
+          .digest("hex");
+      },
+      /content hash changed/,
+    ],
+    [
+      "raw hash cannot infer raw mode",
+      null,
+      (p) => {
+        p.sha256 = createHash("sha256")
+          .update(JSON.stringify(predecessorProjectionFixture().value))
+          .digest("hex");
+      },
+      /content hash changed/,
+    ],
+  ];
+  for (const [name, mutateValue, mutatePin, expected] of cases) {
+    const projection = contentProjectionFixture({ mutateValue, mutatePin });
+    const f = publicReplacementHarness({ predecessorEvidence: projection.env });
+    await assert.rejects(f.runner.replaceStopped(), expected, name);
+    assert.equal(f.calls.filter((c) => c.method === "POST").length, 0, name);
+    assert(!f.calls.some((c) => c.path.includes("/operations/")), name);
+    assert.equal(f.runner.state.status, "stopped", name);
+    assert.equal(f.runner.state.predecessor.raw, f.raw, name);
+    assert.equal(f.runner.state.replacement, undefined, name);
+    assert(
+      !f.runner.state.evidence.some(
+        (e) => e.kind === "operator-predecessor-projection",
+      ),
+      name,
+    );
+  }
+});
+
 test("actual public replacement refuses untrusted, stale or unsettled predecessor projections before any POST", async () => {
   const cases = [
     ["raw bytes changed", { rawSuffix: "\n" }, /hash changed/],

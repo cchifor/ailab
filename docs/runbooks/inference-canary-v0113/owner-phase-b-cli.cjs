@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const { createHash } = require("node:crypto");
 const { readPredecessor: readPrivateUtf8 } = require("./owner-phase-a-cli.cjs");
 const { createSessionFetch } = require("./owner-phase-a-socket.cjs");
+const { parseRunnerDeadline } = require("./owner-phase-a-deadline.cjs");
 const {
   createClaudePhaseBAutomation,
 } = require("./owner-phase-a-automation.cjs");
@@ -59,6 +60,7 @@ async function runPhaseBCli({
   argv = process.argv.slice(2),
   env = process.env,
   collectCheckpoint,
+  attemptFence,
   writeLine = writeStdout,
   signals = process,
 } = {}) {
@@ -84,26 +86,26 @@ async function runPhaseBCli({
       "Reviewed Claude observer is not linked",
     );
     need(
-      typeof env.RUNNER_DEADLINE === "string" &&
-        /^[0-9]{13}$/.test(env.RUNNER_DEADLINE),
-      "RUNNER_DEADLINE epoch milliseconds required",
+      ["inspect", "arm", "advance", "close", "readOperation"].every(
+        (name) => typeof attemptFence?.[name] === "function",
+      ),
+      "Reviewed signed attempt-fence adapter is not linked",
     );
-    const deadline = Number(env.RUNNER_DEADLINE);
-    need(
-      Number.isSafeInteger(deadline) &&
-        deadline > Date.now() &&
-        deadline - Date.now() <= 1800000,
-      "Phase B deadline outside bound",
-    );
+    const deadline = parseRunnerDeadline(env.RUNNER_DEADLINE, 1800000);
     const phaseInputs = JSON.parse(readPrivateUtf8(argv[1]));
     const phaseAReportSha256 = completedPhaseA(readPrivateUtf8(argv[3]));
-    const authenticatedFetch = createSessionFetch(env.RELAY_SESSION_SOCKET);
+    const authenticatedFetch = createSessionFetch(
+      env.RELAY_SESSION_SOCKET,
+      env.RELAY_SESSION_CONTROL_SOCKET,
+    );
+    need(deadline > Date.now(), "Runner deadline elapsed during preparation");
     host = createClaudePhaseBAutomation({
       directory: argv[5],
       phaseInputs,
       phaseAReportSha256,
       authenticatedFetch,
       collectCheckpoint,
+      attemptFence,
       deadline,
       maxDurationMs: deadline - Date.now(),
       signal: controller.signal,

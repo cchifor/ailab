@@ -22,13 +22,16 @@ class PiOwnerPhaseB(unittest.TestCase):
 
     def test_offline_claude_driver_and_host_contracts(self):
         self.run_node_tests(
-            ["owner-phase-b.test.cjs", "owner-phase-b-automation.test.cjs"], 60,
+            ["owner-phase-b.test.cjs", "owner-phase-b-fence.test.cjs",
+             "owner-phase-b-automation.test.cjs"], 60,
         )
 
     def test_offline_complete_claude_flow(self):
         # The real five-second observation barriers and twenty-second lease
         # heartbeat remain active. The fixture contains no real account access.
-        self.run_node_tests(["owner-phase-b-automation-integration.test.cjs"], 330)
+        # Fresh native/client drain observations add real five-second barriers.
+        # The synthetic candidate keeps the production phase deadlines intact.
+        self.run_node_tests(["owner-phase-b-automation-integration.test.cjs"], 510)
 
 
 if __name__ == "__main__":

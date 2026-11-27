@@ -7,17 +7,18 @@ checks. Phase B has a separate report and accounting. It references the complete
 Phase A report by hash; it never imports that report as mutable state or resets
 its carried one prompt / two attempts.
 
-The core is qualified with synthetic normal HTTP responses and typed operator
-observations. The complete Phase B host path and the operator branch reader
-still require qualification. Its reservations limit planned and observed work;
-they **do not enforce a hard upstream dispatch ceiling**. Do not execute live
-B/C through this entry until the operator integration supplies and qualifies
-that bound. Loading the module or merging these files supplies no credentials,
-execution window or authority.
+The public entry is held by `QUALIFIED_FENCE_ROUTER = null`. The new fixed
+managed-key fence port is mandatory before launch; the historical Router pin
+below does not implement that contract. A final combined Router release and
+its compatibility/artifact/host qualification must precede a reviewed pin update.
+Tests compile isolated copies with only exact source-pin substitutions and
+record before/after hashes. A passing synthetic copy does not qualify the
+unchanged held public bundle for execution. Loading or merging these files
+supplies no credentials, execution window or authority.
 
 ## Fixed scope and inputs
 
-The core pins the following sources and artifacts. A different deployed source
+The retained pre-fence core pins the following sources and artifacts. A different deployed source
 requires an explicit reviewed compatibility update; it is not accepted by
 changing an observer's reported source.
 
@@ -63,6 +64,10 @@ Phase C and final grant cleanup remain separate.
 `stop()`, `renew()` and `state`. Its `env.load()` must return null for the new
 exclusive B store. Start is single-use, including failure. Phase A replacement
 and final-revocation entrypoints refuse on this core.
+
+The core additionally requires `env.executionDeadline` (absolute milliseconds)
+and the five fixed `env.attemptFence` callbacks documented below. Missing methods,
+an expired deadline or the unassigned release pin refuses before launch.
 
 The named `createClaudePhaseBAutomation` export from
 [owner-phase-a-automation.cjs](owner-phase-a-automation.cjs) accepts
@@ -138,10 +143,12 @@ Its result is:
 {version:1,observedUtc,
  hubSource,routerSource,holderSource,holderBinarySha256,piManifestSha256,profilesSha256,
  holderId:UUID,journalId:UUID,nativeRecovery:2,nativeStateReady:true,
+ routerDeploymentId:UUID,
  activeSessions:0,pendingCommands:0,admissionPaused:false,
  route:{alias:'canary-pi-claude',account,model,protocol:'anthropic-messages',
         maxAttempts:1,fallbacks:[],transport:'sdk-resume',cliVersion:'2.1.283',
-        warmSessions:false,trustVerified:true,configRevision:integer},
+        warmSessions:false,trustVerified:true,configRevision:integer,
+        deploymentId:actualDeploymentId,providerGeneration:actualRegistrationGeneration},
  cold:{reportSha256:hex64,account,source:ROUTER_SOURCE,passed:true},
  projectionSha256:hex64}
 ```
@@ -220,11 +227,87 @@ added.
 Before each prompt the core durably reserves two attempts for ordinary text/read,
 three for marker/read, two for compaction, and zero for local controls and the
 expected configuration refusal. Insufficient remaining allocation refuses
-before dispatch; an observed excess stops subsequent work. These reservations
-are not a provider admission fence: automatically blocked tools can cause
-continuations before an observation is collected. A future meter refusal may
-also create a trajectory attempt before admission. Preserve the raw counts;
-do not subtract those rows to turn a failed phase into a pass.
+before dispatch; an observed excess stops subsequent work. The separate fixed
+fence arms lifecycle rows `ready:2, denied:3, approved:3, branch:2, compaction:2,
+compacted:2, cancel:2, recovered:2` under phase limit 20, then effort rows `low:2,
+high:2` under phase limit 6. Unused row allowance is retired, never added to the
+next row. The unallocated difference between row sums and phase ceilings is
+not permission for another prompt or retry. A denied N+1 request can still
+create a raw trajectory attempt before admission; that mismatch fails the
+phase. Preserve both counters without subtracting the denied diagnostic.
+
+Local history/branch/reconciliation commands and the expected configuration
+refusal keep the existing fence and create no new row. Their source-qualified
+local behavior and exact zero-attempt observations remain mandatory. This is
+**not a server-enforced zero-admission stage**: an unexpected request could
+consume unused current-row allowance and must stop the phase.
+
+## Fixed managed-key fence port
+
+[owner-phase-b-fence.cjs](owner-phase-b-fence.cjs) implements the controller for
+the [Router candidate contract](https://git.chifor.me/cchifor/llm-router/src/commit/02d698236b6336daee0d5581547636f7cf2b36f3/packages/contracts/attempt-fence.ts),
+whose raw SHA256 is
+`79316b299abc9b94262de060dda408c2e4f9f419a63f40731b148aaf02af22ee`.
+This source reference is not a published deployment pin.
+
+`inspect`, `arm`, `advance`, `close` and `readOperation` each receive one frozen
+object `{raw,bodySha256,requestDigest,notBefore,deadline,signal,cleanup}`. The
+operator transport signs and sends the **exact UTF-8 raw bytes** through the
+existing signed `POST /register/relay-keys` authority. The callback's
+`requestDigest` is the JWT assertion binding,
+`SHA256("POST\n/register/relay-keys\n" + SHA256(raw))`. The returned receipt's
+`requestDigest` is instead `SHA256(raw)`, compared with the durable original
+`bodySha256`, including after operation lookup. These two hashes are distinct.
+No key/token or signer secret enters the report. `readOperation` uses a fresh
+lookup operation ID and the original `targetOperationId`, and returns the
+original immutable mutation receipt with its original action/ID/digest.
+
+Every callback returns `{routerSource,observedAt,projectionSha256,response}`.
+`response` is the actual strict inspect response or mutation receipt;
+`projectionSha256` is SHA256 of `owner-phase-a.js` canonical JSON of that response.
+The source must equal the eventual qualified pin. Outer observations begin after
+dispatch and remain less than 120 seconds old, at most five seconds ahead.
+Receipt commit clocks allow the existing five-second skew. The envelope is
+trusted operator attribution, not independent database authentication.
+
+The controller validates key creation/coverage, persistent Router deployment,
+namespace/principal, complete immutable plan and selection (including actual
+provider registration generation), exact counters/revision, and whole returned
+state. Mutation IDs, exact raw body and both digests are saved before calling the
+signer. A lost response permits one read of the original operation under the
+same deadline, never a mutation resend. Missing/changed/late receipts stop work.
+First arm requires no earlier fence and zero token-unknown baseline. Later
+settled cancellations retain charged attempts and token uncertainty; every
+mutation carries the exact `expectedUnknownUsage` CAS. Unattributed history,
+stale opens or missing attempt coverage remain refusals.
+
+Before advancing, the `claude-attempt-drain` checkpoint supplies:
+
+```text
+{version:1,observedAt:epochMs,scope:exactContextScope,
+ completedOperationIds:exactContextIds,terminalPrompts:exactContextTerminals,
+ pendingPermissions:[],pendingTools:[],pendingControls:[],
+ nativeRequests:[],clientRequests:[],
+ provenance:{nativeSha256:hex64,clientSha256:hex64,operationsSha256:hex64}}
+```
+
+The context binds source/deployment, key/principal, tenant/binding/profile,
+holder/journal, Relay session/generation, original native UUID, run and fence.
+It lists the issued command operation IDs and validated native terminal prompt
+receipts. Read the actual native/client pending work and operation evidence;
+zero Router opens alone is not proof that a delayed request cannot arrive.
+The observation must be collected after the existing five-second boundary.
+Unavailable or ambiguous native/client evidence stops advancement. Hashes retain
+provenance; the Router does not authenticate the controller's terminal digest.
+
+Normal phase completion closes the exact fence before the next phase can arm
+with its closed predecessor ID/revision. On failure, the controller attempts a
+bounded irreversible close before ordinary Relay cancel/Close/release cleanup.
+A failed or unresolved fence close is retained and does not suppress Relay
+cleanup or become a drained-success claim. No new phase follows failure.
+The host must track raw port promises/body reads, combine stop/deadline signals,
+and include these ports in its bounded cleanup drain. Only inspect, close and
+original-operation read are allowed on the cleanup signal.
 
 The existing exact marker commands, full-input permission rereads, independent
 filesystem observations and scoped Relay message-read rule remain enforced.
@@ -235,7 +318,7 @@ Changing low to high effort must first produce the exact configuration refusal
 with no observed upstream attempt, followed by explicit branch reconciliation.
 A generic failure cannot substitute for that refusal.
 
-The core qualification passed 117 tests: 104 unchanged Phase A cases and 13
+The historical pre-fence core qualification passed 117 tests: 104 unchanged Phase A cases and 13
 Claude cases through the actual public entry, with no Runner/start overrides.
 After correcting only the Claude handoff instructions, all 13 Claude cases
 passed again. They cover three launches and native UUID retention, direct and
@@ -259,3 +342,40 @@ not establish their precise cause. These fixtures do not
 claim a live subscription run, published-Pi execution, a qualified operator
 reader or hard budget enforcement. `phase-b-passed` leaves `completed:false`;
 Phase C, paired performance evidence and final cleanup remain outstanding.
+
+The initial fence-core follow-up passed 29 focused Linux cases with zero skips. It
+includes the real public entry in isolated pin-only compiled modules, unchanged
+held-bundle refusal before I/O, exact ordered rows and durable intents, native/
+client drain refusals, cancellation token-unknown continuity, original-operation
+readback after lost arm/advance/close replies, save/deadline/stop failures, and
+ordinary cleanup even when fence closure is unresolved. The successful synthetic
+transcript contains 44 management reads/writes and 12 committed mutations; every
+request and receipt also passed the actual frozen Router `Input` and
+`AttemptFenceReceipt` parsers. Those shape checks did not verify the HTTP route's
+receipt-digest semantics: the initial synthetic transport incorrectly reused the
+JWT binding as the receipt digest. The subsequent 301.938-second full synthetic
+host pass has the same limitation. Both proofs remain historical; neither proves
+compatibility with actual HTTP receipts. The corrected helper compares the
+receipt with the original raw-body hash, and the fixture now models that exact
+contract.
+
+The correction passed 31 focused Linux cases with zero skips, including two
+regressions that failed before the correction: recovering the original body
+digest after a lost reply, and refusing a JWT binding substituted into the
+receipt. A separate test against real signed Router HTTP, SQLite, KeyMeter and
+the same controller passed two cases on integrated candidate
+`0bc835ab72fb9ea03b2b3ea51bba7a9789a5e171`. It traversed all eight lifecycle and
+two effort rows, committed twelve mutations, and recovered one lost committed
+reply by its original operation ID without resending. Its issuer and terminal
+evidence are synthetic, with zero provider opens.
+
+The corrected full synthetic host then passed in 301.950 seconds with zero
+skips, retaining real Unix HTTP, five-second observation barriers, twenty-second
+heartbeats, fsynced snapshots and normal cleanup. It completed three launches,
+eleven lifecycle plus four effort prompts, twelve fence mutations and thirteen
+lease renewals. All thirteen qualified source files were unchanged during the
+run; all 44 management requests and twelve receipts passed the actual Router
+schemas and raw-body digest checks. This host test uses synthetic fence,
+readiness, branch and terminal observations. The public release gate remains
+NULL; no final published release, live authority or deployed native/client drain
+qualification is claimed.

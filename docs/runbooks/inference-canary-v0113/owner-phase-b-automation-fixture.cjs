@@ -7,8 +7,8 @@ const { setTimeout: delay } = require("node:timers/promises");
 const { createHash } = require("node:crypto");
 const fs = require("node:fs"),
   path = require("node:path");
-const a = require("./owner-phase-a.js"),
-  b = require("./owner-phase-b.js");
+const sourceFixture = require("./owner-phase-b-fence-fixture.cjs");
+const { a, b } = sourceFixture.sourceFixture();
 const NOW = Date.now();
 const date = (x) => new Date(x).toISOString(),
   clone = (x) => JSON.parse(JSON.stringify(x));
@@ -112,6 +112,7 @@ function ready(now) {
     profilesSha256: b.PINS.profiles,
     holderId: HOLDER,
     journalId: JOURNAL,
+    routerDeploymentId: "11111111-1111-4111-8111-999999999999",
     nativeRecovery: 2,
     nativeStateReady: true,
     activeSessions: 0,
@@ -129,6 +130,8 @@ function ready(now) {
       warmSessions: false,
       trustVerified: true,
       configRevision: 2883,
+      deploymentId: "claude-selected-deployment",
+      providerGeneration: 7,
     },
     cold: {
       reportSha256: "1".repeat(64),
@@ -257,6 +260,19 @@ function phaseServer(outputDirectory) {
     attempts = [],
     consumerReads = [],
     effects = new Map();
+  const managedFence = sourceFixture.transport({
+    now: Date.now,
+    keyId: KEY,
+    tenantId: "00000000-0000-4000-8000-000000000001",
+    // Read the actual fsynced host snapshot at each signer boundary.
+    saves: { at: () => latestSnapshot() },
+    usage: () => ({
+      attempts: attempts.reduce((n, row) => n + row.attempts, 0),
+      tokenUsageUnknown: [...commands.values()].filter(
+        (c) => c.kind === "prompt" && c.cancelled && c.state === "completed",
+      ).length,
+    }),
+  });
   function consumerRows() {
     return [...sessions.values()].map((s) => {
       const pp = profiles[s.provider];
@@ -485,6 +501,55 @@ function phaseServer(outputDirectory) {
           s.coordination,
           context.retiredBranch ? s.retired : s.routerRecord,
         );
+      }
+      case "claude-attempt-drain": {
+        const s = sessions.get(context.scope.sessionId);
+        assert(s);
+        assert.equal(context.scope.nativeSessionId, s.native);
+        assert.equal(context.scope.routerSource, b.PINS.router);
+        assert.equal(
+          context.scope.routerDeploymentId,
+          managedFence.deploymentId,
+        );
+        const owned = [...commands.values()].filter(
+          (c) => c.session_id === s.id,
+        );
+        assert.deepEqual(
+          owned.map((c) => c.operation_id),
+          context.completedOperationIds,
+        );
+        const terminalPrompts = owned
+          .filter((c) => c.kind === "prompt" && c.state === "completed")
+          .map((c) => ({
+            operationId: c.operation_id,
+            stopReason: c.receipt.result.stopReason,
+          }));
+        assert.deepEqual(terminalPrompts, context.terminalPrompts);
+        return {
+          version: 1,
+          observedAt: Date.now(),
+          scope: context.scope,
+          completedOperationIds: owned
+            .filter((c) => c.state === "completed")
+            .map((c) => c.operation_id),
+          terminalPrompts,
+          pendingPermissions: [...permissions.values()]
+            .filter((p) => p.session_id === s.id && p.state === "pending")
+            .map((p) => p.id),
+          pendingTools: [],
+          pendingControls: owned
+            .filter((c) => c.state !== "completed")
+            .map((c) => c.operation_id),
+          nativeRequests: owned
+            .filter((c) => c.kind === "prompt" && c.state !== "completed")
+            .map((c) => c.operation_id),
+          clientRequests: [],
+          provenance: {
+            nativeSha256: "6".repeat(64),
+            clientSha256: "7".repeat(64),
+            operationsSha256: "8".repeat(64),
+          },
+        };
       }
       default:
         throw Error("Unknown B checkpoint " + context.kind);
@@ -981,6 +1046,8 @@ function phaseServer(outputDirectory) {
     effects,
     attempts,
     consumerReads,
+    managedFence,
+    attemptFence: managedFence.port,
   };
 }
 
