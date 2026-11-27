@@ -125,6 +125,35 @@ class Gate(unittest.TestCase):
         time.sleep(0.3)
         self.assertEqual(self.client(self.req())["code"], "observer-down")
 
+    def test_deep_nesting_and_overflowing_numbers_are_refused_and_the_gate_survives(self):
+        deep = ('{"v":1,"call":"deployment","deadline":1,"context":' + "[" * 5000 + "]" * 5000 + "}\n").encode()
+        self.assertEqual(self.client(deep)["code"], "refused")
+        self.assertEqual(self.client(b'{"v":1,"call":"deployment","deadline":1,"context":{"x":1e999}}\n')["code"],
+                         "refused")
+        out = {}
+        t = threading.Thread(target=lambda: out.setdefault("r", self.client(self.req())))
+        t.start()
+        self.reply_to_next({"v": 1, "ok": True, "value": 1})
+        t.join(5)
+        self.assertEqual(out["r"]["value"], 1)
+
+    def test_back_to_back_requests_are_never_busy(self):
+        for i in range(5):
+            out = {}
+            t = threading.Thread(target=lambda: out.setdefault("r", self.client(self.req())))
+            t.start()
+            self.reply_to_next({"v": 1, "ok": True, "value": i})
+            t.join(5)
+            self.assertEqual(out["r"], {"v": 1, "ok": True, "value": i, "seq": i + 1} if "seq" in out["r"]
+                             else {"v": 1, "ok": True, "value": i})
+
+    def test_clock_probe_round_trip(self):
+        self.host_in.write(b'{"clockProbe": "p1"}\n')
+        self.host_in.flush()
+        f = json.loads(self.frames.readline())
+        self.assertEqual(f["clockProbe"], "p1")
+        self.assertIsInstance(f["gateNow"], int)
+
     def test_second_concurrent_connection_is_busy(self):
         s = self.client(self.req(), read=False)
         self.frames.readline()
@@ -162,7 +191,7 @@ class HostProtocol(unittest.TestCase):
         self.gate = FakeGate()
         self.faults = []
         host = O.Host(gate=self.gate, collectors=collectors or {}, cfg=cfg_obj(), evidence=O.Evidence(self.ev_path),
-                      on_fault=self.faults.append, heartbeat_s=0.2)
+                      on_fault=lambda r, e=False: self.faults.append(r), heartbeat_s=0.2)
         self.gate.frame({"ready": True})
         host.start(ready_timeout=3)
         return host
@@ -258,9 +287,13 @@ class Transitions(unittest.TestCase):
         with self.assertRaises(O.Refuse):  # an observation before post-open
             O.admit(st, "checkpoint", "observation", {"provider": "codex", "runId": CODEX["run"]}, cfg)
         c = {"provider": "codex", "runId": CODEX["run"]}
-        for k in ("post-open", "observation", "permission", "observation", "recover-history", "observation",
-                  "reconcile-choice", "observation"):
+        for k in ("post-open", "observation", "permission", "observation", "recover-history"):
             self.step(st, "checkpoint", k, c if k != "permission" else {})
+        with self.assertRaises(O.Refuse):  # after recovery only the recovered zero-attempt observation is admitted
+            O.admit(st, "checkpoint", "observation", {**c, "phase": "approved", "zeroAttempts": False}, cfg)
+        self.step(st, "checkpoint", "observation", {**c, "phase": "recovered", "zeroAttempts": True})
+        for k in ("reconcile-choice", "observation"):
+            self.step(st, "checkpoint", k, c)
         self.step(st, "checkpoint", "pre-launch", {"provider": "qwen", "runId": QWEN["run"], "effort": False})
         with self.assertRaises(O.Refuse):  # retire-branch belongs to the effort run only
             O.admit(st, "checkpoint", "retire-branch", {"provider": "qwen", "runId": QWEN["run"]}, cfg)
@@ -273,39 +306,57 @@ class Transitions(unittest.TestCase):
 
 
 # ------------------------------------------------------------------------------------------ collectors, faked
+POD = {"name": "llm-router-x", "uid": u(30), "restarts": 0}
+
+
 class FakeRemote:
-    """Scripted answers keyed by `what`; records every call."""
+    """Scripted answers keyed by `what` (or 'sql:<file>'); a list answers one item per call. Records every call."""
 
     def __init__(self, answers):
         self.answers, self.calls = answers, []
 
-    def _ans(self, what):
-        self.calls.append(what)
-        a = self.answers[what]
-        return a.pop(0) if isinstance(a, list) else a
+    def _ans(self, key):
+        self.calls.append(key)
+        a = self.answers[key]
+        if isinstance(a, list):
+            return a.pop(0) if len(a) > 1 else a[0]
+        if isinstance(a, BaseException):
+            raise a
+        return a
 
     def sql(self, name, variables, budget, obs):
         self.calls.append(("sql", name, dict(variables)))
-        rows = self.answers["sql:" + name]
-        obs.setdefault("sql", {})[name] = rows
+        rows = self.answers["sql:" + name]  # a row list is ONE answer
+        obs.setdefault("sql", {})[name] = {"rows": len(rows)}
         return rows
 
     def dw(self, args, budget, obs, what, cap=60.0):
         return self._ans(what)
 
-    def router(self, args, budget, obs, what, cap=60.0):
+    def router(self, args, budget, obs, what, cap=60.0, pod=None):
         return self._ans(what)
+
+    def router_pod(self, budget, obs):
+        self.calls.append("router-pod")
+        return dict(self.answers.get("router-pod", POD))
 
 
 class FakeHost:
     def __init__(self, remote):
         self.cfg, self.remote, self.state = cfg_obj(), remote, O.ObserverState()
         self.run_start_ms = 1_000
+        self.recv_ms = int(time.time() * 1000)
         self.ledger = None
+        self.lease_ok = lambda: True
         self.ev = type("E", (), {"write": lambda *a, **k: None})()
+        self._cutoff = int(time.time() * 1000) + 3_600_000
 
     marker_command = H.ObserverHost.marker_command
     native_home = H.ObserverHost.native_home
+    mutation_cap = H.ObserverHost.mutation_cap
+
+    def runner_cutoff_ms(self):
+        return self._cutoff
 
 
 def budget(ms=30000):
@@ -318,7 +369,7 @@ def renewed_rows(codex_state="ready"):
                 "current_credential_id": cred if state == "ready" else None,
                 "pending_credential_id": cred if state != "ready" else None, "credential_id": cred,
                 "router_key_id": key, "credential_generation": 3, "namespace": "default",
-                "connection_id": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8", "expires_ms": exp}
+                "connection_id": CFG["connectionId"], "expires_ms": exp}
     return [row(CODEX, u(1), "key_" + "a" * 32, codex_state, 9_000_000), row(QWEN, u(2), "key_" + "b" * 32, "ready",
                                                                               8_000_000)]
 
@@ -326,32 +377,34 @@ def renewed_rows(codex_state="ready"):
 def renewed_ctx():
     def prof(p, cred, key, exp):
         return {"id": p["id"], "run": p["run"], "binding": p["binding"], "credential": cred, "key": key,
-                "namespace": "default", "connection": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8", "generation": 3,
-                "revision": 2, "expiresAt": exp, "protocol": "x", "definitionHash": "y"}
+                "namespace": "default", "connection": CFG["connectionId"], "generation": 3, "revision": 2,
+                "expiresAt": exp, "protocol": p["protocol"], "definitionHash": p["definitionHash"]}
     return {"version": 1, "kind": "renewed-credentials", "expiresAt": 8_000_000,
             "profiles": {"codex": prof(CODEX, u(1), "key_" + "a" * 32, 9_000_000),
                          "qwen": prof(QWEN, u(2), "key_" + "b" * 32, 8_000_000)}}
 
 
 class RenewedCredentials(unittest.TestCase):
-    def test_ready_and_installing_match_and_any_drift_fails(self):
+    def c2(self, rows, ctx):
+        return C.c_renewed_credentials(FakeHost(FakeRemote({"sql:renewed-credentials.sql": rows})), {}, ctx,
+                                       budget(), 0, {})
+
+    def test_ready_and_installing_match(self):
         for state in ("ready", "installing"):
-            h = FakeHost(FakeRemote({"sql:renewed-credentials.sql": renewed_rows(state)}))
-            v = C.c_renewed_credentials(h, {}, renewed_ctx(), budget(), 0, {})
-            self.assertEqual(v["expiresAt"], 8_000_000)
-            self.assertEqual(h.state.renewed["codex"]["key"], "key_" + "a" * 32)
-        ctx = renewed_ctx()
-        ctx["profiles"]["qwen"]["revision"] = 9
+            self.assertEqual(self.c2(renewed_rows(state), renewed_ctx())["expiresAt"], 8_000_000)
+
+    def test_any_drift_extension_or_historical_key_fails(self):
+        for mutate in (lambda c: c["profiles"]["qwen"].update(revision=9),
+                       lambda c: c["profiles"]["codex"].update(extra="smuggled"),  # an unvalidated extension
+                       lambda c: c["profiles"]["codex"].update(definitionHash="0" * 64)):
+            ctx = renewed_ctx()
+            mutate(ctx)
+            with self.assertRaises(O.Failed):
+                self.c2(renewed_rows(), ctx)
+        rows, ctx = renewed_rows(), renewed_ctx()
+        rows[0]["router_key_id"] = ctx["profiles"]["codex"]["key"] = CODEX["historicalKey"]
         with self.assertRaises(O.Failed):
-            C.c_renewed_credentials(FakeHost(FakeRemote({"sql:renewed-credentials.sql": renewed_rows()})), {}, ctx,
-                                    budget(), 0, {})
-        rows = renewed_rows()
-        rows[0]["router_key_id"] = CODEX["historicalKey"]
-        ctx = renewed_ctx()
-        ctx["profiles"]["codex"]["key"] = CODEX["historicalKey"]
-        with self.assertRaises(O.Failed):  # a historical key is never a renewed one
-            C.c_renewed_credentials(FakeHost(FakeRemote({"sql:renewed-credentials.sql": rows})), {}, ctx, budget(),
-                                    0, {})
+            self.c2(rows, ctx)
 
 
 def bound_run(h, provider="codex", effort=False):
@@ -361,6 +414,11 @@ def bound_run(h, provider="codex", effort=False):
     h.state.stage = "runs"
     h.state.sessions[r.session_id] = r
     return r
+
+
+def sess(state="open", generation=1, rebinding=False):
+    return [{"id": u(10), "state": state, "generation": generation, "rebinding": rebinding, "control_epoch": 1,
+             "holder_id": u(7), "native_session_id": "n"}]
 
 
 def perm_ctx(r, purpose, kind, desc, title, opt="o1", expected=None):
@@ -380,40 +438,49 @@ class PermissionPolicy(unittest.TestCase):
         self.h = FakeHost(None)
         self.r = bound_run(self.h)
 
-    def run_c8(self, ctx, rows):
-        self.h.remote = FakeRemote({"sql:permission.sql": rows})
-        return C.c_permission(self.h, {}, ctx, budget(), 0, {})
+    def run_c8(self, ctx, rows, session=None):
+        self.h.remote = FakeRemote({"sql:permission.sql": rows, "sql:session-state.sql": session or sess()})
+        obs = {}
+        v = C.c_permission(self.h, {}, ctx, budget(), 0, obs)
+        self.last_obs = obs
+        return v
 
-    def test_relay_read_exact_input_only(self):
-        desc = 'Input: {"limit": 5, "after": "12"}'
+    def test_relay_read_exact_input_only_and_nothing_raw_is_logged(self):
+        desc = '{"limit": 5, "after": "12"}'
         self.assertTrue(self.run_c8(perm_ctx(self.r, "relay-message-read", "allow_once", desc, C.READ_TITLE),
                                     perm_row("allow_once", desc, C.READ_TITLE)))
-        for bad in ('{"limit": 51}', '{"after": "012"}', '{"channelId": "' + u(1) + '"}', '{"send": true}'):
+        self.assertNotIn('"after"', json.dumps(self.last_obs))  # only hashes of the untrusted text
+        for bad in ('{"limit": 51}', '{"after": "012"}', '{"channelId": "' + u(1) + '"}', '{"send": true}',
+                    'Input: {"limit": 5}'):  # the WHOLE description must be the JSON input
             with self.assertRaises(O.Failed):
                 self.run_c8(perm_ctx(self.r, "relay-message-read", "allow_once", bad, C.READ_TITLE),
                             perm_row("allow_once", bad, C.READ_TITLE))
 
-    def test_marker_decisions_are_bound_to_the_command(self):
+    def test_marker_decisions_are_bound_to_the_command_and_the_bash_tool(self):
         denied = self.h.marker_command("codex", self.r.run_id, "denied")
         effects = self.h.marker_command("codex", self.r.run_id, "effects")
-        d1, d2 = json.dumps({"command": denied}), json.dumps({"command": effects, "timeout": 30})
+        d1, d2 = json.dumps({"command": denied}), json.dumps({"command": effects, "timeout": 30.5})
         with self.assertRaises(O.Failed):  # the denied command may only be rejected
-            self.run_c8(perm_ctx(self.r, "marker", "allow_once", d1, "t", expected=denied),
-                        perm_row("allow_once", d1, "t"))
-        self.assertTrue(self.run_c8(perm_ctx(self.r, "marker", "reject_once", d1, "t", expected=denied),
-                                    perm_row("reject_once", d1, "t")))
-        self.assertTrue(self.run_c8(perm_ctx(self.r, "marker", "allow_once", d2, "t", expected=effects),
-                                    perm_row("allow_once", d2, "t")))
+            self.run_c8(perm_ctx(self.r, "marker", "allow_once", d1, C.MARKER_TITLE, expected=denied),
+                        perm_row("allow_once", d1, C.MARKER_TITLE))
+        with self.assertRaises(O.Failed):  # not the exact bash tool
+            self.run_c8(perm_ctx(self.r, "marker", "reject_once", d1, "Allow sh?", expected=denied),
+                        perm_row("reject_once", d1, "Allow sh?"))
+        self.assertTrue(self.run_c8(perm_ctx(self.r, "marker", "reject_once", d1, C.MARKER_TITLE, expected=denied),
+                                    perm_row("reject_once", d1, C.MARKER_TITLE)))
+        self.assertTrue(self.run_c8(perm_ctx(self.r, "marker", "allow_once", d2, C.MARKER_TITLE, expected=effects),
+                                    perm_row("allow_once", d2, C.MARKER_TITLE)))
         with self.assertRaises(O.Failed):  # each once per run
-            self.run_c8(perm_ctx(self.r, "marker", "allow_once", d2, "t", expected=effects),
-                        perm_row("allow_once", d2, "t"))
-        other = json.dumps({"command": "rm -rf /"})
-        with self.assertRaises(O.Failed):
-            self.run_c8(perm_ctx(self.r, "marker", "allow_once", other, "t", expected="rm -rf /"),
-                        perm_row("allow_once", other, "t"))
+            self.run_c8(perm_ctx(self.r, "marker", "allow_once", d2, C.MARKER_TITLE, expected=effects),
+                        perm_row("allow_once", d2, C.MARKER_TITLE))
+        self.assertEqual([c["step"] for c in self.r.confirmed], ["denied", "effects"])
 
-    def test_unbound_session_expired_or_ambiguous_option_refused(self):
+    def test_authoritative_generation_rebinding_expiry_and_ambiguity(self):
         desc = '{"limit": 5}'
+        for session in (sess(generation=999), sess(rebinding=True), sess(state="closed")):
+            with self.assertRaises(O.Failed):
+                self.run_c8(perm_ctx(self.r, "relay-message-read", "allow_once", desc, C.READ_TITLE),
+                            perm_row("allow_once", desc, C.READ_TITLE), session)
         ctx = perm_ctx(self.r, "relay-message-read", "allow_once", desc, C.READ_TITLE)
         ctx["sessionId"] = u(99)
         with self.assertRaises(O.Refuse):
@@ -422,107 +489,315 @@ class PermissionPolicy(unittest.TestCase):
             self.run_c8(perm_ctx(self.r, "relay-message-read", "allow_once", desc, C.READ_TITLE),
                         perm_row("allow_once", desc, C.READ_TITLE, unexpired=False))
         rows = perm_row("allow_once", desc, C.READ_TITLE)
-        rows[0]["context"]["options"].append({"optionId": "o1", "kind": "allow_once", "name": "dup"})
+        rows[0]["context"]["options"].append({"optionId": "o2", "kind": "allow_once", "name": "dup"})
         with self.assertRaises(O.Failed):
             self.run_c8(perm_ctx(self.r, "relay-message-read", "allow_once", desc, C.READ_TITLE), rows)
 
 
+def holder_rec(paused=False, pid=42):
+    return {"hello": {"incarnation": u(7), "journalId": CFG["holder"]["newJournalId"], "nativeRecovery": 2,
+                      "nativeStateReady": True, "sessions": 0},
+            "status": {"admissionPaused": paused, "admissionRevision": 1, "activeSessions": 0, "pendingCommands": 0,
+                       "nativeStateReady": True, "sealed": False},
+            "binarySha256": CFG["holder"]["qualified"]["binarySha256"],
+            "profilesSha256": CFG["holder"]["profilesSha256"],
+            "units": {"relay-holder.service": {"mainPid": pid, "active": "active"},
+                      "relay-holder-control-plane.service": {"active": "active"}},
+            "observedMs": 1}
+
+
+class Recovery(unittest.TestCase):
+    def setUp(self):
+        self.h = FakeHost(None)
+        self.h.state.holder = {"incarnation": u(7), "journal": CFG["holder"]["newJournalId"], "mainPid": 42}
+        self.r = bound_run(self.h)
+        self.r.confirmed = [{"permission": u(21), "option": "rej", "kind": "reject_once", "step": "denied"},
+                            {"permission": u(22), "option": "acc", "kind": "allow_once", "step": "effects"}]
+        self.r.approved_marker_sha = "e" * 64
+        shell = lambda k, err: {"sha256": O.sha256_bytes(self.h.marker_command("codex", self.r.run_id, k).encode()),
+                                "results": [err]}
+        self.answers = {
+            "holder": holder_rec(), "sql:session-state.sql": sess(state="closed"),
+            "sql:session-commands.sql": [{"table": "control", "kind": "prompt", "state": "completed",
+                                          "receipt_status": "completed", "stop_reason": "end_turn"},
+                                         {"table": "agent", "kind": "permission-decision", "state": "unknown",
+                                          "receipt_status": "accepted", "stop_reason": None}],
+            "sql:permission-decisions.sql": [{"id": u(21), "state": "resolved", "option_id": "rej"},
+                                             {"id": u(22), "state": "resolved", "option_id": "acc"}],
+            "transcript": {"state": "observed", "unsettled": [], "duplicateResults": [],
+                           "shellCommands": [shell("denied", True), shell("effects", False)]},
+            "marker:approved": {"state": "observed", "phaseChecksPass": True, "observedUtc": "x",
+                                "files": {"effects": {"sha256": "e" * 64}}}}
+        self.ctx = {"sessionId": self.r.session_id, "generation": 1, "holderId": u(7),
+                    "journalId": CFG["holder"]["newJournalId"], "provider": "codex", "runId": self.r.run_id}
+
+    def c9(self, **over):
+        a = dict(self.answers)
+        a.update(over)
+        self.h.remote = FakeRemote(a)
+        return C.c_recover_history(self.h, {}, self.ctx, budget(), 0, {})
+
+    def test_settled_and_reconciled(self):
+        self.assertTrue(self.c9())
+
+    def test_missing_evidence_fails(self):
+        bad = dict(self.answers["transcript"])
+        bad["shellCommands"] = [dict(s) for s in bad["shellCommands"]]
+        bad["shellCommands"][0]["results"] = [False]  # the denied command executed
+        with self.assertRaises(O.Failed):
+            self.c9(transcript=bad)
+        with self.assertRaises(O.Failed):  # resolved with another option than confirmed
+            self.c9(**{"sql:permission-decisions.sql": [{"id": u(21), "state": "resolved", "option_id": "acc"},
+                                                         {"id": u(22), "state": "resolved", "option_id": "acc"}]})
+        with self.assertRaises(O.Failed):  # an unconfirmed permission exists
+            self.c9(**{"sql:permission-decisions.sql": self.answers["sql:permission-decisions.sql"]
+                       + [{"id": u(23), "state": "resolved", "option_id": "x"}]})
+        with self.assertRaises(O.Failed):  # a control command in an unknown state
+            self.c9(**{"sql:session-commands.sql": [{"table": "control", "kind": "prompt", "state": "unknown",
+                                                     "receipt_status": "completed", "stop_reason": None}]})
+        unknown = dict(self.answers["transcript"])
+        unknown["shellCommands"] = [dict(s, results=[]) for s in unknown["shellCommands"]]
+        with self.assertRaises(O.Unsupported):  # the native outcome cannot be established
+            self.c9(transcript=unknown)
+
+
+class Delivery(unittest.TestCase):
+    def test_effort_reuses_an_installed_credential_on_this_host(self):
+        h = FakeHost(None)
+        h.state.holder = {"incarnation": u(7), "journal": CFG["holder"]["newJournalId"]}
+        h.state.renewed = {"codex": {"binding": CODEX["binding"], "credential": u(1), "generation": 3, "key": "k"}}
+        r = O.RunState("codex", CFG["effortRun"], True, phase="c5")
+        r.baseline_marker = {"files": {"denied": {"state": "absent"}, "effects": {"state": "absent"}}}
+        h.state.runs.append(r)
+        h.state.stage = "runs"
+        launch = {"id": u(40), "session_id": u(41), "actor_id": CFG["jitUserId"], "created_ms": 5_000,
+                  "profile_id": CODEX["id"], "profile_revision": 1, "cwd": CODEX["cwd"], "holder_id": u(7),
+                  "holder_journal_id": CFG["holder"]["newJournalId"], "native_id": "n"}
+        install = {"holder_id": u(7), "generation": 3, "rendered": True, "render_failure": None,
+                   "install_state": "completed", "receipt_status": "completed", "consumer_state": "active",
+                   "consumer_lease_ok": True}
+        h.remote = FakeRemote({"sql:session-launch.sql": [launch],
+                               "sql:session-state.sql": [dict(sess()[0], id=u(41))],
+                               "sql:delivery.sql": [], "sql:delivery-reuse.sql": [install],
+                               "credfile": {"state": "present", "regular": True, "uid": 1000, "mode": "0o600",
+                                            "links": 1},
+                               "marker:baseline": {"state": "observed", "phaseChecksPass": True, "observedUtc": "x",
+                                                   "files": r.baseline_marker["files"]}})
+        ctx = {"provider": "codex", "runId": CFG["effortRun"], "phase": "baseline", "sessionId": u(41),
+               "generation": 1, "notBefore": 1}
+        self.assertEqual(C.c_post_open(h, {}, ctx, budget(), 0, {})["deliveryConfirmed"], True)
+        used = [c[1] for c in h.remote.calls if isinstance(c, tuple)]
+        self.assertIn("delivery-reuse.sql", used)
+        self.assertEqual([c[2]["host_id"] for c in h.remote.calls if isinstance(c, tuple)
+                          and c[1] == "delivery.sql"], [CFG["hostId"]])
+
+
 class Gates(unittest.TestCase):
-    def test_c10_and_the_projection_stay_unsupported(self):
-        with self.assertRaises(O.Unsupported):
-            C.c_reconcile_choice(None, {}, {}, budget(), 0, {})
-        with self.assertRaises(O.Unsupported):
-            C.c_predecessor(None, {}, {}, budget(), 0, {})
+    def test_c10_c11_and_the_projection_stay_unsupported(self):
+        for fn in (C.c_reconcile_choice, C.c_retire_branch, C.c_predecessor):
+            with self.assertRaises(O.Unsupported):
+                fn(None, {}, {}, budget(), 0, {})
+
+
+class Canonical(unittest.TestCase):
+    def test_javascript_number_and_key_order(self):
+        cases = {1.0: "1", -0.0: "0", 1e-07: "1e-7", 1e-06: "0.000001", 1e16: "10000000000000000", 1e21: "1e+21",
+                 1.5e-07: "1.5e-7", 0.1 + 0.2: "0.30000000000000004", 123.456: "123.456", 0.05: "0.05"}
+        for v, js in cases.items():
+            self.assertEqual(O.js_number(v), js, v)
+        self.assertEqual(O.canonical({"b": 1, "a": [1.0, None, True]}), '{"a":[1,null,true],"b":1}')
 
 
 # ------------------------------------------------------------------------------------------ ledger, pre-run, C4
 class LedgerTests(unittest.TestCase):
-    def test_records_checksummed_torn_and_corrupt_refused(self):
+    def test_exclusive_reservation_checksums_torn_and_corrupt(self):
         d = tempfile.mkdtemp()
         L = H.Ledger(d, u(5))
-        L.require_empty()
-        L.append(op="x", phase="intent")
+        L.reserve(op="x", phase="intent")
         self.assertEqual(len(L.records()), 1)
-        with self.assertRaises(O.Refuse):
-            L.require_empty()
+        with self.assertRaises(O.Refuse):  # a second run cannot reserve the same preparation
+            H.Ledger(d, u(5)).reserve(op="y", phase="intent")
+        L.close()
         raw = L.path.read_bytes()
         L.path.write_bytes(raw[:-1])  # torn
         with self.assertRaises(O.Fault):
-            L.records()
+            H.Ledger(d, u(5)).reserve(op="y", phase="intent")
         L.path.write_bytes(raw.replace(b'"op":"x"', b'"op":"y"'))  # checksum mismatch
         with self.assertRaises(O.Fault):
             L.records()
+        if os.name != "nt":
+            self.assertEqual(os.stat(d).st_mode & 0o077, 0)
 
 
 def prerun_facts():
     h = CFG["holder"]
     return {"receiptSha256": h["receiptSha256"], "stateDirMode": "0o700",
-            "receipt": {"operationId": h["preparationId"], "newState": h["stateDir"], "oldState": h["oldStateDir"]},
+            "receipt": {"operationId": h["preparationId"], "newState": h["stateDir"], "oldState": h["oldStateDir"],
+                        "state": "prepared-stopped-new-state",
+                        "preservedJournal": {"incarnation": h["oldHolderId"], "journalId": h["oldJournalId"],
+                                             "sealId": h["sealId"], "sha256": h["oldJournalSha256"], "records": 40,
+                                             "unknownCommands": 0}},
+            "oldJournalSha256": h["oldJournalSha256"],
+            "oldJournalLast": {"kind": "holder-maintenance-seal", "sealId": h["sealId"], "sealed": True,
+                               "expectedIncarnation": h["oldHolderId"]},
+            "artifacts": dict(h["artifacts"]),
             "units": {"relay-holder.service": {"active": "inactive", "argv": h["holderArgv"], "dropIns": ""},
                       "relay-holder-control-plane.service": {"active": "inactive", "argv": h["reconciliationArgv"],
                                                              "dropIns": ""}},
-            "journal": {"admission": {"paused": True, "operationId": h["pauseOperationId"], "revision": 1}}}
+            "journal": {"lastStartedIncarnation": h["newJournalId"],
+                        "admission": {"paused": True, "operationId": h["pauseOperationId"], "revision": 1}}}
 
 
-def started(paused=True):
-    return {"started": True, "holder": {
-        "hello": {"incarnation": u(7), "journalId": u(7), "sessions": 0},
-        "status": {"incarnation": u(7), "admissionPaused": paused, "admissionRevision": 1, "activeSessions": 0,
+def started(paused=True, contained=False):
+    jid = CFG["holder"]["newJournalId"]
+    return {"started": True, "paused": paused, "contained": contained, "unitAfterStop": "inactive", "holder": {
+        "hello": {"incarnation": jid, "journalId": jid, "sessions": 0},
+        "status": {"incarnation": jid, "admissionPaused": paused, "admissionRevision": 1, "activeSessions": 0,
                    "pendingCommands": 0, "nativeStateReady": True, "sealed": False},
         "units": {"relay-holder.service": {"mainPid": 42}}}}
 
 
+IDENT = {"captureLevel": "baseline", "captureSha256": "c" * 64, "storeSha256": "s" * 64, "podNow": 1}
+
+
 class PreRun(unittest.TestCase):
     def host(self, answers):
-        h = FakeHost(FakeRemote(answers))
+        h = FakeHost(FakeRemote({"identity": IDENT, **answers}))
         h.ledger = H.Ledger(tempfile.mkdtemp(), CFG["holder"]["preparationId"])
         return h
 
-    def test_starts_paused_and_records(self):
+    def test_starts_paused_pins_the_router_and_records(self):
         h = self.host({"prerun": prerun_facts(), "mutate-start-holder": started()})
-        self.assertEqual(H.prerun(h, budget())["incarnation"], u(7))
+        self.assertEqual(H.prerun(h, budget())["journal"], CFG["holder"]["newJournalId"])
         self.assertEqual([r["phase"] for r in h.ledger.records()], ["intent", "receipt"])
+        self.assertEqual(h.state.router_pod["uid"], POD["uid"])
 
-    def test_an_unpaused_start_is_contained(self):
-        h = self.host({"prerun": prerun_facts(), "mutate-start-holder": started(paused=False),
-                       "mutate-stop-holder (containment)": {"stopped": True}})
+    def test_an_unpaused_start_is_contained_on_the_host(self):
+        h = self.host({"prerun": prerun_facts(), "mutate-start-holder": started(paused=False, contained=True)})
+        with self.assertRaises(O.Fault):
+            H.prerun(h, budget())
+        self.assertEqual(h.ledger.records()[-1]["outcome"], "contained-unpaused")
+
+    def test_a_lost_start_response_is_classified_and_contained(self):
+        h = self.host({"prerun": prerun_facts(), "mutate-start-holder": O.Deadline("ssh timed out"),
+                       "classify-holder": holder_rec(paused=False), "mutate-stop-holder (containment)":
+                       {"stopped": True}})
         with self.assertRaises(O.Fault):
             H.prerun(h, budget())
         self.assertIn("mutate-stop-holder (containment)", h.remote.calls)
         self.assertEqual(h.ledger.records()[-1]["outcome"], "contained-unpaused")
 
-    def test_drifted_units_or_journal_refuse_before_any_write(self):
-        f = prerun_facts()
-        f["journal"]["admission"]["paused"] = False
-        h = self.host({"prerun": f})
-        with self.assertRaises(O.Failed):
+    def test_preservation_drift_refuses_before_any_write(self):
+        for mutate in (lambda f: f["journal"]["admission"].update(paused=False),
+                       lambda f: f.update(oldJournalSha256="0" * 64),
+                       lambda f: f["oldJournalLast"].update(sealed=False),
+                       lambda f: f["receipt"]["preservedJournal"].update(unknownCommands=1),
+                       lambda f: f["artifacts"].update({"service.json": "0" * 64})):
+            f = prerun_facts()
+            mutate(f)
+            h = self.host({"prerun": f})
+            with self.assertRaises(O.Failed):
+                H.prerun(h, budget())
+            self.assertNotIn("mutate-start-holder", h.remote.calls)
+            self.assertFalse(h.ledger.path.exists())
+
+    def test_a_lost_lease_refuses_before_any_write(self):
+        h = self.host({"prerun": prerun_facts()})
+        h.lease_ok = lambda: False
+        with self.assertRaises(O.Fault):
             H.prerun(h, budget())
-        self.assertNotIn("mutate-start-holder", h.remote.calls)
-        self.assertEqual(h.ledger.records(), [])
+        self.assertFalse(h.ledger.path.exists())
 
 
 class Handoff(unittest.TestCase):
-    def test_outside_the_window_no_mutation(self):
-        h = FakeHost(FakeRemote({}))
+    def host(self, answers, window=None):
+        h = FakeHost(FakeRemote(answers))
         h.ledger = H.Ledger(tempfile.mkdtemp(), CFG["holder"]["preparationId"])
-        h.lease_ok = lambda: True
-        h.state.window = (0, 1)  # long past
-        h.state.holder = {"incarnation": u(7), "journal": u(7), "mainPid": 42, "revision": 1}
-        rec = {"hello": {"incarnation": u(7), "journalId": u(7), "nativeRecovery": 2, "nativeStateReady": True,
-                         "sessions": 0, "profileDigests": []},
-               "status": {"admissionPaused": True, "admissionRevision": 1, "activeSessions": 0, "pendingCommands": 0,
-                          "nativeStateReady": True, "sealed": False},
-               "binarySha256": CFG["holder"]["qualified"]["binarySha256"], "profilesSha256": CFG["holder"]["profilesSha256"],
-               "units": {"relay-holder.service": {"mainPid": 42}, "relay-holder-control-plane.service": {"active": "inactive"}},
-               "observedMs": 1}
-        h.remote = FakeRemote({"holder": rec})
-        h.authorize_mutation = lambda b: H.ObserverHost.authorize_mutation(h, b)
-        ctx = {"qualifiedHolder": CFG["holder"]["qualified"], "oldHolderId": CFG["holder"]["oldHolderId"],
-               "oldJournalId": CFG["holder"]["oldJournalId"], "startedAt": 1}
+        h.ledger.reserve(op="pre-run-start", phase="intent")
+        now = int(time.time() * 1000)
+        h.state.window = window or (now - 1000, now + 600_000)
+        jid = CFG["holder"]["newJournalId"]
+        h.state.holder = {"incarnation": u(7), "journal": jid, "mainPid": 42, "revision": 1}
+        h.state.preservation = {"sealId": CFG["holder"]["sealId"]}
+        return h
+
+    def ctx(self):
+        return {"qualifiedHolder": CFG["holder"]["qualified"], "oldHolderId": CFG["holder"]["oldHolderId"],
+                "oldJournalId": CFG["holder"]["oldJournalId"], "startedAt": 1}
+
+    def test_outside_the_window_no_mutation(self):
+        h = self.host({"holder": holder_rec(paused=True), "classify-handoff": holder_rec(paused=True)}, window=(0, 1))
         with self.assertRaises(O.Failed):
-            H.c_preserving_holder(h, {}, ctx, budget(), 0, {})
-        self.assertEqual(h.ledger.records(), [])
+            H.c_preserving_holder(h, {}, self.ctx(), budget(), 0, {})
         self.assertNotIn("mutate-resume", h.remote.calls)
+        self.assertEqual(h.ledger.records()[-1]["outcome"], "failed")
+
+    def test_success_records_every_stage(self):
+        rec = holder_rec(paused=True)
+        h = self.host({"holder": [rec, holder_rec(paused=False)],
+                       "mutate-resume": {"resumed": True, "status": {"admissionPaused": False},
+                                         "journal": {"admission": {"paused": False, "operationId": None}}},
+                       "sql:holder-health.sql": []})
+        res = h.remote.answers["mutate-resume"]
+        orig = h.remote.dw
+
+        def dw(args, budget, obs, what, cap=60.0):
+            if what == "mutate-resume":
+                res["journal"]["admission"]["operationId"] = args[3]  # the journal names THIS operation
+            return orig(args, budget, obs, what, cap)
+        h.remote.dw = dw
+        ru = {"active": "active", "sub": "running", "enabled": "enabled", "argv": CFG["holder"]["reconciliationArgv"],
+              "restarts": 0}
+        h.remote.answers["mutate-enable-start"] = {"enabled": True, "started": True, "units": {
+            "relay-holder-control-plane.service": ru, "relay-holder.service": {"enabled": "enabled"}}}
+        h.remote.answers["sql:holder-health.sql"] = [{"journal_id": CFG["holder"]["newJournalId"],
+                                                      "admission_paused": False, "native_state_ready": True,
+                                                      "observed_ms": int(time.time() * 1000) + 60_000}]
+        v = H.c_preserving_holder(h, {}, self.ctx(), budget(), 0, {})
+        self.assertTrue(v["preservedOldStateConfirmed"])
+        ops = [(r["op"], r["phase"], r.get("outcome")) for r in h.ledger.records()]
+        self.assertEqual(ops[1:], [("resume", "intent", None), ("resume", "receipt", "ok"),
+                                   ("enable-start", "intent", None), ("enable-start", "receipt", "ok"),
+                                   ("handoff", "receipt", "ok")])
+
+    def test_an_interrupted_resume_gets_a_terminal_classified_receipt(self):
+        h = self.host({"holder": holder_rec(paused=True), "mutate-resume": O.Deadline("ssh timed out"),
+                       "classify-handoff": holder_rec(paused=False)})
+        with self.assertRaises(O.Deadline):
+            H.c_preserving_holder(h, {}, self.ctx(), budget(), 0, {})
+        last = h.ledger.records()[-1]
+        self.assertEqual((last["op"], last["outcome"], last["interruptedStage"]), ("handoff", "failed", "resume"))
+        self.assertEqual(last["state"]["admissionPaused"], False)
+
+
+# ------------------------------------------------------------------------------------------ host faults
+class HostFaults(unittest.TestCase):
+    def test_short_evidence_writes_are_completed_and_failures_are_evidence_faults(self):
+        class Short:
+            def __init__(self):
+                self.data = b""
+
+            def write(self, view):
+                chunk = bytes(view[:3])
+                self.data += chunk
+                return len(chunk)
+
+            tmp = tempfile.TemporaryFile()
+
+            def fileno(self):
+                return self.tmp.fileno()  # a real, fsync-able descriptor
+
+        ev = O.Evidence(os.devnull)
+        ev.f = Short()
+        ev.write(a=1)
+        self.assertTrue(ev.f.data.endswith(b"\n"))
+
+        class Broken(Short):
+            def write(self, view):
+                return 0
+        ev.f = Broken()
+        with self.assertRaises(O.EvidenceFailure):
+            ev.write(a=1)
 
 
 # ------------------------------------------------------------------------------------------ broker integration
@@ -567,6 +842,18 @@ class BrokerIntegration(unittest.TestCase):
             self.ros.verify_observer(self.manifest, str(self.repo), str(self.pred))
         with self.assertRaises(self.ros.Refused):
             self.ros.verify_observer(self.manifest, str(self.repo), None)
+
+    def test_the_observer_is_imported_from_the_verified_copy_only(self):
+        staged = Path(tempfile.mkdtemp()) / "scripts"
+        staged.mkdir()
+        for m in ("relay_phase_a_observer.py", "relay_phase_a_collectors.py", "relay_phase_a_host.py"):
+            shutil.copy(SCRIPTS / m, staged / m)
+        O2, C2, H2 = self.ros._import_observer(str(staged))
+        for mod in (O2, C2, H2):
+            self.assertTrue(str(Path(mod.__file__).resolve()).startswith(str(staged.resolve())))
+        for m in ("relay_phase_a_observer", "relay_phase_a_collectors", "relay_phase_a_host"):
+            sys.modules.pop(m, None)  # the rest of the suite uses the working-tree modules imported at the top
+        sys.modules.update({"relay_phase_a_observer": O, "relay_phase_a_collectors": C, "relay_phase_a_host": H})
 
     def test_precedence_puts_an_observer_fault_above_the_runner_failure(self):
         self.assertEqual(self.ros.PRECEDENCE, [3, 4, 5, 6, 7, 9, 8, 2])
