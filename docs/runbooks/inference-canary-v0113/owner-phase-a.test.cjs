@@ -685,6 +685,11 @@ async function renewalReviewHarness(options = {}) {
   h.runner.env.ask = async (title, text, validate, timeout) => {
     if (title === "Review already-renewed phase-A credentials") {
       assert(timeout <= 120000);
+      assert(
+        !text.includes(a.RUN_SOURCE),
+        "Attestation must not supply its expected source",
+      );
+      assert(text.includes("OBSERVED_SOURCE_SHA"));
       const value = {
         confirmMetadataReview: true,
         reportDownloaded: true,
@@ -2571,7 +2576,30 @@ function phaseServer({
   const calls = [],
     checkpoints = [],
     attempts = [],
+    consumerReads = [],
     effects = new Map();
+  function consumerRows() {
+    return [...sessions.values()].map((s) => {
+      const pp = profiles[s.provider];
+      return {
+        id: s.id,
+        binding_id: pp.binding,
+        credential_id: pp.credential,
+        generation: pp.generation,
+        kind: "holder-session",
+        host_id: HOST,
+        execution_identity: "c4",
+        state: s.state === "closed" ? "released" : "active",
+        failure_code: null,
+        created_at: date(clock),
+        last_used_at: date(clock),
+        lease_expires_at: date(clock + 60000),
+        ended_at: s.state === "closed" ? date(clock) : null,
+        retire_after: null,
+        unobserved: false,
+      };
+    });
+  }
   const id = () =>
     `00000000-0000-4000-8000-${String(++serial).padStart(12, "0")}`;
   const definitions = JSON.parse(
@@ -2762,9 +2790,16 @@ function phaseServer({
         body: body && clone(body),
       });
       let result;
-      if (pathName === "/api/router-credentials" && renewal)
-        result = renewal.inventory;
-      else if (pathName === "/api/agent-profiles")
+      if (pathName === "/api/router-credentials" && renewal) {
+        result = {
+          ...renewal.inventory,
+          consumers: [...renewal.inventory.consumers, ...consumerRows()],
+        };
+        consumerReads.push({
+          path: pathName,
+          consumers: clone(result.consumers),
+        });
+      } else if (pathName === "/api/agent-profiles")
         result = definitions.map((d) => ({
           id: d.holder.id,
           revision: approvedRevision,
@@ -2852,6 +2887,31 @@ function phaseServer({
               },
               binding: { currentCredentialId: pp.credential },
             };
+        if (renewal) {
+          result = {
+            ...result,
+            consumers: [
+              ...result.consumers,
+              ...consumerRows()
+                .filter((c) => c.credential_id === pp.credential)
+                .map((c) => ({
+                  id: c.id,
+                  kind: c.kind,
+                  generation: c.generation,
+                  state: c.state,
+                  failureCode: c.failure_code,
+                  createdAt: c.created_at,
+                  lastUsedAt: c.last_used_at,
+                  leaseExpiresAt: c.lease_expires_at,
+                  endedAt: c.ended_at,
+                })),
+            ],
+          };
+          consumerReads.push({
+            path: pathName,
+            consumers: clone(result.consumers),
+          });
+        }
       } else if (pathName.startsWith("/api/agent-permissions/")) {
         const req = permissions.get(pathName.split("/")[3]);
         assert(req);
@@ -3134,6 +3194,7 @@ function phaseServer({
     checkpoints,
     effects,
     attempts,
+    consumerReads,
   };
 }
 
@@ -3161,6 +3222,17 @@ test("renewed generation two runs all three phases with fresh principals and his
   );
   assert.equal(f.runner.state.runs[0].carriedAttempts, 2);
   assert.equal(f.launches.length, 5);
+  assert.equal(f.launches.filter((l) => l.resume_from).length, 2);
+  assert(
+    f.consumerReads.some((r) => r.consumers.some((c) => c.state === "active")),
+  );
+  const refreshes = f.consumerReads.filter(
+    (r) => r.path === "/api/router-credentials",
+  );
+  assert(refreshes.some((r) => r.consumers.length > 0));
+  assert(
+    refreshes.every((r) => r.consumers.every((c) => c.state === "released")),
+  );
   assert.equal(f.effects.get(a.PROFILES.codex.run), 1);
   assert.equal(f.effects.get(a.PROFILES.qwen.run), 1);
   for (const run of f.runner.state.runs) {
@@ -3201,6 +3273,47 @@ test("renewed delivery refuses a stale consumer generation before a prompt", asy
     /Credential\/principal changed/,
   );
   assert.equal(f.calls.filter((c) => c.body?.kind === "prompt").length, 0);
+});
+
+test("renewed refresh refuses owned-open, unrelated and wrong-generation active consumers", async () => {
+  for (const variant of [
+    "owned-open",
+    "unrelated",
+    "wrong-generation",
+    "detail-only",
+  ]) {
+    const renewal = renewedFixture("ready");
+    const f = phaseServer({ renewal });
+    await f.runner.phase("codex");
+    const old = [...f.sessions.values()][0];
+    assert.equal(old.state, "closed");
+    assert(f.launches.some((l) => l.resume_from === old.id));
+    const pp = f.runner.profiles.codex;
+    const consumer = {
+      id: OTHER,
+      binding_id: pp.binding,
+      credential_id: pp.credential,
+      generation: variant === "wrong-generation" ? 1 : pp.generation,
+      kind: "holder-session",
+      state: "active",
+    };
+    if (variant === "owned-open") old.state = "open";
+    else if (variant === "detail-only")
+      renewal.details.codex.consumers.push(consumer);
+    else renewal.inventory.consumers.push(consumer);
+    const before = f.calls.length;
+    await assert.rejects(
+      f.runner.refreshRenewedCredentials(),
+      /still active|detail changed or is incomplete/,
+      variant,
+    );
+    assert(f.calls.slice(before).every((c) => c.method === "GET"));
+    assert.equal(
+      f.launches.length,
+      2,
+      "No extra recovery or launch on refusal",
+    );
+  }
 });
 
 test("full lifecycle phase crosses queued hub contracts through recovery without hidden mutations", async () => {
