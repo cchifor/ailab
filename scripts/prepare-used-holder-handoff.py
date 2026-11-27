@@ -27,17 +27,21 @@ FILES = {'profiles': ('.config/relay-holder/profiles.json', 0o600),
          **{name: ('.config/systemd/user/' + name, 0o644) for name in UNITS}}
 
 
+class Refusal(ValueError):
+    """A fixed diagnostic label, never input or filesystem contents."""
+
+
 def require(condition, message):
     if not condition:
-        raise ValueError(message)
+        raise Refusal(message)
 
 
 def directory(path, uid, private=False):
     s = path.lstat()
     require(stat.S_ISDIR(s.st_mode) and path.resolve() == path and s.st_uid == uid
-            and not s.st_mode & 0o022, 'Unsafe directory: ' + str(path))
+            and not s.st_mode & 0o022, 'Unsafe directory')
     if private:
-        require(stat.S_IMODE(s.st_mode) == 0o700, 'Directory must be private: ' + str(path))
+        require(stat.S_IMODE(s.st_mode) == 0o700, 'Directory must be private')
     return s
 
 
@@ -49,7 +53,7 @@ def unit_status(name):
     row = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
     require(result.returncode == 0 or (result.returncode in (1, 4)
             and row.get('LoadState') == 'not-found' and row.get('Id') == name),
-            'Cannot inspect user service: ' + name)
+            'Cannot inspect user service')
     return row
 
 
@@ -63,15 +67,15 @@ def stopped(home, status, moved_units=()):
                     'LoadState': 'loaded', 'SubState': 'dead'}
         if name in moved_units:
             require(not os.path.lexists(fragment) and fragment.parent.resolve() == fragment.parent,
-                    'Moved unit destination reappeared or changed: ' + name)
+                    'Moved unit destination reappeared or changed')
             require(row.get('UnitFileState') in ('disabled', '', 'bad')
                     and row.get('FragmentPath') in ('', str(fragment))
                     and row.get('LoadState') in ('loaded', 'not-found')
                     and row.get('SubState') in ('dead', 'not-found'),
-                    'Unexpected moved-unit metadata: ' + name)
+                    'Unexpected moved-unit metadata')
             for field in ('UnitFileState', 'FragmentPath', 'LoadState', 'SubState'):
                 expected.pop(field)
-        require(all(row.get(k) == v for k, v in expected.items()), 'Service is not cleanly stopped: ' + name)
+        require(all(row.get(k) == v for k, v in expected.items()), 'Service is not cleanly stopped')
 
 
 def directory_identity(path, uid, private=False):
@@ -229,7 +233,7 @@ def journal_proof(data, expected, preparation_id=None):
 
 
 def private_open(path, uid):
-    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         meta = os.fstat(fd)
         require(stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1 and meta.st_uid == uid
@@ -596,11 +600,16 @@ def main():
     print(json.dumps(result))
 
 
+def refusal_report(error):
+    return {'state': 'refused', 'complete': False,
+            'reason': str(error) if isinstance(error, Refusal) else type(error).__name__,
+            'next': 'Keep services stopped; inspect private inputs and retained receipts'}
+
+
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
+    except Exception as error:
         # Journal, native history and credentials must never reach a traceback.
-        print(json.dumps({'state': 'refused', 'complete': False,
-                          'next': 'Keep services stopped; inspect private inputs and retained receipts'}))
+        print(json.dumps(refusal_report(error)))
         raise SystemExit(1)

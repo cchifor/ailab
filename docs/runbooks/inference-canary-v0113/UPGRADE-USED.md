@@ -124,6 +124,8 @@ path and SHA256 from the sanitized result.
 
 Any failure leaves both services stopped and all successfully moved files and
 receipts in place. There is no automatic retry, rollback, deletion or overwrite.
+Refusals report fixed diagnostic labels; unexpected errors report only their
+exception type, without paths, payloads or tracebacks.
 Inspect the partial operation and source/backup locations before proposing any
 recovery. A missing `complete.json` cannot authorize the next step.
 
@@ -150,10 +152,11 @@ the holder still loads the original profile file. Existing differing units fail
 instead of being replaced. Recompute both unit hashes and service configuration
 from the reviewed release and inspect the effective units after daemon-reload.
 
-This is stopped staging only. It can be repeated while the new state remains
-empty and the retained snapshots still match. Once the holder has started, or
-profile/workspace contents have legitimately changed, this gate refuses a role
-rerun before installation writes. It is not general active-service convergence.
+This is one-shot stopped staging. A full role pass followed by a second pass has
+not been qualified; any rerun requires a fresh review of the retained receipts
+and actual configuration state. Once the holder has started, or profile/workspace
+contents have legitimately changed, this gate refuses a role rerun before
+installation writes. It is not general active-service convergence.
 Do not change the profile base back, discard the receipt or clear the new state
 to bypass that refusal. Future maintenance needs its own reviewed transition.
 

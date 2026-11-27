@@ -90,8 +90,20 @@ print('Id='+name+'\\nActiveState=inactive\\nSubState=dead\\nLoadState=loaded\\nM
         result = self.run_role({**self.values, 'relay_holder_handoff_receipt_sha256': 'f' * 64})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('refused', result.stdout)
+        self.assertIn('Receipt SHA mismatch', result.stdout)
         self.assertNotIn('Traceback', result.stdout)
         self.case.unchanged()
+
+    def test_05_shell_characters_are_passed_as_data_and_refused(self):
+        marker = self.root / 'must-not-run'
+        for field in ('relay_holder_state', 'relay_holder_profile_state', 'relay_holder_profiles_sha256'):
+            with self.subTest(field=field):
+                values = {**self.values, field: self.values[field] + '; touch ' + str(marker) + '; #'}
+                result = self.run_role(values)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Handoff scope mismatch', result.stdout)
+                self.assertFalse(marker.exists())
+                self.case.unchanged()
 
 
 if __name__ == '__main__':

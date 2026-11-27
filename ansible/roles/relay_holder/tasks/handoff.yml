@@ -12,12 +12,12 @@
 - name: Authenticate stopped handoff and preserved state without modifying it
   ansible.builtin.script:
     cmd: >-
-      {{ role_path }}/../../../scripts/prepare-used-holder-handoff.py
-      --verify {{ relay_holder_handoff_receipt }}
-      --receipt-sha256 {{ relay_holder_handoff_receipt_sha256 }}
-      --state {{ relay_holder_state }}
-      --profile-state {{ relay_holder_profile_state }}
-      --profiles-sha256 {{ relay_holder_profiles_sha256 }}
+      {{ (role_path + '/../../../scripts/prepare-used-holder-handoff.py') | quote }}
+      --verify {{ relay_holder_handoff_receipt | quote }}
+      --receipt-sha256 {{ relay_holder_handoff_receipt_sha256 | quote }}
+      --state {{ relay_holder_state | quote }}
+      --profile-state {{ relay_holder_profile_state | quote }}
+      --profiles-sha256 {{ relay_holder_profiles_sha256 | quote }}
     executable: python3
   become_user: "{{ relay_holder_user }}"
   environment:

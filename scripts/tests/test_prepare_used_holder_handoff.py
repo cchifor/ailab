@@ -146,6 +146,36 @@ class UsedHandoff(unittest.TestCase):
                     self.prepare()
                 self.assertFalse(self.next.exists())
 
+    def test_retained_descriptors_cannot_write_but_can_lock(self):
+        for name in ('journal.jsonl', 'holder.lock', 'connector-control.lock'):
+            path = self.state / name
+            before = path.read_bytes()
+            fd = h.private_open(path, self.uid)
+            try:
+                self.assertEqual(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE, os.O_RDONLY)
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(OSError):
+                    os.write(fd, b'cannot-write')
+                self.assertEqual(path.read_bytes(), before)
+            finally:
+                os.close(fd)
+
+    def test_refusal_labels_do_not_disclose_exception_payload_or_paths(self):
+        with self.assertRaises(h.Refusal) as caught:
+            h.require(False, 'Journal SHA mismatch')
+        self.assertEqual(h.refusal_report(caught.exception)['reason'], 'Journal SHA mismatch')
+        with self.assertRaises(h.Refusal) as caught:
+            h.directory(self.marker, self.uid)
+        report = h.refusal_report(caught.exception)
+        self.assertEqual(report['reason'], 'Unsafe directory')
+        self.assertNotIn(str(self.marker), json.dumps(report))
+        for error in (OSError('secret-payload at /private/path'),
+                      ValueError('private JSON'), RuntimeError('private provider data')):
+            report = h.refusal_report(error)
+            self.assertEqual(report['reason'], type(error).__name__)
+            self.assertNotIn(str(error), json.dumps(report))
+            self.assertFalse(report['complete'])
+
     def test_journal_missing_pause_seal_or_drain_refused(self):
         original = copy.deepcopy(self.events)
         variants = [original[:-1], original[:6] + original[7:],
