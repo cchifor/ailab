@@ -1,0 +1,35 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# specpulse (cchifor/specpulse): a private web app at specpulse.chifor.me with its own login (owner decision
+# 2026-11-26: GitOps on ailab, private, native auth, a new Router key on claude-sub-opus, start empty, deploy from main).
+# manifests.yaml is a VERBATIM copy of the specpulse repo's deploy/manifests/manifests.yaml (the chart rendered; it holds
+# no Secret and names no infrastructure). Every cluster-specific value is set HERE, by the image override and the
+# patches below, so an update is: copy the file again, pin the new digest. docs/runbooks/specpulse.md.
+resources:
+  - manifests.yaml
+  - specpulse-secrets.sops.yaml # SOPS: Fernet key, session secret, Router key (claude-sub-opus), optional GitHub token
+images:
+  # The publish workflow (cchifor/specpulse .gitea/workflows/publish.yml, workflow_dispatch from main) pushes
+  # specpulse/specpulse:sha-<40 hex>; the digest of that tag is pinned here.
+  - name: REGISTRY_PLACEHOLDER/specpulse/specpulse
+    newName: registry.chifor.me/specpulse/specpulse
+    digest: sha256:731eec81b7676f8b4f21df4b90595dea7e8567d486d7d9706ddbb5d9d00d0c5a # publish run 152525, main 289d6243 (tag sha-289d6243f7fae38520c79013a6fa9160f878b28e)
+patches:
+  # Block storage for the SQLite database: Trident iSCSI, ReadWriteOnce, Retain, honours fsGroup.
+  - target: { kind: PersistentVolumeClaim, name: specpulse-data }
+    patch: |
+      - op: replace
+        path: /spec/storageClassName
+        value: qnap-iscsi
+  # The Router seat: the public origin (pods reach it over the NetworkPolicy's 443 egress; it resolves to Cloudflare
+  # public addresses, outside the policy's private-range exclusions) and the one route the app key may use.
+  - target: { kind: ConfigMap, name: specpulse-seats }
+    patch: |
+      - op: replace
+        path: /data/seats.toml
+        value: |
+          [router]
+          url = "https://router.chifor.me"
+          route = "claude-sub-opus"
+          key_file = "/run/specpulse/keys/router-key"
+          billing = "included"
