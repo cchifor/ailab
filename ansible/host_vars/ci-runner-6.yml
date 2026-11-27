@@ -3,3 +3,12 @@
 # Runners on one node share its NVMe with etcd, so their windows must not overlap.
 gitea_runner_fstrim_window_start: "01:50"
 gitea_runner_fstrim_window_end: "03:35"
+
+# workbricks `push` (main) jobs run only on ci-runner-3 and ci-runner-6 (their ci.yml: `runs-on` names
+# workbricks-push for the push event). workbricks keeps one cache per event (~34 GiB of Cargo targets
+# each), so a runner that serves both events holds ~80 GiB against workbricks' 45 GiB total cap, and the
+# cap evicts a target pair that the next job rebuilds cold: 1,015 GiB evicted fleet-wide over
+# 2026-11-24..26, each rebuilt. With push on two runners, every other runner holds the pull_request cache
+# alone. These two were chosen because they held the only complete warm push pair on 2026-11-27 and sit on
+# ai-node3, the least-worn NVMe (60%). See docs/runbooks/ci-runners.md, "workbricks push runners".
+gitea_runner_extra_labels: [workbricks-push]
