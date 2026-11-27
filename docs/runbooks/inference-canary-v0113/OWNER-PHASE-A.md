@@ -1,21 +1,102 @@
 # Owner-run phase A
 
-This packet retains published **v0.13.1** holder/Pi source
-`2604c41b69c5d9c50a3324545a51f0bfa38435a0` and first-registration profile revision
-1. The profile file SHA256 is
+**Published and offline-qualified successor (2026-11-27); operator handoff pending.**
+Holder v0.13.4, source `64dc50f47a4867a6d9a7afc2e7d5ae24068c59af`,
+was published in [run152719](https://git.chifor.me/cchifor/relay/actions/runs/152719).
+Its Linux amd64 binary SHA256 is
+`d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926`.
+The [release receipt](https://git.chifor.me/cchifor/relay/releases/download/v0.13.4/deployment-images-152719.json)
+and [holder-used-handoff-inputs.json](holder-used-handoff-inputs.json) bind the
+installer image and archive. Use [UPGRADE-USED.md](UPGRADE-USED.md) with the
+separate actual preparation-UUID/receipt overlay; historical `holder-inputs.json`
+still selects v0.13.1.
+
+Actual published-holder controls passed one case (nine filtered): four exact
+controls, 13 malformed refusals, inbox-ID preservation and zero MCP/permission
+calls. Published-holder preserving handoff passed one case with two synthetic
+requests, fresh delivery/readiness, old-resume refusal and old-state preservation.
+That test uses the new published binary on both sides, not an old2604-to-new
+runtime migration. Systemd and connector-lock observations are fixture seams;
+reconciliation proves synthetic dispatch, not real Router settlement. Operator
+staging, fresh identity readbacks and live acceptance remain unproven by these tests.
+
+Qualification records in the Relay workspace are
+`.data/v0134-published-controls-20261127-r2/evidence/qualification.json`
+(SHA256 `a41e8bbd4a022b72095a0a778cf8b56de4b3adac0e86ec9fdc9fa439bb52b022`)
+and `.data/v0134-published-handoff-20261127T092434Z/evidence/qualification.json`
+(SHA256 `1d3eb98c160440d702eb6c9df82a1de5c575fc5520a6e64ef0a2fcefe79f477e`).
+The controls run's earlier Vitest startup failure is retained separately; no
+case ran in that attempt. The passing attempt changed only fixture HOME and
+the recipe mount, with the same authenticated artifacts and frozen test.
+
+The actual owner-driver module passed 99 offline tests plus its Python wrapper.
+The public stopped-run replacement exercises three phases and five launches,
+checks delivery before prompting, retains the predecessor and its accounting,
+and refuses stale or mismatched handoff evidence. These simulated API/operator
+responses qualify the driver contract, not owner authentication or live providers.
+The local record is `.data/pi-owner-public-replacement-qualification-20261127-r1.json`
+in the implementation workstation's Relay checkout.
+
+The reviewed driver now pins this holder and lifts its control-qualification
+hold. Only the known stopped-run replacement is eligible; initial **Start phase A**
+remains disabled. Final driver checks, normal review/merge and all fresh operator
+and owner checkpoints below still apply. Do not edit qualification inputs locally.
+
+**Historical control hold, resolved by this successor:** the published
+holder at source `2604c41b69c5d9c50a3324545a51f0bfa38435a0` appends an inbox
+reminder to local slash commands as a second ACP text block; the pinned Pi
+launcher rejects that shape. The renewal-metadata and
+actual-API projection qualification below remains evidence only for that
+boundary. It does not qualify the complete Phase A workflow. The separate
+`HOLDER_CONTROLS_QUALIFIED = false` gate previously refused the public start entry
+while `QUALIFIED_HOLDER = null`. Renewal/API qualification alone could not lift
+that hold; the published-holder evidence above addresses it.
+
+Use the qualified published holder and reviewed replacement inputs with a post-use
+handoff that preserves the old journal, native homes and seal intact. A fresh
+sibling state directory receives the new incarnation and journal; it does not
+reuse or empty the old root. The old [stopped-idle helper](UPGRADE-IDLE.md) requires a
+holder that has never run a command or session; this holder is ineligible.
+Do not rerun that helper or
+erase retained state to meet its conditions. Preserve the stopped report,
+operation IDs, marker identities and the **one prompt/two attempts** already
+charged.
+
+Everything below remains a procedure or historical evidence, not proof of an
+executed operator handoff. Deployment, credential-renewal and owner-window
+requirements still apply; offline qualification does not authorize a launch.
+
+This packet retains the published **v0.13.1 Pi runtime** at source
+`2604c41b69c5d9c50a3324545a51f0bfa38435a0` and approved profile revision 1.
+The retained Pi manifest SHA256 is
+`d0bf7f9d44a2ae992bb1fbd87f7f2043c7d582ad563078bd13d713ebcd211a0d`.
+The profile file SHA256 remains
 `928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`.
-Fresh published-holder actual-root readiness, compiled e843 schema checks
+Historical v0.13.1 holder actual-root readiness, compiled e843 schema checks
 (31 positive/5 negative) and normalization passed for these exact revision-1
 bytes. Nine offline compiled registration-boundary cases passed: each profile
 accepts revision 1 with empty history and refuses revision 3 with empty history
 or revision 1 over existing revision 3. These use strict fake database fixtures,
-not live API authority or real database transactions. The runtime artifacts
-are unchanged; the earlier five synthetic wire cases remain runtime evidence,
-not live subscription acceptance. Evidence is recorded in [README](README.md).
+not live API authority or real database transactions. The retained Pi artifacts
+are unchanged. The earlier five synthetic wire cases remain evidence for that
+runtime, not qualification of a corrected holder or live acceptance. Historical
+holder pins and evidence remain recorded in [README](README.md).
 
-`QUALIFIED_INPUTS = true` enables this qualified correction after normal packet
-review/merge and installation; it does not perform profile approval or authorize
-live work by itself. The previously installed revision-3 profile hash is rejected.
+This post-expiry successor targets renewal-capable hub source
+`74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613`, the reviewed release merge in
+[Relay PR717](https://git.chifor.me/cchifor/relay/pulls/717).
+Its metadata paths are qualified offline using this actual source pin;
+`QUALIFIED_INPUTS` does not
+establish publication, deployment, owner authority or a live acceptance result.
+The operator rollout/readback in [PR2042](https://git.chifor.me/cchifor/ailab/pulls/2042)
+confirms that deployed hub source. Before use, still require the operator's fresh
+deployment readback for that exact source. The bootstrap
+then verifies both renewed credential references through the normal API before
+any replacement launch. Do not edit the source pin or qualification flag locally.
+The earlier merged 7dff6049 driver was qualified only for the original credentials
+and their November 26 deadline; it cannot be reused after renewal. Qualification
+does not perform profile approval or authorize live work by itself. The previously
+installed revision-3 profile hash remains rejected.
 The empty-history requirement and the 14:26 absence readback belonged to the
 historical first-registration stage. Codex and Qwen were subsequently approved
 at revision 1. The current replacement must verify those existing exact enabled
@@ -26,15 +107,22 @@ stop the driver; approval remains a separate owner/API action outside it.
 Start still requires the operator's fresh installed-hash
 handoff and router rollout below. Do not run it against the old e843 holder,
 which drops Pi's tool-input description.
-The e843 hub/API and schema 93 stay in place; the holder/Pi update is separate.
+The historical report names the e843 hub. The successor requires the separately
+deployed renewal-capable hub named by `RUN_SOURCE`; schema 93, retained Pi and
+profile inputs remain unchanged. The corrected v0.13.4 holder is a separate
+artifact and does not change the hub source. The operator must verify the hub
+deployment before the credential
+metadata review. An API response is not an independent
+measurement of the deployed binary.
 An empty permission description is a stop, never an approval shortcut. Do not
 edit pins, revisions, qualification flags or run UUIDs locally.
 
 The owner can paste the entire reviewed [owner-phase-a.js](owner-phase-a.js) into
 the browser console at `https://relay.chifor.me`. It installs a panel without
-making requests. This successor enables only the reviewed stopped-run replacement
-described below; the initial **Start phase A** button stays disabled even if
-browser storage is empty. After its explicit review and checkpoints, the driver
+making requests. With the qualified holder pins, only the known
+stopped-run replacement described below is eligible; the initial
+**Start phase A** button stays disabled even if browser storage is empty.
+After its explicit review and checkpoints, the driver
 runs Codex lifecycle, Qwen lifecycle, then fresh Codex effort, in that order.
 This is an operator-assisted driver: it constructs and
 polls requests, renews the lease every 20 s and checks receipts. It does not pretend
@@ -62,45 +150,118 @@ new 4e4 baseline or a cross-source delta.
 The [stopped-idle upgrade](UPGRADE-IDLE.md) and revision-1 staging were completed
 before the original run. That helper requires a journal with no command or
 session ever; this holder has now run commands and is ineligible. Do not repeat
-the helper, restage profiles, restart the holder or erase its journal for the
-replacement. After normal packet review and merge, verify the current holder
-and existing exact enabled Codex/Qwen definitions. Router
+the helper, restage profiles, restart the old sealed state or erase its journal
+to make the replacement eligible. The separately qualified post-use handoff
+preserves that old state and seal while preparing a new state directory. After
+review of the corrected published holder and handoff inputs, verify the new
+holder and existing exact enabled Codex/Qwen definitions. Router
 [PR2029](https://git.chifor.me/cchifor/ailab/pulls/2029) must be deployed and read back at source
 `4e4bb34e2f968f9450aabe9cf228d3e70c8bab71` before any reviewed replacement Start;
 its source merge and published image alone do not prove deployment. The
 operator-controlled rollout comes first, after prior Phase A work has settled.
 It does not restart that run or assign the replacement window.
 The operator must provide the
-current deployment, holder and route handoff using the readback requirements in
-[activation](ACTIVATE-CODEX-QWEN.md), with the previous session closed and no work
-in flight. The original empty-holder startup preceded that first launch; it is
-not a request to run activation again. Credential rendering and installation for
+current deployment, route and new-holder handoff, with the previous session
+closed and no work in flight. The [original activation](ACTIVATE-CODEX-QWEN.md)
+readbacks describe the earlier empty-holder startup; they do not authorize
+restarting that old root. Use [UPGRADE-USED.md](UPGRADE-USED.md) and the new
+[holder-used-handoff-inputs.json](holder-used-handoff-inputs.json), with the
+actual operator preparation-UUID/receipt overlay. Credential rendering and
+installation for
 the replacement occur after its launch is offered and must complete before its
 first prompt. There is no probe launch. Missing or drifted profile definitions
 stop the driver; it does not approve or replace a profile.
 
-After replacement review, the patched-holder checkpoint separately records the
-current holder incarnation and journal ID. A stopped upgrade changes the incarnation while the
-journal can survive; never copy the historical incarnation into both fields.
-The operator must verify `nativeRecovery: 2`, `nativeStateReady: true`, the
-qualified v0.13.1 release and current resumed admission with the maintenance seal
-already released before Start. This is a readback, not a new maintenance cycle.
-The handoff must also include `profilesSha256` and `holderBinarySha256`, measured
-from the installed profile file and holder binary. The driver compares both to
-the exact values in [holder-inputs.json](holder-inputs.json) before any new launch;
-a release label alone is insufficient. Paste the operator's actual readback,
-not expected values copied from this guide. The saved report attributes these
-hashes to the operator; the browser does not measure host files.
+At **Fresh preserving-holder handoff**, `oldHolderId` and `oldJournalId` must
+match the stopped predecessor's saved launch receipt. Report the actual new
+`holderId` and `journalId`: each must differ from its respective old identity.
+The two new IDs may equal one another, as on a fresh root's first incarnation.
+Keeping the old journal intact on disk does not make it the new active journal.
 
-The current two grants expire **2026-11-26 21:27:37 UTC**. The driver never renews
-or reissues them. Its assigned run UUIDs are fixed, so an existing marker cannot
-be hidden by choosing a new run. Its source assertions are for the hub/API
-contract, not a claim that reading API metadata authenticates a remote binary.
-If either grant expires, rotates or is reissued, stop and prepare a new reviewed
-packet with the actual credential/key identities and authorized window before
-Start. Do not edit `EXPIRES` or credential IDs locally. The existing delivery
-checks also compare live credential, binding, consumer and router-key identities
-before the first prompt; a successful source qualification cannot override drift.
+Supply the actual `preparationId` UUID and its derived sibling `stateDirectory`,
+`/home/c4/.local/state/relay-holder-handoff-<preparationId>`. The
+`handoffReceipt.path` must be
+`/home/c4/.config/relay-holder/used-handoffs/<preparationId>/complete.json`;
+include its measured lowercase SHA256 as `handoffReceipt.sha256`. Do not invent
+a receipt, copy a path from a different preparation or reset the old root.
+Keep the old state and maintenance seal intact throughout this handoff.
+
+`qualifiedRelease`, `holderSource` and `holderBinarySha256` must match the
+corrected published holder's reviewed `QUALIFIED_HOLDER` inputs
+(`release`, `source`, `binarySha256`): v0.13.4 and the full source/binary hashes
+recorded above. Historical v0.13.1 holder pins are not a fallback.
+`profilesSha256` must still equal the unchanged revision-1 profile SHA256 above.
+Measure the installed files; a release label alone is insufficient.
+
+`observedUtc` must be no earlier than the start of this checkpoint and no more
+than five seconds ahead of the current browser clock.
+Require `nativeRecovery: 2`, `nativeStateReady: true`, `activeSessions: 0`,
+`pendingCommands: 0` and `admissionPaused: false` after normal resume of **new**
+admission. Supply explicit `preservedOldStateConfirmed: true` and
+`operatorVerified: true`. The old seal must not be released. This observation
+stays within the already assigned replacement window; it does not renew or
+extend that window or reset prompt/attempt accounting. Paste actual fresh
+operator evidence, not expected values from this guide. The saved projection
+records operator-reported hashes, receipt and hello; the browser does not
+measure host files or independently prove containment.
+
+The original two credentials expire **2026-11-26 21:27:37 UTC**. Their identities
+and deadline remain immutable historical inputs. The owner is unavailable until
+after that deadline, so this successor must use a separately authorized new
+generation behind each of the same two bindings. The driver never renews,
+reissues or extends credentials. It reads only nonsecret metadata after the
+owner explicitly begins review, checks the fixed binding/host/grant selection,
+and asks the owner to confirm the actual replacement identities. Its effective
+deadline is bounded by the earlier of the two new expiries. Re-reading metadata
+must still identify the same generations before a new launch.
+
+Expiry alone does not make the deployed e843 rotate API usable: normal expiry
+cleanup can leave an enabled binding failed with both credential pointers empty.
+The reviewed server correction is
+[Relay PR716](https://git.chifor.me/cchifor/relay/pulls/716). After its release is
+deployed, a fresh `canRenew === true` observation permits the owner to review the
+ordinary rotation operation; the server rechecks eligibility and authority.
+An installing credential must first complete normal expiry revocation and escrow
+cleanup. Retry resumes its existing operation and cannot extend its lifetime.
+Disabled, explicitly revoked, uncertain, worker-managed or otherwise ineligible
+bindings still refuse. Do not race expiry reconciliation or change state to make
+renewal possible. Publication, deployment and renewal are distinct steps.
+
+The driver targets the exact 74d1 API projections. The
+[inventory query](https://git.chifor.me/cchifor/relay/src/commit/74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613/server/router-credentials/service.ts#L335)
+returns snake_case database fields alongside the quoted computed field
+`canRenew`; [credential inspection](https://git.chifor.me/cchifor/relay/src/commit/74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613/server/router-credentials/service.ts#L395)
+and the [session Router view](https://git.chifor.me/cchifor/relay/src/commit/74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613/server/agent-sessions/routes.ts#L181)
+explicitly project camelCase fields. After renewal, an installing or ready binding
+must report `canRenew: false`, because eligibility is for a cleaned, expired,
+failed binding. A missing flag or an alternate spelling is not equivalent to
+false. The driver retains these exact field checks and refuses incomplete
+delivery or generation metadata.
+
+The [recorded contract fixture](owner-phase-a.hub-74d1.fixture.json) contains
+normal HTTP responses from the exact hub source with an isolated PostgreSQL
+database and synthetic credentials. Its provenance records source hashes and
+the generation procedure. The bridge, escrow and model catalog are fakes;
+sessions and consumers are created through server methods. It checks the API
+projection boundary, not a deployed hub, provider or complete holder launch.
+The driver tests consume these recorded bodies without renaming their fields.
+
+Both renewals must use fresh retained operation UUIDs and the observed binding
+revisions through the owner's normal authenticated API workflow. Preserve their
+receipts and new credential metadata. A 202 response is not installation proof:
+the fresh normal launch offers renderer delivery, and render/install/Open must
+complete before a prompt. No probe launch is needed. The fixed profile revisions,
+workspace/credential paths, marker UUIDs and prior one-prompt/two-attempt
+accounting remain unchanged. The old journal and native homes remain intact
+under the old seal; the new active journal is identified by the preserving
+handoff. The old principal is used only for historical accounting.
+Do not edit `EXPIRES`, old credential IDs, the saved report or local storage.
+
+The supported successor still runs Codex lifecycle, Qwen lifecycle and Codex
+effort together. It does not offer a Codex-only completion or reset the budget
+while Qwen is reconciled. If either replacement is not ready for this workflow,
+the metadata review refuses before a new launch. There is no partial Phase A
+completion claim.
 
 Obtain the operator's observations immediately around each checkpoint. The
 marker tool prints JSON on stdout; preserve distinct pre-launch and post-open
@@ -141,7 +302,8 @@ request must appear in the recorder before zero-attempt claims are used.
 ## Review the known stopped-run replacement
 
 These are preparation instructions, not evidence that the replacement is ready
-or authorized. Normal packet review/merge, actual Router 4e4 rollout readback and
+or authorized. Normal packet review/merge, the renewal-capable hub deployment,
+actual Router 4e4 rollout readback, separate owner renewals of both bindings and
 an explicit owner-assigned window remain required. No window is assigned by
 loading this script or accepting the source change.
 
@@ -153,8 +315,14 @@ loading this script or accepting the source change.
    choices disabled; do not import edited data or bypass that check.
 2. Choose **Review stopped-run replacement**. The driver retains the original
    raw report inside the successor record under the same storage key and binds it
-   with a SHA256 of its canonical JSON. It then reads the original session and
-   control, all three original prompt/cancel/Close operation receipts and the
+   with a SHA256 of its canonical JSON. The two renewed-credential review steps
+   come first: confirm the operator's actual deployed hub source and an observation
+   collected during this review, then confirm the exact nonsecret references shown
+   by the panel. The driver reads the inventory and both credential details twice,
+   requiring matching references. Both decisions and all six GETs share a 120-second
+   deadline. This reads metadata only; it never issues or rotates a credential.
+   It then reads the original session and control, all three original
+   prompt/cancel/Close operation receipts and the
    cancelled permission. These checks must confirm settled native outcomes, a
    closed session and no control lease before a new launch can proceed. Download
    the successor report too, including if preflight stops; the original remains
@@ -164,7 +332,7 @@ loading this script or accepting the source change.
    `reportDownloaded:true`, `operatorVerified:true` and the displayed
    `priorReportCanonicalSha256`. Use the owner's actual `windowStartUtc` and
    `windowEndUtc`: the start must be at most two minutes old, the window at most
-   15 minutes and its end no later than the unchanged credential expiry. This is
+   15 minutes and its end no later than the earlier renewed credential expiry. This is
    a new explicitly assigned window, not an extension of the old deadline.
 4. Supply the freshly collected 4e4 `trajectory` with the **original** scope and
    `since`, plus a fresh `marker` baseline after the displayed collection
@@ -173,9 +341,15 @@ loading this script or accepting the source change.
    outcomes. Both marker files must remain absent with unchanged identities and
    commands. Extra history, missing visibility or changed markers stops preflight.
    Reading those old rows on 4e4 does not relabel the preserved 4af report.
-5. Continue through the patched-holder handoff and normal lifecycle checkpoints.
+5. Complete **Fresh preserving-holder handoff** and the normal lifecycle
+   checkpoints within that same assigned window; this readback grants no new
+   window or accounting reset. Keep the old seal and retained state intact.
    Before the new Codex launch, collect a **separate, later, empty 4e4 observation
-   window** and baseline as requested by the panel. Keep its evidence separate
+   window for the newly selected Codex principal** and baseline as requested by the panel.
+   The original principal remains confined to historical accounting. Repeated
+   metadata checks before every launch must match the selected references;
+   normal installation may move an unchanged generation from installing to ready.
+   Keep the new evidence separate
    from the historical accounting snapshot. The new Codex run starts with one
    prompt and two attempts already charged against the existing 12-prompt and
    20-generation totals; they are not erased by the new window. Qwen and effort
@@ -237,7 +411,7 @@ neither execution nor a match to the separate permission tool-call ID; review
 the permission detail itself. Accepted permission delivery is not proof that the
 read completed.
 
-The deployed e843 hub omits Codex native tool IDs from its projected timeline.
+The e843-compatible timeline projection omits Codex native tool IDs.
 The Pi permission UI ID is also separate from the native model tool ID. The
 driver therefore does not join a permission to a native event by identity.
 Instead, it classifies the complete operation's ordered title/status events with
@@ -350,7 +524,7 @@ panel and supply real observations, never placeholder values:
       "sessionId": "<UUID>",
       "bindingId": "<UUID>",
       "credentialId": "<UUID>",
-      "generation": 1,
+      "generation": 2,
       "commandId": "<UUID>",
       "cleanedAt": "<receipt ISO timestamp>",
       "status": "absent",
@@ -364,6 +538,9 @@ panel and supply real observations, never placeholder values:
 }
 ```
 
+The example generation 2 must be replaced by each actual recorded generation:
+the five successor launches use the selected renewed generations, while the
+original stopped launch retains generation 1 and its original credential ID.
 `launches` must include every recorded launch; each marker entry is the actual
 JSON report object, not a string. Collect the file and marker observations after
 the displayed boundary, which includes a conservative 5 s clock-skew allowance.

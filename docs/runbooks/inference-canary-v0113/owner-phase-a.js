@@ -1,5 +1,5 @@
 /* Paste this entire reviewed file in the owner's console at https://relay.chifor.me.
- * No network request or mutation occurs until Start is clicked. No credentials are read.
+ * No network request occurs before explicit owner review. No credential secrets are read.
  * CommonJS exports support offline tests; the browser branch installs the control panel.
  */
 (function (root, factory) {
@@ -10,6 +10,9 @@
 })(typeof window === "object" ? window : globalThis, function () {
   "use strict";
   const SOURCE = "e843921b7cff76406b7da0b5b35cf653c7e458c5";
+  // SOURCE/PROFILES/EXPIRES describe the immutable stopped predecessor.
+  // The target release still requires fresh operator deployment verification.
+  const RUN_SOURCE = "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613";
   const ROUTER = "4e4bb34e2f968f9450aabe9cf228d3e70c8bab71";
   const ORIGIN = "https://relay.chifor.me";
   const EXPIRES = Date.parse("2026-11-26T21:27:37Z");
@@ -20,15 +23,25 @@
   const COMMUNICATION_TOOL = "mcp__relay__relay_messages_read";
   const PROFILES_SHA256 =
     "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4";
-  const HOLDER_BINARY_SHA256 =
-    "0b1a7907f6da2ef6b5794621d87c55c2e0ee6d5aeb1c4e0fdf35c9031a127003";
-  // First-registration revision-1 bytes passed fresh published-holder root,
-  // deployed-hub schema/normalization and offline registration-boundary checks.
-  // Start still requires actual installed hashes and separate owner approval.
+  // Authenticated v0.13.4 publication; actual published-holder controls and
+  // preserving state handoff passed with the retained published Pi runtime.
+  const QUALIFIED_HOLDER = {
+    release: "v0.13.4",
+    source: "64dc50f47a4867a6d9a7afc2e7d5ae24068c59af",
+    binarySha256:
+      "d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926",
+  };
+  // Existing revision-1 profiles stay unchanged.
+  // Qualification does not supply a deployed hub, credentials or owner window.
   const QUALIFIED_INPUTS = true;
+  // The offline handoff used this published binary on both sides with synthetic
+  // services. Fresh installed pins, host preservation and owner authority are
+  // still required by the public replacement checkpoints below.
+  const HOLDER_CONTROLS_QUALIFIED = true;
   const CONFIGURATION_CHANGED_NOTICE =
     "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used.";
   const HOST = "b3b1be1a-275c-4a2e-b515-428b39c43171";
+  const CONNECTION = "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8";
   const STORE = "relay-pi-phase-a-20261126-v1";
   const STOPPED_SOURCE = "4af66b8c7c3cc83ddd10e326c554ad728caad72e";
   const STOPPED_SESSION = "45724087-335a-4c55-ad0f-cb278afe608a";
@@ -75,6 +88,184 @@
         "}"
       );
     return JSON.stringify(v);
+  }
+  function renewalCandidates(inventory, now) {
+    need(integer(now) && now >= EXPIRES, "Post-expiry observation required");
+    need(
+      Array.isArray(inventory?.bindings) &&
+        inventory.bindings.length < 500 &&
+        Array.isArray(inventory.credentials) &&
+        inventory.credentials.length < 1000 &&
+        Array.isArray(inventory.consumers) &&
+        inventory.consumers.length < 1000,
+      "Credential inventory incomplete or truncated",
+    );
+    // Hub migration 017 permits exactly these consumer states. Validate every
+    // row before filtering by binding so malformed identities cannot hide use.
+    need(
+      inventory.consumers.every(
+        (c) =>
+          c !== null &&
+          typeof c === "object" &&
+          !Array.isArray(c) &&
+          uuid(c.binding_id) &&
+          ["active", "released", "blocked"].includes(c.state),
+      ),
+      "Credential consumer inventory malformed",
+    );
+    return Object.fromEntries(
+      Object.entries(PROFILES).map(([provider, prior]) => {
+        const matches = inventory.bindings.filter(
+          (b) => b.id === prior.binding,
+        );
+        need(matches.length === 1, "Renewed binding inventory ambiguous");
+        const b = matches[0];
+        const grant = {
+          routes: ["canary-pi-" + provider],
+          access: [provider === "codex" ? "subscription" : "local"],
+          lifetimeSeconds: 86400,
+        };
+        need(
+          b.enabled === true &&
+            b.canRenew === false &&
+            ["ready", "installing"].includes(b.state) &&
+            b.connection_id === CONNECTION &&
+            b.host_id === HOST &&
+            b.execution_identity === "c4" &&
+            canonical(b.grant_spec) === canonical(grant) &&
+            integer(b.revision) &&
+            b.revision >= 2 &&
+            integer(b.generation) &&
+            b.generation >= 2 &&
+            b.generation < 128,
+          "Renewed binding scope or generation differs",
+        );
+        const credentials = inventory.credentials
+          .filter((c) => c.binding_id === b.id)
+          .sort((a, z) => a.generation - z.generation);
+        need(
+          credentials.length === b.generation &&
+            new Set(credentials.map((c) => c.id)).size === credentials.length &&
+            new Set(credentials.map((c) => c.router_key_id)).size ===
+              credentials.length &&
+            credentials.every(
+              (c, i) =>
+                c.generation === i + 1 &&
+                uuid(c.id) &&
+                /^key_[a-f0-9]{12,32}$/.test(c.router_key_id),
+            ) &&
+            credentials[0].id === prior.credential &&
+            credentials[0].router_key_id === prior.key &&
+            credentials
+              .slice(0, -1)
+              .every(
+                (c) =>
+                  c.state === "revoked" &&
+                  c.revoke_requested === true &&
+                  c.cleanup_pending === false &&
+                  c.failure_code === null,
+              ) &&
+            !inventory.consumers.some(
+              (c) => c.binding_id === b.id && c.state === "active",
+            ),
+          "Prior credential history is incomplete or still active",
+        );
+        const c = credentials.at(-1);
+        const expiry = Date.parse(c.expires_at);
+        need(
+          c.id !== prior.credential &&
+            c.router_key_id !== prior.key &&
+            c.namespace === "default" &&
+            c.remote_acknowledged === true &&
+            c.revoke_requested === false &&
+            c.cleanup_pending === false &&
+            c.failure_code === null &&
+            c.retire_after === null &&
+            Number.isFinite(expiry) &&
+            expiry > now &&
+            expiry <= now + 86400000 + CLOCK_SKEW_MS &&
+            ((b.state === "ready" &&
+              c.state === "ready" &&
+              b.current_credential_id === c.id &&
+              b.pending_credential_id === null) ||
+              (b.state === "installing" &&
+                c.state === "installing" &&
+                b.current_credential_id === null &&
+                b.pending_credential_id === c.id)),
+          "Renewed credential is not acknowledged, fresh and unambiguous",
+        );
+        return [provider, { binding: b, credential: c, expiresAt: expiry }];
+      }),
+    );
+  }
+  // Only normal metadata responses enter this pure validator. Its projection
+  // contains IDs and scope, never token, escrow reference or pasted extra data.
+  function renewedCredentials(inventory, detailsByProvider, now) {
+    const candidates = renewalCandidates(inventory, now);
+    const profiles = Object.fromEntries(
+      Object.entries(candidates).map(([provider, row]) => {
+        const { binding: b, credential: c, expiresAt } = row;
+        const view = detailsByProvider?.[provider];
+        need(
+          view?.credential?.id === c.id &&
+            view.credential.bindingId === b.id &&
+            view.credential.connectionId === CONNECTION &&
+            view.credential.generation === c.generation &&
+            view.credential.routerKeyId === c.router_key_id &&
+            view.credential.namespace === "default" &&
+            view.credential.state === c.state &&
+            view.credential.remoteAcknowledged === true &&
+            view.credential.revokeRequested === false &&
+            view.credential.cleanupPending === false &&
+            view.credential.failureCode === null &&
+            view.credential.retireAfter === null &&
+            Date.parse(view.credential.expiresAt) === expiresAt &&
+            view.binding?.id === b.id &&
+            view.binding.hostId === HOST &&
+            view.binding.executionIdentity === "c4" &&
+            view.binding.enabled === true &&
+            view.binding.canRenew === false &&
+            view.binding.state === b.state &&
+            view.binding.revision === b.revision &&
+            view.binding.generation === b.generation &&
+            view.binding.currentCredentialId === b.current_credential_id &&
+            view.binding.pendingCredentialId === b.pending_credential_id &&
+            Array.isArray(view.consumers) &&
+            view.consumers.length < 128 &&
+            !view.consumers.some((x) => x.state === "active"),
+          "Renewed credential detail changed or is incomplete",
+        );
+        return [
+          provider,
+          Object.freeze({
+            ...PROFILES[provider],
+            credential: c.id,
+            key: c.router_key_id,
+            namespace: "default",
+            connection: CONNECTION,
+            generation: c.generation,
+            revision: b.revision,
+            expiresAt,
+          }),
+        ];
+      }),
+    );
+    const selected = Object.values(profiles),
+      prior = Object.values(PROFILES);
+    need(
+      new Set(selected.map((p) => p.credential)).size === 2 &&
+        new Set(selected.map((p) => p.key)).size === 2 &&
+        selected.every((p) =>
+          prior.every(
+            (old) => p.credential !== old.credential && p.key !== old.key,
+          ),
+        ),
+      "Renewed credentials must be distinct from both historical principals",
+    );
+    return Object.freeze({
+      profiles: Object.freeze(profiles),
+      expiresAt: Math.min(...Object.values(profiles).map((p) => p.expiresAt)),
+    });
   }
   async function digest(crypto, v) {
     return Array.from(
@@ -182,8 +373,8 @@
       "Open changed the retained marker baseline",
     );
   }
-  function snapshot(v, provider, expectedSource = ROUTER) {
-    const p = PROFILES[provider];
+  function snapshot(v, provider, expectedSource = ROUTER, profiles = PROFILES) {
+    const p = profiles[provider];
     need(
       v?.version === 1 &&
         v.source === expectedSource &&
@@ -264,9 +455,9 @@
       totalAttempts: total,
     };
   }
-  function delta(a, b, provider) {
-    a = snapshot(a, provider);
-    b = snapshot(b, provider);
+  function delta(a, b, provider, profiles = PROFILES) {
+    a = snapshot(a, provider, ROUTER, profiles);
+    b = snapshot(b, provider, ROUTER, profiles);
     need(
       canonical(a.scope) === canonical(b.scope) && b.requestedAt > a.observedAt,
       "Trajectory chronology/scope changed",
@@ -433,6 +624,82 @@
       cleanup,
       commands,
       prompt,
+    };
+  }
+  function preservingHandoff(v, priorLaunch, pins, earliest, now) {
+    need(
+      pins &&
+        /^v\d+\.\d+\.\d+$/.test(pins.release) &&
+        /^[a-f0-9]{40}$/.test(pins.source) &&
+        /^[a-f0-9]{64}$/.test(pins.binarySha256),
+      "Corrected published holder inputs are not qualified",
+    );
+    need(
+      priorLaunch?.journalId === HOLDER &&
+        uuid(priorLaunch.holderId) &&
+        Number.isFinite(earliest) &&
+        Number.isFinite(now) &&
+        earliest <= now,
+      "Stopped predecessor or handoff observation window changed",
+    );
+    const observed = Date.parse(v?.observedUtc);
+    need(
+      uuid(v?.preparationId) &&
+        v.oldHolderId === priorLaunch.holderId &&
+        v.oldJournalId === priorLaunch.journalId &&
+        uuid(v.holderId) &&
+        uuid(v.journalId) &&
+        v.holderId !== priorLaunch.holderId &&
+        v.journalId !== priorLaunch.journalId &&
+        v.stateDirectory ===
+          "/home/c4/.local/state/relay-holder-handoff-" + v.preparationId &&
+        v.handoffReceipt?.path ===
+          "/home/c4/.config/relay-holder/used-handoffs/" +
+            v.preparationId +
+            "/complete.json" &&
+        /^[a-f0-9]{64}$/.test(v.handoffReceipt?.sha256) &&
+        Number.isFinite(observed) &&
+        observed >= earliest &&
+        observed <= now + CLOCK_SKEW_MS &&
+        v.qualifiedRelease === pins.release &&
+        v.holderSource === pins.source &&
+        v.holderBinarySha256 === pins.binarySha256 &&
+        v.profilesSha256 === PROFILES_SHA256 &&
+        v.nativeRecovery === 2 &&
+        v.nativeStateReady === true &&
+        v.activeSessions === 0 &&
+        v.pendingCommands === 0 &&
+        v.admissionPaused === false &&
+        v.preservedOldStateConfirmed === true &&
+        v.operatorVerified === true,
+      "Qualified preserving holder handoff missing or changed",
+    );
+    // On a fresh root, the first incarnation is also its journal ID. They must
+    // each differ from the predecessor, but need not differ from each other.
+    return {
+      holderId: v.holderId,
+      journalId: v.journalId,
+      oldHolderId: v.oldHolderId,
+      oldJournalId: v.oldJournalId,
+      preparationId: v.preparationId,
+      stateDirectory: v.stateDirectory,
+      handoffReceipt: {
+        path: v.handoffReceipt.path,
+        sha256: v.handoffReceipt.sha256,
+      },
+      observedUtc: v.observedUtc,
+      qualifiedRelease: v.qualifiedRelease,
+      holderSource: v.holderSource,
+      profilesSha256: v.profilesSha256,
+      holderBinarySha256: v.holderBinarySha256,
+      nativeRecovery: 2,
+      nativeStateReady: true,
+      activeSessions: 0,
+      pendingCommands: 0,
+      admissionPaused: false,
+      preservedOldStateConfirmed: true,
+      provenance:
+        "operator-reported installed hashes, receipt and fresh hello; not a browser host measurement or a new acceptance window",
     };
   }
   function permission(detail, session, generation, expected, kind, now) {
@@ -665,7 +932,7 @@
       this.sleep = env.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
       this.state = {
         version: 1,
-        relay: SOURCE,
+        relay: RUN_SOURCE,
         router: ROUTER,
         completed: false,
         runs: [],
@@ -680,6 +947,8 @@
       this.pending = null;
       this.stopped = false;
       this.cleaning = false;
+      this.profiles = PROFILES;
+      this.effectiveExpiry = EXPIRES;
     }
     save() {
       this.env.save(this.state);
@@ -718,7 +987,7 @@
     }
     check() {
       need(
-        !this.stopped && this.now() < EXPIRES,
+        !this.stopped && this.now() < this.effectiveExpiry,
         "Stopped or credential window expired",
       );
       if (this.run)
@@ -745,12 +1014,12 @@
         validate,
         Math.min(
           timeout,
-          EXPIRES - this.now(),
+          this.effectiveExpiry - this.now(),
           this.run ? this.run.deadline - this.now() : timeout,
         ),
       );
     }
-    async api(path, method = "GET", body) {
+    async api(path, method = "GET", body, timeout = 15000) {
       need(
         /^\/api\//.test(path) && !path.includes("\\") && !path.includes("#"),
         "Invalid API path",
@@ -762,7 +1031,7 @@
         cache: "no-store",
         headers: { "content-type": "application/json" },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(15000),
+        signal: AbortSignal.timeout(timeout),
       });
       need(
         result.ok,
@@ -775,6 +1044,143 @@
       const raw = await result.text();
       need(raw.length <= 2 * 1024 * 1024, "Oversized API response");
       return JSON.parse(raw);
+    }
+    async readRenewedCredentials(deadline = this.now() + 45000) {
+      const get = (path) => {
+        need(
+          !this.stopped && this.now() < deadline,
+          "Renewal metadata read expired or stopped",
+        );
+        return this.api(
+          path,
+          "GET",
+          undefined,
+          Math.min(15000, deadline - this.now()),
+        );
+      };
+      const inventory = await get("/api/router-credentials");
+      const candidates = renewalCandidates(inventory, this.now());
+      const details = {};
+      for (const provider of ["codex", "qwen"]) {
+        need(!this.stopped, "Owner stopped metadata review");
+        details[provider] = await get(
+          "/api/router-credentials/keys/" + candidates[provider].credential.id,
+        );
+      }
+      need(
+        !this.stopped && this.now() < deadline,
+        "Renewal metadata read expired or stopped",
+      );
+      return renewedCredentials(inventory, details, this.now());
+    }
+    async explicitReview() {
+      need(
+        QUALIFIED_INPUTS &&
+          /^[a-f0-9]{40}$/.test(RUN_SOURCE) &&
+          RUN_SOURCE !== SOURCE,
+        "Renewal hub source and successor qualification remain pending",
+      );
+      need(this.now() >= EXPIRES, "Post-expiry successor only");
+      need(
+        this.state.predecessor?.raw,
+        "Preserved stopped predecessor required",
+      );
+      stoppedPredecessor(this.state.predecessor.raw);
+      // This bounded read-only bootstrap cannot use the predecessor's expired
+      // request window. It enables no launch, issuance or mutation itself.
+      const startedAt = this.now(),
+        deadline = startedAt + 120000;
+      const remaining = () => {
+        need(
+          !this.stopped && this.now() < deadline,
+          "Renewal metadata review expired or stopped",
+        );
+        return deadline - this.now();
+      };
+      const deployment = await this.env.ask(
+        "Review already-renewed phase-A credentials",
+        "Preserve/download the original stopped report. This driver issues or rotates no credential. Confirm the operator has deployed the qualified renewal hub and completed normal owner-authorized renewal of BOTH unchanged bindings. Paste {confirmMetadataReview:true,reportDownloaded:true,operatorVerified:true,deploymentVerified:true,observedUtc:ISO,hubSource:OBSERVED_SOURCE_SHA}. Copy the source and observation time from the operator's actual deployment readback collected during this review, not from this script or a prior release. This remains an operator attestation, not a browser measurement of the deployed source. Only then will this browser read their nonsecret metadata. No new launch or permission decision is authorized by this checkpoint.",
+        (v) => {
+          remaining();
+          need(
+            v?.confirmMetadataReview === true &&
+              v.reportDownloaded === true &&
+              v.operatorVerified === true &&
+              v.deploymentVerified === true &&
+              v.hubSource === RUN_SOURCE &&
+              Date.parse(v.observedUtc) >= startedAt &&
+              Date.parse(v.observedUtc) <= this.now() + CLOCK_SKEW_MS,
+            "Explicit renewed-credential metadata review required",
+          );
+          return {
+            hubSource: v.hubSource,
+            observedUtc: v.observedUtc,
+            deploymentVerified: true,
+            operatorVerified: true,
+          };
+        },
+        remaining(),
+      );
+      remaining();
+      const first = await this.readRenewedCredentials(deadline);
+      remaining();
+      await this.env.ask(
+        "Confirm exact renewed credentials for all three phases",
+        "Review these metadata-only references against the approved renewal. Old references and their two attempts stay historical. Paste exactly {confirmRenewedCredentials:true,profiles:" +
+          JSON.stringify(first.profiles) +
+          ",expiresAt:" +
+          first.expiresAt +
+          "}. This selects Codex lifecycle, Qwen lifecycle and Codex effort; it does not authorize a partial run. The effective expiry is the earlier of the two renewed grants. No token or escrow value is requested.",
+        (v) => {
+          remaining();
+          need(
+            v?.confirmRenewedCredentials === true &&
+              canonical(v.profiles) === canonical(first.profiles) &&
+              v.expiresAt === first.expiresAt,
+            "Exact renewed metadata confirmation required",
+          );
+          return true;
+        },
+        remaining(),
+      );
+      remaining();
+      const current = await this.readRenewedCredentials(deadline);
+      remaining();
+      need(
+        canonical(current) === canonical(first),
+        "Renewed credentials changed during owner review",
+      );
+      this.profiles = current.profiles;
+      this.effectiveExpiry = current.expiresAt;
+      this.state.successorCredentials = {
+        ...current,
+        observedAt: this.now(),
+        hubSource: RUN_SOURCE,
+        deployment,
+        sourceAttribution:
+          "operator-confirmed deployed hub; browser reads normal credential metadata",
+      };
+      this.record("renewed-credential-review", this.state.successorCredentials);
+    }
+    async refreshRenewedCredentials() {
+      need(
+        this.state.successorCredentials,
+        "Renewed credential review missing",
+      );
+      this.check();
+      const current = await this.readRenewedCredentials(
+        Math.min(
+          this.now() + 45000,
+          this.effectiveExpiry,
+          this.run?.deadline ?? Infinity,
+        ),
+      );
+      this.check();
+      need(
+        canonical(current.profiles) === canonical(this.profiles) &&
+          current.expiresAt === this.effectiveExpiry,
+        "Reviewed renewed credential references changed; no launch",
+      );
     }
     async mutate(path, body) {
       this.check();
@@ -991,7 +1397,7 @@
       throw new Error("Timeline exceeds bounded pagination");
     }
     async checkDelivery() {
-      const p = PROFILES[this.run.provider],
+      const p = this.profiles[this.run.provider],
         s = await this.sessionRead();
       need(s.state === "open", "Session not open");
       const r = await this.api("/api/agent-sessions/" + s.id + "/router");
@@ -1020,7 +1426,35 @@
           c.credential.routerKeyId === p.key &&
           c.credential.namespace === "default" &&
           c.credential.state === "ready" &&
-          c.binding?.currentCredentialId === p.credential,
+          c.binding?.currentCredentialId === p.credential &&
+          (!this.state.successorCredentials ||
+            (r.connection.id === CONNECTION &&
+              r.binding.revision === p.revision &&
+              r.binding.generation === p.generation &&
+              r.credential.generation === p.generation &&
+              Date.parse(r.credential.expiresAt) === p.expiresAt &&
+              r.credential.remoteAcknowledged === true &&
+              r.credential.revokeRequested === false &&
+              r.consumer.generation === p.generation &&
+              r.consumer.failureCode === null &&
+              c.credential.connectionId === CONNECTION &&
+              c.credential.generation === p.generation &&
+              c.credential.remoteAcknowledged === true &&
+              c.credential.revokeRequested === false &&
+              c.credential.cleanupPending === false &&
+              c.credential.failureCode === null &&
+              c.credential.retireAfter === null &&
+              Date.parse(c.credential.expiresAt) === p.expiresAt &&
+              c.binding.id === p.binding &&
+              c.binding.canRenew === false &&
+              c.binding.enabled === true &&
+              c.binding.state === "ready" &&
+              c.binding.hostId === HOST &&
+              c.binding.executionIdentity === "c4" &&
+              c.binding.revision === p.revision &&
+              c.binding.generation === p.generation &&
+              c.binding.pendingCredentialId === null &&
+              Date.parse(r.consumer.credentialExpiresAt) === p.expiresAt)),
         "Credential/principal changed",
       );
       const m = await this.api(
@@ -1035,10 +1469,19 @@
         credentialId: p.credential,
         namespace: "default",
         principal: "key:" + p.key,
+        ...(this.state.successorCredentials
+          ? { credentialGeneration: p.generation, expiresAt: p.expiresAt }
+          : {}),
       });
     }
     async launch(recovery = false) {
-      const p = PROFILES[this.run.provider],
+      // lifecycle() awaits close() before recovery. Hub journal.endSession()
+      // releases the holder consumer in the same transaction before closing
+      // the source session; native recovery rejects an open source. Keep the
+      // no-active-consumer rule for recovery too, including unrelated consumers.
+      if (this.state.successorCredentials)
+        await this.refreshRenewedCredentials();
+      const p = this.profiles[this.run.provider],
         operationId = this.crypto.randomUUID(),
         previous = recovery ? this.launchRow : null;
       const path = recovery
@@ -1459,7 +1902,7 @@
             v?.coverageConfirmed === true,
             "Operator coverage confirmation missing",
           );
-          snapshot(v.trajectory, this.run.provider);
+          snapshot(v.trajectory, this.run.provider, ROUTER, this.profiles);
           this.collectedAfter(boundary, v.trajectory, phase ? v.marker : null);
           need(
             this.now() - v.trajectory.observedAt >= -5000 &&
@@ -1470,6 +1913,7 @@
             this.run.lastSnapshot,
             v.trajectory,
             this.run.provider,
+            this.profiles,
           );
           if (zero) need(added === 0, "Expected zero recorded attempts");
           need(
@@ -1480,7 +1924,12 @@
             "Observed generation budget exceeded",
           );
           return {
-            trajectory: snapshot(v.trajectory, this.run.provider),
+            trajectory: snapshot(
+              v.trajectory,
+              this.run.provider,
+              ROUTER,
+              this.profiles,
+            ),
             ...(phase
               ? {
                   marker: marker(
@@ -1577,7 +2026,7 @@
       this.record("effort", { sessionId: this.session.id, value });
     }
     async phase(provider, effort = false) {
-      const p = PROFILES[provider],
+      const p = this.profiles[provider],
         runId = effort ? EFFORT_RUN : p.run;
       const replacement =
         provider === "codex" && !effort ? this.state.replacement : null;
@@ -1639,7 +2088,7 @@
           );
           return {
             marker: marker(v.marker, provider, runId, "baseline", this.now()),
-            trajectory: snapshot(v.trajectory, provider),
+            trajectory: snapshot(v.trajectory, provider, ROUTER, this.profiles),
           };
         },
       );
@@ -2063,7 +2512,7 @@
         "Credential inventory incomplete or truncated",
       );
       const targets = [];
-      for (const [provider, p] of Object.entries(PROFILES)) {
+      for (const [provider, p] of Object.entries(this.profiles)) {
         const bindings = inventory.bindings.filter((b) => b.id === p.binding);
         need(bindings.length === 1, "Binding inventory ambiguous");
         const b = bindings[0];
@@ -2078,7 +2527,18 @@
             b.revision > 0 &&
             integer(b.generation) &&
             b.generation > 0 &&
-            b.generation < 128,
+            b.generation < 128 &&
+            (!this.state.successorCredentials ||
+              (b.canRenew === false &&
+                b.connection_id === CONNECTION &&
+                b.revision === p.revision &&
+                b.generation === p.generation &&
+                canonical(b.grant_spec) ===
+                  canonical({
+                    routes: ["canary-pi-" + provider],
+                    access: [provider === "codex" ? "subscription" : "local"],
+                    lifetimeSeconds: 86400,
+                  }))),
           "Binding changed; inspect before revocation",
         );
         const credentials = inventory.credentials
@@ -2239,12 +2699,15 @@
             intent.status = "dispatch-uncertain";
           }
           this.save();
-          const deadline = Math.min(this.now() + 120000, EXPIRES);
+          const deadline = Math.min(this.now() + 120000, this.effectiveExpiry);
           let confirmed = false;
           while (this.now() < deadline) {
             // Stop forbids the next binding mutation, but retain bounded readback
             // of the immutable request already sent before cleanup can begin.
-            need(this.now() < EXPIRES, "Credential window expired");
+            need(
+              this.now() < this.effectiveExpiry,
+              "Credential window expired",
+            );
             let settled = true;
             for (const c of target.generations) {
               const v = await this.api("/api/router-credentials/keys/" + c.id);
@@ -2322,6 +2785,18 @@
           launches.push(prior.launch);
         }
         const expected = launches.map((l) => {
+          // The sixth cleanup row remains the original generation1 reference.
+          // Renewal must never relabel the old launch as using the new key.
+          if (l.sessionId === STOPPED_SESSION) {
+            need(this.state.predecessor, "Unexpected predecessor cleanup row");
+            return {
+              launchId: l.id,
+              sessionId: l.sessionId,
+              bindingId: PROFILES.codex.binding,
+              credentialId: PROFILES.codex.credential,
+              generation: 1,
+            };
+          }
           const target = targets.find(
             (t) => PROFILES[t.provider].id === l.profileId,
           );
@@ -2333,7 +2808,7 @@
             launchId: l.id,
             sessionId: l.sessionId,
             bindingId: target.bindingId,
-            credentialId: PROFILES[target.provider].credential,
+            credentialId: this.profiles[target.provider].credential,
             generation: target.generations.length,
           };
         });
@@ -2540,10 +3015,12 @@
               now - start <= 120000 &&
               end > now &&
               end - start <= 900000 &&
-              end <= EXPIRES,
+              end <= this.effectiveExpiry,
             "Invalid replacement window; credential expiry and 15-minute cap remain",
           );
-          const trajectory = snapshot(v.trajectory, "codex"),
+          // Historical accounting deliberately retains the OLD principal,
+          // even though this fresh observation is collected on Router4e4.
+          const trajectory = snapshot(v.trajectory, "codex", ROUTER, PROFILES),
             currentMarker = marker(
               v.marker,
               "codex",
@@ -2603,6 +3080,14 @@
         this.env.origin === ORIGIN,
         "Run only in the owner session at " + ORIGIN,
       );
+      need(
+        replacement,
+        "Post-expiry successor requires the original stopped report; no fresh-start reset",
+      );
+      need(
+        HOLDER_CONTROLS_QUALIFIED,
+        "Holder controls are not qualified: await the corrected holder and reviewed preserving handoff. Keep the saved report unchanged.",
+      );
       const raw = this.env.load();
       const prior = replacement ? stoppedPredecessor(raw) : null;
       if (!replacement)
@@ -2614,7 +3099,7 @@
         QUALIFIED_INPUTS,
         "Await the qualified patch release and reviewed successor inputs; this draft cannot launch",
       );
-      this.check();
+      need(!this.stopped, "Owner stopped");
       if (prior)
         this.state.predecessor = {
           raw,
@@ -2625,31 +3110,20 @@
       this.state.status = "running";
       this.save();
       try {
+        await this.explicitReview();
         if (prior) await this.replacementPreflight(prior);
+        const handoffStarted = this.now();
         const handoff = await this.ask(
-          "Fresh patched-holder handoff",
-          "Paste {holderId:UUID,journalId:UUID,nativeRecovery:2,nativeStateReady:true,qualifiedRelease:'v0.13.1',profilesSha256:OBSERVED_PROFILE_FILE_SHA256,holderBinarySha256:OBSERVED_INSTALLED_BINARY_SHA256,operatorVerified:true}. Use the current operator readback after stopped upgrade and explicit seal release, not copied expected hashes. The journal ID may survive while incarnation changes.",
-          (v) => {
-            need(
-              uuid(v?.holderId) &&
-                uuid(v?.journalId) &&
-                v.nativeRecovery === 2 &&
-                v.nativeStateReady === true &&
-                v.qualifiedRelease === "v0.13.1" &&
-                v.profilesSha256 === PROFILES_SHA256 &&
-                v.holderBinarySha256 === HOLDER_BINARY_SHA256 &&
-                v.operatorVerified === true,
-              "Qualified holder handoff missing",
-            );
-            return {
-              holderId: v.holderId,
-              journalId: v.journalId,
-              profilesSha256: v.profilesSha256,
-              holderBinarySha256: v.holderBinarySha256,
-              provenance:
-                "operator-reported installed file hashes; not a browser host measurement",
-            };
-          },
+          "Fresh preserving-holder handoff",
+          "Paste {holderId:NEW_INCARNATION_UUID,journalId:NEW_JOURNAL_UUID,oldHolderId:OLD_INCARNATION_UUID,oldJournalId:OLD_JOURNAL_UUID,preparationId:PREPARATION_UUID,stateDirectory:OBSERVED_NEW_STATE_PATH,handoffReceipt:{path:OBSERVED_COMPLETE_RECEIPT_PATH,sha256:OBSERVED_RECEIPT_SHA256},observedUtc:OBSERVED_UTC,qualifiedRelease:OBSERVED_RELEASE,holderSource:OBSERVED_SOURCE_SHA,holderBinarySha256:OBSERVED_INSTALLED_BINARY_SHA256,profilesSha256:OBSERVED_PROFILE_FILE_SHA256,nativeRecovery:2,nativeStateReady:true,activeSessions:0,pendingCommands:0,admissionPaused:false,preservedOldStateConfirmed:true,operatorVerified:true}. Use a fresh operator readback after the preserving handoff and normal resume of NEW admission in the existing owner window. Keep the old seal and state intact. Both new identities must differ from their predecessor; they may equal each other. This observation does not renew a window or reset accounting.",
+          (v) =>
+            preservingHandoff(
+              v,
+              prior.launch,
+              QUALIFIED_HOLDER,
+              handoffStarted,
+              this.now(),
+            ),
         );
         this.holderId = handoff.holderId;
         this.journalId = handoff.journalId;
@@ -2866,7 +3340,7 @@
     replace.disabled = true;
     try {
       stoppedPredecessor(saved);
-      replace.disabled = !QUALIFIED_INPUTS;
+      replace.disabled = !QUALIFIED_INPUTS || !HOLDER_CONTROLS_QUALIFIED;
       status.textContent =
         "Known stopped run retained. Download it, then explicitly review a bounded replacement; no automatic replay.";
     } catch {
@@ -2886,7 +3360,13 @@
       start.disabled = true;
       replace.disabled = true;
       status.textContent =
-        "Draft held: qualified patch artifacts and successor profile inputs are not installed in this packet. No launch permitted.";
+        "Draft held: final renewal hub source and post-expiry successor qualification are pending. No launch permitted.";
+    }
+    if (!HOLDER_CONTROLS_QUALIFIED) {
+      start.disabled = true;
+      replace.disabled = true;
+      status.textContent +=
+        " Holder controls are not qualified. Await corrected holder artifacts and a reviewed preserving handoff; no acceptance launch is permitted.";
     }
     d.body.appendChild(panel);
   }
@@ -2894,6 +3374,10 @@
     Runner,
     PROFILES,
     SOURCE,
+    RUN_SOURCE,
+    HOLDER_CONTROLS_QUALIFIED,
+    preservingHandoff,
+    renewedCredentials,
     CONFIGURATION_CHANGED_NOTICE,
     ROUTER,
     ORIGIN,

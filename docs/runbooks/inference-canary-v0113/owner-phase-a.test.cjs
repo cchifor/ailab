@@ -7,6 +7,46 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 const a = require("./owner-phase-a.js");
+const driverSource = fs.readFileSync(
+  path.join(__dirname, "owner-phase-a.js"),
+  "utf8",
+);
+// Positive entry, metadata, lifecycle and handoff cases use the actual module.
+// Only negative hold cases evaluate an explicitly disabled module variant.
+// Published v0.13.4 pins bind the separately qualified holder artifacts.
+// These actual-module tests run offline; they do not prove live readiness.
+const PUBLISHED_HOLDER_TEST_PINS = Object.freeze({
+  release: "v0.13.4",
+  source: "64dc50f47a4867a6d9a7afc2e7d5ae24068c59af",
+  binarySha256:
+    "d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926",
+});
+assert.equal(a.RUN_SOURCE, "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613");
+assert.equal(a.HOLDER_CONTROLS_QUALIFIED, true);
+assert.match(PUBLISHED_HOLDER_TEST_PINS.binarySha256, /^[a-f0-9]{64}$/);
+const holderDisabledModule = { exports: {} };
+assert.match(driverSource, /const HOLDER_CONTROLS_QUALIFIED = (?:true|false);/);
+vm.runInThisContext(
+  "(function(module){" +
+    driverSource.replace(
+      /const HOLDER_CONTROLS_QUALIFIED = (?:true|false);/,
+      "const HOLDER_CONTROLS_QUALIFIED = false;",
+    ) +
+    "\n})",
+  { filename: "disabled-holder-entrypoint.js", timeout: 1000 },
+)(holderDisabledModule);
+const holderDisabled = holderDisabledModule.exports;
+const heldModule = { exports: {} };
+vm.runInThisContext(
+  "(function(module){" +
+    driverSource.replace(
+      /const QUALIFIED_INPUTS = (?:true|false);/,
+      "const QUALIFIED_INPUTS = false;",
+    ) +
+    "\n})",
+  { filename: "offline-held-owner-phase-a.js", timeout: 1000 },
+)(heldModule);
+const held = heldModule.exports;
 const NOW = Date.parse("2026-11-26T12:00:00Z");
 const SID = "11111111-1111-4111-8111-111111111111";
 const OTHER = "22222222-2222-4222-8222-222222222222";
@@ -17,15 +57,11 @@ const HOST = "b3b1be1a-275c-4a2e-b515-428b39c43171";
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const date = (n) => new Date(n).toISOString();
 const p = a.PROFILES.codex;
+const POST_EXPIRY = a.EXPIRES + 60000;
 const command = a.markerCommand("codex", p.run, "effects");
 const holderInputs = JSON.parse(
   fs.readFileSync(path.join(__dirname, "holder-inputs.json"), "utf8"),
 );
-const handoffHashes = {
-  profilesSha256: holderInputs.relay_holder_profiles_sha256,
-  holderBinarySha256: holderInputs.relay_holder_binary_sha256,
-};
-
 function harness(
   handler = () => {
     throw Error("Unexpected fetch");
@@ -294,49 +330,479 @@ test("replacement refuses duplicate non-command categories even with exactly six
   }
 });
 
+function renewedFixture(state = "installing", now = POST_EXPIRY) {
+  const inventory = { bindings: [], credentials: [], consumers: [] },
+    details = {};
+  for (const [i, provider] of ["codex", "qwen"].entries()) {
+    const prior = a.PROFILES[provider],
+      id = [SID, OTHER][i],
+      key = "key_" + ["a", "b"][i].repeat(32);
+    const expiry = now + (i ? 3600000 : 7200000);
+    const binding = {
+      id: prior.binding,
+      connection_id: "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+      host_id: HOST,
+      execution_identity: "c4",
+      enabled: true,
+      state,
+      revision: 2,
+      generation: 2,
+      canRenew: false,
+      grant_spec: {
+        routes: ["canary-pi-" + provider],
+        access: [i ? "local" : "subscription"],
+        lifetimeSeconds: 86400,
+      },
+      current_credential_id: state === "ready" ? id : null,
+      pending_credential_id: state === "installing" ? id : null,
+    };
+    const credential = {
+      id,
+      binding_id: prior.binding,
+      generation: 2,
+      router_key_id: key,
+      namespace: "default",
+      state,
+      remote_acknowledged: true,
+      revoke_requested: false,
+      cleanup_pending: false,
+      failure_code: null,
+      retire_after: null,
+      expires_at: date(expiry),
+    };
+    inventory.bindings.push(binding);
+    inventory.credentials.push(
+      {
+        id: prior.credential,
+        binding_id: prior.binding,
+        generation: 1,
+        router_key_id: prior.key,
+        state: "revoked",
+        revoke_requested: true,
+        cleanup_pending: false,
+        failure_code: null,
+      },
+      credential,
+    );
+    details[provider] = {
+      credential: {
+        id,
+        bindingId: prior.binding,
+        connectionId: binding.connection_id,
+        generation: 2,
+        routerKeyId: key,
+        namespace: "default",
+        state,
+        remoteAcknowledged: true,
+        revokeRequested: false,
+        cleanupPending: false,
+        failureCode: null,
+        retireAfter: null,
+        expiresAt: date(expiry),
+      },
+      binding: {
+        id: prior.binding,
+        hostId: HOST,
+        executionIdentity: "c4",
+        enabled: true,
+        state,
+        canRenew: false,
+        revision: 2,
+        generation: 2,
+        currentCredentialId: binding.current_credential_id,
+        pendingCredentialId: binding.pending_credential_id,
+      },
+      consumers: [],
+      operations: [],
+    };
+  }
+  return { inventory, details };
+}
+
+// Captured normal HTTP responses from the pinned hub with a private PostgreSQL
+// fixture. The generation recipe and source provenance live beside the payloads;
+// unlike renewedFixture(), these response shapes were not authored by the driver.
+const hubProjection = JSON.parse(
+  fs.readFileSync(
+    path.join(__dirname, "owner-phase-a.hub-74d1.fixture.json"),
+    "utf8",
+  ),
+);
+const hubObservation = Date.parse(hubProjection.observedAt);
+
+test("renewed credentials accept the exact 74d1 HTTP inventory and detail projections", () => {
+  assert.equal(hubProjection.version, 1);
+  assert.equal(hubProjection.sourceCommit, a.RUN_SOURCE);
+  assert.equal(
+    hubProjection.provenance.sourceBlobs["server/router-credentials/service.ts"]
+      .gitBlob,
+    "beadba8563481fabf7af7f2079ffda9876106aa9",
+  );
+  assert.equal(
+    hubProjection.provenance.sourceBlobs["server/agent-sessions/routes.ts"]
+      .gitBlob,
+    "9c19c29cb2fc4bb3d48bc74d89f1a461e4b5a6ea",
+  );
+  assert(Number.isFinite(hubObservation));
+  const { inventory, details } = hubProjection.bootstrap;
+  const renewed = a.renewedCredentials(inventory, details, hubObservation);
+  for (const provider of ["codex", "qwen"]) {
+    const binding = inventory.bindings.find(
+      (b) => b.id === a.PROFILES[provider].binding,
+    );
+    assert.equal(binding.canRenew, false);
+    assert.equal(Object.hasOwn(binding, "can_renew"), false);
+    assert.equal(details[provider].binding.canRenew, false);
+    assert.equal(renewed.profiles[provider].generation, 2);
+    assert.equal(
+      renewed.profiles[provider].credential,
+      details[provider].credential.id,
+    );
+    assert.equal(
+      renewed.profiles[provider].expiresAt,
+      Date.parse(details[provider].credential.expiresAt),
+    );
+  }
+});
+
+test("renewed inventory refuses malformed consumer rows before binding filtering", () => {
+  for (const row of [
+    null,
+    [],
+    "active",
+    { state: "active" },
+    { bindingId: p.binding, state: "active" },
+    { binding_id: "not-a-uuid", state: "active" },
+    { binding_id: p.binding },
+    { binding_id: p.binding, state: "unknown" },
+    { binding_id: OTHER, state: "unknown" },
+  ]) {
+    const { inventory, details } = clone(hubProjection.bootstrap);
+    inventory.consumers.push(row);
+    assert.throws(
+      () => a.renewedCredentials(inventory, details, hubObservation),
+      /Credential consumer inventory malformed/,
+    );
+  }
+});
+
+test("renewed inventory accepts valid unrelated and terminal consumer rows", () => {
+  const { inventory, details } = clone(hubProjection.bootstrap);
+  const expected = a.renewedCredentials(inventory, details, hubObservation);
+  inventory.consumers.push(
+    { binding_id: OTHER, state: "active" },
+    { binding_id: p.binding, state: "released" },
+    { binding_id: a.PROFILES.qwen.binding, state: "blocked" },
+  );
+  assert.deepEqual(
+    a.renewedCredentials(inventory, details, hubObservation),
+    expected,
+  );
+  inventory.consumers.push({ binding_id: p.binding, state: "active" });
+  assert.throws(
+    () => a.renewedCredentials(inventory, details, hubObservation),
+    /still active/,
+  );
+});
+
+test("captured hub metadata never permits a missing or alternate canRenew spelling", () => {
+  for (const provider of ["codex", "qwen"]) {
+    for (const view of ["inventory", "detail"]) {
+      for (const rename of [false, true]) {
+        const { inventory, details } = clone(hubProjection.bootstrap);
+        const binding =
+          view === "inventory"
+            ? inventory.bindings.find(
+                (b) => b.id === a.PROFILES[provider].binding,
+              )
+            : details[provider].binding;
+        delete binding.canRenew;
+        if (rename) binding.can_renew = false;
+        assert.throws(() =>
+          a.renewedCredentials(inventory, details, hubObservation),
+        );
+      }
+    }
+  }
+});
+
+function capturedDelivery(provider, payload) {
+  const renewed = a.renewedCredentials(
+    hubProjection.bootstrap.inventory,
+    hubProjection.bootstrap.details,
+    hubObservation,
+  );
+  const id = payload.router.sessionId;
+  const h = harness(({ path: url }) => {
+    if (url === "/api/agent-sessions/" + id + "/router") return payload.router;
+    if (
+      url ===
+      "/api/router-credentials/keys/" + renewed.profiles[provider].credential
+    )
+      return payload.detail;
+    if (url === "/api/agent-sessions/" + id) return payload.session;
+    // Communication readiness alone is stubbed; this fixture qualifies metadata
+    // projections, not communication, provider execution or live readiness.
+    if (url === "/api/agent-sessions/" + id + "/communication")
+      return { sessionId: id, status: "ready" };
+    throw Error("Unexpected captured delivery request " + url);
+  });
+  h.runner.now = () => hubObservation;
+  h.runner.profiles = renewed.profiles;
+  h.runner.effectiveExpiry = renewed.expiresAt;
+  h.runner.state.successorCredentials = renewed;
+  h.runner.run = { provider };
+  h.runner.session = { id, generation: payload.router.generation };
+  return h;
+}
+
+test("renewed delivery accepts actual 74d1 HTTP router and active-consumer detail", async () => {
+  for (const provider of ["codex", "qwen"]) {
+    const payload = hubProjection.delivery[provider];
+    const h = capturedDelivery(provider, payload);
+    await h.runner.checkDelivery();
+    assert.equal(payload.router.consumer.state, "active");
+    assert.equal(h.calls.length, 4);
+    assert(h.calls.every((c) => c.method === "GET"));
+    assert.equal(h.runner.state.operations.length, 0);
+    assert.equal(h.runner.state.evidence.length, 1);
+    assert.equal(h.runner.state.evidence[0].credentialGeneration, 2);
+    assert.equal(
+      h.runner.state.evidence[0].expiresAt,
+      Date.parse(payload.router.credential.expiresAt),
+    );
+  }
+});
+
+test("captured router responses refuse missing delivery identity and authority fields", async () => {
+  const required = {
+    connection: ["id"],
+    binding: ["revision", "generation"],
+    credential: [
+      "generation",
+      "expiresAt",
+      "remoteAcknowledged",
+      "revokeRequested",
+    ],
+    consumer: ["generation", "failureCode", "credentialExpiresAt"],
+  };
+  for (const [section, fields] of Object.entries(required)) {
+    for (const field of fields) {
+      const payload = clone(hubProjection.delivery.codex);
+      delete payload.router[section][field];
+      const h = capturedDelivery("codex", payload);
+      await assert.rejects(h.runner.checkDelivery(), /not ready|changed/);
+      assert(h.calls.every((c) => c.method === "GET"));
+      assert.equal(h.runner.state.operations.length, 0);
+      assert.equal(h.runner.state.evidence.length, 0);
+    }
+  }
+});
+
+test("renewed credential projection preserves reviewed scope and selects the earlier expiry", () => {
+  const installing = renewedFixture(),
+    ready = renewedFixture("ready");
+  const first = a.renewedCredentials(
+    installing.inventory,
+    installing.details,
+    POST_EXPIRY,
+  );
+  assert.deepEqual(
+    a.renewedCredentials(ready.inventory, ready.details, POST_EXPIRY),
+    first,
+  );
+  assert.equal(first.expiresAt, POST_EXPIRY + 3600000);
+  for (const provider of ["codex", "qwen"]) {
+    assert.equal(first.profiles[provider].generation, 2);
+    assert.equal(
+      first.profiles[provider].binding,
+      a.PROFILES[provider].binding,
+    );
+    assert.equal(
+      first.profiles[provider].definitionHash,
+      a.PROFILES[provider].definitionHash,
+    );
+    assert.equal(first.profiles[provider].run, a.PROFILES[provider].run);
+    assert.notEqual(first.profiles[provider].key, a.PROFILES[provider].key);
+    assert(Object.isFrozen(first.profiles[provider]));
+  }
+  installing.details.codex.credential.unrelated = "must-not-export";
+  assert(
+    !JSON.stringify(
+      a.renewedCredentials(
+        installing.inventory,
+        installing.details,
+        POST_EXPIRY,
+      ),
+    ).includes("must-not-export"),
+  );
+});
+
+test("renewed credential validator rejects scope drift, incomplete revocation and stale authority", () => {
+  for (const mutate of [
+    (f) => {
+      f.inventory.bindings[0].grant_spec.routes.push("other");
+    },
+    (f) => {
+      f.inventory.bindings[1].grant_spec.access = ["subscription"];
+    },
+    (f) => {
+      f.inventory.bindings[0].grant_spec.lifetimeSeconds++;
+    },
+    (f) => {
+      f.inventory.bindings[0].id = REQUEST;
+    },
+    (f) => {
+      f.inventory.bindings[0].host_id = OTHER;
+    },
+    (f) => {
+      f.inventory.bindings[0].state = "unknown";
+    },
+    (f) => {
+      f.inventory.bindings[0].canRenew = true;
+    },
+    (f) => {
+      delete f.inventory.bindings[0].canRenew;
+    },
+    (f) => {
+      f.inventory.bindings[0].current_credential_id =
+        a.PROFILES.codex.credential;
+    },
+    (f) => {
+      f.inventory.credentials[0].state = "revocation_pending";
+    },
+    (f) => {
+      f.inventory.credentials[0].cleanup_pending = true;
+    },
+    (f) => {
+      f.inventory.credentials[1].remote_acknowledged = false;
+    },
+    (f) => {
+      f.inventory.credentials[1].revoke_requested = true;
+    },
+    (f) => {
+      f.inventory.credentials[1].failure_code = "unavailable";
+    },
+    (f) => {
+      f.inventory.credentials[1].expires_at = date(POST_EXPIRY);
+    },
+    (f) => {
+      f.inventory.credentials[1].router_key_id = a.PROFILES.codex.key;
+    },
+    (f) => {
+      f.inventory.credentials[1].router_key_id = a.PROFILES.qwen.key;
+      f.details.codex.credential.routerKeyId = a.PROFILES.qwen.key;
+    },
+    (f) => {
+      f.inventory.credentials[3].router_key_id =
+        f.inventory.credentials[1].router_key_id;
+      f.details.qwen.credential.routerKeyId =
+        f.inventory.credentials[1].router_key_id;
+    },
+    (f) => {
+      f.inventory.credentials.pop();
+    },
+    (f) => {
+      f.inventory.consumers.push({ binding_id: p.binding, state: "active" });
+    },
+    (f) => {
+      f.details.codex.credential.bindingId = REQUEST;
+    },
+    (f) => {
+      f.details.codex.credential.expiresAt = date(POST_EXPIRY + 1);
+    },
+    (f) => {
+      f.details.codex.binding.pendingCredentialId = REQUEST;
+    },
+    (f) => {
+      delete f.details.codex.binding.canRenew;
+    },
+    (f) => {
+      f.details.qwen.credential.state = "unknown";
+    },
+    (f) => {
+      f.details.qwen.consumers.push({ state: "active" });
+    },
+  ]) {
+    const f = renewedFixture();
+    mutate(f);
+    assert.throws(() =>
+      a.renewedCredentials(f.inventory, f.details, POST_EXPIRY),
+    );
+  }
+  const f = renewedFixture();
+  assert.throws(
+    () => a.renewedCredentials(f.inventory, f.details, NOW),
+    /Post-expiry/,
+  );
+});
+
+test("new-principal snapshots cannot rewrite or delta against the old predecessor", () => {
+  const f = renewedFixture(),
+    current = a.renewedCredentials(f.inventory, f.details, POST_EXPIRY);
+  const old = trajectory(),
+    fresh = trajectory(POST_EXPIRY);
+  fresh.scope.principal = "key:" + current.profiles.codex.key;
+  fresh.scope.since = POST_EXPIRY;
+  assert.equal(
+    a.snapshot(fresh, "codex", a.ROUTER, current.profiles).totalAttempts,
+    0,
+  );
+  assert.throws(
+    () => a.snapshot(old, "codex", a.ROUTER, current.profiles),
+    /scope/,
+  );
+  assert.throws(() => a.snapshot(fresh, "codex"), /scope/);
+  assert.throws(() => a.delta(old, fresh, "codex", current.profiles));
+  assert.equal(
+    a.stoppedPredecessor(JSON.stringify(stoppedReport())).first.scope.principal,
+    "key:" + p.key,
+  );
+});
+
+function predecessorResponse(prior, c) {
+  assert.equal(c.method, "GET", "Replacement preflight must not dispatch work");
+  const prefix = "/api/agent-sessions/" + a.STOPPED_SESSION;
+  if (c.path === prefix + "/control") return { lease: null };
+  if (c.path.startsWith(prefix + "/operations/")) {
+    const op = prior.commands.find((o) => c.path.endsWith(o.body.operationId));
+    assert(op);
+    return {
+      command: {
+        id: OP,
+        operation_id: op.body.operationId,
+        session_id: a.STOPPED_SESSION,
+        kind: op.body.kind,
+        generation: 1,
+        state: "completed",
+        receipt: {
+          status: "completed",
+          result:
+            op.body.kind === "prompt"
+              ? { stopReason: "end_turn" }
+              : { cancelSent: true },
+        },
+      },
+    };
+  }
+  if (c.path === "/api/agent-permissions/" + a.STOPPED_PERMISSION)
+    return {
+      id: a.STOPPED_PERMISSION,
+      session_id: a.STOPPED_SESSION,
+      generation: 1,
+      state: "resolved",
+      decision: { outcome: "cancelled" },
+      context: { title: "Allow mcp__relay__relay_messages_read?" },
+    };
+  assert.equal(c.path, prefix, "Unexpected predecessor endpoint");
+  return session({ id: a.STOPPED_SESSION, state: "closed" });
+}
+
 async function replacementHarness({ drift, approval } = {}) {
   const raw = JSON.stringify(stoppedReport(), null, 2);
   const prior = a.stoppedPredecessor(raw);
   const h = harness((c) => {
-    assert.equal(
-      c.method,
-      "GET",
-      "Replacement preflight must not dispatch work",
-    );
-    let value;
-    if (c.path.endsWith("/control")) value = { lease: null };
-    else if (c.path.includes("/operations/")) {
-      const op = prior.commands.find((o) =>
-        c.path.endsWith(o.body.operationId),
-      );
-      assert(op);
-      value = {
-        command: {
-          id: OP,
-          operation_id: op.body.operationId,
-          session_id: a.STOPPED_SESSION,
-          kind: op.body.kind,
-          generation: 1,
-          state: "completed",
-          receipt: {
-            status: "completed",
-            result:
-              op.body.kind === "prompt"
-                ? { stopReason: "end_turn" }
-                : { cancelSent: true },
-          },
-        },
-      };
-    } else if (c.path.startsWith("/api/agent-permissions/"))
-      value = {
-        id: a.STOPPED_PERMISSION,
-        session_id: a.STOPPED_SESSION,
-        generation: 1,
-        state: "resolved",
-        decision: { outcome: "cancelled" },
-        context: { title: "Allow mcp__relay__relay_messages_read?" },
-      };
-    else value = session({ id: a.STOPPED_SESSION, state: "closed" });
+    const value = predecessorResponse(prior, c);
     if (drift) drift(value, c);
     return value;
   });
@@ -370,6 +836,188 @@ async function replacementHarness({ drift, approval } = {}) {
   };
   return { ...h, raw, prior };
 }
+
+async function renewalReviewHarness(options = {}) {
+  const h = await replacementHarness(options);
+  h.advance(POST_EXPIRY - NOW);
+  h.runner.env.load = () => h.raw;
+  let metadata = renewedFixture(),
+    inventories = 0,
+    confirmations = 0;
+  const originalFetch = h.runner.env.fetch,
+    originalAsk = h.runner.env.ask;
+  h.runner.env.fetch = async (path, init) => {
+    if (
+      path === "/api/router-credentials" ||
+      path.startsWith("/api/router-credentials/keys/")
+    ) {
+      assert.equal(init.method, "GET");
+      h.calls.push({ path, method: init.method, init });
+      let value;
+      if (path === "/api/router-credentials") {
+        inventories++;
+        if (options.installDuringReview && inventories === 2)
+          metadata = renewedFixture("ready");
+        value = metadata.inventory;
+      } else {
+        value = Object.values(metadata.details).find((v) =>
+          path.endsWith(v.credential.id),
+        );
+        assert(
+          value,
+          "Only selected renewed credential details may be fetched",
+        );
+      }
+      if (options.metadataDrift)
+        options.metadataDrift(metadata, inventories, path);
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify(value),
+      };
+    }
+    return originalFetch(path, init);
+  };
+  h.runner.env.ask = async (title, text, validate, timeout) => {
+    if (title === "Review already-renewed phase-A credentials") {
+      assert(timeout <= 120000);
+      assert(
+        !text.includes(a.RUN_SOURCE),
+        "Attestation must not supply its expected source",
+      );
+      assert(text.includes("OBSERVED_SOURCE_SHA"));
+      const value = {
+        confirmMetadataReview: true,
+        reportDownloaded: true,
+        operatorVerified: true,
+        deploymentVerified: true,
+        observedUtc: date(h.runner.now()),
+        hubSource: a.RUN_SOURCE,
+      };
+      if (options.bootstrap) options.bootstrap(value, h);
+      return validate(value);
+    }
+    if (title === "Confirm exact renewed credentials for all three phases") {
+      confirmations++;
+      const projection = a.renewedCredentials(
+        metadata.inventory,
+        metadata.details,
+        h.runner.now(),
+      );
+      const value = { confirmRenewedCredentials: true, ...projection };
+      if (options.confirmation) options.confirmation(value, h);
+      return validate(value);
+    }
+    return originalAsk(title, text, validate, timeout);
+  };
+  return {
+    ...h,
+    inventories: () => inventories,
+    confirmations: () => confirmations,
+  };
+}
+
+test("held module variant refuses renewal review before metadata or storage mutation", async () => {
+  const h = await renewalReviewHarness();
+  const runner = new held.Runner(h.runner.env);
+  runner.state.predecessor = { raw: h.raw };
+  await assert.rejects(runner.explicitReview(), /qualification|source/i);
+  await assert.rejects(runner.replaceStopped(), /qualified|draft/i);
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.saves.length, 0);
+});
+
+test("explicit renewed review reads twice then preserves old accounting without any mutation", async () => {
+  const h = await renewalReviewHarness({ installDuringReview: true });
+  await h.runner.explicitReview();
+  assert.equal(h.inventories(), 2);
+  assert.equal(h.confirmations(), 1);
+  assert.equal(h.calls.length, 6);
+  assert(h.calls.every((c) => c.method === "GET"));
+  assert.equal(h.runner.effectiveExpiry, POST_EXPIRY + 3600000);
+  assert.equal(h.runner.profiles.codex.generation, 2);
+  assert.equal(h.runner.state.predecessor.raw, h.raw);
+  await h.runner.replacementPreflight(h.prior);
+  assert.equal(h.calls.length, 12);
+  assert.equal(h.runner.state.replacement.carriedPrompts, 1);
+  assert.equal(h.runner.state.replacement.carriedAttempts, 2);
+  assert.equal(
+    h.runner.state.replacement.priorObservation.scope.principal,
+    "key:" + p.key,
+  );
+  assert.notEqual(h.runner.profiles.codex.key, p.key);
+  assert.equal(h.runner.state.operations.length, 0);
+});
+
+test("renewed metadata review rejects decline, deployment mismatch, timeout and second-read drift", async () => {
+  for (const options of [
+    {
+      bootstrap: (v) => {
+        v.confirmMetadataReview = false;
+      },
+    },
+    {
+      bootstrap: (v) => {
+        v.hubSource = a.SOURCE;
+      },
+    },
+    {
+      bootstrap: (v) => {
+        v.deploymentVerified = false;
+      },
+    },
+    {
+      bootstrap: (v) => {
+        v.observedUtc = date(POST_EXPIRY - 1);
+      },
+    },
+    {
+      bootstrap: (_v, h) => {
+        h.advance(120001);
+      },
+    },
+    {
+      confirmation: (v) => {
+        v.confirmRenewedCredentials = false;
+      },
+    },
+    {
+      confirmation: (_v, h) => {
+        h.advance(120001);
+      },
+    },
+    {
+      metadataDrift: (f, n) => {
+        if (n === 2) {
+          f.inventory.credentials[1].expires_at = date(POST_EXPIRY + 7000000);
+          f.details.codex.credential.expiresAt = date(POST_EXPIRY + 7000000);
+        }
+      },
+    },
+  ]) {
+    const h = await renewalReviewHarness(options);
+    await assert.rejects(h.runner.explicitReview());
+    assert.equal(h.runner.state.successorCredentials, undefined);
+    assert.equal(h.runner.effectiveExpiry, a.EXPIRES);
+    assert.equal(h.runner.state.predecessor.raw, h.raw);
+    assert(h.calls.every((c) => c.method === "GET"));
+    if (options.bootstrap) assert.equal(h.calls.length, 0);
+  }
+});
+
+test("credential refresh refuses revocation after review before a launch is dispatched", async () => {
+  const h = await renewalReviewHarness({
+    metadataDrift: (f, n) => {
+      if (n >= 3) f.inventory.credentials[1].revoke_requested = true;
+    },
+  });
+  await h.runner.explicitReview();
+  h.runner.run = { provider: "codex", deadline: POST_EXPIRY + 900000 };
+  await assert.rejects(h.runner.launch(), /credential|acknowledged/i);
+  assert(h.calls.every((c) => c.method === "GET"));
+  assert.equal(h.runner.state.operations.length, 0);
+});
 
 test("replacement preflight independently settles the predecessor using GETs and carries its budget", async () => {
   const h = await replacementHarness();
@@ -464,8 +1112,8 @@ test("replacement declines or changed closure/receipts/permission never dispatch
   }
 });
 
-test("replacement entry point preserves the exact raw predecessor even when owner declines", async () => {
-  const h = await replacementHarness({
+test("actual public entry preserves the raw predecessor when owner declines", async () => {
+  const h = await renewalReviewHarness({
     approval: (v) => {
       v.confirmReplacement = false;
     },
@@ -566,18 +1214,17 @@ test("replacement final cleanup requires the old sixth launch as well as the fiv
   assert.notEqual(missing.runner.state.finalRevocation.status, "confirmed");
 });
 
-test("mount never dispatches or writes storage and enables replacement only for the known stopped report", () => {
-  for (const [raw, eligible, savedSuccessor] of [
-    [null, false],
-    ["{invalid", false],
-    [JSON.stringify({ version: 1, status: "stopped" }), false],
-    [JSON.stringify(stoppedReport()), true],
+test("explicit disabled-holder fixture blocks replacement for every saved-report state without effects", () => {
+  for (const [raw, savedSuccessor] of [
+    [null],
+    ["{invalid"],
+    [JSON.stringify({ version: 1, status: "stopped" })],
+    [JSON.stringify(stoppedReport())],
     [
       JSON.stringify({
         ...stoppedReport(),
         predecessor: { raw: JSON.stringify(stoppedReport()) },
       }),
-      false,
       true,
     ],
   ]) {
@@ -596,7 +1243,7 @@ test("mount never dispatches or writes storage and enables replacement only for 
       return node;
     };
     const body = createElement("body");
-    a.mount({
+    holderDisabled.mount({
       location: { origin: a.ORIGIN },
       crypto: webcrypto,
       document: { createElement, body, getElementById: () => null },
@@ -631,11 +1278,18 @@ test("mount never dispatches or writes storage and enables replacement only for 
       return matches[0];
     };
     assert.equal(button("Start phase A").disabled, true);
-    assert.equal(button("Review stopped-run replacement").disabled, !eligible);
+    assert.equal(button("Review stopped-run replacement").disabled, true);
     assert.equal(button("Confirm current checkpoint").disabled, true);
     assert.equal(button("Review final grant revocation").disabled, true);
     assert.equal(body.children.length, 1);
     assert.equal(body.children[0].id, "relay-pi-acceptance-panel");
+    assert(
+      descendants(body).some(
+        (n) =>
+          n.tagName === "p" &&
+          n.textContent.includes("Holder controls are not qualified"),
+      ),
+    );
     if (savedSuccessor)
       assert(
         descendants(body).some(
@@ -653,6 +1307,26 @@ test("requiring the browser script does not dispatch work", () => {
   assert.equal(h.calls.length, 0);
   assert.equal(h.saves.length, 0);
   assert.equal(h.runner.state.completed, false);
+});
+test("explicit disabled-holder fixture rejects both entry points before storage, owner questions or requests", async () => {
+  for (const entry of ["startRun", "replaceStopped"]) {
+    const h = harness();
+    h.runner = new holderDisabled.Runner(h.runner.env);
+    const initial = clone(h.runner.state);
+    h.runner.env.load = () => {
+      throw Error("Hold must precede storage read");
+    };
+    h.runner.env.ask = () => {
+      throw Error("Hold must precede owner questions");
+    };
+    await assert.rejects(
+      h.runner[entry](true),
+      /Holder controls are not qualified/,
+    );
+    assert.deepEqual(h.runner.state, initial);
+    assert.deepEqual(h.calls, []);
+    assert.deepEqual(h.saves, []);
+  }
 });
 test("unqualified draft start refuses before network, checkpoints or saved-run mutation", async () => {
   const h = harness();
@@ -673,85 +1347,229 @@ test("unqualified draft start refuses before network, checkpoints or saved-run m
     { filename: "disabled-owner-phase-a.js", timeout: 1000 },
   );
   h.runner = new context.module.exports.Runner(h.runner.env);
+  h.runner.env.load = () => JSON.stringify(stoppedReport());
   h.runner.env.ask = () => {
     throw Error("Draft must not ask to activate");
   };
-  await assert.rejects(h.runner.start(), /draft|qualified|publication|pins/i);
+  await assert.rejects(
+    h.runner.replaceStopped(),
+    /draft|qualified|publication|pins/i,
+  );
   assert.equal(h.calls.length, 0);
   assert.equal(h.saves.length, 0);
   assert.equal(h.runner.state.completed, false);
 });
-test("qualified packet refuses absent or invalid holder handoff before any request", async () => {
-  const valid = {
+function preservingHandoffFixture() {
+  // Synthetic pins exercise the pure validator only. They are not publication
+  // evidence and never enable a Runner or replace the production pins.
+  const pins = {
+    release: "v9.9.9",
+    source: "a".repeat(40),
+    binarySha256: "b".repeat(64),
+  };
+  const report = stoppedReport();
+  const prior = report.evidence.find((e) => e.kind === "launch");
+  const value = {
     holderId: SID,
-    journalId: OTHER,
+    journalId: LEASE,
+    oldHolderId: prior.holderId,
+    oldJournalId: prior.journalId,
+    preparationId: OP,
+    stateDirectory:
+      "/home/c4/.local/state/relay-holder-handoff-44444444-4444-4444-8444-444444444444",
+    handoffReceipt: {
+      path: "/home/c4/.config/relay-holder/used-handoffs/44444444-4444-4444-8444-444444444444/complete.json",
+      sha256: "c".repeat(64),
+    },
+    observedUtc: date(NOW),
+    qualifiedRelease: pins.release,
+    holderSource: pins.source,
+    holderBinarySha256: pins.binarySha256,
+    profilesSha256: holderInputs.relay_holder_profiles_sha256,
     nativeRecovery: 2,
     nativeStateReady: true,
-    qualifiedRelease: "v0.13.1",
+    activeSessions: 0,
+    pendingCommands: 0,
+    admissionPaused: false,
+    preservedOldStateConfirmed: true,
     operatorVerified: true,
-    ...handoffHashes,
   };
-  for (const input of [
-    null,
-    {},
-    { ...valid, holderId: "unknown" },
-    { ...valid, journalId: "unknown" },
-    { ...valid, nativeRecovery: 1 },
-    { ...valid, nativeStateReady: false },
-    { ...valid, qualifiedRelease: "v0.13.0" },
-    { ...valid, operatorVerified: false },
-    { ...valid, profilesSha256: undefined },
-    { ...valid, holderBinarySha256: undefined },
-    { ...valid, profilesSha256: "0".repeat(64) },
-    {
-      ...valid,
-      profilesSha256:
-        "58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39",
-    },
-    { ...valid, holderBinarySha256: "0".repeat(64) },
-  ]) {
-    const h = harness();
-    let asked = 0;
-    h.runner.env.ask = async (title, _instructions, validate) => {
-      assert.equal(title, "Fresh patched-holder handoff");
-      asked++;
-      return validate(input);
-    };
-    await assert.rejects(h.runner.start(), /Qualified holder handoff missing/);
-    assert.equal(asked, 1);
-    assert.equal(h.calls.length, 0);
-    assert.equal(h.runner.state.operations.length, 0);
-    assert.equal(h.runner.state.runs.length, 0);
-    assert.equal(h.runner.state.completed, false);
+  return { value, prior, pins, earliest: NOW - 1000, now: NOW, report };
+}
+
+test("pure preserving handoff binds fresh identities and copies only reviewed evidence", () => {
+  for (const sameNewIds of [false, true]) {
+    for (const observed of [NOW - 1000, NOW, NOW + 5000]) {
+      const f = preservingHandoffFixture();
+      if (sameNewIds) f.value.journalId = f.value.holderId;
+      f.value.observedUtc = date(observed);
+      f.value.unreviewedField = "must not enter the receipt";
+      f.value.handoffReceipt.unreviewedField = "must not enter the receipt";
+      const before = structuredClone(f);
+      const result = a.preservingHandoff(
+        f.value,
+        f.prior,
+        f.pins,
+        f.earliest,
+        f.now,
+      );
+      assert.deepEqual(f, before, "validation must not alter prior accounting");
+      assert.equal(result.holderId, SID);
+      assert.equal(result.journalId, sameNewIds ? SID : LEASE);
+      assert.equal(result.oldHolderId, f.prior.holderId);
+      assert.equal(result.oldJournalId, f.prior.journalId);
+      assert.notEqual(result.holderId, f.prior.holderId);
+      assert.notEqual(result.journalId, f.prior.journalId);
+      assert.equal(result.preparationId, OP);
+      assert.equal(result.stateDirectory, f.value.stateDirectory);
+      assert.equal(result.observedUtc, date(observed));
+      assert.equal(result.qualifiedRelease, f.pins.release);
+      assert.equal(result.holderSource, f.pins.source);
+      assert.equal(result.holderBinarySha256, f.pins.binarySha256);
+      assert.equal(
+        result.profilesSha256,
+        holderInputs.relay_holder_profiles_sha256,
+      );
+      assert.deepEqual(result.handoffReceipt, {
+        path: f.value.handoffReceipt.path,
+        sha256: "c".repeat(64),
+      });
+      assert.notStrictEqual(result, f.value);
+      assert.notStrictEqual(result.handoffReceipt, f.value.handoffReceipt);
+      assert.equal(Object.hasOwn(result, "unreviewedField"), false);
+      assert.equal(result.nativeRecovery, 2);
+      assert.equal(result.nativeStateReady, true);
+      assert.equal(result.activeSessions, 0);
+      assert.equal(result.pendingCommands, 0);
+      assert.equal(result.admissionPaused, false);
+      assert.equal(result.preservedOldStateConfirmed, true);
+      assert.match(result.provenance, /operator-reported/);
+      assert.match(result.provenance, /not a browser host measurement/);
+      assert.match(result.provenance, /not .*a new acceptance window/);
+      result.handoffReceipt.sha256 = "d".repeat(64);
+      assert.deepEqual(f, before, "returned evidence must not alias the input");
+    }
   }
 });
-test("qualified packet keeps incarnation separate from surviving journal identity", async () => {
-  const h = harness(() => {
-    throw Error("Stop at first metadata read");
-  });
-  h.runner.env.ask = async (_title, _instructions, validate) =>
-    validate({
-      holderId: SID,
-      journalId: OTHER,
-      nativeRecovery: 2,
-      nativeStateReady: true,
-      qualifiedRelease: "v0.13.1",
-      operatorVerified: true,
-      ...handoffHashes,
-    });
-  await assert.rejects(h.runner.start(), /Stop at first metadata read/);
-  assert.equal(h.runner.holderId, SID);
-  assert.equal(h.runner.journalId, OTHER);
-  const recorded = h.runner.state.evidence.find(
-    (e) => e.kind === "operator-holder-handoff",
-  );
-  assert.equal(recorded.profilesSha256, handoffHashes.profilesSha256);
-  assert.equal(recorded.holderBinarySha256, handoffHashes.holderBinarySha256);
-  assert.match(recorded.provenance, /operator-reported/);
-  assert.equal(h.calls.length, 1);
-  assert.equal(h.calls[0].method, "GET");
-  assert.equal(h.runner.state.operations.length, 0);
-  assert.equal(h.runner.state.completed, false);
+
+test("pure preserving handoff refuses unqualified pins and drift without changing accounting", () => {
+  const cases = [
+    ["null pins", (f) => (f.pins = null)],
+    ["missing pins", (f) => (f.pins = undefined)],
+    ["empty pins", (f) => (f.pins = {})],
+    ["unversioned release", (f) => (f.pins.release = "latest")],
+    ["unqualified prerelease", (f) => (f.pins.release = "v9.9.9-rc.1")],
+    ["short source hash", (f) => (f.pins.source = "a".repeat(39))],
+    ["invalid binary hash", (f) => (f.pins.binarySha256 = "g".repeat(64))],
+    ["missing predecessor", (f) => (f.prior = null)],
+    ["invalid predecessor holder", (f) => (f.prior.holderId = "unknown")],
+    [
+      "relabelled predecessor journal",
+      (f) => (f.value.oldJournalId = f.prior.journalId = REQUEST),
+    ],
+    ["inverted observation window", (f) => (f.earliest = f.now + 1)],
+    ["nonfinite earliest", (f) => (f.earliest = NaN)],
+    ["nonfinite current clock", (f) => (f.now = Infinity)],
+    ["null handoff", (f) => (f.value = null)],
+    ["missing handoff", (f) => (f.value = undefined)],
+    ["empty handoff", (f) => (f.value = {})],
+    ["array handoff", (f) => (f.value = [])],
+    ["missing preparation", (f) => delete f.value.preparationId],
+    ["invalid preparation", (f) => (f.value.preparationId = "unknown")],
+    ["other preparation", (f) => (f.value.preparationId = REQUEST)],
+    ["changed old holder", (f) => (f.value.oldHolderId = SID)],
+    ["changed old journal", (f) => (f.value.oldJournalId = OTHER)],
+    ["missing old holder", (f) => delete f.value.oldHolderId],
+    ["missing old journal", (f) => delete f.value.oldJournalId],
+    ["invalid new holder", (f) => (f.value.holderId = "unknown")],
+    ["invalid new journal", (f) => (f.value.journalId = "unknown")],
+    ["reused old holder", (f) => (f.value.holderId = f.prior.holderId)],
+    ["reused old journal", (f) => (f.value.journalId = f.prior.journalId)],
+    [
+      "old state directory",
+      (f) => (f.value.stateDirectory = "/home/c4/.local/state/relay-holder"),
+    ],
+    ["state path alias", (f) => (f.value.stateDirectory += "/")],
+    [
+      "state in another root",
+      (f) => (f.value.stateDirectory = "/tmp/relay-holder-handoff-" + OP),
+    ],
+    ["missing receipt", (f) => delete f.value.handoffReceipt],
+    ["null receipt", (f) => (f.value.handoffReceipt = null)],
+    [
+      "another preparation receipt",
+      (f) =>
+        (f.value.handoffReceipt.path =
+          "/home/c4/.config/relay-holder/used-handoffs/" +
+          REQUEST +
+          "/complete.json"),
+    ],
+    [
+      "receipt path alias",
+      (f) => (f.value.handoffReceipt.path += "/../complete.json"),
+    ],
+    ["missing receipt hash", (f) => delete f.value.handoffReceipt.sha256],
+    [
+      "short receipt hash",
+      (f) => (f.value.handoffReceipt.sha256 = "c".repeat(63)),
+    ],
+    [
+      "invalid receipt hash",
+      (f) => (f.value.handoffReceipt.sha256 = "g".repeat(64)),
+    ],
+    ["missing observation", (f) => delete f.value.observedUtc],
+    ["invalid observation", (f) => (f.value.observedUtc = "unknown")],
+    ["stale observation", (f) => (f.value.observedUtc = date(f.earliest - 1))],
+    ["future observation", (f) => (f.value.observedUtc = date(f.now + 5001))],
+    ["different release", (f) => (f.value.qualifiedRelease = "v9.9.8")],
+    ["different source", (f) => (f.value.holderSource = "d".repeat(40))],
+    ["missing binary hash", (f) => delete f.value.holderBinarySha256],
+    ["different binary", (f) => (f.value.holderBinarySha256 = "d".repeat(64))],
+    ["missing profile hash", (f) => delete f.value.profilesSha256],
+    ["different profiles", (f) => (f.value.profilesSha256 = "d".repeat(64))],
+    [
+      "historical revision-three profiles",
+      (f) =>
+        (f.value.profilesSha256 =
+          "58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39"),
+    ],
+    ["old recovery protocol", (f) => (f.value.nativeRecovery = 1)],
+    ["string recovery protocol", (f) => (f.value.nativeRecovery = "2")],
+    ["unready native state", (f) => (f.value.nativeStateReady = false)],
+    ["active session", (f) => (f.value.activeSessions = 1)],
+    ["string active count", (f) => (f.value.activeSessions = "0")],
+    ["pending command", (f) => (f.value.pendingCommands = 1)],
+    ["missing pending count", (f) => delete f.value.pendingCommands],
+    ["paused admission", (f) => (f.value.admissionPaused = true)],
+    [
+      "unconfirmed preserved state",
+      (f) => (f.value.preservedOldStateConfirmed = false),
+    ],
+    [
+      "missing preserved-state confirmation",
+      (f) => delete f.value.preservedOldStateConfirmed,
+    ],
+    ["unverified operator", (f) => (f.value.operatorVerified = false)],
+    [
+      "string operator confirmation",
+      (f) => (f.value.operatorVerified = "true"),
+    ],
+  ];
+  for (const [name, mutate] of cases) {
+    const f = preservingHandoffFixture();
+    mutate(f);
+    const before = structuredClone(f);
+    assert.throws(
+      () => a.preservingHandoff(f.value, f.prior, f.pins, f.earliest, f.now),
+      /inputs are not qualified|observation window changed|handoff missing or changed/,
+      name,
+    );
+    assert.deepEqual(
+      f,
+      before,
+      name + " must not change prior evidence/accounting",
+    );
+  }
 });
 test("profile hashes bind reviewed definitions after deployed schema defaults", async () => {
   const definitions = JSON.parse(
@@ -800,7 +1618,7 @@ test("mutation is persisted before a lost response and cannot silently restart",
   assert.equal(h.saves.at(-1).operations[0].status, "uncertain");
   assert.equal(h.saves.at(-1).operations[0].body.operationId, OP);
   h.runner.env.load = () => JSON.stringify(h.saves.at(-1));
-  await assert.rejects(h.runner.start(), /saved run/);
+  await assert.rejects(h.runner.start(), /original stopped report|fresh-start/);
   assert.equal(h.calls.length, 1);
 });
 test("operation lookup preserves ID and refuses null or mismatched receipts", async () => {
@@ -2089,8 +2907,17 @@ function phaseServer({
   configurationNotice = "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used.",
   clocksWithin5s = true,
   approvedRevision = 1,
+  renewal = null,
+  preloadRenewal = true,
+  holderId = a.HOLDER,
+  journalId = a.HOLDER,
 } = {}) {
-  let clock = NOW,
+  const projection =
+    renewal &&
+    a.renewedCredentials(renewal.inventory, renewal.details, POST_EXPIRY);
+  const profiles = projection ? projection.profiles : a.PROFILES;
+  let clock = renewal ? POST_EXPIRY : NOW,
+    trajectorySince = clock,
     serial = 100,
     sequence = 0;
   const sessions = new Map(),
@@ -2098,9 +2925,33 @@ function phaseServer({
     commands = new Map(),
     permissions = new Map();
   const calls = [],
+    saves = [],
     checkpoints = [],
     attempts = [],
+    consumerReads = [],
     effects = new Map();
+  function consumerRows() {
+    return [...sessions.values()].map((s) => {
+      const pp = profiles[s.provider];
+      return {
+        id: s.id,
+        binding_id: pp.binding,
+        credential_id: pp.credential,
+        generation: pp.generation,
+        kind: "holder-session",
+        host_id: HOST,
+        execution_identity: "c4",
+        state: s.state === "closed" ? "released" : "active",
+        failure_code: null,
+        created_at: date(clock),
+        last_used_at: date(clock),
+        lease_expires_at: date(clock + 60000),
+        ended_at: s.state === "closed" ? date(clock) : null,
+        retire_after: null,
+        unobserved: false,
+      };
+    });
+  }
   const id = () =>
     `00000000-0000-4000-8000-${String(++serial).padStart(12, "0")}`;
   const definitions = JSON.parse(
@@ -2113,9 +2964,9 @@ function phaseServer({
       maxWakesPerHour: 10,
       maxCausalHops: 4,
     });
-  const profile = (sid) => a.PROFILES[sessions.get(sid).provider];
+  const profile = (sid) => profiles[sessions.get(sid).provider];
   function observeTrajectory(provider) {
-    const pp = a.PROFILES[provider],
+    const pp = profiles[provider],
       rows = attempts.filter((r) => r.route === "canary-pi-" + provider);
     clock += 10;
     return {
@@ -2126,7 +2977,7 @@ function phaseServer({
         namespace: "default",
         principal: "key:" + pp.key,
         route: "canary-pi-" + provider,
-        since: NOW,
+        since: trajectorySince,
       },
       requestedAt: clock,
       observedAt: clock + 1,
@@ -2140,7 +2991,7 @@ function phaseServer({
     return {
       version: 1,
       provider,
-      profileId: a.PROFILES[provider].id,
+      profileId: profiles[provider].id,
       runId,
       phase,
       state: "observed",
@@ -2227,7 +3078,7 @@ function phaseServer({
       clock += ms;
     },
     load: () => null,
-    save: () => {},
+    save: (state) => saves.push(clone(state)),
     ask: async (title, instructions, validate) => {
       checkpoints.push(title);
       clock += 20;
@@ -2291,7 +3142,16 @@ function phaseServer({
         body: body && clone(body),
       });
       let result;
-      if (pathName === "/api/agent-profiles")
+      if (pathName === "/api/router-credentials" && renewal) {
+        result = {
+          ...renewal.inventory,
+          consumers: [...renewal.inventory.consumers, ...consumerRows()],
+        };
+        consumerReads.push({
+          path: pathName,
+          consumers: clone(result.consumers),
+        });
+      } else if (pathName === "/api/agent-profiles")
         result = definitions.map((d) => ({
           id: d.holder.id,
           revision: approvedRevision,
@@ -2311,11 +3171,9 @@ function phaseServer({
         }
         const provider =
           previous?.provider ||
-          Object.keys(a.PROFILES).find(
-            (k) => a.PROFILES[k].id === body.profileId,
-          );
+          Object.keys(profiles).find((k) => profiles[k].id === body.profileId);
         assert(provider);
-        const pp = a.PROFILES[provider];
+        const pp = profiles[provider];
         const sid = id(),
           native = previous?.native || id();
         const s = {
@@ -2338,8 +3196,8 @@ function phaseServer({
           cwd: "/home/c4/.local/state/relay-holder/workspaces/" + pp.id,
           state: "pending",
           session_id: sid,
-          holder_id: a.HOLDER,
-          holder_journal_id: a.HOLDER,
+          holder_id: holderId,
+          holder_journal_id: journalId,
           native_recovery_version: 2,
           expires_at: date(clock + 120000),
           resume_from: previous?.id || null,
@@ -2363,20 +3221,49 @@ function phaseServer({
         } else l.state = "offered";
         result = launches;
       } else if (pathName.startsWith("/api/router-credentials/keys/")) {
-        const pp = Object.values(a.PROFILES).find(
+        const pp = Object.values(profiles).find(
           (x) => x.credential === pathName.split("/").at(-1),
         );
         assert(pp);
-        result = {
-          credential: {
-            id: pp.credential,
-            bindingId: pp.binding,
-            routerKeyId: pp.key,
-            namespace: "default",
-            state: "ready",
-          },
-          binding: { currentCredentialId: pp.credential },
-        };
+        result = renewal
+          ? Object.values(renewal.details).find(
+              (v) => v.credential.id === pp.credential,
+            )
+          : {
+              credential: {
+                id: pp.credential,
+                bindingId: pp.binding,
+                routerKeyId: pp.key,
+                namespace: "default",
+                state: "ready",
+              },
+              binding: { currentCredentialId: pp.credential },
+            };
+        if (renewal) {
+          result = {
+            ...result,
+            consumers: [
+              ...result.consumers,
+              ...consumerRows()
+                .filter((c) => c.credential_id === pp.credential)
+                .map((c) => ({
+                  id: c.id,
+                  kind: c.kind,
+                  generation: c.generation,
+                  state: c.state,
+                  failureCode: c.failure_code,
+                  createdAt: c.created_at,
+                  lastUsedAt: c.last_used_at,
+                  leaseExpiresAt: c.lease_expires_at,
+                  endedAt: c.ended_at,
+                })),
+            ],
+          };
+          consumerReads.push({
+            path: pathName,
+            consumers: clone(result.consumers),
+          });
+        }
       } else if (pathName.startsWith("/api/agent-permissions/")) {
         const req = permissions.get(pathName.split("/")[3]);
         assert(req);
@@ -2422,17 +3309,41 @@ function phaseServer({
           result = {
             sessionId: sid,
             generation: 1,
-            connection: { enabled: true },
-            binding: { id: pp.binding, enabled: true, state: "ready" },
-            credential: { id: pp.credential, state: "ready" },
+            connection: {
+              enabled: true,
+              ...(renewal ? { id: pp.connection } : {}),
+            },
+            binding: {
+              id: pp.binding,
+              enabled: true,
+              state: "ready",
+              ...(renewal
+                ? { revision: pp.revision, generation: pp.generation }
+                : {}),
+            },
+            credential: {
+              id: pp.credential,
+              state: "ready",
+              ...(renewal
+                ? {
+                    generation: pp.generation,
+                    expiresAt: date(pp.expiresAt),
+                    remoteAcknowledged: true,
+                    revokeRequested: false,
+                  }
+                : {}),
+            },
             consumer: {
               credentialId: pp.credential,
               state: "active",
               credentialState: "ready",
               remoteAcknowledged: true,
               revokeRequested: false,
-              credentialExpiresAt: date(a.EXPIRES),
+              credentialExpiresAt: date(renewal ? pp.expiresAt : a.EXPIRES),
               leaseExpiresAt: date(clock + 60000),
+              ...(renewal
+                ? { generation: pp.generation, failureCode: null }
+                : {}),
             },
           };
         else if (tail === "communication")
@@ -2620,6 +3531,11 @@ function phaseServer({
       };
     },
   });
+  if (projection && preloadRenewal) {
+    runner.profiles = projection.profiles;
+    runner.effectiveExpiry = projection.expiresAt;
+    runner.state.successorCredentials = projection;
+  }
   return {
     runner,
     calls,
@@ -2630,8 +3546,539 @@ function phaseServer({
     checkpoints,
     effects,
     attempts,
+    consumerReads,
+    saves,
+    advance: (ms) => {
+      clock += ms;
+    },
+    setTrajectorySince: (since) => {
+      trajectorySince = since;
+    },
   };
 }
+
+function publicReplacementHarness({
+  mutateHandoff,
+  expireDuringHandoff = false,
+  refuseDelivery = false,
+} = {}) {
+  const renewal = renewedFixture("ready");
+  const f = phaseServer({
+    renewal,
+    preloadRenewal: false,
+    // Independently supplied server identities, never read back from Runner.
+    // A new root can legitimately have equal incarnation and journal UUIDs.
+    holderId: SID,
+    journalId: SID,
+  });
+  const raw = JSON.stringify(stoppedReport(), null, 2);
+  const prior = a.stoppedPredecessor(raw);
+  const trace = [],
+    entry = {};
+  const fetch = f.runner.env.fetch,
+    ask = f.runner.env.ask;
+  f.runner.env.load = () => raw;
+  f.runner.env.fetch = async (url, init) => {
+    const c = {
+      path: new URL(url, a.ORIGIN).pathname,
+      method: init.method,
+      body: init.body && JSON.parse(init.body),
+    };
+    trace.push({ kind: "request", ...c });
+    if (
+      c.path.startsWith("/api/agent-sessions/" + a.STOPPED_SESSION) ||
+      c.path.startsWith("/api/agent-permissions/" + a.STOPPED_PERMISSION)
+    ) {
+      f.calls.push(c);
+      f.advance(5);
+      const result = predecessorResponse(prior, c);
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => "application/json" },
+        text: async () => JSON.stringify(result),
+      };
+    }
+    return fetch(url, init);
+  };
+  f.runner.env.ask = async (title, instructions, validate, timeout) => {
+    const accept = (value) => {
+      const result = validate(value);
+      trace.push({ kind: "checkpoint-accepted", title });
+      return result;
+    };
+    let value;
+    if (title === "Review already-renewed phase-A credentials") {
+      assert.equal(f.runner.state.successorCredentials, undefined);
+      assert(timeout <= 120000);
+      value = {
+        confirmMetadataReview: true,
+        reportDownloaded: true,
+        operatorVerified: true,
+        deploymentVerified: true,
+        observedUtc: date(f.runner.now()),
+        hubSource: a.RUN_SOURCE,
+      };
+    } else if (
+      title === "Confirm exact renewed credentials for all three phases"
+    ) {
+      value = {
+        confirmRenewedCredentials: true,
+        ...a.renewedCredentials(
+          renewal.inventory,
+          renewal.details,
+          f.runner.now(),
+        ),
+      };
+    } else if (
+      title === "Assign one bounded replacement for the stopped Codex run"
+    ) {
+      f.advance(6000);
+      const rows = ["338869f5-complete", "811cab9f-cancelled"].map((id, i) => ({
+        ...trajectoryRow(),
+        id,
+        status: i ? "cancelled" : "complete",
+        startedAt: NOW - 50 + i,
+        endedAt: NOW - 20 + i,
+      }));
+      value = {
+        confirmReplacement: true,
+        reportDownloaded: true,
+        operatorVerified: true,
+        priorReportCanonicalSha256: f.runner.state.predecessor.canonicalSha256,
+        windowStartUtc: date(f.runner.now()),
+        windowEndUtc: date(f.runner.now() + 900000),
+        trajectory: trajectory(f.runner.now(), rows),
+        marker: { ...marker(), observedUtc: date(f.runner.now()) },
+      };
+      entry.window = {
+        start: Date.parse(value.windowStartUtc),
+        deadline: Date.parse(value.windowEndUtc),
+      };
+    } else if (title === "Fresh preserving-holder handoff") {
+      f.advance(expireDuringHandoff ? 900001 : 20);
+      value = {
+        holderId: SID,
+        journalId: SID,
+        oldHolderId: prior.launch.holderId,
+        oldJournalId: prior.launch.journalId,
+        preparationId: OP,
+        stateDirectory: "/home/c4/.local/state/relay-holder-handoff-" + OP,
+        handoffReceipt: {
+          path:
+            "/home/c4/.config/relay-holder/used-handoffs/" +
+            OP +
+            "/complete.json",
+          sha256: "c".repeat(64),
+        },
+        observedUtc: date(f.runner.now()),
+        qualifiedRelease: PUBLISHED_HOLDER_TEST_PINS.release,
+        holderSource: PUBLISHED_HOLDER_TEST_PINS.source,
+        holderBinarySha256: PUBLISHED_HOLDER_TEST_PINS.binarySha256,
+        profilesSha256: holderInputs.relay_holder_profiles_sha256,
+        nativeRecovery: 2,
+        nativeStateReady: true,
+        activeSessions: 0,
+        pendingCommands: 0,
+        admissionPaused: false,
+        preservedOldStateConfirmed: true,
+        operatorVerified: true,
+      };
+      if (mutateHandoff) mutateHandoff(value, f);
+      entry.handoff = clone(value);
+      // The fresh principal/window starts after the old accounting observation.
+      f.setTrajectorySince(f.runner.now());
+    } else {
+      return ask(
+        title,
+        instructions,
+        (result) =>
+          accept(
+            refuseDelivery && title.startsWith("Open complete:")
+              ? { ...result, deliveryConfirmed: false }
+              : result,
+          ),
+        timeout,
+      );
+    }
+    f.checkpoints.push(title);
+    return accept(value);
+  };
+  assert.equal(Object.getPrototypeOf(f.runner), a.Runner.prototype);
+  assert.equal(f.runner.state.predecessor, undefined);
+  assert.equal(f.runner.state.replacement, undefined);
+  assert.equal(f.runner.state.successorCredentials, undefined);
+  return { ...f, raw, prior, trace, entry };
+}
+
+test("actual public replacement uses published holder pins through all phases without resetting history", async () => {
+  const f = publicReplacementHarness();
+  await f.runner.replaceStopped();
+  assert.equal(f.runner.state.status, "phase-a-passed");
+  assert.equal(f.runner.state.phaseACompleted, true);
+  assert.equal(f.runner.state.completed, false);
+  assert.equal(f.runner.state.predecessor.raw, f.raw);
+  assert.equal(
+    f.runner.state.predecessor.canonicalSha256,
+    await a.digest(webcrypto, JSON.parse(f.raw)),
+  );
+  assert(f.saves.length > 0);
+  assert(f.saves.every((s) => s.predecessor.raw === f.raw));
+  const replacement = f.runner.state.replacement;
+  assert.equal(replacement.carriedPrompts, 1);
+  assert.equal(replacement.carriedAttempts, 2);
+  assert.equal(replacement.originalDeadline, f.prior.run.deadline);
+  assert.equal(replacement.start, f.entry.window.start);
+  assert.equal(replacement.deadline, f.entry.window.deadline);
+  assert.equal(f.runner.state.runs[0].deadline, f.entry.window.deadline);
+  assert(replacement.deadline <= f.runner.effectiveExpiry);
+  const handoffs = f.runner.state.evidence.filter(
+    (e) => e.kind === "operator-holder-handoff",
+  );
+  assert.equal(handoffs.length, 1);
+  assert.equal(f.entry.handoff.operatorVerified, true);
+  // The validator requires this input attestation but saves only its documented
+  // projection and provenance; it does not copy arbitrary input fields.
+  for (const key of [
+    "holderId",
+    "journalId",
+    "oldHolderId",
+    "oldJournalId",
+    "preparationId",
+    "stateDirectory",
+    "handoffReceipt",
+    "observedUtc",
+    "qualifiedRelease",
+    "holderSource",
+    "profilesSha256",
+    "holderBinarySha256",
+    "nativeRecovery",
+    "nativeStateReady",
+    "activeSessions",
+    "pendingCommands",
+    "admissionPaused",
+    "preservedOldStateConfirmed",
+  ])
+    assert.deepEqual(handoffs[0][key], f.entry.handoff[key]);
+  assert.equal(handoffs[0].operatorVerified, undefined);
+  assert.equal(
+    handoffs[0].provenance,
+    "operator-reported installed hashes, receipt and fresh hello; not a browser host measurement or a new acceptance window",
+  );
+  assert.equal(f.runner.holderId, SID);
+  assert.equal(f.runner.journalId, SID);
+  assert.equal(f.launches.length, 5);
+  assert.equal(f.launches.filter((l) => l.resume_from).length, 2);
+  assert(
+    f.launches.every((l) => l.holder_id === SID && l.holder_journal_id === SID),
+  );
+  assert.deepEqual(
+    f.runner.state.runs.map((r) => [r.provider, r.effort, r.prompts]),
+    [
+      ["codex", false, 12],
+      ["qwen", false, 11],
+      ["codex", true, 4],
+    ],
+  );
+  assert.equal(f.runner.state.runs[0].carriedAttempts, 2);
+  assert(
+    f.runner.state.runs.every(
+      (r) => r.status === "passed-with-live-wire-unobserved",
+    ),
+  );
+  assert(
+    f.runner.state.runs[0].firstSnapshot.scope.since >
+      replacement.priorObservation.observedAt,
+  );
+  assert.equal(replacement.priorObservation.scope.principal, "key:" + p.key);
+  assert.equal(
+    f.runner.state.runs[0].firstSnapshot.scope.principal,
+    "key:" + f.runner.profiles.codex.key,
+  );
+  const deliveries = f.runner.state.evidence.filter(
+    (e) => e.kind === "delivery",
+  );
+  assert(deliveries.length >= 5);
+  assert(deliveries.every((e) => e.credentialGeneration === 2));
+  assert(
+    [...f.sessions.values()].every(
+      (s) => s.state === "closed" && s.lease === null,
+    ),
+  );
+  assert.equal(f.effects.get(a.PROFILES.codex.run), 1);
+  assert.equal(f.effects.get(a.PROFILES.qwen.run), 1);
+  const handoffAt = f.trace.findIndex(
+    (e) => e.title === "Fresh preserving-holder handoff",
+  );
+  const launchAt = f.trace.findIndex(
+    (e) => e.method === "POST" && e.path === "/api/agent-launches",
+  );
+  const deliveryAt = f.trace.findIndex(
+    (e) => e.title === "Open complete: verify delivery before prompting",
+  );
+  const promptAt = f.trace.findIndex(
+    (e) => e.method === "POST" && e.body?.kind === "prompt",
+  );
+  assert(
+    handoffAt >= 0 &&
+      handoffAt < launchAt &&
+      launchAt < deliveryAt &&
+      deliveryAt < promptAt,
+  );
+});
+
+test("actual public replacement refuses changed handoff pins, identity, provenance and expired window before dispatch", async () => {
+  for (const [name, options, expected] of [
+    [
+      "old holder release",
+      {
+        mutateHandoff: (v) => {
+          v.qualifiedRelease = "v0.13.1";
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "wrong source",
+      {
+        mutateHandoff: (v) => {
+          v.holderSource = "a".repeat(40);
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "wrong binary",
+      {
+        mutateHandoff: (v) => {
+          v.holderBinarySha256 = "b".repeat(64);
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "old incarnation",
+      {
+        mutateHandoff: (v) => {
+          v.holderId = v.oldHolderId;
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "old journal",
+      {
+        mutateHandoff: (v) => {
+          v.journalId = v.oldJournalId;
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "different preparation receipt",
+      {
+        mutateHandoff: (v) => {
+          v.handoffReceipt.path = v.handoffReceipt.path.replace(OP, REQUEST);
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "stale observation",
+      {
+        mutateHandoff: (v, f) => {
+          v.observedUtc = date(f.runner.now() - 120000);
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "unready native state",
+      {
+        mutateHandoff: (v) => {
+          v.nativeStateReady = false;
+        },
+      },
+      /handoff missing or changed/,
+    ],
+    [
+      "expired owner window",
+      { expireDuringHandoff: true },
+      /Replacement window expired/,
+    ],
+  ]) {
+    const f = publicReplacementHarness(options);
+    await assert.rejects(f.runner.replaceStopped(), expected, name);
+    assert(f.calls.length > 0, name);
+    assert(
+      f.calls.every((c) => c.method === "GET"),
+      name,
+    );
+    assert.equal(f.launches.length, 0, name);
+    assert.equal(f.attempts.length, 0, name);
+    assert.equal(f.runner.state.predecessor.raw, f.raw, name);
+    assert.equal(
+      f.runner.state.predecessor.canonicalSha256,
+      await a.digest(webcrypto, JSON.parse(f.raw)),
+      name,
+    );
+    assert(
+      f.saves.every((s) => s.predecessor.raw === f.raw),
+      name,
+    );
+    assert.equal(f.runner.state.replacement.carriedPrompts, 1, name);
+    assert.equal(f.runner.state.replacement.carriedAttempts, 2, name);
+    assert.equal(
+      f.runner.state.replacement.deadline,
+      f.entry.window.deadline,
+      name,
+    );
+    assert.equal(f.runner.state.status, "stopped", name);
+    assert.equal(f.runner.state.completed, false, name);
+  }
+});
+
+test("actual public replacement never prompts when the post-Open delivery handoff is refused", async () => {
+  const f = publicReplacementHarness({ refuseDelivery: true });
+  await assert.rejects(f.runner.replaceStopped(), /Delivery handoff missing/);
+  assert.equal(f.launches.length, 1);
+  assert.equal(f.attempts.length, 0);
+  assert(
+    !f.calls.some(
+      (c) =>
+        c.method === "POST" &&
+        (c.body?.kind === "prompt" || c.path.includes("/agent-permissions/")),
+    ),
+  );
+  assert(
+    [...f.sessions.values()].every(
+      (s) => s.state === "closed" && s.lease === null,
+    ),
+  );
+  assert.equal(f.runner.state.predecessor.raw, f.raw);
+  assert.equal(f.runner.state.replacement.carriedPrompts, 1);
+  assert.equal(f.runner.state.replacement.carriedAttempts, 2);
+  assert.equal(f.runner.state.replacement.deadline, f.entry.window.deadline);
+  assert.equal(f.runner.state.status, "stopped");
+});
+
+test("renewed generation two runs all three phases with fresh principals and historical budget carried", async () => {
+  const renewal = renewedFixture("ready"),
+    f = phaseServer({ renewal });
+  f.runner.state.predecessor = { raw: JSON.stringify(stoppedReport()) };
+  f.runner.state.replacement = {
+    deadline: POST_EXPIRY + 900000,
+    carriedPrompts: 1,
+    carriedAttempts: 2,
+    priorObservation: trajectory(POST_EXPIRY - 100),
+    marker: marker(),
+  };
+  await f.runner.phase("codex");
+  await f.runner.phase("qwen");
+  await f.runner.phase("codex", true);
+  assert.deepEqual(
+    f.runner.state.runs.map((r) => [r.provider, r.effort, r.prompts]),
+    [
+      ["codex", false, 12],
+      ["qwen", false, 11],
+      ["codex", true, 4],
+    ],
+  );
+  assert.equal(f.runner.state.runs[0].carriedAttempts, 2);
+  assert.equal(f.launches.length, 5);
+  assert.equal(f.launches.filter((l) => l.resume_from).length, 2);
+  assert(
+    f.consumerReads.some((r) => r.consumers.some((c) => c.state === "active")),
+  );
+  const refreshes = f.consumerReads.filter(
+    (r) => r.path === "/api/router-credentials",
+  );
+  assert(refreshes.some((r) => r.consumers.length > 0));
+  assert(
+    refreshes.every((r) => r.consumers.every((c) => c.state === "released")),
+  );
+  assert.equal(f.effects.get(a.PROFILES.codex.run), 1);
+  assert.equal(f.effects.get(a.PROFILES.qwen.run), 1);
+  for (const run of f.runner.state.runs) {
+    assert.equal(run.status, "passed-with-live-wire-unobserved");
+    assert.equal(
+      run.firstSnapshot.scope.principal,
+      "key:" + f.runner.profiles[run.provider].key,
+    );
+  }
+  assert(
+    f.runner.state.evidence
+      .filter((e) => e.kind === "delivery")
+      .every((e) => e.credentialGeneration === 2),
+  );
+  assert(
+    f.calls.filter((c) => c.path === "/api/router-credentials").length >= 5,
+  );
+  assert(
+    [...f.sessions.values()].every(
+      (s) => s.state === "closed" && s.lease === null,
+    ),
+  );
+  assert.equal(f.runner.state.completed, false);
+});
+
+test("renewed delivery refuses a stale consumer generation before a prompt", async () => {
+  const f = phaseServer({ renewal: renewedFixture("ready") });
+  const fetch = f.runner.env.fetch;
+  f.runner.env.fetch = async (url, init) => {
+    const response = await fetch(url, init);
+    if (!url.endsWith("/router")) return response;
+    const value = JSON.parse(await response.text());
+    value.consumer.generation = 1;
+    return { ...response, text: async () => JSON.stringify(value) };
+  };
+  await assert.rejects(
+    f.runner.phase("codex"),
+    /Credential\/principal changed/,
+  );
+  assert.equal(f.calls.filter((c) => c.body?.kind === "prompt").length, 0);
+});
+
+test("renewed refresh refuses owned-open, unrelated and wrong-generation active consumers", async () => {
+  for (const variant of [
+    "owned-open",
+    "unrelated",
+    "wrong-generation",
+    "detail-only",
+  ]) {
+    const renewal = renewedFixture("ready");
+    const f = phaseServer({ renewal });
+    await f.runner.phase("codex");
+    const old = [...f.sessions.values()][0];
+    assert.equal(old.state, "closed");
+    assert(f.launches.some((l) => l.resume_from === old.id));
+    const pp = f.runner.profiles.codex;
+    const consumer = {
+      id: OTHER,
+      binding_id: pp.binding,
+      credential_id: pp.credential,
+      generation: variant === "wrong-generation" ? 1 : pp.generation,
+      kind: "holder-session",
+      state: "active",
+    };
+    if (variant === "owned-open") old.state = "open";
+    else if (variant === "detail-only")
+      renewal.details.codex.consumers.push(consumer);
+    else renewal.inventory.consumers.push(consumer);
+    const before = f.calls.length;
+    await assert.rejects(
+      f.runner.refreshRenewedCredentials(),
+      /still active|detail changed or is incomplete/,
+      variant,
+    );
+    assert(f.calls.slice(before).every((c) => c.method === "GET"));
+    assert.equal(
+      f.launches.length,
+      2,
+      "No extra recovery or launch on refusal",
+    );
+  }
+});
 
 test("full lifecycle phase crosses queued hub contracts through recovery without hidden mutations", async () => {
   for (const provider of ["codex", "qwen"]) {
@@ -2827,22 +4274,40 @@ test("unverified observer clock bound stops phase before the first launch", asyn
 });
 
 function finalRevocationServer(options = {}) {
+  const renewed =
+    options.renewal &&
+    a.renewedCredentials(
+      options.renewal.inventory,
+      options.renewal.details,
+      POST_EXPIRY,
+    );
+  const profiles = renewed ? renewed.profiles : a.PROFILES;
+  const reviewRevision = renewed ? renewed.profiles.codex.revision : 3;
   let serial = 500;
   const uid = () =>
     `00000000-0000-4000-8000-${String(++serial).padStart(12, "0")}`;
-  const rows = Object.entries(a.PROFILES).map(([provider, pp]) => ({
+  const rows = Object.entries(profiles).map(([provider, pp]) => ({
     provider,
     pp,
     binding: {
       id: pp.binding,
       host_id: HOST,
       execution_identity: "c4",
-      revision: 3,
+      revision: reviewRevision,
       generation: 2,
       enabled: true,
       state: "ready",
       current_credential_id: pp.credential,
       pending_credential_id: null,
+      ...(renewed
+        ? {
+            canRenew: false,
+            connection_id: pp.connection,
+            grant_spec: options.renewal.inventory.bindings.find(
+              (b) => b.id === pp.binding,
+            ).grant_spec,
+          }
+        : {}),
     },
     credentials: [
       {
@@ -2879,7 +4344,7 @@ function finalRevocationServer(options = {}) {
         (r) => c.path === "/api/router-credentials/" + r.pp.binding + "/revoke",
       );
       assert(row);
-      assert.equal(c.body.revision, 3);
+      assert.equal(c.body.revision, reviewRevision);
       const saved = saves.at(-1).finalRevocation.intents.at(-1);
       assert.deepEqual(saved.body, c.body);
       assert.equal(saved.status, "sending");
@@ -2906,7 +4371,11 @@ function finalRevocationServer(options = {}) {
       },
       binding: {
         id: row.pp.binding,
-        revision: revoked ? (options.changedRevision ? 6 : 4) : 3,
+        revision: revoked
+          ? options.changedRevision
+            ? 6
+            : reviewRevision + 1
+          : reviewRevision,
         generation: 2,
         enabled: !revoked,
         state: revoked ? "revoked" : "ready",
@@ -2928,6 +4397,12 @@ function finalRevocationServer(options = {}) {
     };
   });
   const r = h.runner;
+  if (renewed) {
+    h.advance(POST_EXPIRY - NOW);
+    r.profiles = renewed.profiles;
+    r.effectiveExpiry = renewed.expiresAt;
+    r.state.successorCredentials = renewed;
+  }
   r.state.status = "phase-a-passed";
   r.state.runs = ["codex", "qwen", "codex"].map((provider, i) => ({
     provider,
@@ -2967,7 +4442,7 @@ function finalRevocationServer(options = {}) {
       const targets = rows.map((row) => ({
         provider: row.provider,
         bindingId: row.pp.binding,
-        revision: 3,
+        revision: reviewRevision,
         generations: row.credentials.map((c) => ({
           id: c.id,
           generation: c.generation,
@@ -2990,8 +4465,11 @@ function finalRevocationServer(options = {}) {
         launchId: l.id,
         sessionId: l.sessionId,
         bindingId: row.pp.binding,
-        credentialId: row.pp.credential,
-        generation: 2,
+        credentialId:
+          l.sessionId === a.STOPPED_SESSION
+            ? a.PROFILES.codex.credential
+            : row.pp.credential,
+        generation: l.sessionId === a.STOPPED_SESSION ? 1 : 2,
         commandId: uid(),
         cleanedAt: date(
           options.staleRenderer
@@ -3037,6 +4515,26 @@ function finalRevocationServer(options = {}) {
     rendererChecks: () => rendererChecks,
   };
 }
+test("renewed final revocation uses the reviewed new keys and retains the predecessor sixth cleanup", async () => {
+  const h = finalRevocationServer({
+    renewal: renewedFixture("ready"),
+    predecessor: stoppedReport(),
+  });
+  await h.runner.revokeFinal();
+  assert.equal(h.runner.state.finalRevocation.status, "confirmed");
+  assert.equal(h.rows.length, 2);
+  for (const row of h.rows) {
+    assert.notEqual(row.pp.credential, a.PROFILES[row.provider].credential);
+    assert.notEqual(row.pp.key, a.PROFILES[row.provider].key);
+    assert(
+      h.calls.some(
+        (c) => c.path === "/api/router-credentials/keys/" + row.pp.credential,
+      ),
+    );
+  }
+  assert.equal(h.runner.state.completed, false);
+});
+
 test("explicit final revocation covers both bindings/all generations and separate renderer proof", async () => {
   const h = finalRevocationServer();
   await h.runner.revokeFinal();
