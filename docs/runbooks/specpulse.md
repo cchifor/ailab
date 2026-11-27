@@ -70,6 +70,9 @@ Those can write to every repository the account reaches, including the GitHub mi
    (`kubectl -n specpulse rollout restart deploy/specpulse`).
 4. **Revoke the token it replaces** on GitHub, and confirm the old one answers 401. A rotation is complete only then.
 
+Rotation record: 2026-11-27, `e0784b` (personal resource owner, from #2054) was replaced by `310274` (`kartrainc`,
+Contents read-only; #2057). `e0784b` was revoked by the owner the same day; `/user` and both repositories answer 401.
+
 ## Making it reachable by name (after the first deploy)
 1. `just edge-smoke --host specpulse` from the LAN. It expects 303 to `/login` anonymously.
 2. Then set `lan_dns: true`, run `just edge-render`, and merge. Then `just edge-gateway-plan` / `edge-gateway-apply`, and
