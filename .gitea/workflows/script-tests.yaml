@@ -28,7 +28,9 @@ jobs:
     # There are no hosted runners on this forge: every runner carries `self-hosted-hv`.
     runs-on: ${{ vars.RUNNER_LABEL || 'self-hosted-hv' }}
     # Starvation must be loud, not a silent sweep-cancel.
-    timeout-minutes: 15
+    # Each complete automation flow exercises real lease timers for about five
+    # minutes. Keep headroom for the proxy image pull and the remaining suite.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 

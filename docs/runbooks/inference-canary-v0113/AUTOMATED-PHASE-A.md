@@ -152,6 +152,7 @@ node --test docs/runbooks/inference-canary-v0113/owner-phase-a.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-automation.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-socket.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-renewal.test.cjs
+node --test docs/runbooks/inference-canary-v0113/owner-phase-a-collector.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-automation-integration.test.cjs
 ```
 
@@ -163,6 +164,31 @@ Its real observation delays take about five minutes; the case has a 360-second
 bound and the separate Python CI entry has a 390-second bound. The server,
 deployment and observer inputs are synthetic. This qualifies orchestration,
 not the operator's authenticated proxy, a published holder or a live provider.
+
+The additional `test_offline_complete_session_proxy_flow` Python entry runs the
+same complete workflow through the unmodified operator proxy at
+`2c2deb5368c9121a3b28a9cc3341a8742dce1244`. Its source snapshot is hash checked.
+Only login and the HTTPS transport boundary are replaced by synthetic fixtures;
+the actual planner, scope checks, learned IDs, cookie handling and logout run.
+Six out-of-scope requests must be refused before upstream dispatch. Final logout
+must produce a subsequent 401 and remove the private socket. This is proxy
+orchestration qualification, not real JIT login, TLS, provider or holder evidence.
+
+Synthetic collectors recheck the real wall clock after each timer wake before
+returning an observation. A controlled clock-backstep regression exercises the
+actual collector and cancellation without HTTP calls or relaxed validators.
+The proxy fixture retains returned observations, and command assertions accept
+the Runner's separately persisted cleanup-dispatch state only with the exact
+matching operation ID, path and body. The complete proxy rerun passed in 311.2
+seconds with 15 lease heartbeats and 286 durable snapshots.
+
+That entry needs Docker. It runs the pinned Node/Python image without a network,
+as UID 1000 with a read-only checkout and a private `/run/relay-session` tmpfs.
+It does not create a socket directory on the CI host. The Node case remains
+bounded to 360 seconds, the container to 390 seconds, and its Python wrapper to
+600 seconds including image retrieval. The script job has 20 minutes for both
+complete flows and the other checks. A timeout still fails and cleans up only
+the container created by that invocation.
 
 These checks use synthetic services and reports. They do not prove operator
 authentication, original browser-state recovery, a live provider outcome or a
