@@ -164,6 +164,23 @@ bound and the separate Python CI entry has a 390-second bound. The server,
 deployment and observer inputs are synthetic. This qualifies orchestration,
 not the operator's authenticated proxy, a published holder or a live provider.
 
+The additional `test_offline_complete_session_proxy_flow` Python entry runs the
+same complete workflow through the unmodified operator proxy at
+`2c2deb5368c9121a3b28a9cc3341a8742dce1244`. Its source snapshot is hash checked.
+Only login and the HTTPS transport boundary are replaced by synthetic fixtures;
+the actual planner, scope checks, learned IDs, cookie handling and logout run.
+Six out-of-scope requests must be refused before upstream dispatch. Final logout
+must produce a subsequent 401 and remove the private socket. This is proxy
+orchestration qualification, not real JIT login, TLS, provider or holder evidence.
+
+That entry needs Docker. It runs the pinned Node/Python image without a network,
+as UID 1000 with a read-only checkout and a private `/run/relay-session` tmpfs.
+It does not create a socket directory on the CI host. The Node case remains
+bounded to 360 seconds, the container to 390 seconds, and its Python wrapper to
+600 seconds including image retrieval. The script job has 20 minutes for both
+complete flows and the other checks. A timeout still fails and cleans up only
+the container created by that invocation.
+
 These checks use synthetic services and reports. They do not prove operator
 authentication, original browser-state recovery, a live provider outcome or a
 completed acceptance window.
