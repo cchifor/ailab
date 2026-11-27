@@ -21,6 +21,14 @@ gitea_runner_label_schema: host # HOST mode, NOT docker://: platform workflows h
 #   ${{ github.workspace }} (docker run -v "$WS:/w" reclaim steps) and `sudo systemctl start docker` —
 #   under act_runner's default *container* execution the host daemon can't bind-mount an in-container
 #   path, so jobs must run directly on the host. See the forge-migration ADR.
+# Extra labels this runner declares beside gitea_runner_label, with the same schema. Set per host in
+# host_vars, never here: a label only means something because few runners carry it. act_runner (0.6.1)
+# declares the labels in config.yaml at every start ("with labels: [...], declare successfully"), so
+# adding or removing one is a config change and a daemon restart, not a re-registration. Each is a plain
+# name (lowercase letters, digits, inner dashes) and must differ from gitea_runner_label; tasks/main.yml
+# asserts it.
+# In use: `workbricks-push` on ci-runner-3/-6 (host_vars there say why).
+gitea_runner_extra_labels: []
 
 # ---- registration (ORG scope) ----
 # Org runner-registration token from git.chifor.me/org/<org>/settings/actions/runners ("Create Runner").

@@ -3,3 +3,7 @@
 # Runners on one node share its NVMe with etcd, so their windows must not overlap.
 gitea_runner_fstrim_window_start: "01:50"
 gitea_runner_fstrim_window_end: "03:35"
+
+# workbricks `push` (main) jobs get their own runners (this one and the other of ci-runner-3/-6): why, the
+# rollout order and the fallback are in docs/runbooks/ci-runners.md, "workbricks push runners".
+gitea_runner_extra_labels: [workbricks-push]

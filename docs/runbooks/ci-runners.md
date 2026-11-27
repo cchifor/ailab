@@ -210,6 +210,33 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     - `journalctl -t gitea-runner-cleanup | grep 'target sweep'`.
   - **Tunables:** `gitea_runner_cleanup_target_*`.
   - The repo should still bound its own cache. This keeps a runner alive when one does not.
+- **workbricks push runners** (`workbricks-push` label, ci-runner-3 and ci-runner-6, 2026-11-27).
+  - **What.** Those two runners declare a second label, `workbricks-push`, through
+    `gitea_runner_extra_labels` in their host_vars.
+    - The label exists for workbricks' `ci.yml`, whose `runs-on` names it for the `push` event. That is a
+      workbricks change, opened only once the label was live here, so it routes nothing until it merges.
+    - Every other job, workbricks' pull requests included, still runs on `self-hosted-hv`, which all
+      runners keep.
+  - **Why.** workbricks keeps one cache per event (`~/.cache/workbricks-ci/<event>`, so a push to main
+    never runs what a pull request wrote). Each event's Cargo target pair is about 34 GiB. Its own
+    `scripts/ci/sweep_cache.sh` caps all events together at 45 GiB, so a runner serving both held about
+    80 GiB of working set against that cap.
+    - When the cap applied, it evicted a target pair, and the next job built it cold: 1,015 GiB evicted
+      over 2026-11-24..26 across the fleet, each one rebuilt.
+    - When a container was running at the job's start, the cap was skipped, and the cache grew to
+      85-91 GiB. That is what kept `CIRunnerDiskPressureSustained` firing.
+  - **Effect.** The other runners hold only the pull_request cache, under the cap.
+    - Their stale push targets go by age through the Cargo target sweep above (72h unread, on-prem) or by
+      workbricks' own least-recently-used cap.
+    - ci-runner-3/-6 still take workbricks pull requests now and then, so they can still churn. Removing
+      that needs a workbricks pull-request label the push runners lack.
+  - **One node.** Both push runners are on ai-node3, the least-worn NVMe. While that node is down or in
+    maintenance, every workbricks push job waits; pull requests keep running elsewhere.
+    - **Fallback:** add `workbricks-push` to a runner on another node (its host_vars, then a drained converge).
+    - The cost is a cold push cache there: its first push job builds about 34 GiB of targets.
+  - **Changing the set.** Edit the two host_vars, converge those runners after a drained stop, and check
+    the label in Gitea (Site/Org settings → Actions → Runners) before workbricks' `runs-on` relies on it.
+    Removing the label from a runner while workbricks still names it leaves push jobs waiting.
 - **Bounded /tmp** (ailab#1284; live on a runner only once rolled out, see below): all jobs share one `/tmp`,
   and Ubuntu ages it only after **30 days**
   (`/usr/lib/tmpfiles.d/tmp.conf`). It reached 9-22 GB per runner (`pytest-of-runner`, `node-compile-cache`).
