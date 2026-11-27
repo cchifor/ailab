@@ -11,6 +11,7 @@ FIXTURE = ROOT / "docs/runbooks/inference-canary-v0113/owner-phase-a.test.cjs"
 AUTOMATION_FIXTURE = ROOT / "docs/runbooks/inference-canary-v0113/owner-phase-a-automation.test.cjs"
 SOCKET_FIXTURE = ROOT / "docs/runbooks/inference-canary-v0113/owner-phase-a-socket.test.cjs"
 RENEWAL_FIXTURE = ROOT / "docs/runbooks/inference-canary-v0113/owner-phase-a-renewal.test.cjs"
+COLLECTOR_FIXTURE = ROOT / "docs/runbooks/inference-canary-v0113/owner-phase-a-collector.test.cjs"
 INTEGRATION_FIXTURE = ROOT / "docs/runbooks/inference-canary-v0113/owner-phase-a-automation-integration.test.cjs"
 PROXY_IMAGE = "node@sha256:8fa96264f302f58bbb13aa7339c541547b56975766ce956c875da149452a3e40"
 
@@ -29,7 +30,7 @@ class PiOwnerPhaseA(unittest.TestCase):
         node = shutil.which("node")
         self.assertIsNotNone(node, "Node is required: do not skip automation host tests")
         result = subprocess.run(
-            [node, "--test", str(AUTOMATION_FIXTURE), str(SOCKET_FIXTURE), str(RENEWAL_FIXTURE)], cwd=ROOT,
+            [node, "--test", str(AUTOMATION_FIXTURE), str(SOCKET_FIXTURE), str(RENEWAL_FIXTURE), str(COLLECTOR_FIXTURE)], cwd=ROOT,
             capture_output=True, text=True, encoding="utf-8", timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

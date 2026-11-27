@@ -152,6 +152,7 @@ node --test docs/runbooks/inference-canary-v0113/owner-phase-a.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-automation.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-socket.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-renewal.test.cjs
+node --test docs/runbooks/inference-canary-v0113/owner-phase-a-collector.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-automation-integration.test.cjs
 ```
 
@@ -172,6 +173,14 @@ the actual planner, scope checks, learned IDs, cookie handling and logout run.
 Six out-of-scope requests must be refused before upstream dispatch. Final logout
 must produce a subsequent 401 and remove the private socket. This is proxy
 orchestration qualification, not real JIT login, TLS, provider or holder evidence.
+
+Synthetic collectors recheck the real wall clock after each timer wake before
+returning an observation. A controlled clock-backstep regression exercises the
+actual collector and cancellation without HTTP calls or relaxed validators.
+The proxy fixture retains returned observations, and command assertions accept
+the Runner's separately persisted cleanup-dispatch state only with the exact
+matching operation ID, path and body. The complete proxy rerun passed in 311.2
+seconds with 15 lease heartbeats and 286 durable snapshots.
 
 That entry needs Docker. It runs the pinned Node/Python image without a network,
 as UID 1000 with a read-only checkout and a private `/run/relay-session` tmpfs.
