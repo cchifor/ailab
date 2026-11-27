@@ -31,6 +31,7 @@ patches:
           [router]
           url = "https://router.chifor.me"
           route = "claude-sub-opus"
+          target_model = "opus"
           key_file = "/run/specpulse/keys/router-key"
           billing = "included"
   # The chart rolls the pod when seats.toml changes through the checksum/seats annotation, which it computed from the
@@ -41,4 +42,4 @@ patches:
     patch: |
       - op: replace
         path: /spec/template/metadata/annotations/checksum~1seats
-        value: "8f1cac92baccbe2ec13f7b0dd053add6f2839f17aa0eabb7df2cfd35d6e52a3c"
+        value: "16ee1c22df089407f57c6e3bbe3e6288f6c128293bcf5eeca482054c4c2c8914"
