@@ -1,7 +1,7 @@
 {
   "_generated": "by scripts/edge/render.py from kubernetes/edge/hostnames.yaml; do not edit, run `just edge-render`",
-  "registry_sha256": "f88e4324236077f0f55134a41ebc94bf55d31d8c5b099ac8021e230e59daf0c1",
-  "binding_sha256": "a87754ee62b6bcba2855afafa6f94b7e772d48b08ae4b4c3413fcadb3eb1900e",
+  "registry_sha256": "81b8859c3493d3427790a1de0d9fad5a544f6856cdeefaca25ff26622dd48966",
+  "binding_sha256": "6234ad49e8e5bcb0f9ec79e8f115971b928748ddd0c468b039ec041d551ab966",
   "zone": "chifor.me",
   "tunnel_id": "f93d9a6a-5172-43d3-8bef-13460ea7607b",
   "vip": "192.168.0.51",
@@ -173,6 +173,13 @@
       "content": "f93d9a6a-5172-43d3-8bef-13460ea7607b.cfargotunnel.com",
       "proxied": true,
       "ttl": 1
+    },
+    "specpulse": {
+      "mode": "private",
+      "type": "A",
+      "content": "192.168.0.51",
+      "proxied": false,
+      "ttl": 60
     },
     "sso": {
       "mode": "tunnel",

@@ -1,0 +1,134 @@
+# `promtool test rules` fixtures for target-down-rules.yaml. Run by scripts/rules-lint.sh on every PR.
+#
+# The restated TargetDown must behave EXACTLY like the chart's for every non-cloudlab job, and differ in
+# one way only: a cloudlab scrape job is not reported while CloudlabAsleep is firing (planned nightly
+# power-off). ALERTS{alertname="CloudlabAsleep"} is fed as an input series: its rule lives in
+# ci-runners-cloud-rules.yaml, and in Prometheus it is the series that rule writes.
+rule_files:
+  - target-down-rules.yaml
+evaluation_interval: 1m
+tests:
+  - name: a normal job down fires exactly like the chart rule
+    interval: 1m
+    input_series:
+      - series: up{job="ci-runner-node",namespace="monitoring",service="ci-runner-node",instance="192.168.0.14:9100"}
+        values: 0+0x15
+      - series: up{job="ci-runner-node",namespace="monitoring",service="ci-runner-node",instance="192.168.0.15:9100"}
+        values: 1+0x15
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: TargetDown
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: ci-runner-node
+              namespace: monitoring
+              service: ci-runner-node
+            exp_annotations:
+              description: 50% of the ci-runner-node/ci-runner-node targets in monitoring namespace are down.
+              runbook_url: https://runbooks.prometheus-operator.dev/runbooks/general/targetdown
+              summary: One or more targets are unreachable.
+
+  - name: cloudlab targets down while CloudlabAsleep fires stay quiet (the nightly power-off)
+    interval: 1m
+    input_series:
+      - series: up{job="cloud-node",namespace="monitoring",service="cloud-node",instance="192.168.0.20:9100"}
+        values: 0+0x20
+      - series: up{job="cloud-vllm",namespace="monitoring",service="cloud-vllm",instance="192.168.0.27:18020"}
+        values: 0+0x20
+      - series: up{job="cloud-llama-swap",namespace="monitoring",service="cloud-llama-swap",instance="192.168.0.27:8080"}
+        values: 0+0x20
+      - series: up{job="ci-runner-cloud",namespace="monitoring",service="ci-runner-cloud1",instance="192.168.0.29:9100"}
+        values: 0+0x20
+      - series: ALERTS{alertname="CloudlabAsleep",alertstate="firing",severity="none"}
+        values: 1+0x20
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: TargetDown
+        exp_alerts: []
+
+  - name: cloudlab targets down while cloudlab is AWAKE still fire (a real outage is not muted)
+    interval: 1m
+    input_series:
+      - series: up{job="cloud-vllm",namespace="monitoring",service="cloud-vllm",instance="192.168.0.27:18020"}
+        values: 0+0x15
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cloud-vllm
+              namespace: monitoring
+              service: cloud-vllm
+            exp_annotations:
+              description: 100% of the cloud-vllm/cloud-vllm targets in monitoring namespace are down.
+              runbook_url: https://runbooks.prometheus-operator.dev/runbooks/general/targetdown
+              summary: One or more targets are unreachable.
+
+  - name: CloudlabAsleep mutes only cloudlab jobs, never an unrelated outage at the same time
+    interval: 1m
+    input_series:
+      - series: up{job="cloud-pve",namespace="monitoring",service="cloud-pve-exporter",instance="10.244.0.9:9221"}
+        values: 0+0x15
+      - series: up{job="loki",namespace="monitoring",service="loki",instance="10.244.1.5:3100"}
+        values: 0+0x15
+      - series: ALERTS{alertname="CloudlabAsleep",alertstate="firing",severity="none"}
+        values: 1+0x15
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: loki
+              namespace: monitoring
+              service: loki
+            exp_annotations:
+              description: 100% of the loki/loki targets in monitoring namespace are down.
+              runbook_url: https://runbooks.prometheus-operator.dev/runbooks/general/targetdown
+              summary: One or more targets are unreachable.
+
+  - name: the mute arriving a few minutes late (CloudlabAsleep's for:2m plus eval lag) still keeps it quiet
+    interval: 1m
+    input_series:
+      - series: up{job="cloud-node",namespace="monitoring",service="cloud-node",instance="192.168.0.20:9100"}
+        values: 0+0x20
+      - series: ALERTS{alertname="CloudlabAsleep",alertstate="pending",severity="none"}
+        values: _x1 1+0x3
+      - series: ALERTS{alertname="CloudlabAsleep",alertstate="firing",severity="none"}
+        values: _x5 1+0x15
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: TargetDown
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: TargetDown
+        exp_alerts: []
+
+  - name: a mute arriving AFTER the 10m hold is too late - pins why CloudlabAsleep's for must stay short
+    interval: 1m
+    input_series:
+      - series: up{job="cloud-node",namespace="monitoring",service="cloud-node",instance="192.168.0.20:9100"}
+        values: 0+0x20
+      - series: ALERTS{alertname="CloudlabAsleep",alertstate="firing",severity="none"}
+        values: _x12 1+0x8
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: TargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: cloud-node
+              namespace: monitoring
+              service: cloud-node
+            exp_annotations:
+              description: 100% of the cloud-node/cloud-node targets in monitoring namespace are down.
+              runbook_url: https://runbooks.prometheus-operator.dev/runbooks/general/targetdown
+              summary: One or more targets are unreachable.
+      - eval_time: 15m
+        alertname: TargetDown
+        exp_alerts: []
