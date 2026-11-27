@@ -1,169 +1,237 @@
 # Bounded Relay session for automated phase A (relay-operator `session`)
 
-## Codex Review
-
-- The narrow proxy, single login, retained owner approvals and cleanup readback are sound foundations. The deployed server confirms that control leases bind to both user ID and login session hash.
-- The current Runner cannot complete its stopped-run preflight through this plan: historical IDs are excluded, and command receipts are scoped to the requesting user even for admins.
-- Ordinary credential rotation introduces no durable approver-membership dependency, but issuance rechecks live admin authority after recording intent. A recorded operation or HTTP 202 does not establish successful issuance.
-- The security boundary needs stricter request schemas, trusted artifact/configuration pins and constrained Docker arguments. Sharing the proxy's network namespace does not restrict Runner egress to localhost.
-- Verification must cover the actual Runner and deployed response shapes, authority removal, lost responses, concurrent invocations and interrupted cleanup. The adapter's source-version and evidence-collection dependencies remain unresolved.
-
 ## Context
 
 On 2026-11-27 the owner directed: "Automate the implementation, you should not require me to manually execute relay
 tasks. Help the worker agent to test and validate the work by himself." Phase A of the dev-worker-1 Pi canary
-(docs/runbooks/inference-canary-v0113/OWNER-PHASE-A.md) has so far run as a browser flow in the owner's own Relay
-session. The inference session now drives it non-interactively, through a reviewed adapter around the exported Runner
-(owner-phase-a.js). Its access requirement (bus 2276) is precise:
+(docs/runbooks/inference-canary-v0113/OWNER-PHASE-A.md) has run as a browser flow in the owner's own Relay session. The
+inference session will drive it non-interactively through a reviewed adapter around the exported Runner
+(owner-phase-a.js). Its access requirement (bus 2276):
 
-- Relay control leases bind `actor.userId` AND `actor.sessionHash`. The existing `scripts/relay-operator.py call`
-  logs in and out per call, so separate calls cannot hold a lease. The run needs ONE authenticated session for its
-  whole duration, with a hard deadline and receipt-preserving cleanup.
-- It needs admin for two things only: `POST /api/router-credentials/:id/rotate` (and its reviewed final revoke), and
-  `GET /api/agent-sessions/:id/native-recovery` + `POST /api/agent-sessions/:id/resume`. Everything else is operator.
-- Explicitly NOT wanted: an unrestricted method/path proxy; new profile, grant or delegation approvals; copied owner
-  cookies; a membership bypass.
+- Relay control leases bind `actor.userId` AND `actor.sessionHash` (verified: control.ts). `relay-operator.py call`
+  logs in and out per call, so it cannot hold a lease. The run needs ONE authenticated session for its whole duration,
+  with a hard deadline and receipt-preserving cleanup.
+- Admin is needed only for `POST /api/router-credentials/:id/rotate`, `GET /api/agent-sessions/:id/native-recovery`
+  and `POST /api/agent-sessions/:id/resume`. Everything else is operator.
+- NOT wanted: an unrestricted proxy; profile, grant or delegation approvals; copied owner cookies; a membership bypass.
 
-The JIT identity (`relay-operator@ailab.invalid`, Keycloak realm `relay`, password only in OpenBao
-`af/relay/operator-oidc`) has no Relay membership at rest. Its rule "never approve grants, creation policies or
-delegations" exists because Relay re-checks the APPROVER's current admin membership on every use of those. **Checked in
-the deployed source (v0.14.1, 5f90d03a):** router-credential rotate and revoke record the actor only in
-`router_credential_operations.actor_id`, an audit journal. `remoteRevoke` passes it to the Router bridge, and the code
-says that journal "is completed even after that human logs out". `isAdmin(…approved_by)` is checked only for worker
-grants, creation policies, environment pools and agent templates. Launch profiles keep their owner `approved_by`. So a
-rotation by the JIT identity does not break once its membership is removed. This plan adds no approval capability.
-<!-- codex: [P1] Qualify this conclusion: service.ts rotate() calls issue(), which re-enters actorTenant(actor, "admin") after insertIssuance(), while subsequent ordinary reconciliation and remoteRevoke() do not recheck the original approver. Require issuance/acknowledgement readback or an explicit unresolved outcome before removing authority; issue() catches failures, so HTTP 202 alone is insufficient. -->
-<!-- codex: [P2] The exhaustive "only" claim omits current-admin checks in workers/delegation/service.ts, workers/management/authority.ts and workers/repositories/service.ts, which use issued_by/issuedBy. Keep the conclusion specific to ordinary credential rotation and retain the runbook's broader prohibition on durable approvals. -->
+The JIT identity (`relay-operator@ailab.invalid`, password only in OpenBao `af/relay/operator-oidc`) has no Relay
+membership at rest. Its standing rule is that it never makes durable approvals (grants, creation policies,
+delegations, management authority, repository issuance), because Relay re-checks the approver's or issuer's CURRENT
+admin membership when those are used.
+
+**Ordinary credential rotation, checked in v0.14.1 (5f90d03a).** `rotate()` records the actor in
+`router_credential_operations.actor_id` (an audit journal), and later reconciliation and `remoteRevoke()` do not recheck
+that actor's membership. However, `rotate()` calls `issue()`, which re-enters `actorTenant(actor, "admin")` after
+recording intent and catches failures, so HTTP 202 does not prove issuance. Therefore the run must read the new
+credential back to a terminal issuance state (installing/ready, or an explicit failure) BEFORE authority is removed.
+Outcomes left unresolved are reported, never assumed.
 
 ## Approach
 
-### 1. `scripts/relay-session-proxy.py` (new; stdlib only; runs in the pinned python image)
+### 0. Scope pinned in reviewed code, not caller configuration
 
-- **Login once.** Reuse `relay-admin-call.py`'s `Client` / `login` / `logout`: import it from the same read-only
-  `/tool` mount. The flow is Keycloak form, every redirect checked, `/api/auth/me` must say admin and
-  `relay-operator (automation)`. The `relay_session` cookie lives only in that process's memory and never crosses
-  the proxy.
-- **Listen on 127.0.0.1:8765 only,** inside its own container network namespace. The Runner container joins it with
-  `--network container:<proxy>`. Nothing listens on the LAN or on the host's loopback.
-  <!-- codex: [P1] This prevents publishing the listener but does not enforce localhost-only Runner egress: the shared namespace also has the proxy's outbound connectivity to Relay and Keycloak. Specify whether localhost use is a trusted-adapter constraint or an enforced network restriction, and test the stated boundary. -->
-- **Allowlist, method + path template.** Everything else gets 403 before any upstream call.
-  - Path IDs are either FIXED (from a run config) or LEARNED (this run's own responses). Fixed: the two bindings
-    `a0f57684-747f-4c3e-8d90-e684b7262590` (Codex) and `d2871eec-8f5a-4afe-a917-014f0ae8e14d` (Qwen); the
-    dev-worker-1 revision-1 profile IDs.
-  - Learning:
-    - launch IDs, from the `id` of POST `/api/agent-launches` and POST `/resume` responses;
-      <!-- codex: [P2] A lost POST response can leave a durable launch whose ID is never learned. Define read-only reconciliation or an explicit unresolved handoff using the original operation ID, without resending the launch or automatically acquiring control. -->
-    - session IDs, only from `session_id` of rows in GET `/api/agent-launches` whose `id` is a learned launch;
-      <!-- codex: [P1] Runner.replacementPreflight() first reads historical session 45724087-335a-4c55-ad0f-cb278afe608a and its control state, then historical permission 70fb1b8e-f7cc-4cc3-b98f-66f83e46d1ab; neither can be learned from this run's launches. Add narrowly pinned read-only predecessor access or a reviewed adapter alternative, keeping those IDs ineligible for mutations. -->
-    - lease IDs, from POST `/control` responses for a learned session;
-    - permission IDs, from GET `/api/agent-sessions/:sid/permissions` (learned sid);
-    - operation IDs, from this run's own POST bodies (`operationId`);
-      <!-- codex: [P1] Even allowlisting predecessor operation IDs will not make the unchanged Runner work: control.ts GET /operations/:operation filters by actor_id = actor.userId and returns {command:null} for the owner's old commands under the JIT identity. Resolve this through a reviewed evidence/adapter contract before implementation; admin role does not bypass that filter. -->
-    - credential IDs, from GET `/api/router-credentials` rows of the two fixed bindings.
-    <!-- codex: [P1] Store parent relationships and provenance, not independent UUID sets: bind launches to operation/profile/revision/actor, leases and permissions to session/generation, and credentials to binding. Learn only from validated successful responses attributable to this run, rejecting old idempotent launch replays and mismatched rows; operation-ID uniqueness within one run does not establish fresh server intent. -->
-  - The allowed routes are exactly bus 2276's list. Operator:
-    - GET `/api/router-credentials`, `/api/router-credentials/keys/:cred`, `/api/agent-profiles`, `/api/agent-launches`;
-    - POST `/api/agent-launches` (body `profileId` ∈ fixed profiles, `revision` == 1);
-    - GET `/api/agent-sessions/:sid`, `/router`, `/communication`, `/control`, `/settings`, `/operations/:op`, `/permissions`;
-    - POST `/control`, DELETE `/control/:lease`, POST `/commands`;
-    - GET `/api/agent-permissions/:pid`, POST `/api/agent-permissions/:pid/decision`;
-    - GET `/api/conversations/sessions/:sid/timeline` (`limit` ≤ 200, only `after` / `limit` / `promptsAfter`).
+`relay-session-proxy.py` holds the scope as constants:
 
-    Admin:
-    - POST `/api/router-credentials/:binding/rotate` and `/revoke` (fixed bindings);
-    - GET `/api/agent-sessions/:sid/native-recovery`, POST `/resume` (learned sid).
-    <!-- codex: [P1] Binding revocation disables all generations, including credentials used outside this invocation; it is distinct from revoking the temporary identity. Preserve the reviewed no-further-use and settled-consumer checks, and specify the outcome when only one binding's revocation succeeds. -->
-- **Request hygiene.**
-  - JSON bodies only, at most 64 KiB, and each must parse.
-    <!-- codex: [P1] Valid JSON plus a route match permits more authority than this workflow needs: arbitrary profile-root cwd, additional command kinds/settings, unrestricted permission options, and resume's acknowledgeUnknownToolEffects:true. Define strict per-route fields and bounded selections, with the reviewed Runner explicitly responsible for prompt/attempt budgets and full permission-input validation rather than duplicating its entire workflow in the proxy. -->
-  - Write bodies must carry a fresh `operationId` UUID, never reused within the run; this does not apply to `/control` or DELETE.
-  - The proxy sets `Origin`; it drops the client's `Cookie`, `Authorization` and `Origin`.
-    <!-- codex: [P1] Construct upstream URLs and headers from trusted values rather than forwarding all remaining client headers, especially Host and HTTP framing headers. Reject ambiguous request targets, duplicate query/body keys and conflicting Content-Length/Transfer-Encoding, and permit queries only on explicitly specified routes. -->
-  - Responses pass through with `Set-Cookie` stripped. Each upstream call is bounded at 30 s.
-    <!-- codex: [P2] These inventories are tenant-wide, and rotate/revoke also return the full credential inventory; path-ID restrictions therefore do not confine reads to the two bindings and this run. Either document that broader disclosure or filter responses while preserving detection of the server's inventory limits, so filtering cannot turn truncated data into apparently complete evidence. -->
-    <!-- codex: [P1] Client.request() uses a socket timeout and unbounded r.read(), which do not provide a total wall-clock or response-size bound. Add bounded reads and deadline enforcement, and ensure slow requests cannot starve the Runner's 20-second renewal schedule for leases capped at 60 seconds; concurrent handling must reserve operation IDs atomically. -->
-- **Hard deadline** (`--deadline-s`, at most 3600). After it every request is refused, the proxy logs out and exits.
-  SIGTERM and SIGINT also log out first. Exit status: 0 if the logout was confirmed (`/api/auth/me` 401 afterwards),
-  4 otherwise.
-  <!-- codex: [P1] Define one monotonic deadline starting before grant, covering startup and in-flight requests, rather than resetting it when the proxy becomes ready. A proxy timer cannot revoke the standing membership after orchestrator SIGKILL or host loss; specify independent revocation enforcement or explicitly qualify this guarantee and document recovery. -->
-- **Receipt log** to stderr, one JSON line per request: time, method, route template, learned or fixed, status,
-  duration. No bodies, cookies, tokens or response content.
+- **Origin:** `https://relay.chifor.me`.
+- **Bindings:** `a0f57684-747f-4c3e-8d90-e684b7262590` (Codex) and `d2871eec-8f5a-4afe-a917-014f0ae8e14d` (Qwen).
+- **Profiles:** `1d9a7d6e-4b26-49fd-9053-7b0a22e1baae` and `f25c187b-1e50-4c7c-860e-52947bfdf39e`, each at revision 1,
+  with its approved workspace cwd and its expected binding.
+- **Predecessor, READ-ONLY:** session `45724087-335a-4c55-ad0f-cb278afe608a` and permission
+  `70fb1b8e-f7cc-4cc3-b98f-66f83e46d1ab`. These are GET-only and can never be a path or body ID in any mutation.
+
+The orchestrator takes no scope parameters. A change of scope is a reviewed code change.
+
+### 1. `scripts/relay-session-proxy.py` (new; stdlib only; pinned python image)
+
+- **Login once** with relay-admin-call.py's `Client` / `login` (imported from the read-only `/tool`). `/api/auth/me`
+  must say admin, `relay-operator (automation)`, and the JIT user id, which is recorded for provenance. The cookie
+  lives only in this process.
+- **Transport: a Unix domain socket,** not TCP. The socket is `/run/relay-session/proxy.sock` in a private tmpfs
+  volume shared with the Runner container. The Runner runs with `--network none`, so it can reach nothing but this
+  socket; the boundary is enforced, not a trusted-adapter promise. The proxy container alone has network, and its
+  only upstream is the pinned origin.
+- **Requests are reconstructed from trusted values.**
+  - The upstream URL is the origin plus a matched route template, filled with validated IDs and the parameters
+    allowed for that route only.
+  - Headers are a fixed set: `Content-Type: application/json`, `Origin`, the UA and the cookie. No client header is
+    forwarded.
+  - Refused: absolute-form targets, a `%2F` or `%2E` encoding, `..`, `//`, duplicate query or JSON keys, both
+    `Content-Length` and `Transfer-Encoding`, chunked bodies, bodies over 64 KiB.
+- **Allowlist, with strict per-route schemas.** Anything else gets a local 403 without an upstream call.
+  - Operator reads:
+    - GET `/api/router-credentials`, `/api/router-credentials/keys/:cred` (cred learned from a fixed binding),
+      `/api/agent-profiles`, `/api/agent-launches`;
+    - GET `/api/agent-sessions/:sid` and its `/router`, `/communication`, `/control`, `/settings`,
+      `/operations/:op` and `/permissions`;
+    - GET `/api/agent-permissions/:pid`;
+    - GET `/api/conversations/sessions/:sid/timeline`, with only the queries `after` (cursor format), `limit`
+      (1..200) and `promptsAfter`, each at most once.
+  - Operator writes:
+    - POST `/api/agent-launches` `{operationId, profileId, revision:1, cwd}`, with the profile and cwd pinned;
+    - POST `/api/agent-sessions/:sid/control` `{generation}` or `{generation, leaseId}` (lease of that sid);
+    - DELETE `/api/agent-sessions/:sid/control/:lease`;
+    - POST `/api/agent-sessions/:sid/commands` `{operationId, leaseId, generation, kind}`. `kind` is one of `prompt`
+      (+`controlEpoch`, `text` ≤ 8 KiB), `set-config` (+`controlEpoch`, `settingsRevision`,
+      `configId:"thought_level"`, `value` from a fixed set), `cancel` or `close`. The prompt and attempt budget stays
+      the Runner's reviewed responsibility;
+    - POST `/api/agent-permissions/:pid/decision` `{operationId, optionId, generation}`, once per pid, the pid
+      learned under a learned sid.
+  - Admin:
+    - POST `/api/router-credentials/:binding/rotate` `{operationId, revision}`, a fixed binding, at most once per
+      binding per run;
+    - GET `/api/agent-sessions/:sid/native-recovery`;
+    - POST `/api/agent-sessions/:sid/resume` `{operationId, generation}`. `acknowledgeUnknownToolEffects` must be
+      absent or false.
+  - **Binding revoke is NOT in this session.** Revoking a binding disables every generation, including credentials
+    in use elsewhere; the final revocation is a separate reviewed operation after acceptance.
+- **Learned IDs carry provenance, not loose sets.**
+  - A launch is learned from a launch-shaped response (POST `/api/agent-launches` or `/resume`), or from a
+    GET `/api/agent-launches` row whose `operation_id` is one this run dispatched AND whose `actor_id` is the JIT user
+    AND whose `profile_id` / `profile_revision` match the dispatched body. That second path reconciles a lost POST
+    response read-only, without resending the launch.
+  - A replayed launch receipt that predates this run (wrong actor or operation) is refused.
+  - A session is learned only from a learned launch's `session_id`.
+  - A lease is learned from POST `/control` (`id`, `generation`, `expires_at`) and bound to its sid and generation.
+  - A permission is learned from `/permissions` rows of a learned sid, with `id`.
+  - A credential is learned from inventory rows (`binding_id`) of a fixed binding.
+  - Operation IDs are reserved atomically under a lock BEFORE dispatch; a reuse is refused.
+  - Cross-session substitution is refused: a lease, permission or operation used under a sid other than its own.
+- **Bounds.**
+  - The server is a `ThreadingHTTPServer` on the socket, so a slow request cannot starve the Runner's 20 s
+    lease heartbeat.
+  - Each upstream call has a 30 s total wall-clock deadline (connect, headers and body) and at most 8 MiB of
+    response, read incrementally; it is aborted otherwise.
+  - Responses pass through with `Set-Cookie` removed.
+  - Inventories are tenant-wide and are NOT filtered, so the Runner can still detect truncation. The disclosure stays
+    on the operator's machine, and no response content is logged.
+- **Deadlines.** The orchestrator passes the absolute `cleanup_deadline` (monotonic-equivalent epoch, fixed before the
+  grant) and an earlier `runner_deadline`.
+  - After `runner_deadline` only cleanup-shaped requests pass: GETs, DELETE `/control`, `cancel` / `close` commands
+    and permission decisions.
+  - At `cleanup_deadline` everything is refused, the proxy logs out (logout plus `/api/auth/me` must answer 401) and
+    exits.
+  - SIGTERM and SIGINT log out first.
+  - Exit codes: 0 means logout confirmed, 4 means not confirmed.
+- **Evidence log** (stderr, flushed per line, JSON). One line per request: time, method, route template, path IDs
+  (non-secret UUIDs), operationId, the decision (allowed, refused and why), dispatched yes/no, upstream status (or
+  `timeout` / `lost`) and duration. No bodies, cookies, tokens or response content.
 
 ### 2. `scripts/relay-operator.py session` (new subcommand)
 
 ```
-relay-operator.py session --config RUN.json --deadline-s N -- <runner docker run args…>
+relay-operator.py session --bundle DIR --bundle-sha256 HEX --image REF@sha256:… --runner-minutes N --evidence-dir DIR
 ```
 
-<!-- codex: [P1] Arbitrary Docker arguments can defeat the stated isolation through mounts, privileged mode, shared PID namespaces, entrypoint overrides or injected runtime options. Prefer a fixed launch specification with narrowly validated inputs, and apply equivalent hardening to the proxy container that holds the admin cookie. -->
+1. **Before any authority.**
+   - Validate the arguments: N at most 50; the image is a digest reference; the bundle's manifest (every file +
+     sha256, the entrypoint) hashes to `--bundle-sha256`.
+   - Copy the bundle to a private temp dir, so the mounted copy is the verified copy.
+   - Fix `cleanup_deadline = now + N + 10 min` and `runner_deadline = now + N`.
+2. **Serialize.** Create the Kubernetes Lease `relay-operator-jit` in namespace `relay` (holder = run id, duration =
+   until `cleanup_deadline`). If a live Lease exists, refuse. `call` takes the same Lease, for its duration.
+3. **Grant, inside one `try/finally`.**
+   1. Grant admin (member.js).
+   2. Start the proxy container, detached and hardened: pinned IMAGE, `--read-only`, `--cap-drop ALL`,
+      `--security-opt no-new-privileges`, non-root, pids and memory limits, `/tool` read-only and the socket tmpfs.
+      The password and deadlines go on stdin.
+   3. Wait for `READY` until `cleanup_deadline` (at most 120 s).
+   4. Run the Runner container with a fixed specification: the pinned `--image`, `--network none`, `--read-only`,
+      `--cap-drop ALL`, no-new-privileges, non-root, limits, the bundle copy read-only, the socket volume, the fixed
+      entrypoint from the manifest, and the env `RELAY_SESSION_SOCKET` and `RUNNER_DEADLINE`. No caller-supplied
+      Docker arguments. Its stdout (JSON lines: the adapter's env.save snapshots and its final report) streams
+      continuously into `--evidence-dir/runner.jsonl`.
+   5. At `runner_deadline`, SIGTERM the Runner (it runs `Runner.stop()` and its cleanup). Wait for it until
+      `cleanup_deadline − 2 min`, then kill and remove it. The proxy keeps the session valid for that cleanup.
+   6. `docker stop -t 30` the proxy, then capture its exit code and logs into `--evidence-dir/proxy.jsonl`.
+4. **`finally`: bounded and independent stages.** Every subprocess has a timeout, SIGTERM and SIGINT become an
+   exception, and `BaseException` is caught per stage.
+   1. Force-remove both containers.
+   2. Delete the subject's memberships and sessions and read back `0 memberships, 0 sessions`; rc 3 if not.
+   3. Keycloak SSO logout.
+   4. Release the Lease.
+   - rc precedence: 3 (revoke not confirmed), then 4 (proxy logout), then 5 (Keycloak), then the Runner's or the
+     deadline's failure.
+   - A failed evidence capture fails the run (rc 6).
 
-- `RUN.json`: fixed binding IDs, fixed profile IDs + revision, origin. It is validated against UUIDs and an
-  allowlisted origin `https://relay.chifor.me`.
-  <!-- codex: [P1] UUID syntax does not enforce the fixed canary scope: pin the two binding IDs and profile IDs 1d9a7d6e-4b26-49fd-9053-7b0a22e1baae and f25c187b-1e50-4c7c-860e-52947bfdf39e at revision 1, including their expected relationships. Validate configuration and artifact pins before granting admin, and distinguish reviewed scope from caller-selectable parameters. -->
-- Order, all inside one `try/finally`:
-  <!-- codex: [P1] Serialize call/session invocations for this shared subject across supported execution hosts before granting authority. cleanup() deletes every session and membership for the identity, so one overlapping invocation can invalidate another's lease or leave misleading cleanup readbacks. -->
-  1. read the creds from OpenBao;
-  2. `grant` admin;
-  3. start the proxy container, detached, pinned IMAGE, `/tool` read-only, with the password and RUN.json on stdin;
-  4. wait for its `READY` line (login done, admin confirmed), at most 120 s;
-  5. run the Runner container `--network container:<proxy>` with `--rm --read-only --cap-drop ALL`, a non-root
-     user and the reviewed adapter directory mounted read-only. The adapter must match the sha256 given with
-     `--runner-sha256`. It reaches `http://127.0.0.1:8765` only;
-     <!-- codex: [P1] Define the reviewed artifact and trusted source of its expected digest: hashing one adapter file does not cover imported owner-phase-a.js, other executable dependencies or a mutable Runner image. Verify the complete executed bundle and image digest, including the entrypoint, and prevent changes between verification and execution. -->
-  6. at the Runner's exit or the deadline, `docker stop` the proxy (SIGTERM → logout).
-     <!-- codex: [P1] Stop the Runner early enough to call Runner.stop(), settle its cleanup and export evidence while the original login and lease remain usable, then stop/remove the tracked Runner container as well as the proxy. Logging out or deleting authentication sessions does not close agent sessions or prove already accepted inference stopped, and a hard cutoff otherwise prevents cancel/Close requests. -->
-     <!-- codex: [P2] Specify a bounded Docker stop grace period and capture the proxy's actual exit status before removal; the default grace can expire while logout and its readback are still waiting on HTTP. Ensure Python receives signals directly and that logout failures cannot skip the independent membership cleanup. -->
-- `finally` (unchanged semantics from `call`): `cleanup()` deletes the memberships and sessions of the subject (read
-  back `0 memberships, 0 sessions`, rc 3 if not), ends the Keycloak SSO sessions, and `docker rm -f` the proxy. The
-  proxy's own logout result is folded into the rc (4).
-  <!-- codex: [P1] The existing helpers use subprocess.run() without timeouts, cleanup() catches only SystemExit, and ordinary SIGTERM does not automatically run Python finally blocks. Add bounded, independently attempted cleanup stages and explicit signal handling, retaining rc 3 precedence and nonzero Runner/deadline/Keycloak failures rather than reporting success solely because proxy logout succeeded. -->
-- Output: the proxy receipt log, plus the Runner's own report (it writes its sanitized report to stdout). Both are
-  saved under the operator's scratchpad by the caller; the command itself writes no file.
-  <!-- codex: [P1] A final-only stdout report can disappear with the Runner, while route-template logs omit the IDs needed to reconcile uncertain mutations. Stream and flush sanitized env.save snapshots before dispatch, plus run/resource/operation identifiers and dispatch-versus-response status, with the caller capturing them continuously and a defined failure path when evidence capture fails. -->
+### 3. Independent reaper (IaC, Flux)
 
-### 3. Docs
+A CronJob, `relay-operator-reaper` in namespace `relay`, runs every 5 minutes. If the JIT subject has any membership or
+session AND no unexpired `relay-operator-jit` Lease exists, it deletes them (the same SQL as `revoke()`) and logs one
+line. This bounds a SIGKILL of the orchestrator, or the loss of the workstation, to the Lease end plus 5 minutes.
 
-`docs/runbooks/relay.md` "Operator automation identity" gains a `session` subsection: the purpose, the allowlist
-(pointer to the script's table), the learned-ID rule, the deadline, the cleanup readback, why the router-credential
-rotation does not hit the approver recheck (the source pointers above), and that profile, grant, policy and
-delegation approvals stay owner-only.
+- It uses its own minimal service account, scoped to reading that Lease plus exec on relay-postgres-0. Alternatively
+  it uses a dedicated database role allowed only those two DELETEs. The cheaper one that is still narrow is chosen at
+  implementation time.
 
-### Out of scope
+### 4. Docs
 
-- The Runner adapter itself: the inference session's reviewed PR, pinned by hash.
-  <!-- codex: [P1] Make that PR and its compatibility evidence explicit prerequisites: the checked-in Runner requires deployment hubSource 74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613, whereas this review targets deployed 5f90d03a, and the Runner itself never rotates credentials. The adapter must resolve the source pin, renewal ownership and historical-receipt access through reviewed changes without fabricating attestations or silently weakening validators. -->
-  <!-- codex: [P1] Specify how the adapter supplies fresh holder, marker, Router-trajectory and renderer-cleanup observations to env.ask(), preserves the stopped report, and schedules renew(); the 20-second heartbeat currently lives in mount(), outside Runner. These observations require access beyond this Relay route allowlist, so identify their producer and bounded delivery interface without handing the Runner general operator credentials or returning unconditional confirmations. -->
-- Any Relay server change.
-- Starting or resuming the dev-worker-1 holder: `scratchpad/handoff/resume.sh`, run by the operator at the automation
-  window signal.
+`docs/runbooks/relay.md` "Operator automation identity" gains a `session` subsection:
+
+- the purpose, the pinned scope, the allowlist (a pointer to the script);
+- the learned-ID provenance rules and the deadlines;
+- the reaper and the Lease, and the cleanup readback;
+- the qualified rotation finding (issuance readback before removal), and that durable approvals stay owner-only;
+- that the inventory reads are tenant-wide.
+
+### Prerequisites owned by the inference session (not this change)
+
+The proxy is necessary but not sufficient. The adapter PR must resolve, through reviewed changes and without
+fabricated attestations or weakened validators:
+
+1. **Hub source pin:** the Runner currently pins 74d1. The hub rolls to v0.14.2 first, and the driver is re-pinned
+   once to its source.
+2. **Renewal ownership:** the Runner never rotates. The adapter performs the two rotations through the proxy, then
+   reads issuance back to a terminal state.
+3. **Predecessor command receipts:** `GET /operations/:op` is actor-scoped, so the JIT identity cannot see the owner's
+   old commands even as admin. Proposed contract: the operator exports, read-only from Postgres, a sanitized
+   projection of the predecessor session's command operations (id, kind, state, timestamps, no prompt text) as an
+   evidence file pinned by sha256. The adapter's validator accepts that file in place of the live lookup. The
+   inference session decides whether this is sound.
+4. **The `env.ask()` observations** (holder, workspace markers, Router trajectory, renderer cleanup) need access beyond
+   Relay. A separate, later plan adds an operator "observer" with fixed read-only queries on its own socket; this
+   proxy does not grow for it.
+5. **The lease heartbeat:** it moves from `mount()` into the adapter, at a 20 s cadence.
 
 ## Critical files
 
-- `scripts/relay-session-proxy.py` (new): login once, allowlist + learned IDs, deadline, logout.
-- `scripts/relay-operator.py`: the `session` subcommand (grant → proxy → runner → stop → cleanup).
-- `scripts/relay-admin-call.py`: unchanged; imported for `Client` / `login` / `logout`.
-- `scripts/tests/test_relay_session_proxy.py` (new): unit and fake-upstream tests.
-- `docs/runbooks/relay.md`: the `session` subsection.
+- `scripts/relay-session-proxy.py` (new): scope constants, Unix-socket server, allowlist + schemas, provenance, deadlines, logout.
+- `scripts/relay-operator.py`: `session`, the Lease in `call` and `session`, the bounded cleanup stages.
+- `scripts/relay-admin-call.py`: unchanged (imported).
+- `kubernetes/apps/apps/relay/operator-reaper.yaml` (new) + its kustomization entry.
+- `scripts/tests/test_relay_session_proxy.py`, `scripts/tests/test_relay_operator_session.py` (new).
+- `docs/runbooks/relay.md`.
 
 ## Verification
 
-1. **Unit** (`scripts/tests/test_relay_session_proxy.py`, in docker python:3.13): each allowed route passes and
-   near-misses are refused. Near-misses: an unknown or unlearned session/permission/lease ID; a fixed binding swapped
-   for a random UUID; an extra query key; `limit=201`; a wrong method; a path with `..`, `//` or encoded slashes. Also:
-   - learning only from this run's launch rows;
-   - `operationId` reuse refused;
-   - body size and JSON checks;
-   - `Cookie`, `Authorization` and `Origin` from the client dropped, `Set-Cookie` stripped;
-   - the deadline refuses and triggers logout.
-   <!-- codex: [P1] Add contract cases using the deployed shapes: launch/resume return top-level id, launch inventory carries session_id, POST control returns id/generation/expires_at, GET control returns lease with owned/expiresAt and id only when owned, and permission lists return rows with id rather than commandId. Credential inventory is {bindings,credentials,consumers} with binding_id, while inspection uses camelCase; test cross-session substitution, old launch replay, inventory saturation and timeline cursor validation as well. -->
-2. **Fake upstream:** a local HTTP server stands in for Relay (login endpoints faked). It asserts the proxy sends the
-   cookie and Origin and that nothing from a refused request reaches it.
-   <!-- codex: [P1] Exercise the actual pinned adapter and exported Runner through the proxy across stopped-run replacement, renewal, five launches including two resumes, permission decisions and cleanup, preserving deployed field names and actor-scoped operation lookup. Add an isolated server-backed check that ordinary issued credentials and queued revocations reconcile after JIT membership removal, and that a different login for the same user cannot renew, command through or release the original lease. -->
-   <!-- codex: [P1] Add orchestrator fault tests for grant transport failure after commit, READY timeout, slow upstream/body reads, lost mutation responses, proxy/Runner crashes, SIGINT/SIGTERM, deadline during active work, overlapping invocations and each cleanup-stage failure. Assert preserved operation evidence, no automatic mutation replay, both containers accounted for, independent revoke/SSO attempts and correct exit-code precedence. -->
-3. **Live read-only smoke** (operator, before any run): `session` with a trivial Runner (curl image) that GETs
-   `/api/auth/me` (refused: not on the allowlist), then `/api/agent-profiles` and `/api/router-credentials` (200), and
-   one POST with an unlearned session ID (403 locally). Then the readback `0 memberships, 0 sessions` and the
-   Keycloak logout.
-4. **Codex implementation review** before the PR; the PR goes through the normal reviewbot gate.
+1. **Proxy unit and contract tests** (docker python:3.13), using the deployed response shapes:
+   - launch and resume return top-level `id`; the launch inventory carries `session_id`, `operation_id` and
+     `actor_id`; POST `/control` returns `id`, `generation`, `expires_at`; GET `/control` exposes the lease;
+     permission rows carry `id`; the credential inventory is `{bindings, credentials, consumers}` with `binding_id`;
+   - each allowed route passes and every near-miss is refused before upstream;
+   - provenance: an old launch replay, cross-session substitution, an unlearned ID, the predecessor used in a
+     mutation, `acknowledgeUnknownToolEffects: true`, a second rotate per binding, reused or duplicate keys, framing
+     conflicts;
+   - bounds: a slow upstream, an oversize body, the timeline cursor;
+   - deadlines: cleanup-only after `runner_deadline`, nothing after `cleanup_deadline`, logout on SIGTERM.
+2. **Orchestrator fault tests** (fakes for docker, kubectl and the proxy):
+   - a grant transport failure after commit, a READY timeout, Runner and proxy crashes, SIGINT and SIGTERM, the
+     deadline during work, an overlapping invocation (the Lease is refused), each cleanup stage failing;
+   - assert that both containers are accounted for, the stages run independently, evidence is preserved, nothing is
+     replayed, and the rc precedence holds.
+3. **Reaper test:** render the CronJob and run its script against a disposable Postgres (docker). It deletes only with
+   no live Lease and leaves everything when one exists.
+4. **Live read-only smoke** (operator, before any run): `session` with a trivial pinned Runner bundle.
+   - It GETs `/api/agent-profiles` and `/api/router-credentials` (200).
+   - Locally refused: `/api/auth/me`, a POST with an unlearned sid, a mutation on the predecessor.
+   - It confirms that a TCP connect from the Runner fails (`--network none`).
+   - Then: readback `0 memberships, 0 sessions`, the Keycloak logout, the Lease released. A second run while the
+     first holds the Lease is refused.
+5. **The first real run** reads back after cleanup: both rotated credentials stay ready or installed with the
+   membership gone, and the reaper finds nothing to do.
+6. **Codex implementation review** before the PR; then the normal reviewbot gate.
+
+<!-- codex: [P1] Exercise the actual pinned adapter and exported Runner through the proxy across stopped-run replacement, renewal, five launches including two resumes, permission decisions and cleanup, preserving deployed field names and actor-scoped operation lookup. Add an isolated server-backed check that ordinary issued credentials and queued revocations reconcile after JIT membership removal, and that a different login for the same user cannot renew, command through or release the original lease. -->
+<!-- opus-pushback: The actual-adapter run cannot be part of this change because the adapter does not exist yet (it is the inference session's prerequisite PR); it becomes verification step 5's first real run, gated on that PR. A disposable Relay server stack to prove post-removal reconciliation and lease-session binding is out of proportion: the lease binding is enforced in control.ts by actor.userId+sessionHash, which the deployed code shows, and post-removal reconciliation is checked by step 5's live readback with the reaper as the backstop. -->
 
 <!-- codex-review-status: complete -->
