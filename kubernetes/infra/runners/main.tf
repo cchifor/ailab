@@ -69,7 +69,7 @@ resource "proxmox_virtual_environment_vm" "runner" {
     datastore_id = var.vm_datastore
     import_from  = proxmox_virtual_environment_download_file.ubuntu_cloud.id
     interface    = "scsi0"
-    size         = var.runner_rootfs_gb # cloud-init growpart expands the root fs to fill this
+    size         = coalesce(each.value.rootfs_gb, var.runner_rootfs_gb) # cloud-init growpart expands the root fs to fill this (per-runner override: variables.tf)
     iothread     = true
     discard      = "on"
 
