@@ -1,5 +1,29 @@
 # Owner-run phase A
 
+**Current operational hold (2026-11-27): do not run this driver.** The published
+holder/Pi source `2604c41b69c5d9c50a3324545a51f0bfa38435a0` rejects the required
+two-block reminder and slash/local-control cases. The renewal-metadata and
+actual-API projection qualification below remains evidence only for that
+boundary. It does not qualify the complete Phase A workflow. The separate
+`HOLDER_CONTROLS_QUALIFIED = false` gate refuses the public start entry and
+disables the Start and replacement controls in the panel. `QUALIFIED_INPUTS`
+does not override it. Do not change either flag locally.
+
+Before this procedure can become runnable, qualify and publish a corrected
+holder and review its replacement inputs together with a post-use upgrade
+handoff that preserves the existing journal and native homes. No successor
+artifact or profile pin is supplied by this hold notice. The old
+[stopped-idle helper](UPGRADE-IDLE.md) requires a holder that has never run a
+command or session; this holder is ineligible. Do not rerun that helper or
+erase retained state to meet its conditions. Preserve the stopped report,
+operation IDs, marker identities and the **one prompt/two attempts** already
+charged.
+
+Everything below is candidate procedure or historical evidence until that
+qualification and reviewed handoff are complete. Existing publication,
+deployment, credential-renewal and owner-window requirements still apply;
+their completion alone does not lift this holder-control hold.
+
 This packet retains published **v0.13.1** holder/Pi source
 `2604c41b69c5d9c50a3324545a51f0bfa38435a0` and first-registration profile revision
 1. The profile file SHA256 is

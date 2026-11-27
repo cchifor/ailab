@@ -1,5 +1,22 @@
 # Exact dev-worker-1 Pi canary inputs
 
+**Current operational hold (2026-11-27): Phase A is not runnable.** The
+published holder/Pi source `2604c41b69c5d9c50a3324545a51f0bfa38435a0` rejects
+the required two-block reminder and slash/local-control cases. Correct renewal
+metadata and passing API contract tests do not qualify those holder controls.
+The driver keeps a separate `HOLDER_CONTROLS_QUALIFIED = false` gate; do not
+change that flag locally or execute the candidate workflow below.
+
+Resumption requires a published, qualified corrected holder, a reviewed
+post-use upgrade handoff that preserves the holder journal and native homes,
+and reviewed replacement inputs. No corrected artifact or profile pin is
+declared here. This holder has already run commands: the never-used-holder
+[idle upgrade helper](UPGRADE-IDLE.md) is ineligible. Do not erase retained
+state, replay that helper or reset the saved report, marker identities or the
+stopped run's **one prompt and two attempts**. The remainder of this packet is
+candidate procedure and historical evidence, not a runnable handoff; see the
+[owner procedure's hold](OWNER-PHASE-A.md) before any future use.
+
 These are proposed, nonsecret inputs for owner review. Committing them does not
 approve profiles, issue credentials or enable an inventory host. The operator
 owns route creation, trust configuration, dedicated OpenBao reader provisioning
