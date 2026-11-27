@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -479,11 +480,10 @@ class CallLifecycle(unittest.TestCase):
         def runner(args, **kw):
             self.events.append("docker-run")
             return behaviour(args, **kw) or P()
-        self.m.subprocess.run = runner
-
-    def tearDown(self):
-        import subprocess as sp
-        self.m.subprocess.run = sp.run
+        # self.m.subprocess IS the global subprocess module: patch it reversibly, or every later suite inherits it
+        p = mock.patch.object(self.m.subprocess, "run", runner)
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_happy_call(self):
         self.fake_docker(lambda a, **k: None)
