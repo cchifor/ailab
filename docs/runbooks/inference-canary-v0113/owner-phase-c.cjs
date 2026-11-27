@@ -600,7 +600,9 @@ class WarmRunner extends a.Runner {
         this.acceptSample(value);
       }
     })().catch(() => {
-      if (!this.monitorAbort.signal.aborted) {
+      // The host aborts active work after a primary failure or Stop. That also
+      // cancels next(); it must not replace the saved failure with an observer fault.
+      if (!this.monitorAbort.signal.aborted && !this.ports.signal.aborted) {
         this.monitorFault = true;
         this.stopped = true;
         this.state.status = "stopped";

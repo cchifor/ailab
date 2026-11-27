@@ -292,6 +292,7 @@ function fixture({
   coldArmLost = false,
   stopFailure = false,
   coldCounterDrift = false,
+  observerFailure = false,
 } = {}) {
   let clock = NOW,
     seq = 0,
@@ -661,6 +662,7 @@ function fixture({
       },
       next: async ({ signal }) => {
         signal.throwIfAborted();
+        if (observerFailure) throw Error("Synthetic observer transport failure");
         if (queued.length) return queued.shift();
         return new Promise((resolve, reject) => {
           const abort = () => {
@@ -891,8 +893,48 @@ function fixture({
     fence: () => fence,
     pulse,
     trace,
+    abortWork: () => signal.abort(),
   };
 }
+
+for (const primaryFailure of [false, true])
+  test(
+    "host cancellation preserves the process observer state" +
+      (primaryFailure ? " after a primary failure" : ""),
+    async () => {
+      const f = fixture();
+      await f.runner.startMonitor();
+      if (primaryFailure) {
+        f.runner.stopped = true;
+        f.runner.state.status = "stopped";
+        f.runner.state.reason =
+          "C stopped; preserve scoped observations and unresolved intents";
+        f.runner.save();
+      }
+      const before = clone(f.runner.state);
+      const saves = f.snapshots.length;
+      f.abortWork();
+      await f.runner.monitorTask;
+      assert.equal(Boolean(f.runner.monitorFault), false);
+      assert.deepEqual(f.runner.state, before);
+      assert.equal(f.snapshots.length, saves);
+      await f.runner.stopMonitor();
+      assert.equal(f.runner.monitorStopped, true);
+    },
+  );
+
+test("an observer transport failure still stops C while the host is active", async () => {
+  const f = fixture({ observerFailure: true });
+  await f.runner.startMonitor();
+  await f.runner.monitorTask;
+  assert.equal(f.ports.signal.aborted, false);
+  assert.equal(f.runner.monitorFault, true);
+  assert.equal(f.runner.stopped, true);
+  assert.equal(f.runner.state.status, "stopped");
+  assert.equal(f.runner.state.reason, "Process observer failed");
+  assert.equal(f.snapshots.at(-1).reason, "Process observer failed");
+  await f.runner.stopMonitor();
+});
 
 test("unpublished entry refuses before any API, settings or fence operation", async () => {
   const f = fixture();
