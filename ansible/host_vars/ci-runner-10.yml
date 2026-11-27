@@ -3,3 +3,9 @@
 # ci-runner-10 03:40-05:25. Runners on one node share its NVMe with etcd, so their windows must not overlap.
 gitea_runner_fstrim_window_start: "03:40"
 gitea_runner_fstrim_window_end: "05:25"
+
+# workbricks PULL-REQUEST jobs run only on runners with this label - every runner except the push runners
+# ci-runner-3/-6 - so no runner switches between workbricks' push and pull_request caches (each switch
+# was a cold ~34 GiB Rust target rebuild). Why and the rollout order: docs/runbooks/ci-runners.md,
+# "workbricks push runners". Every other job keeps running on self-hosted-hv here.
+gitea_runner_extra_labels: [workbricks-pr]
