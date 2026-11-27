@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -471,19 +472,15 @@ class CallLifecycle(unittest.TestCase):
         m.run = lambda args, stdin=None, check=True, timeout=120: (self.events.append(" ".join(args[:3])), b"")[1]
 
     def fake_docker(self, behaviour):
-        import subprocess as sp
-
         class P:
             returncode, stdout, stderr = 0, b"ok", b""
 
         def runner(args, **kw):
             self.events.append("docker-run")
             return behaviour(args, **kw) or P()
-        self.m.subprocess.run = runner
-
-    def tearDown(self):
-        import subprocess as sp
-        self.m.subprocess.run = sp.run
+        # subprocess is a shared module: assigning sp.run back after replacement
+        # would restore the fake itself and poison later discovery modules.
+        self.enterContext(mock.patch.object(self.m.subprocess, "run", side_effect=runner))
 
     def test_happy_call(self):
         self.fake_docker(lambda a, **k: None)
@@ -543,6 +540,23 @@ class CallLifecycle(unittest.TestCase):
         self.assertEqual(self.m.call(["me"]), 0)
         self.assertIn("sso", self.events)
         self.assertEqual(self.w.lease["spec"]["holderIdentity"], "")
+
+
+class CallFixtureIsolation(unittest.TestCase):
+    def test_timeout_fixture_restores_subprocess_for_later_tests(self):
+        import subprocess as sp
+        original = sp.run
+        try:
+            result = unittest.TestResult()
+            CallLifecycle("test_timed_out_container_is_removed_before_the_revoke").run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertIs(sp.run, original)
+            child = sp.run([sys.executable, "-c", "print('local-child-ok')"],
+                           capture_output=True, text=True, timeout=5)
+            self.assertEqual((child.returncode, child.stdout.strip()), (0, "local-child-ok"))
+        finally:
+            # A regression must not itself poison the rest of unittest discovery.
+            sp.run = original
 
 
 if __name__ == "__main__":
