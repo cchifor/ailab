@@ -1,0 +1,26 @@
+---
+- name: Require explicit stopped-only handoff for split profile paths
+  ansible.builtin.assert:
+    that:
+      - relay_holder_profile_state == relay_holder_state or not relay_holder_start | bool
+      - relay_holder_profile_state != relay_holder_state or (relay_holder_handoff_receipt == '' and relay_holder_handoff_receipt_sha256 == '')
+      - relay_holder_profile_state == relay_holder_state or (relay_holder_user == 'c4' and relay_holder_uid | int == 1000 and relay_holder_home == '/home/c4' and relay_holder_config == '/home/c4/.config/relay-holder')
+      - relay_holder_profile_state == relay_holder_state or relay_holder_handoff_receipt is match('^/home/c4/\.config/relay-holder/used-handoffs/[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}/complete\.json$')
+      - relay_holder_profile_state == relay_holder_state or relay_holder_handoff_receipt_sha256 is match('^[a-f0-9]{64}$')
+    fail_msg: Split profile paths require the pinned used-holder handoff receipt and start:false.
+
+- name: Authenticate stopped handoff and preserved state without modifying it
+  ansible.builtin.script:
+    cmd: >-
+      {{ (role_path + '/../../../scripts/prepare-used-holder-handoff.py') | quote }}
+      --verify {{ relay_holder_handoff_receipt | quote }}
+      --receipt-sha256 {{ relay_holder_handoff_receipt_sha256 | quote }}
+      --state {{ relay_holder_state | quote }}
+      --profile-state {{ relay_holder_profile_state | quote }}
+      --profiles-sha256 {{ relay_holder_profiles_sha256 | quote }}
+    executable: python3
+  become_user: "{{ relay_holder_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ relay_holder_uid }}"
+  changed_when: false
+  when: relay_holder_profile_state != relay_holder_state

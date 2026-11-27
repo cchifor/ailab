@@ -8,8 +8,8 @@
       - item.qualification == 'protocol-fixture'
       - item.native.kind == 'pi'
       - item.native.runtimeDirectory == relay_holder_pi_root + '/' + (relay_holder_archives | selectattr('component', 'equalto', 'pi-linux-x64') | first).manifestSha256
-      - item.credentialHome == relay_holder_state + '/profile-homes/' + item.id
-      - item.roots == [relay_holder_state + '/workspaces/' + item.id]
+      - item.credentialHome == relay_holder_profile_state + '/profile-homes/' + item.id
+      - item.roots == [relay_holder_profile_state + '/workspaces/' + item.id]
   loop: "{{ relay_holder_profiles }}"
   loop_control:
     label: "{{ item.id | default('invalid') }}"
