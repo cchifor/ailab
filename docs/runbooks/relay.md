@@ -859,3 +859,69 @@ user `a2d7daaa-…` (for example `enrollment-reissued`).
   Never retry a failed login: the realm has brute-force protection, so repeated failures lock the account.
 - **Retire it:** `revoke`, then `kc update users/72e99c0a-… -r relay -s enabled=false` (or delete it),
   then `bao kv metadata delete -mount=af relay/operator-oidc`.
+
+### `session`: one bounded authenticated run (automated Pi canary phase A, 2026-11-27)
+
+`call` logs in and out per call, so it cannot hold a Relay control lease, which binds `actor.userId` AND the
+login session. The automated phase A (the inference session's `owner-phase-a-automation.cjs`) needs ONE session for
+its whole run. `session` provides exactly that, and nothing general-purpose
+(plan: `plans/2026-11-27-relay-operator-session-plan.md`):
+
+```bash
+python scripts/relay-operator.py session --manifest-ref <FULL_COMMIT>:<path/to/manifest.json> \
+  --bundle <dir> --runner-minutes <1-45> --evidence-dir <NEW dir>
+```
+
+- **The bundle.** The manifest (`{version: 1, image: name@sha256:…, entrypoint: [...], files: {relpath: sha256}}`)
+  is read from a commit on `gitea/main`, so only reviewed code runs. The bundle is copied into a private directory,
+  refusing symlinks, special files and files outside the manifest, and the COPIED bytes are hashed.
+- **The proxy** (`scripts/relay-session-proxy.py`, stdlib, pinned python image, hardened container) logs in once,
+  keeps the cookie in memory and serves a fixed allowlist on a Unix socket. Scope is pinned in its source: the two
+  canary bindings, profiles `1d9a7d6e` / `f25c187b` at revision 1 and their workspaces, the read-only predecessor
+  session and permission. Each request is rebuilt from validated fields (Relay v0.14.1 schemas); client headers are
+  never forwarded.
+  - Allowed: binding rotation (at most once per binding), launch, control lease, `prompt` / `set-config`
+    (`thought_level` low or high) / `cancel` / `close` commands, permission decisions (Relay's `outcome` union, once
+    per permission), native recovery and resume (never with `acknowledgeUnknownToolEffects`), and the reads.
+  - Not allowed: binding revoke, profile or grant approvals, `set-mode`, `native-command`, question replies.
+  - Dynamic IDs are learned only from this run's own responses. A launch must be this run's operation, by this
+    actor, created after login, matching the dispatched intent; a lost POST response is reconciled read-only through
+    the inventory, never resent. Operation IDs that existed at login are refused.
+- **The Runner** runs with `--network none` and is hardened. It shares only the proxy's socket
+  (`RELAY_SESSION_SOCKET`), and its durable store is a named volume `relay-state-<run>` (`AUTOMATION_DIR`), kept
+  after the run and exported to `state.tar`.
+- **Deadlines.** `RUNNER_DEADLINE`, then `CLEANUP_DEADLINE` (10 min later).
+  - After the runner deadline the Runner gets SIGTERM. The proxy then passes only cleanup-shaped calls: reads,
+    renewal of an existing lease and its release, `cancel` / `close`, and cancelled permission decisions.
+  - At the cleanup deadline the proxy refuses everything, logs out (`/api/auth/me` must answer 401) and exits.
+  - A dispatched mutation that was interrupted is logged `uncertain`, with its operationId.
+- **The Lease** `relay-operator-jit` (namespace `relay`) serializes `session`, `call` and the reaper.
+  - It is taken by create, or by a `resourceVersion`-conditioned replace when expired. Orphan authority is cleared
+    before every grant.
+  - A run never revokes when it positively sees another live holder; an unknown answer still revokes, so no admin
+    is left standing.
+- **Cleanup stages**, each bounded and independent: drain the logs, stop the proxy (logout), remove the containers and
+  the socket volume, export the state, revoke plus readback `0 memberships, 0 sessions`, Keycloak logout, release the
+  Lease.
+- **Exit codes** (precedence order): 3 revoke not confirmed, 4 proxy logout, 5 Keycloak, 6 evidence capture, 7 Lease,
+  8 Runner or deadline, 2 refused before any authority.
+- **Evidence** (`--evidence-dir`): `run.json` (manifest commit, image, file hashes, deadlines), `proxy.jsonl`
+  (one line per call: route, IDs, operationId, status; never bodies or cookies), `runner.jsonl` (the library's
+  snapshots and report), `state.tar` and `result.json`.
+
+**Router credential rotation is safe to run under this identity, with a qualification** (Relay v0.14.1). `rotate()`
+records the actor only in the `router_credential_operations` journal, and later reconciliation and revocation do not
+recheck its membership. But `issue()` re-enters an admin check after recording intent and swallows failures, so a 202
+does not prove issuance: the Runner must read the new credential back to a terminal state before the session ends.
+
+**Live read-only smoke** (after merge, before any real run): `--manifest-ref <main commit>:scripts/relay-session-smoke/manifest.json
+--bundle scripts/relay-session-smoke/bundle --runner-minutes 2`. Expect `{"smoke": "pass"}` in `runner.jsonl`
+(profiles and credentials 200; local refusals for `/api/auth/me`, an unlearned session and a predecessor mutation;
+no network from the Runner), then rc 0 and `status` 0/0.
+
+**Gates before a real phase A run:**
+- this change and the reaper are deployed, and the reaper has been checked once;
+- the inference session's adapter and its manifest are merged and pinned to the deployed hub source;
+- the observer (`collectCheckpoint`) is merged;
+- the predecessor command-receipt export is accepted by the inference session;
+- the original browser report has been recovered byte-exact.
