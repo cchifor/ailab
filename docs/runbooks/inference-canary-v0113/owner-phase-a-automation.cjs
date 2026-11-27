@@ -50,7 +50,11 @@ function writeExclusive(file, content) {
   syncDirectory(path.dirname(file));
 }
 
-function createStore(directory, predecessorRaw) {
+function createStore(directory, predecessorRaw, onSnapshot) {
+  need(
+    onSnapshot === undefined || typeof onSnapshot === "function",
+    "Snapshot callback must be a function",
+  );
   need(path.isAbsolute(directory), "Absolute store path required");
   const parent = path.dirname(directory);
   need(fs.realpathSync(parent) === parent, "Canonical store parent required");
@@ -84,6 +88,13 @@ function createStore(directory, predecessorRaw) {
         content + "\n",
       );
       sequence = next;
+      if (onSnapshot) {
+        const result = onSnapshot(JSON.parse(content));
+        need(
+          !result || typeof result.then !== "function",
+          "Snapshot callback must be synchronous",
+        );
+      }
     },
   };
 }
@@ -108,6 +119,12 @@ function createAutomation(options) {
     signal,
     maxDurationMs = 2700000,
     cleanupTimeoutMs = 120000,
+    onSnapshot,
+    readPredecessorEvidence,
+    predecessorEvidencePin,
+    renewalPrelude,
+    observeDeployment,
+    deadline,
   } = options;
   need(
     typeof predecessorRaw === "string" &&
@@ -130,7 +147,27 @@ function createAutomation(options) {
     "Bounded execution and cleanup deadlines required",
   );
   need(!signal?.aborted, "Automation already cancelled");
-  const store = createStore(directory, predecessorRaw);
+  need(
+    renewalPrelude === undefined || typeof renewalPrelude === "function",
+    "Renewal prelude must be a function",
+  );
+  need(
+    observeDeployment === undefined || typeof observeDeployment === "function",
+    "Deployment observer must be a function",
+  );
+  need(
+    deadline === undefined ||
+      (Number.isSafeInteger(deadline) &&
+        deadline > Date.now() &&
+        deadline - Date.now() <= 2700000),
+    "Absolute execution deadline outside bound",
+  );
+  need(
+    readPredecessorEvidence === undefined ||
+      typeof readPredecessorEvidence === "function",
+    "Predecessor evidence reader must be a function",
+  );
+  const store = createStore(directory, predecessorRaw, onSnapshot);
   const active = new AbortController(),
     cleanup = new AbortController();
   const transports = new Set();
@@ -156,6 +193,41 @@ function createAutomation(options) {
     origin: driver.ORIGIN,
     crypto: webcrypto,
     load: store.load,
+    predecessorEvidencePin,
+    ...(readPredecessorEvidence
+      ? {
+          async readPredecessorEvidence(context) {
+            need(
+              started && !finished && !stopping,
+              "Predecessor evidence reader is closed",
+            );
+            const combined = AbortSignal.any([active.signal, context.signal]);
+            combined.throwIfAborted();
+            try {
+              const value = await abortable(
+                track(
+                  collectors,
+                  Promise.resolve().then(() => {
+                    combined.throwIfAborted();
+                    return readPredecessorEvidence(
+                      Object.freeze({
+                        ...context,
+                        signal: combined,
+                      }),
+                    );
+                  }),
+                ),
+                combined,
+              );
+              combined.throwIfAborted();
+              return value;
+            } catch (error) {
+              failure();
+              throw error;
+            }
+          },
+        }
+      : {}),
     save(state) {
       try {
         store.save(state);
@@ -213,7 +285,7 @@ function createAutomation(options) {
         throw error;
       }
     },
-    async ask(name, instructions, validate, timeout) {
+    async ask(name, instructions, validate, timeout, context) {
       need(
         !stopping && !checkpoint && Number.isFinite(timeout) && timeout > 0,
         "Checkpoint unavailable",
@@ -232,6 +304,7 @@ function createAutomation(options) {
                 instructions,
                 deadline: Date.now() + timeout,
                 signal: combined,
+                context,
               }),
             ),
           ),
@@ -296,19 +369,72 @@ function createAutomation(options) {
     async run() {
       need(!started && !finished && !stopping, "Automation is single-use");
       started = true;
+      const runAbsoluteDeadline = Math.min(
+        deadline ?? Infinity,
+        Date.now() + maxDurationMs,
+      );
       const cancel = () => {
         void stop();
       };
       signal?.addEventListener("abort", cancel, { once: true });
       if (signal?.aborted) cancel();
-      executionTimer = setTimeout(cancel, maxDurationMs);
+      executionTimer = setTimeout(
+        cancel,
+        Math.max(0, runAbsoluteDeadline - Date.now()),
+      );
       heartbeat = setInterval(() => {
         runner.renew().catch(() => {
           void stop();
         });
       }, 20000);
       try {
-        runPromise = runner.replaceStopped();
+        need(
+          runAbsoluteDeadline > Date.now(),
+          "Execution deadline elapsed before dispatch",
+        );
+        runPromise = (async () => {
+          active.signal.throwIfAborted();
+          if (renewalPrelude) {
+            await renewalPrelude({
+              authenticatedFetch: (url, init) => {
+                active.signal.throwIfAborted();
+                return env.fetch(url, init);
+              },
+              persist: (state) =>
+                store.save({ renewal: state, runner: runner.state }),
+              deadline: runAbsoluteDeadline,
+              signal: active.signal,
+              ...(observeDeployment
+                ? {
+                    observeDeployment: async (context) => {
+                      const combined = AbortSignal.any([
+                        active.signal,
+                        context.signal,
+                      ]);
+                      combined.throwIfAborted();
+                      const value = await abortable(
+                        track(
+                          collectors,
+                          Promise.resolve().then(() => {
+                            combined.throwIfAborted();
+                            return observeDeployment({
+                              ...context,
+                              signal: combined,
+                            });
+                          }),
+                        ),
+                        combined,
+                      );
+                      combined.throwIfAborted();
+                      return value;
+                    },
+                  }
+                : {}),
+            });
+          }
+          active.signal.throwIfAborted();
+          return runner.replaceStopped();
+        })();
         await abortable(runPromise, active.signal);
         need(!stopping, "Automation stopped");
         clearInterval(heartbeat);

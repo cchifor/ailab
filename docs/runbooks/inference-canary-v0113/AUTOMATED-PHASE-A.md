@@ -16,6 +16,25 @@ helper is insufficient: its logout between calls invalidates the session that
 owns the control lease. Keep this execution boundary closed until the bounded
 operator integration is available and qualified.
 
+The operator is preparing a Unix-domain HTTP proxy that retains the JIT session.
+The socket transport in `owner-phase-a-socket.cjs` sends relative API requests
+through `RELAY_SESSION_SOCKET`, without forwarding credentials or following
+redirects. `owner-phase-a-cli.cjs` supplies Linux entrypoint mechanics: an exact
+private predecessor file, an exclusive writable evidence directory, an absolute
+`RUNNER_DEADLINE` in epoch milliseconds, signal handling, and JSONL snapshots
+after filesystem synchronization. The root filesystem can remain read-only;
+the evidence directory must be a separate private writable mount.
+
+The CLI still requires the operator's reviewed checkpoint collector and
+deployment observer. Running it without those integrations refuses before
+authenticated traffic. The operator owns the final integration entrypoint and
+bundle/runtime pins. Its absence is not evidence of a completed automated run.
+
+The next execution target is v0.14.2, after the operator publishes its exact
+source and deployment receipt. The current v0.14.1 source bridge is historical
+qualification; update the pin and verify the corresponding contracts before
+using this driver on a different deployed source.
+
 ## Integration boundary
 
 `createAutomation` accepts an absolute new `directory`, the exact
@@ -34,6 +53,39 @@ integration must enforce the reviewed canary endpoint/identity scope and honor
 abort signals, response bounds and redirect refusal. It must retain uncertain
 dispatch receipts. This library neither creates an identity nor supplies
 cookies; a new login per request does not satisfy its contract.
+
+`owner-phase-a-renewal.cjs` implements the fixed two-binding renewal prelude.
+`createRenewalPrelude({authenticatedFetch,persist,observeDeployment,deadline,signal})`
+returns a single-use `run()`. The host invokes it after preserving the original
+report, within the same overall deadline and before `Runner.replaceStopped()`.
+`persist` must synchronously finish the durable snapshot; it is not a fire-and-forget
+log callback. The deployment observer must return an actual fresh
+`{hubSource,ready,observedUtc}` matching the reviewed driver source before any
+credential request. The operator's final entrypoint supplies this observer.
+
+Both fixed bindings must have normal `canRenew` eligibility, unchanged grants
+and hosts, fully retired credential history and no active consumers before
+either rotation. Each fresh operation ID and observed binding revision is
+saved before its single POST. HTTP 202 is followed by read-only inventory and
+detail checks: the created credential must refer to that exact operation and
+reach acknowledged `installing` or `ready`, with the matching terminal issuance
+operation. Only then can the next rotation run. The final metadata goes through
+the existing driver validator. Issuance is not installation; the later delivery
+checkpoint remains mandatory.
+
+An uncertain response, malformed or changed scope, failed issuance or deadline
+stops this prelude. It preserves the original operation IDs and any already
+issued credential and never repeats a POST, revokes a binding, creates a new
+profile, or opens an inference session. The prelude has a maximum two-minute
+bootstrap budget inside the overall deadline. The host subsequently performs
+the ordinary two-pass renewed-metadata review. Final revocation remains a
+separate operation after acceptance.
+
+For the original owner's actor-scoped commands, the optional
+[predecessor projection](projection-contract.md) accepts a separately pinned,
+operator-produced read-only projection. It preserves the native receipt checks
+and live closed-session, no-lease and cancelled-permission reads. It never
+impersonates an actor-scoped HTTP response or supplies a missing browser report.
 
 The operator's JIT identity needs temporary admin authority for the existing
 credential renewal and native recovery endpoints. Ordinary launch/control and
@@ -98,6 +150,8 @@ Offline checks:
 ```sh
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-automation.test.cjs
+node --test docs/runbooks/inference-canary-v0113/owner-phase-a-socket.test.cjs
+node --test docs/runbooks/inference-canary-v0113/owner-phase-a-renewal.test.cjs
 ```
 
 These checks use synthetic services and reports. They do not prove operator

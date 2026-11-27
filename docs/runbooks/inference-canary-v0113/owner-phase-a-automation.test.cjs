@@ -5,6 +5,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
+const http = require("node:http");
+const { EventEmitter } = require("node:events");
+const { runCli } = require("./owner-phase-a-cli.cjs");
 const a = require("./owner-phase-a.js");
 const {
   createAutomation,
@@ -675,6 +678,259 @@ test("actual Runner treats non-2xx API responses as terminal without retries", a
       new RegExp("API refused.*HTTP " + status),
     );
   }
+});
+
+test("snapshot callback observes fsynced state and cannot change saved bytes", (t) => {
+  const o = setup(t);
+  const originalSync = fs.fsyncSync;
+  let synced = 0,
+    observed;
+  t.mock.method(fs, "fsyncSync", (fd) => {
+    synced++;
+    return originalSync(fd);
+  });
+  const store = createStore(o.directory, o.predecessorRaw, (state) => {
+    assert.equal(synced, 2, "file and directory synced before callback");
+    observed = JSON.parse(
+      fs.readFileSync(path.join(o.directory, "state-000001.json")),
+    );
+    state.status = "callback-mutated";
+  });
+  synced = 0;
+  store.save({ status: "sending" });
+  assert.deepEqual(observed, { status: "sending" });
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(o.directory, "state-000001.json"))),
+    observed,
+  );
+});
+
+test("snapshot output failure retains durable intent and prevents actual Runner HTTP", async (t) => {
+  let calls = 0;
+  const o = setup(t, {
+    authenticatedFetch: async () => {
+      calls++;
+    },
+    onSnapshot: () => {
+      throw Error("Synthetic output failure");
+    },
+  });
+  await assert.rejects(createAutomation(o).run());
+  assert.equal(calls, 0);
+  assert.ok(
+    fs.readdirSync(o.directory).some((name) => name.startsWith("state-")),
+  );
+  assert.equal(
+    fs.readFileSync(path.join(o.directory, "predecessor.json"), "utf8"),
+    o.predecessorRaw,
+  );
+});
+
+test("CLI SIGTERM aborts real prelude observation and emits durable snapshots then failure", async (t) => {
+  const o = setup(t);
+  const parent = path.dirname(o.directory);
+  const input = path.join(parent, "input.json");
+  fs.writeFileSync(input, o.predecessorRaw, { mode: 0o600 });
+  const socket = path.join(parent, "session.sock");
+  let calls = 0,
+    collectorSignal;
+  const server = http.createServer((req, res) => {
+    calls++;
+    res.end("{}");
+  });
+  await new Promise((resolve) => server.listen(socket, resolve));
+  const signals = new EventEmitter();
+  const output = [];
+  try {
+    const result = runCli({
+      argv: ["--predecessor", input, "--output", o.directory],
+      env: {
+        RUNNER_DEADLINE: String(Date.now() + 60000),
+        RELAY_SESSION_SOCKET: socket,
+      },
+      signals,
+      writeLine: (line) => {
+        output.push(JSON.parse(line));
+      },
+      collectCheckpoint: async () => {
+        throw Error("Driver must not start before renewal");
+      },
+      observeDeployment: ({ signal }) => {
+        collectorSignal = signal;
+        queueMicrotask(() => signals.emit("SIGTERM"));
+        return new Promise((resolve, reject) =>
+          signal.addEventListener("abort", () => reject(Error("aborted")), {
+            once: true,
+          }),
+        );
+      },
+    });
+    assert.equal(await result, 1);
+    assert.equal(collectorSignal.aborted, true);
+    assert.equal(calls, 0);
+    assert.ok(output.some((row) => row.type === "snapshot"));
+    assert.equal(output.at(-1).type, "final");
+    assert.equal(output.at(-1).ok, false);
+    assert.ok(output.at(-1).lastDurableSnapshot);
+    assert.equal(signals.listenerCount("SIGTERM"), 0);
+    assert.equal(signals.listenerCount("SIGINT"), 0);
+    assert.equal(
+      fs.readFileSync(path.join(o.directory, "predecessor.json"), "utf8"),
+      o.predecessorRaw,
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("renewal hook shares absolute deadline and persists intent before transport", async (t) => {
+  const deadline = Date.now() + 500;
+  let calls = 0;
+  const o = setup(t, {
+    deadline,
+    renewalPrelude: async (context) => {
+      assert.equal(context.deadline, deadline);
+      assert.equal(
+        fs.readFileSync(path.join(o.directory, "predecessor.json"), "utf8"),
+        o.predecessorRaw,
+      );
+      context.persist({ status: "sending", operationId: "synthetic-intent" });
+      await context.authenticatedFetch("/api/router-credentials", {
+        method: "GET",
+      });
+      throw Error("Negative hook fixture stops before actual workflow");
+    },
+    authenticatedFetch: async () => {
+      calls++;
+      const saved = JSON.parse(
+        fs.readFileSync(path.join(o.directory, "state-000001.json")),
+      );
+      assert.equal(saved.renewal.operationId, "synthetic-intent");
+      return new Response("{}", {
+        headers: { "content-type": "application/json" },
+      });
+    },
+  });
+  await assert.rejects(createAutomation(o).run(), /preserve store/);
+  assert.equal(calls, 1);
+});
+
+test("uncooperative renewal hook cannot dispatch after bounded stop", async (t) => {
+  let context,
+    finish,
+    calls = 0;
+  const o = setup(t, {
+    maxDurationMs: 30,
+    cleanupTimeoutMs: 30,
+    renewalPrelude: (value) => {
+      context = value;
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    },
+    authenticatedFetch: async () => {
+      calls++;
+    },
+  });
+  await assert.rejects(createAutomation(o).run(), /cleanup unresolved/);
+  assert.equal(context.signal.aborted, true);
+  assert.throws(() =>
+    context.authenticatedFetch("/api/router-credentials", { method: "GET" }),
+  );
+  finish();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 0);
+});
+
+test("real renewal prelude's uncooperative observer remains in unresolved drain", async (t) => {
+  let answer,
+    calls = 0;
+  const o = setup(t, {
+    maxDurationMs: 30,
+    cleanupTimeoutMs: 30,
+    renewalPrelude: (context) =>
+      require("./owner-phase-a-renewal.cjs")
+        .createRenewalPrelude(context)
+        .run(),
+    observeDeployment: () =>
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    authenticatedFetch: async () => {
+      calls++;
+    },
+  });
+  await assert.rejects(createAutomation(o).run(), /cleanup unresolved/);
+  const files = fs
+    .readdirSync(o.directory)
+    .filter((name) => name.startsWith("state-"))
+    .sort();
+  const last = JSON.parse(
+    fs.readFileSync(path.join(o.directory, files.at(-1))),
+  );
+  assert.equal(last.automationHost.outstandingCollectors, 1);
+  answer({
+    hubSource: a.RUN_SOURCE,
+    ready: true,
+    observedUtc: new Date().toISOString(),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 0);
+});
+
+test("Stop reaches predecessor reader through its sole documented context argument", async (t) => {
+  const controller = new AbortController();
+  const context = Object.freeze({
+    source: a.RUN_SOURCE,
+    sessionId: a.STOPPED_SESSION,
+    generation: 1,
+    deadline: Date.now() + 15000,
+    signal: AbortSignal.timeout(15000),
+  });
+  // Negative scheduling seam only: enter the reader without replaying the full
+  // owner flow. Real projection validation has its separate actual-driver tests.
+  t.mock.method(a.Runner.prototype, "replaceStopped", async function () {
+    await this.env.readPredecessorEvidence(context);
+    await this.env.fetch("/api/router-credentials", { method: "GET" });
+  });
+  let observed,
+    argc,
+    calls = 0;
+  const o = setup(t, {
+    signal: controller.signal,
+    readPredecessorEvidence: function (value) {
+      observed = value;
+      argc = arguments.length;
+      queueMicrotask(() => controller.abort());
+      return new Promise((resolve) =>
+        value.signal.addEventListener(
+          "abort",
+          () => resolve("late raw evidence"),
+          { once: true },
+        ),
+      );
+    },
+    authenticatedFetch: async () => {
+      calls++;
+    },
+  });
+  await assert.rejects(
+    createAutomation(o).run(),
+    (error) =>
+      /preserve store/.test(error.message) && !/unresolved/.test(error.message),
+  );
+  assert.equal(argc, 1);
+  assert.equal(Object.isFrozen(observed), true);
+  assert.equal(observed.signal.aborted, true);
+  assert.equal(
+    context.signal.aborted,
+    false,
+    "did not wait for original 15 second deadline",
+  );
+  assert.deepEqual({ ...observed, signal: context.signal }, context);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 0);
 });
 
 test("host ceiling accepts three-phase budget but does not accept unbounded deadlines", (t) => {
