@@ -12,6 +12,16 @@ resources:
 - network-policy.yaml
 - postgres-bootstrap.yaml
 - backup.yaml
+# The relay-operator reaper: the independent backstop for the JIT automation identity's temporary admin
+# (operator-reaper.yaml; docs/runbooks/relay.md, "Operator automation identity").
+- relay-operator-reaper.sops.yaml
+- operator-reaper.yaml
+configMapGenerator:
+- name: relay-operator-reaper-scripts
+  namespace: relay  # a generator entry renders WITHOUT a namespace otherwise, and Flux rejects the whole layer
+  files:
+  - lease.py=operator-reaper/lease.py
+  - setup.sql=operator-reaper/setup.sql
 components:
 # Default agent communication; it contains no router/OpenBao Secret or trust bridge.
 - ../../../components/relay-default-communication

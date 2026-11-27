@@ -1,0 +1,267 @@
+# The relay-operator reaper: the INDEPENDENT backstop for the JIT automation identity's temporary admin
+# (plans/2026-11-27-relay-operator-session-plan.md, section 3; docs/runbooks/relay.md, "Operator automation identity").
+# `relay-operator.py session|call` grants admin under the fenced Lease `relay-operator-jit` and revokes it in a finally;
+# if the orchestrator dies (SIGKILL, workstation loss), the membership would stand. Every 5 minutes this CronJob takes
+# the same Lease ONLY when no live holder has it, and calls ops.relay_operator_reap() (a fixed-subject SECURITY DEFINER
+# function: it can delete that identity's sessions and memberships and nothing else), then releases the Lease.
+# Best-effort: bounded by the scheduler, the API server and the database; RelayOperatorReaper* alerts say when it is not.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: relay-operator-reaper
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: relay-operator-reaper
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  resourceNames: ["relay-operator-jit"]
+  verbs: ["get", "update"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["create"]  # create cannot be restricted by name; the script only ever creates relay-operator-jit
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: relay-operator-reaper
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: relay-operator-reaper
+subjects:
+- kind: ServiceAccount
+  name: relay-operator-reaper
+  namespace: relay
+---
+# The database objects (idempotent). Flux force-replaces this Job when its spec changes (a Job template is immutable;
+# without the per-object annotation a change would wedge the whole layer). Value lowercase "enabled".
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: relay-operator-reaper-setup
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: "enabled"
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: relay-operator-reaper-setup
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: setup
+        image: docker.io/library/postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
+        command:
+        - sh
+        - -c
+        - >-
+          for i in $(seq 1 30); do pg_isready -h relay-postgres -p 5432 -q && break; sleep 5; done;
+          psql "host=relay-postgres port=5432 dbname=relay user=postgres sslmode=disable" --no-psqlrc
+          -v ON_ERROR_STOP=1 -v pw="$REAPER_PASSWORD" -f /scripts/setup.sql
+        env:
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: relay-postgres
+              key: password
+        - name: REAPER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: relay-operator-reaper
+              key: password
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 10m, memory: 32Mi}
+          limits: {memory: 64Mi}
+        volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+          readOnly: true
+      volumes:
+      - name: scripts
+        configMap:
+          name: relay-operator-reaper-scripts
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: relay-operator-reaper
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app: relay-operator-reaper
+        spec:
+          restartPolicy: Never
+          serviceAccountName: relay-operator-reaper
+          automountServiceAccountToken: true  # the Lease API only (the Role above)
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+          - name: lease-take  # writes /work/go only if it took a free Lease
+            image: mirror.gcr.io/library/python:3.15-slim@sha256:63bb298d2b7b88f176f51b5189f54ce6535c997682ea70885d2132f5d473a8a5
+            command: ["python3", "-I", "/scripts/lease.py", "take"]
+            securityContext: &hardened
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: ["ALL"]
+            resources: &small
+              requests: {cpu: 10m, memory: 32Mi}
+              limits: {memory: 64Mi}
+            volumeMounts: &mounts
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: work
+              mountPath: /work
+          - name: reap  # only with /work/go; the role can execute ops.relay_operator_reap() and nothing else
+            image: docker.io/library/postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
+            command:
+            - sh
+            - -c
+            - >-
+              if [ ! -f /work/go ]; then echo '{"event":"reap","skipped":true}'; exit 0; fi;
+              out=$(psql "host=relay-postgres port=5432 dbname=relay user=relay_operator_reaper sslmode=disable
+              connect_timeout=10" --no-psqlrc -tA -F ' ' -v ON_ERROR_STOP=1
+              -c 'SELECT sessions_deleted, memberships_deleted FROM ops.relay_operator_reap()') || exit 1;
+              set -- $out; echo "{\"event\":\"reap\",\"sessions_deleted\":$1,\"memberships_deleted\":$2}"
+            env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: relay-operator-reaper
+                  key: password
+            securityContext: *hardened
+            resources: *small
+            volumeMounts: *mounts
+          containers:
+          - name: lease-release
+            image: mirror.gcr.io/library/python:3.15-slim@sha256:63bb298d2b7b88f176f51b5189f54ce6535c997682ea70885d2132f5d473a8a5
+            command: ["python3", "-I", "/scripts/lease.py", "release"]
+            securityContext: *hardened
+            resources: *small
+            volumeMounts: *mounts
+          volumes:
+          - name: scripts
+            configMap:
+              name: relay-operator-reaper-scripts
+          - name: work
+            emptyDir:
+              medium: Memory
+              sizeLimit: 1Mi
+---
+# Additive: relay-postgres' own policy stays unchanged; this one only admits the reaper and its setup Job on 5432.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-postgres-operator-reaper
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  podSelector:
+    matchLabels:
+      app: relay-postgres
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: relay-operator-reaper
+    - podSelector:
+        matchLabels:
+          app: relay-operator-reaper-setup
+    ports:
+    - protocol: TCP
+      port: 5432
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: relay-operator-reaper
+  namespace: relay
+  labels:
+    release: kube-prometheus-stack
+    app.kubernetes.io/part-of: relay
+spec:
+  groups:
+  - name: relay-operator-reaper
+    rules:
+    - alert: RelayOperatorReaperStale
+      expr: time() - kube_cronjob_status_last_successful_time{namespace="relay", cronjob="relay-operator-reaper"} > 1200
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: The relay-operator reaper has not succeeded for 20+ minutes
+        description: >-
+          The independent backstop that removes a standing JIT admin membership (after a crashed
+          `relay-operator.py session|call`) is not running. Check the CronJob relay/relay-operator-reaper and its last
+          Job's logs; meanwhile run `python scripts/relay-operator.py status` (expect 0 memberships, 0 sessions).
+    - alert: RelayOperatorReaperFailing
+      expr: sum(kube_job_status_failed{namespace="relay", job_name=~"relay-operator-reaper-[0-9]+"} > 0) > 0
+      for: 15m
+      labels:
+        severity: warning
+      annotations:
+        summary: relay-operator reaper Jobs are failing
+        description: >-
+          A relay-operator-reaper Job failed (Lease API, database or image). The reaper cannot be trusted as a
+          backstop until fixed; run `python scripts/relay-operator.py status` and `revoke` by hand if a membership stands.
+    - alert: RelayOperatorReaperSetupFailed
+      expr: kube_job_status_failed{namespace="relay", job_name="relay-operator-reaper-setup"} > 0
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: The relay-operator reaper's database setup Job failed
+        description: The function ops.relay_operator_reap() or the role relay_operator_reaper may be missing; check the Job's logs.
