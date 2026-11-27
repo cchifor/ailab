@@ -27,6 +27,8 @@ class Clock:
         return self.t
 
     def sleep(self, s):
+        import time as _t
+        _t.sleep(0.002)  # yield real time, so streaming threads run while the fake clock advances
         self.t += s
 
 
@@ -265,11 +267,75 @@ class Lifecycle(unittest.TestCase):
         self.assertEqual(w.revokes, 1)  # never revoked the successor's authority
         self.assertEqual(w.lease["spec"]["holderIdentity"], "session-successor")
 
-    def test_lease_check_error_still_revokes(self):
+    def test_lease_check_error_never_revokes(self):
         w = World(self.files, lease_get_error_after=2)  # acquire's two reads succeed, every later read fails
         rc, _ = run(w, self.tmp, self.dir)
+        self.assertEqual(w.revokes, 1)  # only the orphan clear: unknown ownership leaves it to the reaper
+        self.assertEqual(w.sso, [])
+        self.assertEqual(rc, 7)
+
+    def test_signal_during_cleanup_is_deferred(self):
+        import signal as sig
+        w = World(self.files)
+        orig = w.docker
+
+        def docker(args, **kw):
+            if args[:1] == ["stop"]:  # a SIGTERM arrives in the middle of cleanup
+                sig.getsignal(sig.SIGTERM)(sig.SIGTERM, None)
+            return orig(args, **kw)
+        w.ops.docker = docker
+        rc, ev = run(w, self.tmp, self.dir)
         self.assertEqual(w.revokes, 2)
+        self.assertEqual(w.sso, ["kc"])
         self.assertEqual(rc, 0)
+
+    def test_no_ready_with_logout_failure_reports_the_higher_precedence(self):
+        w = World(self.files, ready=False, proxy_rc=4)
+        saved, ros.READY_TIMEOUT_S = ros.READY_TIMEOUT_S, 0.2
+        try:
+            rc, ev = run(w, self.tmp, self.dir)
+        finally:
+            ros.READY_TIMEOUT_S = saved
+        self.assertEqual(rc, 4)
+        self.assertEqual(json.loads(Path(ev, "result.json").read_text())["rc"], 4)
+
+    def test_systemexit_from_a_wrapper_is_a_failure(self):
+        w = World(self.files)
+
+        def bad_grant(subject):
+            w.granted.append(subject)
+            raise SystemExit("relay-operator: member.js ... failed (1)")
+        w.ops.grant = bad_grant
+        rc, ev = run(w, self.tmp, self.dir)
+        self.assertEqual(rc, 8)
+        self.assertEqual(json.loads(Path(ev, "result.json").read_text())["rc"], 8)
+        self.assertEqual(w.revokes, 2)  # the grant may have committed: still revoked
+
+    def test_unknown_proxy_termination_is_a_logout_failure(self):
+        w = World(self.files)
+        orig = w.docker
+
+        def docker(args, **kw):
+            if args[:1] == ["stop"]:
+                return b""  # the stop "succeeds" but the process never reports an exit
+            if args[:1] == ["inspect"]:
+                return b"true 0"
+            return orig(args, **kw)
+        w.ops.docker = docker
+        rc, _ = run(w, self.tmp, self.dir)
+        self.assertEqual(rc, 4)
+
+    def test_evidence_sink_failure_sets_the_flag_and_keeps_draining(self):
+        w = World(self.files)
+        r = ros.Run(w.ops, "x", "y", 1, os.path.join(self.tmp, "e2"))
+
+        class BrokenSink:
+            def write(self, b):
+                raise OSError("disk full")
+        stream = Stream([b"a" + bytes([10]), b"b" + bytes([10]), b"c" + bytes([10])])
+        r._stream(stream, BrokenSink())
+        self.assertTrue(r.evidence_failed.is_set())
+        self.assertEqual(stream.lines, [])  # fully drained: the producer is never blocked
 
     def test_revoke_failure_outranks_runner_failure(self):
         w = World(self.files, runner_rc=1)

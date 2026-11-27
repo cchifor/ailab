@@ -9,12 +9,15 @@ the whole run; nothing else about it is general-purpose.
 
     stdin line 1: the password; line 2: JSON {"username": EMAIL, "runner_deadline": EPOCH, "cleanup_deadline": EPOCH}
     stdout: one line "READY {...}" once logged in (admin confirmed) and the startup inventory is taken
-    stderr: JSON evidence lines (no bodies, cookies, tokens or response content)
-    exit:   0 logout confirmed, 4 logout not confirmed, 2 login/startup failed
+    stderr: JSON evidence lines (fixed reason codes, route names and validated IDs only; never bodies, raw targets,
+            cookies, tokens or response content)
+    exit:   0 logout confirmed, 4 logout not confirmed (or the session never closed), 2 startup refused before login
 
 Scope is pinned in this file (SCOPE). Request bodies are rebuilt from validated fields; client headers are never
 forwarded. Dynamic IDs are usable only once this run's own responses produced them (provenance rules in learn_*).
-After runner_deadline only cleanup-shaped calls pass; at cleanup_deadline everything is refused and the proxy logs out.
+After runner_deadline only cleanup-shaped calls pass (rechecked at dispatch); at cleanup_deadline everything is refused
+and the proxy logs out. Connections are admitted in two stages: a bounded reader pool with an absolute deadline for the
+request, then a handler slot, some of which are reserved for control-lease requests.
 """
 from __future__ import annotations
 
@@ -58,11 +61,15 @@ UA = "relay-session-proxy/1 (ailab operator automation)"
 SOCKET_PATH = "/run/relay-session/proxy.sock"
 MAX_HEAD = 16 * 1024
 MAX_BODY = 64 * 1024
+MAX_PROMPT_BYTES = 16 * 1024  # UTF-8 bytes (stricter than the server's 16384 UTF-16 units)
 MAX_RESPONSE = 8 * 1024 * 1024
-CLIENT_TIMEOUT = 10.0
+REQUEST_DEADLINE = 5.0  # absolute: the whole request (head + body) must arrive within this
 UPSTREAM_CAP = 30.0
 LOGOUT_BUDGET = 20.0
-SLOTS = 8  # concurrent handlers; one is always left for control-lease requests
+DRAIN_ON_SHUTDOWN = 10.0
+READERS = 32  # connections being read at once
+GENERAL_SLOTS = 6  # concurrent non-control handlers
+CONTROL_SLOTS = 2  # reserved for control-lease requests (renewal must never starve)
 
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 UUID_RE = re.compile(r"^" + UUID + r"$")
@@ -73,17 +80,29 @@ SAFE_MAX = 9007199254740991
 
 
 class Refuse(Exception):
-    """A request outside the allowlist or its schema: answered locally (403/400), never sent upstream."""
+    """A request outside the allowlist or its schema: answered locally, never sent upstream. `code` is a fixed string
+    (the only thing logged); `detail` may name client-supplied keys and goes only into the HTTP answer."""
 
-    def __init__(self, reason: str, status: int = 403):
-        super().__init__(reason)
-        self.reason, self.status = reason, status
+    def __init__(self, code: str, status: int = 403, detail: str = ""):
+        super().__init__(code)
+        self.code, self.status, self.detail = code, status, detail
 
 
 def log(**kv) -> None:
     kv.setdefault("t", datetime.now(timezone.utc).isoformat(timespec="milliseconds"))
-    sys.stderr.write(json.dumps(kv, sort_keys=True) + "\n")
-    sys.stderr.flush()
+    try:
+        sys.stderr.write(json.dumps(kv, sort_keys=True) + "\n")
+        sys.stderr.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def safe_route(path: str) -> str:
+    """A loggable shape of a client path: known words and UUIDs only, anything else becomes '*', no query."""
+    segs = []
+    for s in path.split("?", 1)[0].split("/")[1:8]:
+        segs.append(":id" if UUID_RE.match(s) else (s if re.fullmatch(r"[a-z][a-z-]{0,30}", s) else "*"))
+    return "/" + "/".join(segs)
 
 
 # ---------------------------------------------------------------- strict JSON / schema helpers
@@ -91,7 +110,7 @@ def _no_dupes(pairs):
     d = {}
     for k, v in pairs:
         if k in d:
-            raise Refuse(f"duplicate JSON key {k!r}", 400)
+            raise Refuse("duplicate-json-key", 400)
         d[k] = v
     return d
 
@@ -102,9 +121,9 @@ def parse_body(raw: bytes) -> dict:
     except Refuse:
         raise
     except (UnicodeDecodeError, ValueError):
-        raise Refuse("body is not JSON", 400)
+        raise Refuse("body-not-json", 400)
     if not isinstance(obj, dict):
-        raise Refuse("body is not a JSON object", 400)
+        raise Refuse("body-not-object", 400)
     return obj
 
 
@@ -112,18 +131,18 @@ def keys(body: dict, required: set, optional: set = frozenset()) -> None:
     extra = set(body) - required - set(optional)
     missing = required - set(body)
     if extra or missing:
-        raise Refuse(f"body keys: missing {sorted(missing)}, unexpected {sorted(extra)}", 400)
+        raise Refuse("body-keys", 400, f"missing {sorted(missing)}, unexpected {sorted(extra)[:5]}")
 
 
 def uuid_of(v, what: str) -> str:
     if not isinstance(v, str) or not UUID_RE.match(v):
-        raise Refuse(f"{what} must be a lowercase UUID", 400)
+        raise Refuse("not-a-uuid", 400, what)
     return v
 
 
 def int_of(v, what: str, lo: int, hi: int) -> int:
     if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
-        raise Refuse(f"{what} must be an integer in {lo}..{hi}", 400)
+        raise Refuse("bad-integer", 400, what)
     return v
 
 
@@ -146,6 +165,8 @@ class State:
         self.runner_deadline = float("inf")  # monotonic
         self.cleanup_deadline = float("inf")
         self.closed = False
+        self.inflight: dict[int, dict] = {}  # dispatch id -> {route, op, mutation}
+        self.inflight_seq = 0
 
 
 STATE = State()
@@ -158,11 +179,17 @@ def phase() -> str:
     return "cleanup" if now >= STATE.runner_deadline else "run"
 
 
-def reserve_op(op: str, record: dict) -> None:
-    """Atomically reserve a fresh operationId BEFORE dispatch."""
+def reserve(op: str, record: dict, once: tuple[str, str] | None = None) -> None:
+    """ONE locked section: the operationId is fresh (this run and the startup inventory) AND, for once-only routes,
+    the binding/permission is unused; both are then recorded together. Call only after full validation."""
     with STATE.lock:
         if op in STATE.ops or op in STATE.startup_ops:
-            raise Refuse("operationId already used (this run or a launch that existed at login)")
+            raise Refuse("operation-id-reused")
+        if once is not None:
+            bucket = STATE.rotated if once[0] == "rotated" else STATE.decided
+            if once[1] in bucket:
+                raise Refuse("already-used-in-this-run")
+            bucket.add(once[1])
         STATE.ops[op] = record
 
 
@@ -170,10 +197,10 @@ def learned_session(sid: str, *, allow_predecessor: bool) -> str:
     if sid == PREDECESSOR_SESSION:
         if allow_predecessor:
             return sid
-        raise Refuse("the predecessor session is read-only")
+        raise Refuse("predecessor-read-only")
     with STATE.lock:
         if sid not in STATE.sessions:
-            raise Refuse("session not learned from this run's launches")
+            raise Refuse("session-not-learned")
     return sid
 
 
@@ -199,29 +226,31 @@ def learn_launch(row) -> None:
             return
         created = _created(row)
         if created is None or STATE.run_start is None or created < STATE.run_start:
-            log(event="learn-refused", reason="launch row predates this run", launch=row["id"])
+            log(event="learn-refused", reason="predates-run", launch=row["id"])
             return
+        same_profile = (row.get("profile_id"), row.get("profile_revision"), row.get("cwd")) == (
+            intent["profile_id"], intent["revision"], intent["cwd"])
         if intent["kind"] == "launch":
-            ok = (row.get("profile_id"), row.get("profile_revision"), row.get("cwd")) == (
-                intent["profile_id"], intent["revision"], intent["cwd"])
-        else:  # resume: the row must name the dispatched source session and generation
-            ok = (row.get("resume_from"), row.get("resume_generation")) == (intent["sid"], intent["generation"])
+            ok = same_profile
+        else:  # resume: the named source session/generation AND the source launch's profile/revision/cwd
+            ok = same_profile and (row.get("resume_from"), row.get("resume_generation")) == (
+                intent["sid"], intent["generation"])
         if not ok:
-            log(event="learn-refused", reason="launch row does not match the dispatched intent", launch=row["id"])
+            log(event="learn-refused", reason="intent-mismatch", launch=row["id"])
             return
         entry = STATE.launches.setdefault(row["id"], {
             "profile_id": intent["profile_id"], "revision": intent["revision"], "cwd": intent["cwd"],
             "session_id": None})
         sid = row.get("session_id")
-        if isinstance(sid, str) and UUID_RE.match(sid) and entry["session_id"] in (None, sid):
-            if sid != PREDECESSOR_SESSION:
-                entry["session_id"] = sid
-                STATE.sessions.setdefault(sid, row["id"])
+        if isinstance(sid, str) and UUID_RE.match(sid) and entry["session_id"] in (None, sid) \
+                and sid != PREDECESSOR_SESSION:
+            entry["session_id"] = sid
+            STATE.sessions.setdefault(sid, row["id"])
 
 
 def learn_lease(sid: str, row) -> None:
     if isinstance(row, dict) and isinstance(row.get("id"), str) and UUID_RE.match(row["id"]) \
-            and isinstance(row.get("generation"), int):
+            and isinstance(row.get("generation"), int) and not isinstance(row.get("generation"), bool):
         with STATE.lock:
             prior = STATE.leases.get(row["id"])
             if prior is None or prior["sid"] == sid:
@@ -251,11 +280,14 @@ def learn_credentials(inv) -> None:
 
 # ---------------------------------------------------------------- the allowlist
 class Plan:
-    """What to send upstream (rebuilt from validated values) and how to learn from the answer."""
+    """What to send upstream (rebuilt from validated values), how to learn from the answer, and whether it may still be
+    dispatched in the cleanup phase (rechecked immediately before dispatch)."""
 
-    def __init__(self, route, method, path, query=None, body=None, learn=None, mutation=False, op=None, ids=None):
+    def __init__(self, route, method, path, query=None, body=None, learn=None, mutation=False, op=None, ids=None,
+                 cleanup_ok=False):
         self.route, self.method, self.path, self.query = route, method, path, query or []
         self.body, self.learn, self.mutation, self.op, self.ids = body, learn, mutation, op, ids or {}
+        self.cleanup_ok = cleanup_ok or method == "GET"
 
 
 def _q(query: list, allowed: dict) -> list:
@@ -263,9 +295,9 @@ def _q(query: list, allowed: dict) -> list:
     seen, out = set(), []
     for k, v in query:
         if k not in allowed:
-            raise Refuse(f"query key {k!r} not allowed")
+            raise Refuse("query-key-not-allowed", 403, k[:40])
         if k in seen:
-            raise Refuse(f"query key {k!r} repeated")
+            raise Refuse("query-key-repeated", 403, k[:40])
         seen.add(k)
         out.append((k, allowed[k](v)))
     return out
@@ -273,19 +305,19 @@ def _q(query: list, allowed: dict) -> list:
 
 def _after(v):
     if not re.fullmatch(r"\d{1,15}", v):
-        raise Refuse("after must be a non-negative integer", 400)
+        raise Refuse("bad-after", 400)
     return v
 
 
 def _limit(v):
     if not re.fullmatch(r"\d{1,3}", v) or not 1 <= int(v) <= 200:
-        raise Refuse("limit must be 1..200", 400)
+        raise Refuse("bad-limit", 400)
     return v
 
 
 def _cursor(v):
     if not ISO_CURSOR.match(v):
-        raise Refuse("promptsAfter is not a timeline cursor", 400)
+        raise Refuse("bad-cursor", 400)
     return v
 
 
@@ -295,10 +327,10 @@ SESSION_READS = {"", "/router", "/communication", "/control", "/settings", "/per
 def plan_request(method: str, path: str, query: list, body: dict | None) -> Plan:
     ph = phase()
     if ph == "closed":
-        raise Refuse("the session is closed (cleanup deadline passed)")
+        raise Refuse("session-closed")
     cleanup = ph == "cleanup"
     if method == "GET" and body is not None:
-        raise Refuse("GET with a body", 400)
+        raise Refuse("get-with-body", 400)
 
     # ---- credentials
     if path == "/api/router-credentials" and method == "GET":
@@ -307,25 +339,21 @@ def plan_request(method: str, path: str, query: list, body: dict | None) -> Plan
     if m and method == "GET":
         with STATE.lock:
             if m.group(1) not in STATE.credentials:
-                raise Refuse("credential not learned from a fixed binding")
+                raise Refuse("credential-not-learned")
         return Plan("credential-key", method, path, _q(query, {}), ids={"cred": m.group(1)})
     m = re.fullmatch(r"/api/router-credentials/(" + UUID + ")/rotate", path)
     if m and method == "POST":
         binding = m.group(1)
         if binding not in BINDINGS:
-            raise Refuse("binding outside the pinned scope")
+            raise Refuse("binding-out-of-scope")
         if cleanup:
-            raise Refuse("no rotation after the runner deadline")
+            raise Refuse("cleanup-phase")
         keys(body, {"operationId", "revision"})
         op = uuid_of(body["operationId"], "operationId")
         rev = int_of(body["revision"], "revision", 1, SAFE_MAX)
-        with STATE.lock:
-            if binding in STATE.rotated:
-                raise Refuse("this binding was already rotated in this run")
-        reserve_op(op, {"route": "rotate", "binding": binding})
-        with STATE.lock:
-            STATE.rotated.add(binding)
-        return Plan("rotate", method, path, _q(query, {}), {"operationId": op, "revision": rev},
+        q = _q(query, {})
+        reserve(op, {"route": "rotate", "binding": binding}, once=("rotated", binding))
+        return Plan("rotate", method, path, q, {"operationId": op, "revision": rev},
                     learn=lambda d: learn_credentials(d), mutation=True, op=op, ids={"binding": binding})
 
     # ---- profiles and launches
@@ -336,22 +364,22 @@ def plan_request(method: str, path: str, query: list, body: dict | None) -> Plan
                     learn=lambda d: [learn_launch(r) for r in d] if isinstance(d, list) else None)
     if path == "/api/agent-launches" and method == "POST":
         if cleanup:
-            raise Refuse("no launch after the runner deadline")
+            raise Refuse("cleanup-phase")
         keys(body, {"operationId", "profileId", "revision", "cwd"})
         op = uuid_of(body["operationId"], "operationId")
         pid = uuid_of(body["profileId"], "profileId")
         if pid not in PROFILES:
-            raise Refuse("profile outside the pinned scope")
+            raise Refuse("profile-out-of-scope")
         rev, cwd, _ = PROFILES[pid]
-        if body["revision"] != rev or isinstance(body["revision"], bool):
-            raise Refuse("profile revision is not the pinned one")
+        if isinstance(body["revision"], bool) or body["revision"] != rev:
+            raise Refuse("profile-revision-not-pinned")
         if body["cwd"] != cwd:
-            raise Refuse("cwd is not the profile's approved workspace")
-        reserve_op(op, {"route": "launch", "profile": pid})
+            raise Refuse("cwd-not-approved")
+        q = _q(query, {})
+        reserve(op, {"route": "launch", "profile": pid})
         with STATE.lock:
             STATE.launch_intents[op] = {"kind": "launch", "profile_id": pid, "revision": rev, "cwd": cwd}
-        return Plan("launch", method, path, _q(query, {}),
-                    {"operationId": op, "profileId": pid, "revision": rev, "cwd": cwd},
+        return Plan("launch", method, path, q, {"operationId": op, "profileId": pid, "revision": rev, "cwd": cwd},
                     learn=lambda d: learn_launch(d), mutation=True, op=op, ids={"profile": pid})
 
     # ---- permissions by id
@@ -362,38 +390,33 @@ def plan_request(method: str, path: str, query: list, body: dict | None) -> Plan
             if pid != PREDECESSOR_PERMISSION:
                 with STATE.lock:
                     if pid not in STATE.permissions:
-                        raise Refuse("permission not learned under this run's sessions")
+                        raise Refuse("permission-not-learned")
             return Plan("permission", method, path, _q(query, {}), ids={"permission": pid})
         if decision and method == "POST":
             with STATE.lock:
                 sid = STATE.permissions.get(pid)
             if sid is None:
-                raise Refuse("permission not learned under this run's sessions (or read-only)")
+                raise Refuse("permission-not-learned")
             keys(body, {"operationId", "generation", "outcome"})
             op = uuid_of(body["operationId"], "operationId")
             gen = int_of(body["generation"], "generation", 1, SAFE_MAX)
             out = body["outcome"]
             if not isinstance(out, dict) or out.get("outcome") not in ("selected", "cancelled"):
-                raise Refuse("outcome must be {outcome: selected, optionId} or {outcome: cancelled}", 400)
+                raise Refuse("bad-outcome", 400)
             if out["outcome"] == "selected":
                 keys(out, {"outcome", "optionId"})
                 if not isinstance(out["optionId"], str) or not 1 <= len(out["optionId"]) <= 200:
-                    raise Refuse("optionId must be a 1..200 character string", 400)
+                    raise Refuse("bad-option-id", 400)
                 if cleanup:
-                    raise Refuse("only cancellation of a permission after the runner deadline")
-                outcome = {"outcome": "selected", "optionId": out["optionId"]}
+                    raise Refuse("cleanup-phase")
+                outcome, cleanup_ok = {"outcome": "selected", "optionId": out["optionId"]}, False
             else:
                 keys(out, {"outcome"})
-                outcome = {"outcome": "cancelled"}
-            with STATE.lock:
-                if pid in STATE.decided:
-                    raise Refuse("this permission was already decided in this run")
-            reserve_op(op, {"route": "decision", "sid": sid, "permission": pid})
-            with STATE.lock:
-                STATE.decided.add(pid)
-            return Plan("decision", method, path, _q(query, {}),
-                        {"operationId": op, "generation": gen, "outcome": outcome},
-                        mutation=True, op=op, ids={"permission": pid, "session": sid})
+                outcome, cleanup_ok = {"outcome": "cancelled"}, True
+            q = _q(query, {})
+            reserve(op, {"route": "decision", "sid": sid, "permission": pid}, once=("decided", pid))
+            return Plan("decision", method, path, q, {"operationId": op, "generation": gen, "outcome": outcome},
+                        mutation=True, op=op, ids={"permission": pid, "session": sid}, cleanup_ok=cleanup_ok)
 
     # ---- timeline
     m = re.fullmatch(r"/api/conversations/sessions/(" + UUID + ")/timeline", path)
@@ -405,12 +428,13 @@ def plan_request(method: str, path: str, query: list, body: dict | None) -> Plan
     # ---- one session
     m = re.fullmatch(r"/api/agent-sessions/(" + UUID + r")((?:/[a-z-]+)?)(?:/(" + UUID + r"))?", path)
     if not m:
-        raise Refuse("route not on the allowlist")
+        raise Refuse("route-not-allowed")
     sid, sub, tail = m.group(1), m.group(2), m.group(3)
 
     if method == "GET" and tail is None and sub in SESSION_READS:
         learned_session(sid, allow_predecessor=True)
-        learn = (lambda d, s=sid: learn_permissions(s, d)) if sub == "/permissions" and sid != PREDECESSOR_SESSION else None
+        learn = (lambda d, s=sid: learn_permissions(s, d)) if sub == "/permissions" and sid != PREDECESSOR_SESSION \
+            else None
         return Plan("session" + (sub or ""), method, path, _q(query, {}), learn=learn, ids={"session": sid})
     if method == "GET" and sub == "/operations" and tail:
         learned_session(sid, allow_predecessor=True)
@@ -418,7 +442,7 @@ def plan_request(method: str, path: str, query: list, body: dict | None) -> Plan
             with STATE.lock:
                 rec = STATE.ops.get(tail)
             if not rec or rec.get("sid") != sid:
-                raise Refuse("operation not dispatched by this run for this session")
+                raise Refuse("operation-not-this-run")
         return Plan("operation", method, path, _q(query, {}), ids={"session": sid, "operation": tail})
     if method == "GET" and sub == "/native-recovery" and tail is None:
         learned_session(sid, allow_predecessor=False)
@@ -432,47 +456,49 @@ def plan_request(method: str, path: str, query: list, body: dict | None) -> Plan
             with STATE.lock:
                 known = STATE.leases.get(lease)
             if not known or known["sid"] != sid:
-                raise Refuse("lease not learned for this session")
+                raise Refuse("lease-not-learned")
             gen = int_of(body["generation"], "generation", 1, SAFE_MAX)
             if gen != known["generation"]:
-                raise Refuse("lease renewal must keep the lease's generation")
-            out = {"generation": gen, "leaseId": lease}
+                raise Refuse("lease-generation-changed")
+            out, cleanup_ok = {"generation": gen, "leaseId": lease}, True
         else:
             if cleanup:
-                raise Refuse("no new control lease after the runner deadline (renew the existing one)")
+                raise Refuse("cleanup-phase")
             keys(body, {"generation"})
-            out = {"generation": int_of(body["generation"], "generation", 1, SAFE_MAX)}
+            out, cleanup_ok = {"generation": int_of(body["generation"], "generation", 1, SAFE_MAX)}, False
         return Plan("control", method, path, _q(query, {}), out, learn=lambda d, s=sid: learn_lease(s, d),
-                    mutation=True, ids={"session": sid})
+                    mutation=True, ids={"session": sid}, cleanup_ok=cleanup_ok)
     if method == "DELETE" and sub == "/control" and tail:
         learned_session(sid, allow_predecessor=False)
         with STATE.lock:
             known = STATE.leases.get(tail)
         if not known or known["sid"] != sid:
-            raise Refuse("lease not learned for this session")
-        return Plan("control-release", method, path, _q(query, {}), mutation=True, ids={"session": sid, "lease": tail})
+            raise Refuse("lease-not-learned")
+        return Plan("control-release", method, path, _q(query, {}), mutation=True, ids={"session": sid, "lease": tail},
+                    cleanup_ok=True)
     if method == "POST" and sub == "/commands" and tail is None:
         learned_session(sid, allow_predecessor=False)
         return _command(sid, body, cleanup, query)
     if method == "POST" and sub == "/resume" and tail is None:
         learned_session(sid, allow_predecessor=False)
         if cleanup:
-            raise Refuse("no resume after the runner deadline")
+            raise Refuse("cleanup-phase")
         keys(body, {"operationId", "generation"}, {"acknowledgeUnknownToolEffects"})
         if body.get("acknowledgeUnknownToolEffects", False) is not False:
-            raise Refuse("acknowledgeUnknownToolEffects is never sent by this session")
+            raise Refuse("acknowledgement-never-sent")
         op = uuid_of(body["operationId"], "operationId")
         gen = int_of(body["generation"], "generation", 1, INT_MAX)
+        q = _q(query, {})
         with STATE.lock:
             src = STATE.launches[STATE.sessions[sid]]
-        reserve_op(op, {"route": "resume", "sid": sid})
+        reserve(op, {"route": "resume", "sid": sid})
         with STATE.lock:
             STATE.launch_intents[op] = {"kind": "resume", "sid": sid, "generation": gen,
                                         "profile_id": src["profile_id"], "revision": src["revision"],
                                         "cwd": src["cwd"]}
-        return Plan("resume", method, path, _q(query, {}), {"operationId": op, "generation": gen},
+        return Plan("resume", method, path, q, {"operationId": op, "generation": gen},
                     learn=lambda d: learn_launch(d), mutation=True, op=op, ids={"session": sid})
-    raise Refuse("route not on the allowlist")
+    raise Refuse("route-not-allowed")
 
 
 def _command(sid: str, body: dict, cleanup: bool, query: list) -> Plan:
@@ -480,13 +506,14 @@ def _command(sid: str, body: dict, cleanup: bool, query: list) -> Plan:
     common = {"operationId", "leaseId", "generation", "kind"}
     if kind == "prompt":
         keys(body, common | {"controlEpoch", "text"})
-        if not isinstance(body["text"], str) or not 1 <= len(body["text"]) <= 16384:
-            raise Refuse("prompt text must be 1..16384 characters", 400)
+        if not isinstance(body["text"], str) or not body["text"] or \
+                len(body["text"].encode("utf-8")) > MAX_PROMPT_BYTES:
+            raise Refuse("bad-prompt-text", 400)
         extra = {"controlEpoch": int_of(body["controlEpoch"], "controlEpoch", 0, SAFE_MAX), "text": body["text"]}
     elif kind == "set-config":
         keys(body, common | {"controlEpoch", "settingsRevision", "configId", "value"})
         if body["configId"] != "thought_level" or body["value"] not in THOUGHT_LEVELS:
-            raise Refuse("set-config is limited to thought_level low/high")
+            raise Refuse("set-config-not-allowed")
         extra = {"controlEpoch": int_of(body["controlEpoch"], "controlEpoch", 0, SAFE_MAX),
                  "settingsRevision": int_of(body["settingsRevision"], "settingsRevision", 1, SAFE_MAX),
                  "configId": "thought_level", "value": body["value"]}
@@ -494,20 +521,22 @@ def _command(sid: str, body: dict, cleanup: bool, query: list) -> Plan:
         keys(body, common)
         extra = {}
     else:
-        raise Refuse("command kind not on the allowlist")
-    if cleanup and kind not in ("cancel", "close"):
-        raise Refuse("only cancel/close after the runner deadline")
+        raise Refuse("command-kind-not-allowed")
+    cleanup_ok = kind in ("cancel", "close")
+    if cleanup and not cleanup_ok:
+        raise Refuse("cleanup-phase")
     op = uuid_of(body["operationId"], "operationId")
     lease = uuid_of(body["leaseId"], "leaseId")
     with STATE.lock:
         known = STATE.leases.get(lease)
     if not known or known["sid"] != sid:
-        raise Refuse("lease not learned for this session")
+        raise Refuse("lease-not-learned")
     gen = int_of(body["generation"], "generation", 1, SAFE_MAX)
-    reserve_op(op, {"route": "command", "sid": sid, "kind": kind})
+    q = _q(query, {})
+    reserve(op, {"route": "command", "sid": sid, "kind": kind})
     out = {"operationId": op, "leaseId": lease, "generation": gen, "kind": kind, **extra}
-    return Plan("command-" + kind, "POST", f"/api/agent-sessions/{sid}/commands", _q(query, {}), out,
-                mutation=True, op=op, ids={"session": sid})
+    return Plan("command-" + kind, "POST", f"/api/agent-sessions/{sid}/commands", q, out,
+                mutation=True, op=op, ids={"session": sid}, cleanup_ok=cleanup_ok)
 
 
 # ---------------------------------------------------------------- upstream (bounded, trusted values only)
@@ -530,8 +559,12 @@ class Upstream:
                     self.cookies[name.strip()] = value
 
     def call(self, method: str, path: str, query: list, body: dict | None, budget: float):
+        """One request under an ABSOLUTE deadline: a timer shuts the transport down when the budget is spent, so
+        trickling headers or bodies cannot outlive it (per-read timeouts alone would)."""
+        budget = min(budget, UPSTREAM_CAP)
         if budget <= 0.05:
             raise TimeoutError("no time left before the deadline")
+        end = time.monotonic() + budget
         url = path + ("?" + urllib.parse.urlencode(query) if query else "")
         payload = None if body is None else json.dumps(body, separators=(",", ":")).encode()
         headers = {"User-Agent": UA, "Accept": "application/json", "Cookie": self.cookie_header()}
@@ -540,20 +573,32 @@ class Upstream:
             headers["Content-Length"] = str(len(payload))
         if method != "GET":
             headers["Origin"] = ORIGIN
-        end = time.monotonic() + min(budget, UPSTREAM_CAP)
-        conn = http.client.HTTPSConnection(HOST, 443, timeout=max(0.1, end - time.monotonic()),
-                                           context=ssl.create_default_context())
+        conn = http.client.HTTPSConnection(HOST, 443, timeout=budget, context=ssl.create_default_context())
+        expired = threading.Event()
+        holder = {}
+
+        def cut():
+            expired.set()
+            s = holder.get("sock")
+            if s is not None:
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        timer = threading.Timer(budget, cut)
+        timer.daemon = True
+        timer.start()
         try:
+            conn.connect()
+            holder["sock"] = conn.sock  # the transport the response keeps using, even after Connection: close
+            if expired.is_set():
+                cut()
             conn.request(method, url, body=payload, headers=headers)
-            conn.sock.settimeout(max(0.1, end - time.monotonic()))
             resp = conn.getresponse()
             self.absorb(resp.headers)
             chunks, size = [], 0
             while True:
-                left = end - time.monotonic()
-                if left <= 0:
-                    raise TimeoutError("upstream response exceeded the deadline")
-                conn.sock.settimeout(max(0.1, left))
                 chunk = resp.read(65536)
                 if not chunk:
                     break
@@ -561,8 +606,17 @@ class Upstream:
                 if size > MAX_RESPONSE:
                     raise ValueError("upstream response exceeds 8 MiB")
                 chunks.append(chunk)
+                if time.monotonic() >= end:
+                    raise TimeoutError("upstream response exceeded the deadline")
+            if expired.is_set():
+                raise TimeoutError("upstream response exceeded the deadline")
             return resp.status, resp.getheader("Content-Type") or "application/json", b"".join(chunks), resp.headers
+        except (OSError, http.client.HTTPException) as e:
+            if expired.is_set():
+                raise TimeoutError("upstream deadline") from e
+            raise
         finally:
+            timer.cancel()
             conn.close()
 
 
@@ -573,30 +627,51 @@ UPSTREAM: Upstream | None = None
 class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
     allow_reuse_address = False
+    block_on_close = False
+    request_queue_size = 64  # the default 5 overflows (EAGAIN on connect) when the Runner opens a burst
 
     def __init__(self, path):
         super().__init__(path, Handler)
-        self.slots = threading.BoundedSemaphore(SLOTS)
-        self.general = threading.BoundedSemaphore(SLOTS - 1)
+        self.readers = threading.BoundedSemaphore(READERS)  # stage 1: connections being read
+        self.general = threading.BoundedSemaphore(GENERAL_SLOTS)  # stage 2: handlers, by class
+        self.control = threading.BoundedSemaphore(CONTROL_SLOTS)
 
     def process_request(self, request, client_address):
-        if not self.slots.acquire(blocking=False):
+        if not self.readers.acquire(blocking=False):
             try:
                 request.sendall(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            finally:
-                self.shutdown_request(request)
+            except OSError:
+                pass
+            self.shutdown_request(request)
             return
         try:
             super().process_request(request, client_address)
         except Exception:
-            self.slots.release()
+            self.readers.release()
             raise
 
     def process_request_thread(self, request, client_address):
+        # The absolute request deadline: if the whole request has not arrived in time, the read side is shut down.
+        deadline = threading.Timer(REQUEST_DEADLINE, lambda: _shut_read(request))
+        deadline.daemon = True
+        REQUEST_TIMERS[id(request)] = deadline
+        deadline.start()
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self.slots.release()
+            deadline.cancel()
+            REQUEST_TIMERS.pop(id(request), None)
+            self.readers.release()
+
+
+REQUEST_TIMERS: dict[int, threading.Timer] = {}
+
+
+def _shut_read(sock) -> None:
+    try:
+        sock.shutdown(socket.SHUT_RD)
+    except OSError:
+        pass
 
 
 def _is_control(path: str) -> bool:
@@ -604,7 +679,7 @@ def _is_control(path: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    timeout = CLIENT_TIMEOUT
+    timeout = REQUEST_DEADLINE
     protocol_version = "HTTP/1.1"
     server_version = "relay-session-proxy"
     sys_version = ""
@@ -612,24 +687,30 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # the evidence log replaces the default access log
         pass
 
+    def log_error(self, *args):
+        pass
+
     def _reply(self, status: int, data: bytes, ctype: str = "application/json") -> None:
-        self.send_response(status)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(data)
+        except OSError:
+            pass
         self.close_connection = True
 
-    def _refuse(self, method, target, reason, status) -> None:
-        log(event="refused", method=method, target=target[:200], reason=reason, status=status)
-        self._reply(status, json.dumps({"error": "refused by relay-session-proxy", "reason": reason}).encode())
+    def _refuse(self, method, route, r: Refuse) -> None:
+        log(event="refused", method=method, route=route, reason=r.code, status=r.status)
+        self._reply(r.status, json.dumps({"error": "refused by relay-session-proxy", "reason": r.code,
+                                          "detail": r.detail}).encode())
 
     def handle_one_request(self):
         try:
             super().handle_one_request()
-        except (socket.timeout, TimeoutError):
-            log(event="client-timeout")
+        except (socket.timeout, TimeoutError, ConnectionError):
             self.close_connection = True
 
     def do_GET(self):
@@ -645,75 +726,87 @@ class Handler(BaseHTTPRequestHandler):
         # The raw target from the request line: http.server normalizes self.path (it collapses a leading "//").
         parts = self.requestline.split(" ")
         target = parts[1] if len(parts) == 3 else ""
+        route = safe_route(target) if target.startswith("/") else "*"
         head_size = len(self.requestline) + sum(len(k) + len(v) + 4 for k, v in self.headers.items())
         try:
             if head_size > MAX_HEAD:
-                raise Refuse("request head too large", 431)
+                raise Refuse("head-too-large", 431)
             if not target.startswith("/") or "#" in target:
-                raise Refuse("only origin-form targets", 400)
+                raise Refuse("not-origin-form", 400)
             raw_path, _, raw_query = target.partition("?")
             if "%" in raw_path or ".." in raw_path or "//" in raw_path or "\\" in raw_path or ";" in raw_path:
-                raise Refuse("encoded, dotted or empty path segments are refused", 400)
+                raise Refuse("unsafe-path", 400)
             try:
                 query = urllib.parse.parse_qsl(raw_query, keep_blank_values=True, strict_parsing=bool(raw_query),
                                                max_num_fields=8)
             except ValueError:
-                raise Refuse("malformed query", 400)
+                raise Refuse("malformed-query", 400)
             if self.headers.get("Transfer-Encoding"):
-                raise Refuse("Transfer-Encoding is refused", 400)
+                raise Refuse("transfer-encoding", 400)
             lengths = self.headers.get_all("Content-Length") or []
             body = None
             if method == "POST":
                 if len(lengths) != 1 or not lengths[0].isdigit():
-                    raise Refuse("POST needs exactly one Content-Length", 411)
+                    raise Refuse("content-length", 411)
                 n = int(lengths[0])
                 if n > MAX_BODY:
-                    raise Refuse("body exceeds 64 KiB", 413)
+                    raise Refuse("body-too-large", 413)
                 raw = self.rfile.read(n)
                 if len(raw) != n:
-                    raise Refuse("short body", 400)
+                    raise Refuse("short-body", 400)
                 body = parse_body(raw)
             elif lengths and lengths != ["0"]:
-                raise Refuse(f"{method} with a body", 400)
-            general = None
-            if not _is_control(raw_path):
-                general = self.server.general
-                if not general.acquire(blocking=False):
-                    raise Refuse("busy (slots reserved for lease renewal)", 503)
+                raise Refuse("body-not-allowed", 400)
+            timer = REQUEST_TIMERS.get(id(self.request))
+            if timer is not None:  # the whole request has arrived; the upstream work has its own deadline
+                timer.cancel()
+            slot = self.server.control if _is_control(raw_path) else self.server.general
+            if not slot.acquire(blocking=False):
+                raise Refuse("busy", 503)
             try:
                 plan = plan_request(method, raw_path, query, body)
                 self._dispatch(plan)
             finally:
-                if general is not None:
-                    general.release()
+                slot.release()
         except Refuse as r:
-            self._refuse(method, target, r.reason, r.status)
+            self._refuse(method, route, r)
 
     def _dispatch(self, plan: Plan) -> None:
         start = time.monotonic()
         rec = {"event": "call", "method": plan.method, "route": plan.route, "ids": plan.ids, "operationId": plan.op}
-        budget = STATE.cleanup_deadline - start
-        if phase() == "closed" or budget <= 0:
-            raise Refuse("the session is closed (cleanup deadline passed)")
+        ph = phase()  # rechecked immediately before dispatch: the phase may have changed since planning
+        if ph == "closed" or (ph == "cleanup" and not plan.cleanup_ok):
+            raise Refuse("session-closed" if ph == "closed" else "cleanup-phase")
+        budget = (STATE.cleanup_deadline if plan.cleanup_ok else STATE.runner_deadline) - start
+        if budget <= 0:
+            raise Refuse("cleanup-phase")
+        with STATE.lock:
+            STATE.inflight_seq += 1
+            key = STATE.inflight_seq
+            STATE.inflight[key] = {"route": plan.route, "operationId": plan.op, "mutation": plan.mutation}
         try:
-            status, ctype, data, _ = UPSTREAM.call(plan.method, plan.path, plan.query, plan.body, budget)
-        except Exception as e:  # noqa: BLE001 - every upstream failure is reported, a mutation as uncertain
-            outcome = "uncertain" if plan.mutation else "failed"
-            log(**rec, dispatched=True, outcome=outcome, error=type(e).__name__,
-                ms=int((time.monotonic() - start) * 1000))
-            self._reply(504, json.dumps({"error": "upstream " + outcome, "operationId": plan.op}).encode())
-            return
-        if 300 <= status < 400:
-            log(**rec, dispatched=True, status=status, outcome="redirect-refused")
-            self._reply(502, json.dumps({"error": "upstream redirect refused"}).encode())
-            return
-        if 200 <= status < 300 and plan.learn is not None and data:
             try:
-                plan.learn(json.loads(data))
-            except ValueError:
-                pass
-        log(**rec, dispatched=True, status=status, ms=int((time.monotonic() - start) * 1000))
-        self._reply(status, data, ctype)
+                status, ctype, data, _ = UPSTREAM.call(plan.method, plan.path, plan.query, plan.body, budget)
+            except Exception as e:  # noqa: BLE001 - every upstream failure is reported, a mutation as uncertain
+                outcome = "uncertain" if plan.mutation else "failed"
+                log(**rec, dispatched=True, outcome=outcome, error=type(e).__name__,
+                    ms=int((time.monotonic() - start) * 1000))
+                self._reply(504, json.dumps({"error": "upstream " + outcome, "operationId": plan.op}).encode())
+                return
+            if 300 <= status < 400:
+                log(**rec, dispatched=True, status=status, outcome="redirect-refused")
+                self._reply(502, json.dumps({"error": "upstream redirect refused"}).encode())
+                return
+            if 200 <= status < 300 and plan.learn is not None and data:
+                try:
+                    plan.learn(json.loads(data))
+                except ValueError:
+                    pass
+            log(**rec, dispatched=True, status=status, ms=int((time.monotonic() - start) * 1000))
+            self._reply(status, data, ctype)
+        finally:
+            with STATE.lock:
+                STATE.inflight.pop(key, None)
 
 
 # ---------------------------------------------------------------- login, logout, lifecycle
@@ -726,21 +819,27 @@ def _load_admin_call():
 
 
 def login(username: str, password: str):
+    """Returns (client, actor, server_now, cookies). On failure the exception carries the client (`.client`), so the
+    caller can always log out a session that was opened."""
     rac = _load_admin_call()
     c = rac.Client(ORIGIN)
-    rac.login(c, username, password)  # raises rac.Fail; checks admin + the expected name
-    st, h, raw = c.request("GET", ORIGIN + "/api/auth/me")
-    me = json.loads(raw)
-    if st != 200 or me.get("name") != EXPECTED_NAME or me.get("role") != "admin":
-        raise rac.Fail("/api/auth/me is not the admin automation identity")
-    actor = me.get("userId")
-    if not isinstance(actor, str) or not UUID_RE.match(actor):
-        raise rac.Fail("/api/auth/me carries no user id")
-    server_now = parsedate_to_datetime(h.get("Date")).astimezone(timezone.utc).replace(microsecond=0)
-    cookies = {ck.name: ck.value for ck in c.jar if ck.domain.lstrip(".") == HOST}
-    if "relay_session" not in cookies:
-        raise rac.Fail("no relay_session cookie")
-    return actor, server_now, cookies
+    try:
+        rac.login(c, username, password)  # raises rac.Fail; checks admin + the expected name
+        st, h, raw = c.request("GET", ORIGIN + "/api/auth/me")
+        me = json.loads(raw)
+        if st != 200 or me.get("name") != EXPECTED_NAME or me.get("role") != "admin":
+            raise rac.Fail("/api/auth/me is not the admin automation identity")
+        actor = me.get("userId")
+        if not isinstance(actor, str) or not UUID_RE.match(actor):
+            raise rac.Fail("/api/auth/me carries no userId")
+        server_now = parsedate_to_datetime(h.get("Date")).astimezone(timezone.utc).replace(microsecond=0)
+        cookies = {ck.name: ck.value for ck in c.jar if ck.domain.lstrip(".") == HOST}
+        if "relay_session" not in cookies:
+            raise rac.Fail("no relay_session cookie")
+        return c, actor, server_now, cookies
+    except BaseException as e:
+        e.client = c  # type: ignore[attr-defined]
+        raise
 
 
 def logout() -> bool:
@@ -768,66 +867,97 @@ def startup_inventory() -> None:
     log(event="startup", prior_launch_operations=len(STATE.startup_ops))
 
 
+def drain_inflight(bound: float) -> None:
+    """Wait (bounded) for dispatched calls; any mutation still outstanding is recorded as uncertain."""
+    end = time.monotonic() + bound
+    while time.monotonic() < end:
+        with STATE.lock:
+            if not STATE.inflight:
+                return
+        time.sleep(0.1)
+    with STATE.lock:
+        left = list(STATE.inflight.values())
+    for r in left:
+        log(event="shutdown-outstanding", route=r["route"], operationId=r["operationId"],
+            outcome="uncertain" if r["mutation"] else "abandoned")
+
+
 def main() -> int:
     global UPSTREAM
+    stop_requested = threading.Event()
+    server_box = {}
+
+    def stop(*_):
+        stop_requested.set()
+        STATE.closed = True
+        srv = server_box.get("server")
+        if srv is not None:
+            threading.Thread(target=srv.shutdown, daemon=True).start()
+
+    # Installed before ANY authenticated step: a signal during login or startup still reaches the logout below.
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
     password = sys.stdin.readline().rstrip("\r\n")
     cfg = json.loads(sys.stdin.readline())
     now_wall, now_mono = time.time(), time.monotonic()
     STATE.runner_deadline = now_mono + (float(cfg["runner_deadline"]) - now_wall)
     STATE.cleanup_deadline = now_mono + (float(cfg["cleanup_deadline"]) - now_wall)
     if not (now_mono < STATE.runner_deadline < STATE.cleanup_deadline):
-        log(event="startup-failed", reason="deadlines are not in the future and ordered")
+        log(event="startup-failed", reason="deadlines")
         return 2
     try:
-        actor, server_now, cookies = login(cfg["username"], password)
-    except Exception as e:  # noqa: BLE001
-        log(event="startup-failed", reason="login", error=type(e).__name__, detail=str(e)[:200])
+        _client, actor, server_now, cookies = login(cfg["username"], password)
+    except BaseException as e:  # noqa: BLE001 - a session may have been opened: close it with the client's own jar
+        password = ""
+        log(event="startup-failed", reason="login", error=type(e).__name__)
+        c = getattr(e, "client", None)
+        if c is not None and c.has_session():
+            UPSTREAM = Upstream({ck.name: ck.value for ck in c.jar if ck.domain.lstrip(".") == HOST})
+            return 0 if logout() else 4
         return 2
     password = ""
     UPSTREAM = Upstream(cookies)
     with STATE.lock:
         STATE.actor_id, STATE.run_start = actor, server_now
+    closed = False
     try:
+        if stop_requested.is_set():
+            raise InterruptedError("stop requested during login")
         startup_inventory()
-    except Exception as e:  # noqa: BLE001
-        log(event="startup-failed", reason="inventory", error=type(e).__name__)
-        return 0 if logout() else 4
+        if os.path.exists(SOCKET_PATH):
+            os.unlink(SOCKET_PATH)
+        old = os.umask(0o177)
+        try:
+            server = Server(SOCKET_PATH)
+        finally:
+            os.umask(old)
+        server_box["server"] = server
+        if stop_requested.is_set():
+            stop()
 
-    if os.path.exists(SOCKET_PATH):
-        os.unlink(SOCKET_PATH)
-    old = os.umask(0o177)
-    try:
-        server = Server(SOCKET_PATH)
+        def watchdog():
+            while not stop_requested.wait(0.5):
+                if time.monotonic() >= STATE.cleanup_deadline:
+                    log(event="deadline", which="cleanup")
+                    stop()
+
+        threading.Thread(target=watchdog, daemon=True).start()
+        sys.stdout.write("READY " + json.dumps({"actor": actor, "runStart": server_now.isoformat(),
+                                                "socket": SOCKET_PATH}) + "\n")
+        sys.stdout.flush()
+        server.serve_forever(poll_interval=0.5)
+        server.server_close()
+        drain_inflight(DRAIN_ON_SHUTDOWN)
+    except BaseException as e:  # noqa: BLE001
+        log(event="error", error=type(e).__name__)
     finally:
-        os.umask(old)
-    done = threading.Event()
-
-    def stop(*_):
-        if not done.is_set():
-            done.set()
-            STATE.closed = True
-            threading.Thread(target=server.shutdown, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
-
-    def watchdog():
-        while not done.wait(0.5):
-            if time.monotonic() >= STATE.cleanup_deadline:
-                log(event="deadline", which="cleanup")
-                stop()
-
-    threading.Thread(target=watchdog, daemon=True).start()
-    sys.stdout.write("READY " + json.dumps({"actor": actor, "runStart": server_now.isoformat(),
-                                            "socket": SOCKET_PATH}) + "\n")
-    sys.stdout.flush()
-    server.serve_forever(poll_interval=0.5)
-    server.server_close()
-    closed = logout()
-    try:
-        os.unlink(SOCKET_PATH)
-    except OSError:
-        pass
+        STATE.closed = True
+        closed = logout()
+        try:
+            os.unlink(SOCKET_PATH)
+        except OSError:
+            pass
     return 0 if closed else 4
 
 

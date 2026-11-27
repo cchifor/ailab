@@ -50,7 +50,11 @@ BAO = 'read -r t; export BAO_TOKEN="$t" BAO_TLS_SERVER_NAME=openbao.openbao.svc;
 
 
 def run(args, stdin: bytes | None = None, check=True, timeout: float = 120) -> bytes:
-    p = subprocess.run(args, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    """Every subprocess is bounded; a timeout becomes the same SystemExit as a failure, which cleanup() handles."""
+    try:
+        p = subprocess.run(args, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"relay-operator: {' '.join(args[:6])} ... timed out after {timeout:.0f}s")
     if check and p.returncode != 0:
         raise SystemExit(f"relay-operator: {' '.join(args[:6])} ... failed ({p.returncode}): "
                          f"{p.stderr.decode('utf-8', 'replace').strip()[-300:]}")
@@ -198,42 +202,60 @@ def ops():
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0)
 
 
+CALL_LEASE_S = 900  # far longer than the bounded call below (docker 300 s + grant/revoke stages)
+CALL_DOCKER_TIMEOUT_S = 300
+
+
 def call(op_args: list[str]) -> int:
     ros, o = ops()
     holder = "call-" + secrets.token_hex(6)
     try:  # the same fenced Lease as `session`: a call never overlaps a run, and the reaper waits for it
-        ros.lease_acquire(o, holder, time.time() + 600)
-    except ros.LeaseLost as e:
+        ros.lease_acquire(o, holder, time.time() + CALL_LEASE_S)
+    except (ros.LeaseLost, SystemExit) as e:
         print(f"relay-operator: {e}; refusing (a session or reaper holds the identity)", file=sys.stderr)
         return 7
-    c = creds()
-    subject, username, pw, uid = c["subject"], c["username"], c["password"], c["keycloak_user_id"]
-    c = None
-    tool = str(Path(__file__).resolve().parent)
+    subject = uid = None
     rc = 1
-    try:  # the grant is INSIDE the cleanup scope: whatever fails after it starts, the finally revokes
+    try:  # credentials, the grant and the call are all INSIDE the cleanup + Lease-release scope
+        c = creds()
+        subject, username, pw, uid = c["subject"], c["username"], c["password"], c["keycloak_user_id"]
+        c = None
+        tool = str(Path(__file__).resolve().parent)
         orphan = revoke(subject)
         if orphan != REVOKED:
             raise SystemExit(f"orphan authority not cleared ({orphan})")
         grant(subject)
         print(f"relay-operator: granted admin ({counts(subject)})", file=sys.stderr)
-        p = subprocess.run(["docker", "run", "--rm", "-i", "--network", "bridge", "-v", f"{tool}:/tool:ro", IMAGE,
-                            "python3", "-I", "/tool/relay-admin-call.py", "--username", username, *op_args],
-                           input=(pw + "\n").encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            p = subprocess.run(["docker", "run", "--rm", "-i", "--network", "bridge", "-v", f"{tool}:/tool:ro", IMAGE,
+                                "python3", "-I", "/tool/relay-admin-call.py", "--username", username, *op_args],
+                               input=(pw + "\n").encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               timeout=CALL_DOCKER_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            raise SystemExit(f"the admin call exceeded {CALL_DOCKER_TIMEOUT_S}s")
         pw = None
         sys.stderr.write(p.stderr.decode("utf-8", "replace"))
         sys.stdout.buffer.write(p.stdout)
         sys.stdout.flush()
         rc = p.returncode
-    except SystemExit as e:  # grant/count/docker failed: report it, but let cleanup's verdict decide the rc
-        print(f"relay-operator: {e}", file=sys.stderr)
+    except BaseException as e:  # noqa: BLE001 - grant/count/docker/signal: report it; cleanup's verdict decides
+        print(f"relay-operator: {type(e).__name__}: {e}", file=sys.stderr)
         rc = 1
     finally:
-        rc = cleanup(subject, uid, rc)
+        if subject is not None:
+            owned = ros.lease_secure(o, holder, 300)  # destructive cleanup only while this call still owns the Lease
+            if owned is True:
+                rc = cleanup(subject, uid, rc)
+            else:
+                print("relay-operator: Lease ownership NOT confirmed (" + ("a successor holds it" if owned is False
+                      else "unknown") + "); not revoking: run `relay-operator.py revoke` once the Lease is free",
+                      file=sys.stderr)
+                rc = 7
         try:
             ros.lease_release(o, holder)
         except BaseException as e:  # noqa: BLE001 - the Lease expires on its own; report it
-            print(f"relay-operator: Lease release failed ({type(e).__name__}); it expires in 10 min", file=sys.stderr)
+            print(f"relay-operator: Lease release failed ({type(e).__name__}); it expires on its own",
+                  file=sys.stderr)
     return rc
 
 

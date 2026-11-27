@@ -223,6 +223,45 @@ class Planner(unittest.TestCase):
         self.assertIn(new_sid, P.STATE.sessions)
         self.assertEqual(P.STATE.launches[new_lid]["profile_id"], CODEX_P)
 
+    def test_resume_row_must_keep_the_source_profile(self):
+        sid, _ = learn_session()
+        op = u()
+        P.plan_request("POST", f"/api/agent-sessions/{sid}/resume", [], {"operationId": op, "generation": 2})
+        for bad in ({"profile_id": u()}, {"profile_revision": 2}, {"cwd": "/tmp"}):
+            lid = u()
+            P.learn_launch(launch_row(op, lid, u(), resume_from=sid, resume_generation=2, **bad))
+            self.assertNotIn(lid, P.STATE.launches, bad)
+
+    def test_once_only_reservations_are_atomic(self):
+        results = []
+        barrier = threading.Barrier(8)
+
+        def go():
+            barrier.wait()
+            try:
+                P.plan_request("POST", f"/api/router-credentials/{CODEX_B}/rotate", [],
+                               {"operationId": u(), "revision": 1})
+                results.append("ok")
+            except P.Refuse:
+                results.append("refused")
+        ts = [threading.Thread(target=go) for _ in range(8)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        self.assertEqual(results.count("ok"), 1)
+
+    def test_prompt_byte_limit(self):
+        sid, _ = learn_session()
+        plan = P.plan_request("POST", f"/api/agent-sessions/{sid}/control", [], {"generation": 1})
+        lease = u()
+        plan.learn({"id": lease, "generation": 1, "expires_at": iso(START)})
+        base = {"leaseId": lease, "generation": 1, "kind": "prompt", "controlEpoch": 0}
+        P.plan_request("POST", f"/api/agent-sessions/{sid}/commands", [],
+                       {**base, "operationId": u(), "text": "a" * P.MAX_PROMPT_BYTES})
+        self.refused("POST", f"/api/agent-sessions/{sid}/commands",
+                     body={**base, "operationId": u(), "text": "é" * (P.MAX_PROMPT_BYTES // 2 + 1)})
+
     def test_timeline_query(self):
         sid, _ = learn_session()
         path = f"/api/conversations/sessions/{sid}/timeline"
@@ -379,30 +418,148 @@ class SocketServer(unittest.TestCase):
         self.assertEqual(st, 504)
         self.assertIn(b"uncertain", resp)
 
-    def test_stalled_clients_do_not_block_lease_renewal(self):
+    def test_stalled_clients_and_slow_upstream_do_not_block_lease_renewal(self):
         sid, _ = learn_session()
         lease = u()
         P.learn_lease(sid, {"id": lease, "generation": 1, "expires_at": iso(START)})
         stalled = []
-        for _ in range(P.SLOTS - 1):  # occupy every general slot with slow upstream GETs
+        for _ in range(10):  # clients that never finish their request head: they hold only reader capacity
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.connect(self.sock)
-            s.sendall(b"GET /api/agent-profiles HTTP/1.1\r\nHost: x\r\n\r\n")
+            s.sendall(b"GET /api/agent-profiles HTTP/1.1\r\n")
             stalled.append(s)
-        self.fake.delay = 0  # profiles return immediately, but the 7 sockets hold their slots until read
-        time.sleep(0.2)
-        self.fake.handlers[("POST", f"/api/agent-sessions/{sid}/control")] = \
-            lambda p, b: (200, {"id": lease, "generation": 1, "expires_at": iso(START)})
+
+        def slow(p, b):
+            time.sleep(3.0)
+            return 200, []
+        self.fake.handlers[("GET", "/api/agent-profiles")] = slow
+        # every handler is registered BEFORE the busy calls start: the fake iterates this dict on each call
+        self.fake.handlers[("POST", f"/api/agent-sessions/{sid}/control")] = (
+            lambda p, b: (200, {"id": lease, "generation": 1, "expires_at": iso(START)}))
+        busy = [threading.Thread(target=self.req, args=("GET", "/api/agent-profiles"), daemon=True)
+                for _ in range(P.GENERAL_SLOTS)]  # every general handler slot busy upstream
+        for t in busy:
+            t.start()
+        time.sleep(0.5)
+        t0 = time.monotonic()
         st, _ = self.req("POST", f"/api/agent-sessions/{sid}/control", {"generation": 1, "leaseId": lease})
         self.assertEqual(st, 200)
+        self.assertLess(time.monotonic() - t0, 1.0)
+        st, _ = self.req("GET", "/api/agent-profiles")  # a 7th general request is turned away, not queued
+        self.assertEqual(st, 503)
         for s in stalled:
             s.close()
+        for t in busy:
+            t.join()
+
+    def test_incomplete_request_is_cut_at_the_absolute_deadline(self):
+        saved, P.REQUEST_DEADLINE = P.REQUEST_DEADLINE, 0.5
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect(self.sock)
+            s.sendall(b"GET /api/agent-profiles HTTP/1.1\r\n")  # trickle: never finish the head
+            t0 = time.monotonic()
+            try:
+                while s.recv(1024):
+                    pass
+            except OSError:
+                pass
+            self.assertLess(time.monotonic() - t0, 3.0)
+            s.close()
+        finally:
+            P.REQUEST_DEADLINE = saved
+
+    def test_refusal_log_has_no_raw_target_or_client_keys(self):
+        import io
+        buf, saved = io.StringIO(), sys.stderr
+        sys.stderr = buf
+        try:
+            self.req("GET", "/api/auth/me?token=SECRET-VALUE-123")
+            self.req("POST", "/api/agent-launches", {**launch_body(), "leakykey-SECRET": 1})
+        finally:
+            sys.stderr = saved
+        out = buf.getvalue()
+        self.assertNotIn("SECRET", out)
+        self.assertIn('"reason": "route-not-allowed"', out)
+
+    def test_cleanup_phase_rechecked_at_dispatch(self):
+        plan = P.plan_request("POST", "/api/agent-launches", [], launch_body())  # planned during the run
+        P.STATE.runner_deadline = time.monotonic() - 1  # the phase flips before dispatch
+        h = P.Handler.__new__(P.Handler)
+        with self.assertRaises(P.Refuse):
+            h._dispatch(plan)
+        self.assertEqual(self.fake.calls, [])
 
     def test_closed_after_cleanup_deadline(self):
         P.STATE.cleanup_deadline = time.monotonic() - 1
         st, _ = self.req("GET", "/api/agent-profiles")
         self.assertEqual(st, 403)
         self.assertEqual(self.fake.calls, [])
+
+
+class UpstreamClient(unittest.TestCase):
+    """Upstream.call against a real local HTTP server (TLS swapped for plain HTTP to it)."""
+
+    def setUp(self):
+        import http.client
+        import http.server
+        self.mode = "close"
+        test = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if test.mode == "close":
+                    body = b'{"ok": true}'
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Connection", "close")
+                    self.send_header("Set-Cookie", "relay_session=rotated; Path=/")
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:  # trickle a long body one byte at a time
+                    self.send_response(200)
+                    self.send_header("Content-Length", "1000")
+                    self.end_headers()
+                    for _ in range(1000):
+                        try:
+                            self.wfile.write(b"x")
+                            self.wfile.flush()
+                        except OSError:
+                            return
+                        time.sleep(0.05)
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = self.httpd.server_address[1]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.saved = P.http.client.HTTPSConnection
+        P.http.client.HTTPSConnection = lambda host, p, timeout=None, context=None: http.client.HTTPConnection(
+            "127.0.0.1", port, timeout=timeout)
+
+    def tearDown(self):
+        P.http.client.HTTPSConnection = self.saved
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def test_connection_close_response_and_cookie_absorbed(self):
+        up = P.Upstream({"relay_session": "orig"})
+        st, _, data, _ = up.call("GET", "/x", [], None, 5)
+        self.assertEqual((st, json.loads(data)), (200, {"ok": True}))
+        self.assertEqual(up.cookies["relay_session"], "rotated")
+
+    def test_trickling_body_hits_the_absolute_deadline(self):
+        self.mode = "trickle"
+        up = P.Upstream({"relay_session": "x"})
+        t0 = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            up.call("GET", "/x", [], None, 1.0)
+        self.assertLess(time.monotonic() - t0, 2.5)
 
 
 if __name__ == "__main__":

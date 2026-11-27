@@ -885,8 +885,18 @@ python scripts/relay-operator.py session --manifest-ref <FULL_COMMIT>:<path/to/m
     per permission), native recovery and resume (never with `acknowledgeUnknownToolEffects`), and the reads.
   - Not allowed: binding revoke, profile or grant approvals, `set-mode`, `native-command`, question replies.
   - Dynamic IDs are learned only from this run's own responses. A launch must be this run's operation, by this
-    actor, created after login, matching the dispatched intent; a lost POST response is reconciled read-only through
-    the inventory, never resent. Operation IDs that existed at login are refused.
+    actor, created after login, matching the dispatched intent (a resume also keeps the source's profile, revision
+    and cwd). A lost POST response is reconciled read-only through the inventory, never resent. Operation IDs that
+    existed at login are refused, and once-only routes reserve the operation and the binding or permission
+    atomically.
+  - Bounds:
+    - a reader pool (32) with an absolute 5 s deadline per request, then handler slots, 2 of them reserved for
+      control-lease requests so renewal cannot starve;
+    - a listen backlog of 64;
+    - an absolute upstream deadline (a timer closes the transport), capped by the phase's own deadline;
+    - prompts of at most 16 KiB UTF-8.
+
+    The evidence logs fixed reason codes and route shapes only, never a raw target, query value or client key.
 - **The Runner** runs with `--network none` and is hardened. It shares only the proxy's socket
   (`RELAY_SESSION_SOCKET`), and its durable store is a named volume `relay-state-<run>` (`AUTOMATION_DIR`), kept
   after the run and exported to `state.tar`.
@@ -898,8 +908,11 @@ python scripts/relay-operator.py session --manifest-ref <FULL_COMMIT>:<path/to/m
 - **The Lease** `relay-operator-jit` (namespace `relay`) serializes `session`, `call` and the reaper.
   - It is taken by create, or by a `resourceVersion`-conditioned replace when expired. Orphan authority is cleared
     before every grant.
-  - A run never revokes when it positively sees another live holder; an unknown answer still revokes, so no admin
-    is left standing.
+  - Destructive cleanup (the revoke, the account-wide Keycloak logout, the release) runs ONLY after the run
+    positively re-confirms ownership: a `resourceVersion`-conditioned extension of its own Lease, or a conditional
+    takeover of an absent or expired one. If a successor holds a live Lease, or ownership cannot be established (an
+    API error), the run does NOT revoke and exits 7. The reaper then clears the identity, or run
+    `relay-operator.py revoke` by hand once the Lease is free. `call` follows the same rule.
 - **Cleanup stages**, each bounded and independent: drain the logs, stop the proxy (logout), remove the containers and
   the socket volume, export the state, revoke plus readback `0 memberships, 0 sessions`, Keycloak logout, release the
   Lease.
