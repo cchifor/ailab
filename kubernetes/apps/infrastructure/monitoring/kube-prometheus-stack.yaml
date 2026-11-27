@@ -73,6 +73,9 @@ spec:
       # LeaseKeepAlive/Watch stream counted as 100% failure and paged critical; see that file).
       disabled:
         etcdHighNumberOfFailedGRPCRequests: true
+        # Replaced, not dropped: target-down-rules.yaml restates it verbatim except that cloudlab's scrape
+        # jobs are not reported while CloudlabAsleep fires (planned nightly power-off; 2026-11-26).
+        TargetDown: true
     alertmanager:
       # Two replicas on different nodes, one evictable at a time. Silences and the notification log live in
       # each pod's data dir and are gossiped between the peers, so a pod that is rescheduled (a node drain)
@@ -125,10 +128,13 @@ spec:
           # The generic TargetDown for cloudlab's scrape jobs while cloudlab is powered off or
           # booting (CloudlabAsleep, ci-runners-cloud-rules.yaml): it paged every night the GPU
           # cluster was scheduled OFF. No `equal` — the source carries no job/namespace labels.
+          # Defence in depth only since 2026-11-26: target-down-rules.yaml no longer FIRES TargetDown for these
+          # jobs while CloudlabAsleep fires. The regex is the same pattern as that rule's (the old list
+          # cloud-node|ci-runner-cloud|cloud-pve missed cloud-vllm and cloud-llama-swap, which paged nightly).
           - source_matchers: ['alertname = "CloudlabAsleep"']
             target_matchers:
               - 'alertname = "TargetDown"'
-              - 'job =~ "cloud-node|ci-runner-cloud|cloud-pve"'
+              - 'job =~ "cloud-.+|ci-runner-cloud"'
         # `?template=ailab-alertmanager` = OUR named ntfy template (ntfy.yaml, ntfy-config), not the built-in
         # `alertmanager` one. Both give a real title + plain text instead of raw webhook JSON, but the
         # built-in prints every alert's full description, and ntfy REJECTS a rendered message over 4 KB
