@@ -27,6 +27,8 @@ INTENDED = {
     "vault": "restricted-path",
     # new: the outside probe's target, a fixed answer naming the peer.
     "edge-canary": "new",
+    # new (2026-11-27, owner decision 2026-11-26): the first private host, specpulse's own login; never in the tunnel.
+    "specpulse": "new",
 }
 # cloudflared hostnames the registry deliberately does not carry.
 DROPPED = {
