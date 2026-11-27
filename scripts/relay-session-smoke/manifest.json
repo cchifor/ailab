@@ -1,0 +1,12 @@
+{
+ "version": 1,
+ "image": "python:3.13-bookworm@sha256:073ffebb96ae4d0ed73ccad59f08c47bd84af8a79f5258130f8458ac50ad9ff4",
+ "entrypoint": [
+  "python3",
+  "-I",
+  "/bundle/smoke.py"
+ ],
+ "files": {
+  "smoke.py": "ce043bc4854a1e1dc8933ce7b89204de4941e724c2be0f5fb10a9a32d44c8480"
+ }
+}

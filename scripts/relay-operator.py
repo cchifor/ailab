@@ -5,6 +5,8 @@
     python scripts/relay-operator.py provision --rotate   # new password (Keycloak + OpenBao)
     python scripts/relay-operator.py call OP [ARGS]       # grant admin -> one allowlisted call -> revoke
     python scripts/relay-operator.py revoke               # delete its membership + sessions (idempotent)
+    python scripts/relay-operator.py session --manifest-ref COMMIT:PATH --bundle DIR --runner-minutes N
+                                     --evidence-dir NEW_DIR   # ONE bounded automated run (relay_operator_session.py)
     python scripts/relay-operator.py status               # membership/session counts, Keycloak user state
 
 `call` OPs are relay-admin-call.py's allowlist (me, list-installations, get-installation ID,
@@ -27,6 +29,7 @@ import re
 import secrets
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 CTX = ["kubectl", "--context", "admin@ai"]
@@ -46,8 +49,8 @@ KCADM = (
 BAO = 'read -r t; export BAO_TOKEN="$t" BAO_TLS_SERVER_NAME=openbao.openbao.svc; '
 
 
-def run(args, stdin: bytes | None = None, check=True) -> bytes:
-    p = subprocess.run(args, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def run(args, stdin: bytes | None = None, check=True, timeout: float = 120) -> bytes:
+    p = subprocess.run(args, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
     if check and p.returncode != 0:
         raise SystemExit(f"relay-operator: {' '.join(args[:6])} ... failed ({p.returncode}): "
                          f"{p.stderr.decode('utf-8', 'replace').strip()[-300:]}")
@@ -174,13 +177,44 @@ def cleanup(subject: str, uid: str, rc: int) -> int:
     return rc
 
 
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _session_module():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import relay_operator_session as ros  # noqa: E402 - the orchestrator lives beside this script
+    return ros
+
+
+def ops():
+    ros = _session_module()
+    return ros, ros.Ops(
+        creds=creds, grant=grant, revoke=revoke, end_sso=end_sso,
+        kubectl=lambda args, stdin=None, timeout=60, check=True: run(CTX + list(args), stdin, check, timeout),
+        docker=lambda args, stdin=None, timeout=60, check=True: run(["docker", *args], stdin, check, timeout),
+        git_show=lambda commit, path: run(["git", "-C", str(REPO), "show", f"{commit}:{path}"], timeout=30),
+        git_is_reviewed=lambda commit: subprocess.run(
+            ["git", "-C", str(REPO), "merge-base", "--is-ancestor", commit, "gitea/main"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0)
+
+
 def call(op_args: list[str]) -> int:
+    ros, o = ops()
+    holder = "call-" + secrets.token_hex(6)
+    try:  # the same fenced Lease as `session`: a call never overlaps a run, and the reaper waits for it
+        ros.lease_acquire(o, holder, time.time() + 600)
+    except ros.LeaseLost as e:
+        print(f"relay-operator: {e}; refusing (a session or reaper holds the identity)", file=sys.stderr)
+        return 7
     c = creds()
     subject, username, pw, uid = c["subject"], c["username"], c["password"], c["keycloak_user_id"]
     c = None
     tool = str(Path(__file__).resolve().parent)
     rc = 1
     try:  # the grant is INSIDE the cleanup scope: whatever fails after it starts, the finally revokes
+        orphan = revoke(subject)
+        if orphan != REVOKED:
+            raise SystemExit(f"orphan authority not cleared ({orphan})")
         grant(subject)
         print(f"relay-operator: granted admin ({counts(subject)})", file=sys.stderr)
         p = subprocess.run(["docker", "run", "--rm", "-i", "--network", "bridge", "-v", f"{tool}:/tool:ro", IMAGE,
@@ -196,7 +230,17 @@ def call(op_args: list[str]) -> int:
         rc = 1
     finally:
         rc = cleanup(subject, uid, rc)
+        try:
+            ros.lease_release(o, holder)
+        except BaseException as e:  # noqa: BLE001 - the Lease expires on its own; report it
+            print(f"relay-operator: Lease release failed ({type(e).__name__}); it expires in 10 min", file=sys.stderr)
     return rc
+
+
+def session(a) -> int:
+    ros, o = ops()
+    subprocess.run(["git", "-C", str(REPO), "fetch", "-q", "gitea", "main"], timeout=60, check=False)
+    return ros.run_session(o, a.manifest_ref, a.bundle, a.runner_minutes, a.evidence_dir)
 
 
 def main() -> int:
@@ -205,10 +249,17 @@ def main() -> int:
     pr = sub.add_parser("provision"); pr.add_argument("--rotate", action="store_true")
     ca = sub.add_parser("call"); ca.add_argument("op", nargs=argparse.REMAINDER)
     sub.add_parser("revoke"); sub.add_parser("status")
+    se = sub.add_parser("session")
+    se.add_argument("--manifest-ref", required=True, help="FULL_COMMIT:path of the reviewed bundle manifest")
+    se.add_argument("--bundle", required=True)
+    se.add_argument("--runner-minutes", type=int, required=True)
+    se.add_argument("--evidence-dir", required=True)
     a = p.parse_args()
     if a.cmd == "provision":
         provision(a.rotate)
         return 0
+    if a.cmd == "session":
+        return session(a)
     if a.cmd == "call":
         if not a.op:
             p.error("call needs an OP")
