@@ -448,6 +448,46 @@ test("renewed credentials accept the exact 74d1 HTTP inventory and detail projec
   }
 });
 
+test("renewed inventory refuses malformed consumer rows before binding filtering", () => {
+  for (const row of [
+    null,
+    [],
+    "active",
+    { state: "active" },
+    { bindingId: p.binding, state: "active" },
+    { binding_id: "not-a-uuid", state: "active" },
+    { binding_id: p.binding },
+    { binding_id: p.binding, state: "unknown" },
+    { binding_id: OTHER, state: "unknown" },
+  ]) {
+    const { inventory, details } = clone(hubProjection.bootstrap);
+    inventory.consumers.push(row);
+    assert.throws(
+      () => a.renewedCredentials(inventory, details, hubObservation),
+      /Credential consumer inventory malformed/,
+    );
+  }
+});
+
+test("renewed inventory accepts valid unrelated and terminal consumer rows", () => {
+  const { inventory, details } = clone(hubProjection.bootstrap);
+  const expected = a.renewedCredentials(inventory, details, hubObservation);
+  inventory.consumers.push(
+    { binding_id: OTHER, state: "active" },
+    { binding_id: p.binding, state: "released" },
+    { binding_id: a.PROFILES.qwen.binding, state: "blocked" },
+  );
+  assert.deepEqual(
+    a.renewedCredentials(inventory, details, hubObservation),
+    expected,
+  );
+  inventory.consumers.push({ binding_id: p.binding, state: "active" });
+  assert.throws(
+    () => a.renewedCredentials(inventory, details, hubObservation),
+    /still active/,
+  );
+});
+
 test("captured hub metadata never permits a missing or alternate canRenew spelling", () => {
   for (const provider of ["codex", "qwen"]) {
     for (const view of ["inventory", "detail"]) {

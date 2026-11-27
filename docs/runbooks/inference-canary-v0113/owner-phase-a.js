@@ -90,6 +90,19 @@
         inventory.consumers.length < 1000,
       "Credential inventory incomplete or truncated",
     );
+    // Hub migration 017 permits exactly these consumer states. Validate every
+    // row before filtering by binding so malformed identities cannot hide use.
+    need(
+      inventory.consumers.every(
+        (c) =>
+          c !== null &&
+          typeof c === "object" &&
+          !Array.isArray(c) &&
+          uuid(c.binding_id) &&
+          ["active", "released", "blocked"].includes(c.state),
+      ),
+      "Credential consumer inventory malformed",
+    );
     return Object.fromEntries(
       Object.entries(PROFILES).map(([provider, prior]) => {
         const matches = inventory.bindings.filter(
