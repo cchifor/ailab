@@ -7,10 +7,36 @@ const path = require("node:path");
 const http = require("node:http");
 const { EventEmitter } = require("node:events");
 const { createHash } = require("node:crypto");
-const {
-  createClaudePhaseBAutomation,
-} = require("./owner-phase-a-automation.cjs");
-const { runPhaseBCli, completedPhaseA } = require("./owner-phase-b-cli.cjs");
+const Module = require("node:module");
+const production = require("./owner-phase-a-automation.cjs");
+const { sourceFixture } = require("./owner-phase-b-fence-fixture.cjs");
+const candidate = sourceFixture();
+// Candidate-only source pins come from the explicit shared fixture proof.
+// Host and CLI bytes are unchanged; dependencies remain the actual modules.
+function loadHostModule(name, bindings) {
+  const filename = path.join(__dirname, name);
+  const mod = new Module(filename, module);
+  mod.filename = filename;
+  mod.paths = Module._nodeModulePaths(__dirname);
+  const originalRequire = mod.require.bind(mod);
+  mod.require = (dependency) =>
+    Object.hasOwn(bindings, dependency)
+      ? bindings[dependency]
+      : originalRequire(dependency);
+  mod._compile(fs.readFileSync(filename, "utf8"), filename);
+  return mod.exports;
+}
+const hostModule = loadHostModule("owner-phase-a-automation.cjs", {
+  "./owner-phase-a.js": candidate.a,
+  "./owner-phase-b.js": candidate.b,
+});
+const { createClaudePhaseBAutomation } = hostModule;
+const { runPhaseBCli, completedPhaseA } = loadHostModule(
+  "owner-phase-b-cli.cjs",
+  {
+    "./owner-phase-a-automation.cjs": hostModule,
+  },
+);
 
 // Synthetic structure only; no live report or account authority is implied.
 function aReport() {
@@ -51,6 +77,15 @@ function fixture(t, changes = {}) {
     directory,
     phaseInputs: inputs(),
     phaseAReportSha256: completedPhaseA(aReport()),
+    attemptFence: Object.fromEntries(
+      ["inspect", "arm", "advance", "close", "readOperation"].map((name) => [
+        name,
+        async () => {
+          calls++;
+          throw Error("No fence operation expected before readiness");
+        },
+      ]),
+    ),
     authenticatedFetch: async () => {
       calls++;
       throw Error("No HTTP expected");
@@ -70,6 +105,19 @@ function snapshots(directory) {
     .sort()
     .map((n) => JSON.parse(fs.readFileSync(path.join(directory, n), "utf8")));
 }
+
+test("checked-in B release gate remains closed even with all adapter methods linked", async (t) => {
+  const f = fixture(t, {
+    collectCheckpoint: () => {
+      assert.fail("Unqualified production source must not collect evidence");
+    },
+  });
+  const host = production.createClaudePhaseBAutomation(f.options);
+  await assert.rejects(host.run(), /Automation stopped/);
+  assert.equal(f.calls(), 0);
+  assert.match(snapshots(f.directory).at(-1).reason, /qualif|release/i);
+  assert.equal(candidate.proof.qualifiedLiveBundle, false);
+});
 
 test("B keeps immutable inputs and A hash, then rejects missing readiness before any HTTP", async (t) => {
   let f;
@@ -116,6 +164,8 @@ test("B refuses A bootstrap hooks, bad references and oversized deadlines before
     { phaseAReportSha256: "bad" },
     { maxDurationMs: 1800001 },
     { deadline: NaN },
+    { attemptFence: undefined },
+    { attemptFence: { inspect: async () => ({}) } },
     { phaseInputs: { ...inputs(), window: { startsAt: 0, expiresAt: 1 } } },
   ];
   for (const change of cases) {
@@ -273,6 +323,7 @@ test(
         RUNNER_DEADLINE: String(Date.now() + 60000),
       },
       signals,
+      attemptFence: f.options.attemptFence,
       writeLine: (line) => lines.push(JSON.parse(line)),
       collectCheckpoint: ({ context, signal }) => {
         assert.equal(context.kind, "claude-readiness");

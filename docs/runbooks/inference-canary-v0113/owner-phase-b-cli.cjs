@@ -59,6 +59,7 @@ async function runPhaseBCli({
   argv = process.argv.slice(2),
   env = process.env,
   collectCheckpoint,
+  attemptFence,
   writeLine = writeStdout,
   signals = process,
 } = {}) {
@@ -84,6 +85,12 @@ async function runPhaseBCli({
       "Reviewed Claude observer is not linked",
     );
     need(
+      ["inspect", "arm", "advance", "close", "readOperation"].every(
+        (name) => typeof attemptFence?.[name] === "function",
+      ),
+      "Reviewed signed attempt-fence adapter is not linked",
+    );
+    need(
       typeof env.RUNNER_DEADLINE === "string" &&
         /^[0-9]{13}$/.test(env.RUNNER_DEADLINE),
       "RUNNER_DEADLINE epoch milliseconds required",
@@ -104,6 +111,7 @@ async function runPhaseBCli({
       phaseAReportSha256,
       authenticatedFetch,
       collectCheckpoint,
+      attemptFence,
       deadline,
       maxDurationMs: deadline - Date.now(),
       signal: controller.signal,
