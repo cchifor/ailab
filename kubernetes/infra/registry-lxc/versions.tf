@@ -3,7 +3,7 @@ terraform {
   required_providers {
     proxmox = {
       source  = "bpg/proxmox"
-      version = "~> 0.123" # keep in step with the other bpg/proxmox stacks
+      version = "~> 0.124" # keep in step with the other bpg/proxmox stacks
     }
   }
 }
