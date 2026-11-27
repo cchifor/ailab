@@ -766,6 +766,18 @@ class WarmRunner extends a.Runner {
     await this.switchEpoch(this.segments[0]);
     await this.armSegment(this.segments[0], predecessor);
   }
+  requireTerminalFence(record, f) {
+    need(
+      record.state === "passed" &&
+        record.fenceId === this.fenceId &&
+        record.phaseId === this.fenceContext.segment.phaseId &&
+        record.scopeDigest === digest(this.fenceContext.scope) &&
+        record.rowId === f.activeRowId &&
+        f.attempts === record.admittedBefore + record.generations &&
+        f.tokenUsageUnknown === record.settledTokenUsageUnknown,
+      "Terminal evidence no longer matches fence counters",
+    );
+  }
   async closeCurrentFence(record) {
     need(
       !this.pending &&
@@ -774,13 +786,7 @@ class WarmRunner extends a.Runner {
       "Native/client drain missing before fence close",
     );
     const f = await this.inspectFence(record.rowId);
-    need(
-      record.fenceId === this.fenceId &&
-        record.scopeDigest === digest(this.fenceContext.scope) &&
-        f.attempts === record.admittedBefore + record.generations &&
-        f.tokenUsageUnknown === record.settledTokenUsageUnknown,
-      "Terminal evidence no longer matches fence counters",
-    );
+    this.requireTerminalFence(record, f);
     const closed = await this.fenceMutation(
       "close",
       {
@@ -1257,6 +1263,7 @@ class WarmRunner extends a.Runner {
         "Native/client drain missing before row advance",
       );
       const f = await this.inspectFence(previous.rowId);
+      this.requireTerminalFence(previous, f);
       await this.fenceMutation(
         "advance",
         {

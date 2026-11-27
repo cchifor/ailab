@@ -1425,3 +1425,30 @@ test("a settled extra admission cannot be hidden by closing the warm fence", asy
     await f.runner.cleanup();
   }
 });
+
+for (const priorIndex of [0, 1])
+  for (const counter of ["attempts", "tokenUsageUnknown"])
+    test(`P${priorIndex + 1} terminal ${counter} drift refuses next advance and prompt`, async () => {
+      const f = fixture();
+      try {
+        await f.begin();
+        let last;
+        for (const row of c.ROWS.slice(0, priorIndex + 1))
+          last = await f.runner.runRow(row, last);
+        const before = clone(f.fenceCalls);
+        f.fence()[counter]++; // Within the old row cap, after recorded settlement.
+        await assert.rejects(
+          f.runner.runRow(c.ROWS[priorIndex + 1], last),
+          /Terminal evidence/,
+        );
+        assert.deepEqual(f.fenceCalls, before);
+        assert.equal(
+          f.calls.filter((x) => x.body?.kind === "prompt").length,
+          priorIndex + 1,
+        );
+        assert.equal(f.runner.state.rows.length, priorIndex + 1);
+        assert.equal(f.fence().activeRowId, c.ROWS[priorIndex].id);
+      } finally {
+        await f.runner.cleanup();
+      }
+    });

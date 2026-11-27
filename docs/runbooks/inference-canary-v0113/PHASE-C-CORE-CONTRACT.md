@@ -178,6 +178,11 @@ unattributed and coveredFrom. This is an adapter
 contract awaiting binding to the real API, not proof of implementation. Advance
 requires actual native prompt completion, validated tool delivery/outcomes, zero
 pending client prompt, complete settled process requests and zero meter opens.
+Before either advance or close, the inspected admitted and token-unknown totals
+must exactly match the previous row's recorded terminal evidence, bound to its
+fence, phase, scope and active row. An extra settled admission within that row's
+remaining allowance is still refused before any advance or next prompt; a new
+row's baseline cannot hide it.
 The terminalEvidenceSha256 attributes that controller evidence; Router cannot
 verify the digest as native completion. Close blocks and preserves charges;
 open/stale/unattributed reservations can remain unresolved. No new phase follows cleanup.
