@@ -12,13 +12,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
 
 import relay_phase_a_collectors as C
-from relay_phase_a_observer import (Deadline, Evidence, Failed, Fault, Host, Refuse, canonical, is_uuid, need,
-                                    sha256_bytes)
+from relay_phase_a_observer import (Deadline, Evidence, EvidenceFailure, Failed, Fault, Host, LeaseLostError,
+                                    Refuse, canonical, is_uuid, need, sha256_bytes)
 
 
 # ------------------------------------------------------------------------------------------ ledger
@@ -32,6 +33,7 @@ class Ledger:
         self.path = self.dir / f"{preparation}.jsonl"
         self.seq = 0
         self.fd = None
+        self.lock = threading.Lock()
 
     @staticmethod
     def _crc(rec: dict) -> str:
@@ -86,6 +88,10 @@ class Ledger:
         self.append(**rec)
 
     def append(self, **rec) -> None:
+        with self.lock:
+            self._append(**rec)
+
+    def _append(self, **rec) -> None:
         need(self.fd is not None, "the ledger is not reserved", Fault)
         self.seq += 1
         rec.update(seq=self.seq, t=round(time.time(), 3))
@@ -100,6 +106,10 @@ class Ledger:
         os.fsync(self.fd)
 
     def close(self) -> None:
+        with self.lock:
+            self._close()
+
+    def _close(self) -> None:
         if self.fd is not None:
             try:
                 os.close(self.fd)
@@ -158,16 +168,18 @@ class ObserverHost(Host):
         return self.cfg.raw["holder"]["stateDir"] + "/native-homes/" + run.session_id
 
     def mutation_cap(self, budget, cap: float) -> float:
-        """Before EVERY mutating stage: the Lease, no cancellation, inside the C3 window; the stage is bounded by the
-        least of its cap, the request budget, the window end and the runner cutoff."""
+        """Before EVERY mutating stage: the Lease, no cancellation, inside the C3 window (compared in ONE clock
+        domain: host monotonic, conservatively narrowed at C3); the stage is bounded by the least of its cap, the
+        request budget, the window end and the runner cutoff."""
         budget.check(2.0)
-        need(self.lease_ok(), "the Lease is no longer held", Fault)
-        now = int(time.time() * 1000)
-        w = self.state.window
-        need(w is not None and w[0] <= now < w[1], "outside the granted replacement window", Failed)
-        left = min(w[1], self._cutoff) - now
-        need(left > 5000, "too little of the window is left for a mutation", Failed)
-        return min(cap, left / 1000.0, budget.remaining() - 2.0)
+        if not self.lease_ok():
+            raise LeaseLostError("the Lease is no longer held")
+        w = self.state.window_mono
+        mono = time.monotonic()
+        need(w is not None and w[0] <= mono < w[1], "outside the granted replacement window", Failed)
+        left = min(w[1] - mono, (self._cutoff - int(time.time() * 1000)) / 1000.0)
+        need(left > 5.0, "too little of the window is left for a mutation", Failed)
+        return min(cap, left, budget.remaining() - 2.0)
 
 
 # ------------------------------------------------------------------------------------------ pre-run (orchestrator)
@@ -190,6 +202,10 @@ def prerun_checks(host, budget, obs) -> dict:
     need(j["lastStartedIncarnation"] == h["newJournalId"] and j["admission"] is not None
          and j["admission"]["paused"] is True and j["admission"]["operationId"] == h["pauseOperationId"],
          "the new root's journal is not the prepared, paused one", Failed)
+    need(j["sha256"] == h["newJournalSha256"] and j["kinds"] == ["holder-started", "holder-admission"],
+         "the new root's journal is not byte-for-byte the prepared one (unsealed, drained, nothing appended)", Failed)
+    need(f["binarySha256"] == h["qualified"]["binarySha256"],
+         "the installed holder executable is not the qualified one", Failed)
     need(f["artifacts"] == h["artifacts"], "an installed unit, service or profiles file is not the pinned one", Failed)
     hold, rec = u["relay-holder.service"], u["relay-holder-control-plane.service"]
     need(hold["active"] == "inactive" and rec["active"] == "inactive", "a holder unit is already active", Failed)
@@ -207,23 +223,36 @@ def prerun(host: ObserverHost, budget) -> dict:
     host itself; a lost response is classified by an independent readback, and contained if needed."""
     h = host.cfg.raw["holder"]
     obs: dict = {}
-    need(host.lease_ok(), "the Lease is not held", Fault)
+    if not host.lease_ok():
+        raise LeaseLostError("the Lease is not held")
     prerun_checks(host, budget, obs)
     host.state.preservation = obs["preservation"]
     C.pin_router(host, budget, obs)
+    need(budget.remaining() > 140, "too little budget for a contained holder start", Failed)
     host.ledger.reserve(op="pre-run-start", phase="intent", stateDir=h["stateDir"])
-    need(host.lease_ok(), "the Lease was lost before the start", Fault)
+    if not host.lease_ok():
+        host.ledger.append(op="pre-run-start", phase="receipt", outcome="not-started-lease-lost")
+        raise LeaseLostError("the Lease was lost before the start")
     try:
-        started = host.remote.dw(["mutate-start-holder", h["stateDir"]], budget, obs, "mutate-start-holder", cap=130)
+        # the remote run gets 120 s, of which dw.py always keeps STOP_RESERVE_S for a verified stop
+        started = host.remote.dw(["mutate-start-holder", h["stateDir"], "120"], budget, obs, "mutate-start-holder",
+                                 cap=130)
     except BaseException as e:  # noqa: BLE001 - a lost response: classify on the host, contain if unpaused
-        outcome = _classify_start(host, budget, obs)
+        outcome = _classify_start(host, obs)
         host.ledger.append(op="pre-run-start", phase="receipt", outcome=outcome, error=type(e).__name__)
-        host.ev.write(event="pre-run", outcome=outcome, observations=obs)
-        raise Fault("the holder start's response was lost (" + outcome + ")") from e
+        host.state.handoff_outcome = {"stage": "pre-run-start", "outcome": outcome}
+        try:
+            host.ev.write(event="pre-run", outcome=outcome, observations=obs)
+        except EvidenceFailure:
+            pass
+        if not isinstance(e, Exception):  # an interrupt keeps its own classification, after the receipt
+            raise
+        raise Fault("the holder start response was lost (" + outcome + ")") from e
     hrec = started.get("holder") or {}
     status, hello = hrec.get("status"), hrec.get("hello")
     if started.get("paused") is not True:
         outcome = "contained-unpaused" if started.get("contained") else "unpaused-NOT-contained"
+        host.state.handoff_outcome = {"stage": "pre-run-start", "outcome": outcome}
         host.ledger.append(op="pre-run-start", phase="receipt", outcome=outcome, unit=started.get("unitAfterStop"))
         host.ev.write(event="pre-run", outcome=outcome, observations=obs)
         raise Fault("the holder did not start paused (" + outcome + ")")
@@ -241,24 +270,30 @@ def prerun(host: ObserverHost, budget) -> dict:
     return host.state.holder
 
 
-def _classify_start(host, budget, obs) -> str:
-    """Read-only first; stop the holder only when it is positively running unpaused (or its state is unreadable
-    while the unit is active)."""
+def _classify_start(host, obs) -> str:
+    """Read-only first, until the unit is in a TERMINAL state (a queued start job can still run the holder later);
+    stop the holder only when it is positively running unpaused, and call it contained only on a verified stop."""
     from relay_phase_a_observer import Budget
-    b = Budget(60_000, __import__("threading").Event())  # its own budget: the request budget may be spent
-    try:
-        rec = host.remote.dw(["holder", host.cfg.raw["holder"]["stateDir"]], b, obs, "classify-holder", cap=50)
-    except BaseException:  # noqa: BLE001
-        return "unknown-unreadable"
-    active = rec["units"]["relay-holder.service"]["active"]
-    paused = (rec.get("status") or {}).get("admissionPaused")
-    if active != "active":
+    b = Budget(90_000, threading.Event())  # its own budget: the request budget may be spent
+    rec, active = None, None
+    for _ in range(6):
+        try:
+            rec = host.remote.dw(["holder", host.cfg.raw["holder"]["stateDir"]], b, obs, "classify-holder", cap=50)
+        except BaseException:  # noqa: BLE001
+            return "unknown-unreadable"
+        active = rec["units"]["relay-holder.service"]["active"]
+        if active in ("active", "inactive", "failed"):
+            break
+        time.sleep(3)  # activating / deactivating / reloading: not yet terminal
+    else:
+        return "unresolved-transitional"
+    if active in ("inactive", "failed"):
         return "not-running"
-    if paused is True:
+    if (rec.get("status") or {}).get("admissionPaused") is True:
         return "running-paused"
     try:
-        stop = host.remote.dw(["mutate-stop-holder"], b, obs, "mutate-stop-holder (containment)", cap=40)
-        return "contained-unpaused" if stop.get("stopped") else "unpaused-NOT-contained"
+        stop = host.remote.dw(["mutate-stop-holder"], b, obs, "mutate-stop-holder (containment)", cap=45)
+        return "contained-unpaused" if stop.get("contained") is True else "unpaused-NOT-contained"
     except BaseException:  # noqa: BLE001
         return "unpaused-containment-unknown"
 
@@ -316,14 +351,18 @@ def c_preserving_holder(host: ObserverHost, req, ctx, budget, gate_now, obs):
         need(fin["incarnation"] == pre["incarnation"] and fin["holderMainPid"] == pre["mainPid"]
              and fin["admissionPaused"] is False and fin["activeSessions"] == 0 and fin["pendingCommands"] == 0
              and fin["nativeStateReady"] and fin["nativeRecovery"] == 2, "the resumed holder is not ready", Failed)
+        observed = C.runner_floor(host, gate_now)
+        need(observed >= started_at, "C4 observation precedes its start", Failed)
+        budget.check()
     except BaseException as e:
-        outcome = _classify_handoff(host, obs)
+        outcome = _classify_handoff(host, obs, op)
+        host.state.handoff_outcome = {"stage": stage or "readback", "outcome": "failed", "state": outcome,
+                                      "unresolvedStage": stage}
         host.ledger.append(op="handoff", phase="receipt", outcome="failed", interruptedStage=stage,
                            error=type(e).__name__, state=outcome)
         raise
     host.ledger.append(op="handoff", phase="receipt", outcome="ok", holder=pre["incarnation"])
-    observed = C.runner_floor(host, gate_now)
-    need(observed >= started_at, "C4 observation precedes its start", Failed)
+    host.state.handoff_outcome = {"stage": "handoff", "outcome": "ok"}
     return {
         "holderId": pre["incarnation"], "journalId": pre["journal"],
         "oldHolderId": ctx["oldHolderId"], "oldJournalId": ctx["oldJournalId"],
@@ -338,10 +377,13 @@ def c_preserving_holder(host: ObserverHost, req, ctx, budget, gate_now, obs):
     }
 
 
-def _classify_handoff(host, obs) -> dict:
-    """The actual service and admission state after a failed or interrupted stage (read-only, its own budget)."""
+def _classify_handoff(host, obs, op: str) -> dict:
+    """The actual service and admission state after a failed or interrupted stage (read-only, its own budget). The
+    journal's last admission event names the operation that changed it: `resumedByThisRun` correlates it with OUR
+    resume; a timed-out maintenance container or systemd job may still complete later, which the broker records
+    as unresolved."""
     from relay_phase_a_observer import Budget
-    b = Budget(45_000, __import__("threading").Event())
+    b = Budget(45_000, threading.Event())
     try:
         rec = host.remote.dw(["holder", host.cfg.raw["holder"]["stateDir"]], b, obs, "classify-handoff", cap=40)
         st = rec.get("status") or {}
@@ -349,7 +391,7 @@ def _classify_handoff(host, obs) -> dict:
         return {"holder": rec["units"]["relay-holder.service"]["active"],
                 "reconciliation": rec["units"]["relay-holder-control-plane.service"]["active"],
                 "admissionPaused": st.get("admissionPaused"), "journalAdmissionOp": adm.get("operationId"),
-                "journalAdmissionPaused": adm.get("paused")}
+                "journalAdmissionPaused": adm.get("paused"), "resumedByThisRun": adm.get("operationId") == op}
     except BaseException as e:  # noqa: BLE001
         return {"unreadable": type(e).__name__}
 
