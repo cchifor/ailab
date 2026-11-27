@@ -155,13 +155,17 @@ spec:
         # around a spent account by itself, so ONE Claude account at its wall is context, not an action:
         # its per-account rules are `info` (inhibited by InfoInhibitor unless something in the
         # llm-router namespace is warning or worse) and the pool-level LlmRouterClaudePoolHeadroomLow
-        # below is the Claude warning. Codex stays `warning` per account: it has no pool-level early
-        # warning (LlmRouterProviderExhausted fires only once EVERY account is limited), and its
-        # per-account walls are what the 2026-10-14 incident needed to see. Same alert names either
-        # way, so silences and dashboards keep matching; the provider label picks the rule.
+        # below is the Claude warning. Codex was kept `warning` per account because it had no pool-level
+        # early warning (LlmRouterProviderExhausted fires only once EVERY account is limited) and its
+        # per-account walls are what the 2026-10-14 incident needed to see. Since 2026-11-27 it HAS one,
+        # LlmRouterCodexPoolHeadroomLow (below, the same shape as Claude's), so Codex per-account rules are
+        # `info` too (owner: "an alert means an issue we must address" - codex-3 at its wall for 2 days
+        # while codex/codex-2 served was a warning nobody could act on). Every OTHER provider (local,
+        # anthropic API pools) keeps `warning` per account: none has a pool-level rule. Same alert names
+        # either way, so silences and dashboards keep matching; the provider label picks the rule.
         - alert: LlmRouterAccountNearLimit
           expr: >-
-            llm_router_account_limit_used_percent{job="llm-router",provider!="claude",window=~"primary|weekly"} >= 90
+            llm_router_account_limit_used_percent{job="llm-router",provider!~"claude|codex",window=~"primary|weekly"} >= 90
             unless on (job, account, provider, window)
             ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
           for: 30m
@@ -176,7 +180,7 @@ spec:
               the pool keeps serving on the other accounts until they reach the same wall.
         - alert: LlmRouterAccountNearLimit
           expr: >-
-            llm_router_account_limit_used_percent{job="llm-router",provider="claude",window=~"primary|weekly"} >= 90
+            llm_router_account_limit_used_percent{job="llm-router",provider=~"claude|codex",window=~"primary|weekly"} >= 90
             unless on (job, account, provider, window)
             ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
           for: 30m
@@ -190,7 +194,7 @@ spec:
               Decide now whether to throttle its callers, let it run on credits, or add capacity:
               the pool keeps serving on the other accounts until they reach the same wall.
         - alert: LlmRouterAccountLimited
-          expr: llm_router_account_limit_status{job="llm-router",provider!="claude",status="limited"} == 1
+          expr: llm_router_account_limit_status{job="llm-router",provider!~"claude|codex",status="limited"} == 1
           for: 10m
           labels: { severity: warning }
           annotations:
@@ -200,7 +204,7 @@ spec:
               a limit window: the router skips it (quota_exhausted) until the reset the Status page
               shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
         - alert: LlmRouterAccountLimited
-          expr: llm_router_account_limit_status{job="llm-router",provider="claude",status="limited"} == 1
+          expr: llm_router_account_limit_status{job="llm-router",provider=~"claude|codex",status="limited"} == 1
           for: 10m
           labels: { severity: info }
           annotations:
@@ -275,6 +279,41 @@ spec:
               {provider="claude",window="weekly"}, or the router's Status page. Options: add or
               re-enable a Claude account, slow non-review pool-claude callers, or accept the pause.
               Runbook: docs/runbooks/llm-router.md § Reviewer routes.
+        # The Codex POOL running out of room - Claude's rule above, for Codex (2026-11-27). Codex's long
+        # window is `primary` (weekly). Fewer than two Codex accounts below 90 % means the next wall
+        # leaves pool-codex on one account or none: the dev workers' Codex CLI (dw-N -> pool-codex) and
+        # reviewer-codex then all ride that account until the earliest reset, and the 2026-11-26 night
+        # projection (one account burning ~9 %/h, the next reset 2 h after its wall) is exactly this
+        # shape. Same mechanics as the Claude rule: `or vector(0)` so "none below 90 %" is 0, a stale
+        # reading (own reset already past: codex-4, disabled) is NOT headroom, and the `and on()` gate
+        # needs >= 2 accounts with a reading so a one-account pool stays with the per-account rules.
+        - alert: LlmRouterCodexPoolHeadroomLow
+          expr: |
+            (
+              (
+                count(
+                  (llm_router_account_limit_used_percent{job="llm-router",provider="codex",window="primary"} < 90)
+                  unless on (job, account, provider, window)
+                  ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
+                )
+                or vector(0)
+              )
+                < 2
+            )
+            and on ()
+            (count(llm_router_account_limit_used_percent{job="llm-router",provider="codex",window="primary"}) >= 2)
+          for: 30m
+          labels: { severity: warning }
+          annotations:
+            summary: "llm-router: only {{ $value }} Codex account(s) below 90% of their primary window"
+            description: >-
+              pool-codex has {{ $value }} account(s) with primary-window headroom (below 90 %), held for
+              30m. The dev workers' Codex CLI and reviewer-codex now depend on that many accounts; at
+              their walls Codex requests fail (LlmRouterProviderExhausted) until the earliest reset. Each
+              account's reading and reset: llm_router_account_limit_used_percent /
+              llm_router_account_limit_resets_at_seconds {provider="codex",window="primary"}, or the
+              router's Status page. Options: add or re-enable a Codex account or credits, lower the dev
+              workers' Codex concurrency, or accept the gap. Runbook: docs/runbooks/llm-router.md.
         # Every account of a provider limited: the pools of that provider serve nothing but credits.
         # Left: the `status="limited"` series whose VALUE is 1 (the limited accounts). Right: the
         # `status="limited"` series whatever their value (a label selector matches the series, not

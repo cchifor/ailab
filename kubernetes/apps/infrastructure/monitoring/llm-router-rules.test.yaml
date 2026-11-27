@@ -258,7 +258,7 @@ tests:
         alertname: LlmRouterAccountNearLimit
         exp_alerts:
           - exp_labels:
-              severity: warning
+              severity: info
               job: llm-router
               account: codex-5
               provider: codex
@@ -312,7 +312,7 @@ tests:
                 Decide now whether to throttle its callers, let it run on credits, or add capacity:
                 the pool keeps serving on the other accounts until they reach the same wall.
           - exp_labels:
-              severity: warning
+              severity: info
               job: llm-router
               account: codex-2
               provider: codex
@@ -516,7 +516,7 @@ tests:
         alertname: LlmRouterAccountNearLimit
         exp_alerts:
           - exp_labels:
-              severity: warning
+              severity: info
               job: llm-router
               account: codex-5
               provider: codex
@@ -748,7 +748,7 @@ tests:
         alertname: LlmRouterAccountLimited
         exp_alerts:
           - exp_labels:
-              severity: warning
+              severity: info
               job: llm-router
               account: codex-3
               provider: codex
@@ -787,14 +787,14 @@ tests:
       - eval_time: 16m
         alertname: LlmRouterAccountLimited
         exp_alerts:
-          - exp_labels: { severity: warning, job: llm-router, account: codex-3, provider: codex, status: limited }
+          - exp_labels: { severity: info, job: llm-router, account: codex-3, provider: codex, status: limited }
             exp_annotations:
               summary: "llm-router account codex-3 is limited (refused until its reset)"
               description: >-
                 The provider reports account codex-3 (codex) at 100 % of
                 a limit window: the router skips it (quota_exhausted) until the reset the Status page
                 shows. One account down is capacity, not an outage; see LlmRouterProviderExhausted.
-          - exp_labels: { severity: warning, job: llm-router, account: codex-4, provider: codex, status: limited }
+          - exp_labels: { severity: info, job: llm-router, account: codex-4, provider: codex, status: limited }
             exp_annotations:
               summary: "llm-router account codex-4 is limited (refused until its reset)"
               description: >-
@@ -1018,3 +1018,116 @@ tests:
                 stuck keep-warm. Read llama-swap's /running and the keep-warm journal on the host
                 (`pct exec 5102 -- journalctl -u llama-swap-keepwarm`). Runbook:
                 docs/runbooks/llm-router.md § cloud1 as the third qwen3.8-27b backend.
+
+  # ------------------------------------------------------------ codex pool headroom (2026-11-27)
+  - interval: 1m
+    name: the Codex pool with one account below 90% warns at 31m, not at 25m (the 2026-11-26 night shape)
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex",provider="codex",window="primary"}'
+        values: "21x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-2",provider="codex",window="primary"}'
+        values: "100x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-3",provider="codex",window="primary"}'
+        values: "100x40"
+      # A Claude weekly reading is not Codex headroom.
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="claude-3",provider="claude",window="weekly"}'
+        values: "5x40"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterCodexPoolHeadroomLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "llm-router: only 1 Codex account(s) below 90% of their primary window"
+              description: >-
+                pool-codex has 1 account(s) with primary-window headroom (below 90 %), held for
+                30m. The dev workers' Codex CLI and reviewer-codex now depend on that many accounts; at
+                their walls Codex requests fail (LlmRouterProviderExhausted) until the earliest reset. Each
+                account's reading and reset: llm_router_account_limit_used_percent /
+                llm_router_account_limit_resets_at_seconds {provider="codex",window="primary"}, or the
+                router's Status page. Options: add or re-enable a Codex account or credits, lower the dev
+                workers' Codex concurrency, or accept the gap. Runbook: docs/runbooks/llm-router.md.
+      - eval_time: 25m
+        alertname: LlmRouterCodexPoolHeadroomLow
+        exp_alerts: []
+
+  - interval: 1m
+    name: no Codex account below 90% still warns (an empty count is 0, not silence)
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex",provider="codex",window="primary"}'
+        values: "97x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-2",provider="codex",window="primary"}'
+        values: "100x40"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterCodexPoolHeadroomLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "llm-router: only 0 Codex account(s) below 90% of their primary window"
+              description: >-
+                pool-codex has 0 account(s) with primary-window headroom (below 90 %), held for
+                30m. The dev workers' Codex CLI and reviewer-codex now depend on that many accounts; at
+                their walls Codex requests fail (LlmRouterProviderExhausted) until the earliest reset. Each
+                account's reading and reset: llm_router_account_limit_used_percent /
+                llm_router_account_limit_resets_at_seconds {provider="codex",window="primary"}, or the
+                router's Status page. Options: add or re-enable a Codex account or credits, lower the dev
+                workers' Codex concurrency, or accept the gap. Runbook: docs/runbooks/llm-router.md.
+
+  - interval: 1m
+    name: the live 2026-11-27 Codex pool (two below 90%, one limited, one stale) stays quiet
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex",provider="codex",window="primary"}'
+        values: "83x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-2",provider="codex",window="primary"}'
+        values: "0x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-3",provider="codex",window="primary"}'
+        values: "100x40"
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-4",provider="codex",window="primary"}'
+        values: "100x40"
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="codex-4",provider="codex",window="primary"}'
+        values: "600x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: LlmRouterCodexPoolHeadroomLow
+        exp_alerts: []
+
+  - interval: 1m
+    name: a stale Codex reading (own reset past) is not headroom, whatever its percentage
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex",provider="codex",window="primary"}'
+        values: "40x60"
+      # codex-4: disabled, reads 5 % but its reset is long past -> the router cannot use it.
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex-4",provider="codex",window="primary"}'
+        values: "5x60"
+      - series: 'llm_router_account_limit_resets_at_seconds{job="llm-router",account="codex-4",provider="codex",window="primary"}'
+        values: "600x60"
+    alert_rule_test:
+      # time() starts at 0 in promtool: the 600 s reset is only PAST from 10m, so the 30m hold ends at 40m.
+      - eval_time: 45m
+        alertname: LlmRouterCodexPoolHeadroomLow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "llm-router: only 1 Codex account(s) below 90% of their primary window"
+              description: >-
+                pool-codex has 1 account(s) with primary-window headroom (below 90 %), held for
+                30m. The dev workers' Codex CLI and reviewer-codex now depend on that many accounts; at
+                their walls Codex requests fail (LlmRouterProviderExhausted) until the earliest reset. Each
+                account's reading and reset: llm_router_account_limit_used_percent /
+                llm_router_account_limit_resets_at_seconds {provider="codex",window="primary"}, or the
+                router's Status page. Options: add or re-enable a Codex account or credits, lower the dev
+                workers' Codex concurrency, or accept the gap. Runbook: docs/runbooks/llm-router.md.
+
+  - interval: 1m
+    name: a one-account Codex pool is left to the per-account rules
+    input_series:
+      - series: 'llm_router_account_limit_used_percent{job="llm-router",account="codex",provider="codex",window="primary"}'
+        values: "100x40"
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: LlmRouterCodexPoolHeadroomLow
+        exp_alerts: []
