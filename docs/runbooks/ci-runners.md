@@ -234,9 +234,17 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     maintenance, every workbricks push job waits; pull requests keep running elsewhere.
     - **Fallback:** add `workbricks-push` to a runner on another node (its host_vars, then a drained converge).
     - The cost is a cold push cache there: its first push job builds about 34 GiB of targets.
-  - **Changing the set.** Edit the two host_vars, converge those runners after a drained stop, and check
-    the label in Gitea (Site/Org settings → Actions → Runners) before workbricks' `runs-on` relies on it.
-    Removing the label from a runner while workbricks still names it leaves push jobs waiting.
+  - **Changing the set.** Edit the two host_vars, converge those runners one at a time while the queue is
+    quiet, and check the label in Gitea (Site/Org settings → Actions → Runners) before workbricks' `runs-on`
+    relies on it. Removing the label from a runner while workbricks still names it leaves push jobs waiting.
+    - **Converge with the runner running; do not stop it first.** The role restarts act_runner once, from its
+      handler at the end of the play. That restart drains the job in flight for up to
+      `gitea_runner_shutdown_timeout_min` (10 min), and a job still running then is cut off.
+    - **Why not stop it first.** The role's "Enable + start the act_runner daemon" task starts a stopped runner
+      again mid-play, with the new labels already declared. It can take a job there, and the handler's restart
+      then drains that job.
+    - **What happened on 2026-11-27.** ci-runner-3 was stopped in an idle gap, then converged. It took platform
+      task 679307 at the start task, and the handler's drain cut it off at 10 min. The job had to be rerun.
 - **Bounded /tmp** (ailab#1284; live on a runner only once rolled out, see below): all jobs share one `/tmp`,
   and Ubuntu ages it only after **30 days**
   (`/usr/lib/tmpfiles.d/tmp.conf`). It reached 9-22 GB per runner (`pytest-of-runner`, `node-compile-cache`).
