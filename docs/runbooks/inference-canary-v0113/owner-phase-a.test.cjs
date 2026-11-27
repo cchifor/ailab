@@ -11,9 +11,27 @@ const driverSource = fs.readFileSync(
   path.join(__dirname, "owner-phase-a.js"),
   "utf8",
 );
-// Positive paths exercise the actual pinned module. Only the disabled-path
-// regression uses a copy with qualification withheld; its source pin is unchanged.
+// Metadata and lifecycle cases exercise the actual pinned module. Three retained
+// historical entry-point cases explicitly simulate removal of the holder hold;
+// they are not qualification of the known-broken published holder.
 assert.equal(a.RUN_SOURCE, "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613");
+assert.equal(a.HOLDER_CONTROLS_QUALIFIED, false);
+const historicalWrapperModule = { exports: {} };
+vm.runInThisContext(
+  "(function(module){" +
+    driverSource.replace(
+      "const HOLDER_CONTROLS_QUALIFIED = false;",
+      "const HOLDER_CONTROLS_QUALIFIED = true;",
+    ) +
+    "\n})",
+  { filename: "historical-entrypoint-simulation.js", timeout: 1000 },
+)(historicalWrapperModule);
+function historicalWrapper(runner) {
+  Object.setPrototypeOf(
+    runner,
+    historicalWrapperModule.exports.Runner.prototype,
+  );
+}
 const heldModule = { exports: {} };
 vm.runInThisContext(
   "(function(module){" +
@@ -1095,12 +1113,13 @@ test("replacement declines or changed closure/receipts/permission never dispatch
   }
 });
 
-test("replacement entry point preserves the exact raw predecessor even when owner declines", async () => {
+test("historical entry-point simulation preserves the raw predecessor when owner declines", async () => {
   const h = await renewalReviewHarness({
     approval: (v) => {
       v.confirmReplacement = false;
     },
   });
+  historicalWrapper(h.runner);
   h.runner.env.load = () => h.raw;
   // Exercise the actual wrapper, not merely a pre-populated predecessor state.
   delete h.runner.state.predecessor;
@@ -1197,18 +1216,17 @@ test("replacement final cleanup requires the old sixth launch as well as the fiv
   assert.notEqual(missing.runner.state.finalRevocation.status, "confirmed");
 });
 
-test("mount never dispatches or writes storage and enables replacement only for the known stopped report", () => {
-  for (const [raw, eligible, savedSuccessor] of [
-    [null, false],
-    ["{invalid", false],
-    [JSON.stringify({ version: 1, status: "stopped" }), false],
-    [JSON.stringify(stoppedReport()), true],
+test("holder hold disables replacement for every saved-report state without effects", () => {
+  for (const [raw, savedSuccessor] of [
+    [null],
+    ["{invalid"],
+    [JSON.stringify({ version: 1, status: "stopped" })],
+    [JSON.stringify(stoppedReport())],
     [
       JSON.stringify({
         ...stoppedReport(),
         predecessor: { raw: JSON.stringify(stoppedReport()) },
       }),
-      false,
       true,
     ],
   ]) {
@@ -1262,11 +1280,18 @@ test("mount never dispatches or writes storage and enables replacement only for 
       return matches[0];
     };
     assert.equal(button("Start phase A").disabled, true);
-    assert.equal(button("Review stopped-run replacement").disabled, !eligible);
+    assert.equal(button("Review stopped-run replacement").disabled, true);
     assert.equal(button("Confirm current checkpoint").disabled, true);
     assert.equal(button("Review final grant revocation").disabled, true);
     assert.equal(body.children.length, 1);
     assert.equal(body.children[0].id, "relay-pi-acceptance-panel");
+    assert(
+      descendants(body).some(
+        (n) =>
+          n.tagName === "p" &&
+          n.textContent.includes("Holder controls are not qualified"),
+      ),
+    );
     if (savedSuccessor)
       assert(
         descendants(body).some(
@@ -1284,6 +1309,25 @@ test("requiring the browser script does not dispatch work", () => {
   assert.equal(h.calls.length, 0);
   assert.equal(h.saves.length, 0);
   assert.equal(h.runner.state.completed, false);
+});
+test("actual holder hold rejects both entry points before storage, owner questions or requests", async () => {
+  for (const entry of ["startRun", "replaceStopped"]) {
+    const h = harness();
+    const initial = clone(h.runner.state);
+    h.runner.env.load = () => {
+      throw Error("Hold must precede storage read");
+    };
+    h.runner.env.ask = () => {
+      throw Error("Hold must precede owner questions");
+    };
+    await assert.rejects(
+      h.runner[entry](true),
+      /Holder controls are not qualified/,
+    );
+    assert.deepEqual(h.runner.state, initial);
+    assert.deepEqual(h.calls, []);
+    assert.deepEqual(h.saves, []);
+  }
 });
 test("unqualified draft start refuses before network, checkpoints or saved-run mutation", async () => {
   const h = harness();
@@ -1316,7 +1360,7 @@ test("unqualified draft start refuses before network, checkpoints or saved-run m
   assert.equal(h.saves.length, 0);
   assert.equal(h.runner.state.completed, false);
 });
-test("qualified packet refuses absent or invalid holder handoff before any request", async () => {
+test("historical entry-point simulation refuses invalid holder handoff before launch", async () => {
   const valid = {
     holderId: SID,
     journalId: OTHER,
@@ -1346,6 +1390,7 @@ test("qualified packet refuses absent or invalid holder handoff before any reque
     { ...valid, holderBinarySha256: "0".repeat(64) },
   ]) {
     const h = await renewalReviewHarness();
+    historicalWrapper(h.runner);
     const priorAsk = h.runner.env.ask;
     let asked = 0;
     h.runner.env.ask = async (title, instructions, validate, timeout) => {
@@ -1366,8 +1411,9 @@ test("qualified packet refuses absent or invalid holder handoff before any reque
     assert.equal(h.runner.state.completed, false);
   }
 });
-test("qualified packet keeps incarnation separate from surviving journal identity", async () => {
+test("historical entry-point simulation keeps incarnation separate from journal identity", async () => {
   const h = await renewalReviewHarness();
+  historicalWrapper(h.runner);
   const priorAsk = h.runner.env.ask,
     priorFetch = h.runner.env.fetch;
   h.runner.env.fetch = async (path, init) => {

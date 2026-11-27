@@ -28,6 +28,10 @@
   // Existing revision-1 profiles and v0.13.1 holder pins stay unchanged.
   // Qualification does not supply a deployed hub, credentials or owner window.
   const QUALIFIED_INPUTS = true;
+  // Published holder 2604 appends a communication block to Pi local commands,
+  // which the published launcher rejects. Keep live entry points disabled until
+  // corrected holder artifacts and a preserving post-use handoff are qualified.
+  const HOLDER_CONTROLS_QUALIFIED = false;
   const CONFIGURATION_CHANGED_NOTICE =
     "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used.";
   const HOST = "b3b1be1a-275c-4a2e-b515-428b39c43171";
@@ -2998,6 +3002,10 @@
         replacement,
         "Post-expiry successor requires the original stopped report; no fresh-start reset",
       );
+      need(
+        HOLDER_CONTROLS_QUALIFIED,
+        "Holder controls are not qualified: await the corrected holder and reviewed preserving handoff. Keep the saved report unchanged.",
+      );
       const raw = this.env.load();
       const prior = replacement ? stoppedPredecessor(raw) : null;
       if (!replacement)
@@ -3262,7 +3270,7 @@
     replace.disabled = true;
     try {
       stoppedPredecessor(saved);
-      replace.disabled = !QUALIFIED_INPUTS;
+      replace.disabled = !QUALIFIED_INPUTS || !HOLDER_CONTROLS_QUALIFIED;
       status.textContent =
         "Known stopped run retained. Download it, then explicitly review a bounded replacement; no automatic replay.";
     } catch {
@@ -3284,6 +3292,12 @@
       status.textContent =
         "Draft held: final renewal hub source and post-expiry successor qualification are pending. No launch permitted.";
     }
+    if (!HOLDER_CONTROLS_QUALIFIED) {
+      start.disabled = true;
+      replace.disabled = true;
+      status.textContent +=
+        " Holder controls are not qualified. Await corrected holder artifacts and a reviewed preserving handoff; no acceptance launch is permitted.";
+    }
     d.body.appendChild(panel);
   }
   return {
@@ -3291,6 +3305,7 @@
     PROFILES,
     SOURCE,
     RUN_SOURCE,
+    HOLDER_CONTROLS_QUALIFIED,
     renewedCredentials,
     CONFIGURATION_CHANGED_NOTICE,
     ROUTER,
