@@ -42,6 +42,9 @@ MOUNT_PREFIX="${MOUNT_PREFIX:-/mnt/pve/}"
 WAIT_S="${WAIT_S:-3600}"
 STEP_S="${STEP_S:-10}"
 PROBE_S="${PROBE_S:-5}"
+# A refused start is retried on later passes (PVE's storage check can lag the mount by a moment, or
+# the NAS reconciler's one NFS restart can land on it), at most this many attempts per guest.
+START_ATTEMPTS="${START_ATTEMPTS:-3}"
 
 log() { echo "pve-nfs-guest-autostart: $*"; }
 
@@ -210,7 +213,7 @@ start_now() {  # $1 = ct|vm, $2 = id
 # container's missing bind source). The deadline is checked BEFORE each probe and caps both the probe
 # and the sleep, so the budget is a real bound: once it has passed, a remaining candidate costs
 # nothing more instead of one more possibly-hung probe each.
-declare -A missing=()
+declare -A missing=() tries=()
 pending=("${candidates[@]}")
 while [ "${#pending[@]}" -gt 0 ]; do
   next=()
@@ -227,10 +230,19 @@ while [ "${#pending[@]}" -gt 0 ]; do
         break
       fi
     done
-    if [ -n "$ready" ]; then
-      start_now "$kind" "$id" || rc=1
-    else
+    if [ -z "$ready" ]; then
       next+=("$cand")
+      continue
+    fi
+    unset "missing[$cand]"
+    start_now "$kind" "$id" && continue
+    tries[$cand]=$(( ${tries[$cand]:-0} + 1 ))
+    if [ "${tries[$cand]}" -lt "$START_ATTEMPTS" ] && [ "$((deadline - SECONDS))" -gt 0 ]; then
+      log "$(label "$kind" "$id"): start attempt ${tries[$cand]}/$START_ATTEMPTS failed; retrying on the next pass"
+      next+=("$cand")
+    else
+      log "$(label "$kind" "$id"): start failed ${tries[$cand]} time(s); NOT starting it"
+      rc=1
     fi
   done
   pending=("${next[@]}")
@@ -240,7 +252,11 @@ while [ "${#pending[@]}" -gt 0 ]; do
   sleep "$((left < STEP_S ? left : STEP_S))"
 done
 for cand in "${pending[@]}"; do
-  log "$(label "${cand%%:*}" "${cand#*:}"): ${missing[$cand]} still missing after ${WAIT_S}s; NOT starting it"
+  if [ -n "${missing[$cand]:-}" ]; then
+    log "$(label "${cand%%:*}" "${cand#*:}"): ${missing[$cand]} still missing after ${WAIT_S}s; NOT starting it"
+  else
+    log "$(label "${cand%%:*}" "${cand#*:}"): start failed ${tries[$cand]:-0} time(s) before the ${WAIT_S}s deadline; NOT starting it"
+  fi
   rc=1
 done
 exit "$rc"

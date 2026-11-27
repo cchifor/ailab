@@ -23,12 +23,14 @@ PCT_STUB = """#!/usr/bin/env bash
 # status <ctid> -> "status: <state>" from $STATE_DIR/<ctid> (default stopped), or exit 2 when
 # $STATE_DIR/fail-status-<ctid> exists; after answering, a $STATE_DIR/next-<ctid> becomes the new
 # state (a deterministic "changed after the first look"). start <ctid> -> log it, fail when
-# fail-<ctid> exists.
+# fail-<ctid> exists, and fail once when fail-once-<ctid> exists.
 case "$1" in
   status) [ -f "$STATE_DIR/fail-status-$2" ] && { echo "unable to read config" >&2; exit 2; }
           echo "status: $(cat "$STATE_DIR/$2" 2>/dev/null || echo stopped)"
           [ -f "$STATE_DIR/next-$2" ] && mv "$STATE_DIR/next-$2" "$STATE_DIR/$2"; exit 0;;
-  start) echo "$2" >> "$STATE_DIR/started"; [ ! -f "$STATE_DIR/fail-$2" ];;
+  start) echo "$2" >> "$STATE_DIR/started"
+         if [ -f "$STATE_DIR/fail-once-$2" ]; then rm -f "$STATE_DIR/fail-once-$2"; exit 1; fi
+         [ ! -f "$STATE_DIR/fail-$2" ];;
 esac
 """
 
@@ -258,10 +260,21 @@ class PveNfsGuestAutostartTests(unittest.TestCase):
         self.ct(5002, 'onboot: 1', f'mp0: {src.as_posix()},mp=/models')
         self.ct(5003, 'onboot: 1', f'mp0: {src.as_posix()},mp=/models')
         (self.state / 'fail-5002').write_text('')
-        run = self.run_script()
+        run = self.run_script(wait_s=10)
         self.assertEqual(run.returncode, 1)
-        self.assertEqual(self.started(), ['5002', '5003'])
+        # 5002 is tried START_ATTEMPTS (3) times on successive passes; 5003 starts in the first pass.
+        self.assertEqual(self.started(), ['5002', '5003', '5002', '5002'])
+        self.assertIn('CT 5002: start failed 3 time(s); NOT starting it', run.stdout)
 
+    def test_a_transiently_refused_vm_start_is_retried(self):
+        # qm start can briefly refuse ("storage is not online") right after the share mounts.
+        self.vm_images(4001)
+        self.vm(4001, 'onboot: 1', self.CP_DISK)
+        (self.state / 'fail-once-4001').write_text('')
+        run = self.run_script(wait_s=10)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.started(), ['4001', '4001'])
+        self.assertIn('start attempt 1/3 failed; retrying', run.stdout)
 
     # --- VMs with a disk on an NFS storage (the Talos control planes, ADR 0043) ---------------------
     CP_DISK = 'scsi0: qnap-nfs:4001/vm-4001-disk-0.raw,discard=on,iothread=1,size=64G'
