@@ -285,27 +285,26 @@ spec:
         # reviewer-codex then all ride that account until the earliest reset, and the 2026-11-26 night
         # projection (one account burning ~9 %/h, the next reset 2 h after its wall) is exactly this
         # shape. Same mechanics as the Claude rule: `or vector(0)` so "none below 90 %" is 0, a stale
-        # reading (own reset already past: codex-4, disabled) is NOT headroom, and the `and on()` gate
-        # needs >= 2 accounts with a reading so a pool that has only ever had one account stays with the
-        # per-account rules. The gate counts stale readings ON PURPOSE (as Claude's does, #1432): one
-        # usable account plus a disabled one IS a pool with no fallback - re-enable the account, add
-        # capacity, or delete the dead account so its series goes away. Excluding stale readings from
-        # the gate would leave exactly that pool with NO warning, now that per-account Codex rules are info.
+        # reading (own reset already past: codex-4, disabled) is NOT headroom. THRESHOLD = min(2, accounts
+        # with a reading): a pool of two or more warns below two accounts with headroom; a ONE-account pool
+        # warns when that account has none (review #2047: with per-account Codex rules now info, a sole
+        # account at its wall must still warn - and deleting a dead account can turn a pool into one). No
+        # Codex reading at all = no result (LlmRouterMetricsAbsent owns an absent target). Stale readings
+        # count toward the threshold ON PURPOSE (as Claude's gate does, #1432): one usable account plus a
+        # disabled one IS a pool with no fallback - re-enable the account, add capacity, or delete the
+        # dead account so its series goes away (the pool then warns as a one-account pool if it must).
         - alert: LlmRouterCodexPoolHeadroomLow
           expr: |
             (
-              (
-                count(
-                  (llm_router_account_limit_used_percent{job="llm-router",provider="codex",window="primary"} < 90)
-                  unless on (job, account, provider, window)
-                  ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
-                )
-                or vector(0)
+              count(
+                (llm_router_account_limit_used_percent{job="llm-router",provider="codex",window="primary"} < 90)
+                unless on (job, account, provider, window)
+                ((llm_router_account_limit_resets_at_seconds{job="llm-router"} > 0) <= time())
               )
-                < 2
+              or vector(0)
             )
-            and on ()
-            (count(llm_router_account_limit_used_percent{job="llm-router",provider="codex",window="primary"}) >= 2)
+              < on ()
+            clamp_max(count(llm_router_account_limit_used_percent{job="llm-router",provider="codex",window="primary"}), 2)
           for: 30m
           labels: { severity: warning }
           annotations:
