@@ -128,6 +128,25 @@ Disabled, explicitly revoked, uncertain, worker-managed or otherwise ineligible
 bindings still refuse. Do not race expiry reconciliation or change state to make
 renewal possible. Publication, deployment and renewal are distinct steps.
 
+The driver targets the exact 74d1 API projections. The
+[inventory query](https://git.chifor.me/cchifor/relay/src/commit/74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613/server/router-credentials/service.ts#L335)
+returns snake_case database fields alongside the quoted computed field
+`canRenew`; [credential inspection](https://git.chifor.me/cchifor/relay/src/commit/74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613/server/router-credentials/service.ts#L395)
+and the [session Router view](https://git.chifor.me/cchifor/relay/src/commit/74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613/server/agent-sessions/routes.ts#L181)
+explicitly project camelCase fields. After renewal, an installing or ready binding
+must report `canRenew: false`, because eligibility is for a cleaned, expired,
+failed binding. A missing flag or an alternate spelling is not equivalent to
+false. The driver retains these exact field checks and refuses incomplete
+delivery or generation metadata.
+
+The [recorded contract fixture](owner-phase-a.hub-74d1.fixture.json) contains
+normal HTTP responses from the exact hub source with an isolated PostgreSQL
+database and synthetic credentials. Its provenance records source hashes and
+the generation procedure. The bridge, escrow and model catalog are fakes;
+sessions and consumers are created through server methods. It checks the API
+projection boundary, not a deployed hub, provider or complete holder launch.
+The driver tests consume these recorded bodies without renaming their fields.
+
 Both renewals must use fresh retained operation UUIDs and the observed binding
 revisions through the owner's normal authenticated API workflow. Preserve their
 receipts and new credential metadata. A 202 response is not installation proof:
