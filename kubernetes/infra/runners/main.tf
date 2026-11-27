@@ -59,7 +59,7 @@ resource "proxmox_virtual_environment_vm" "runner" {
   # Per-runner floor override (runner_nodes[*].memory_floating_mib) for runners on a host that sits at
   # pvestatd's ~80% line, where the floor IS the working size; see variables.tf.
   memory {
-    dedicated = var.runner_memory_mib
+    dedicated = coalesce(each.value.memory_mib, var.runner_memory_mib)
     floating  = coalesce(each.value.memory_floating_mib, var.runner_memory_floating_mib)
   }
 
@@ -69,7 +69,7 @@ resource "proxmox_virtual_environment_vm" "runner" {
     datastore_id = var.vm_datastore
     import_from  = proxmox_virtual_environment_download_file.ubuntu_cloud.id
     interface    = "scsi0"
-    size         = var.runner_rootfs_gb # cloud-init growpart expands the root fs to fill this
+    size         = coalesce(each.value.rootfs_gb, var.runner_rootfs_gb) # cloud-init growpart expands the root fs to fill this (per-runner override: variables.tf)
     iothread     = true
     discard      = "on"
 
@@ -138,10 +138,12 @@ resource "proxmox_virtual_environment_vm" "runner" {
     # cache. Ignoring it is the same reasoning that already applies to `initialization`: both are
     # first-boot-only inputs. Added 2026-09-07 while adopting ci-runner-6..10 (4106-4110).
     ignore_changes = [initialization, agent, disk[0].import_from]
-    # PVE requires balloon floor <= memory ceiling; fail at plan, naming the runner.
+    # PVE requires balloon floor <= memory ceiling; fail at plan, naming the runner. Both sides are the
+    # EFFECTIVE per-runner values (runner_nodes[*].memory_floating_mib / memory_mib, else the globals),
+    # so a runner given memory_mib below the global floor without its own memory_floating_mib fails here.
     precondition {
-      condition     = coalesce(each.value.memory_floating_mib, var.runner_memory_floating_mib) <= var.runner_memory_mib
-      error_message = "runner_nodes[\"${each.key}\"]: effective balloon floor exceeds runner_memory_mib."
+      condition     = coalesce(each.value.memory_floating_mib, var.runner_memory_floating_mib) <= coalesce(each.value.memory_mib, var.runner_memory_mib)
+      error_message = "runner_nodes[\"${each.key}\"]: effective balloon floor (memory_floating_mib, else runner_memory_floating_mib) exceeds the effective ceiling (memory_mib, else runner_memory_mib)."
     }
   }
 }
