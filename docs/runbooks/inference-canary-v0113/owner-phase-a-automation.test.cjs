@@ -555,6 +555,128 @@ test("heartbeat rejection aborts actual Runner checkpoint and clears future rene
   assert.equal(calls, 0);
 });
 
+test("cancellation during final drain cannot return success", async (t) => {
+  const timers = new Set();
+  const originalSet = global.setTimeout,
+    originalClear = global.clearTimeout;
+  t.mock.method(global, "setTimeout", (fn, delay, ...args) => {
+    const timer = originalSet(fn, delay, ...args);
+    timers.add(timer);
+    return timer;
+  });
+  t.mock.method(global, "clearTimeout", (timer) => {
+    timers.delete(timer);
+    return originalClear(timer);
+  });
+  // Negative scheduling injection, not positive Runner lifecycle qualification:
+  // leave a body pending after the mocked flow returns so the host must drain it.
+  let releaseBody,
+    calls = 0,
+    transport;
+  t.mock.method(a.Runner.prototype, "replaceStopped", async function () {
+    transport = this.env.fetch("/api/router-credentials", { method: "GET" });
+    transport.catch(() => {});
+  });
+  const controller = new AbortController();
+  const o = setup(t, {
+    signal: controller.signal,
+    authenticatedFetch: async () => {
+      calls++;
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        text: () =>
+          new Promise((resolve) => {
+            releaseBody = resolve;
+          }),
+      };
+    },
+  });
+  const host = createAutomation(o);
+  const result = host.run();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof releaseBody, "function");
+  controller.abort();
+  releaseBody("{}");
+  await assert.rejects(result, /preserve store/);
+  await assert.rejects(transport, /cancelled|aborted/i);
+  assert.equal(calls, 1);
+  await assert.rejects(host.run(), /single-use/);
+  assert.equal(fs.existsSync(path.join(o.directory, "run.lock")), true);
+  assert.equal(timers.size, 0, "both drain timers and execution timer cleared");
+});
+
+test("actual Runner pre-lease heartbeat is a no-op during pending checkpoint", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
+  const controller = new AbortController();
+  let checkpointSignal,
+    calls = 0,
+    settled = false;
+  const o = setup(t, {
+    signal: controller.signal,
+    maxDurationMs: 2700000,
+    authenticatedFetch: async () => {
+      calls++;
+    },
+    collectCheckpoint: ({ signal }) => {
+      checkpointSignal = signal;
+      return new Promise((resolve, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => reject(Error("Checkpoint aborted")),
+          { once: true },
+        );
+      });
+    },
+  });
+  const host = createAutomation(o);
+  const result = host.run();
+  result.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(20000);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(checkpointSignal.aborted, false);
+  assert.equal(settled, false);
+  assert.equal(calls, 0);
+  controller.abort();
+  await assert.rejects(result, /preserve store/);
+  assert.equal(checkpointSignal.aborted, true);
+});
+
+test("actual Runner treats non-2xx API responses as terminal without retries", async (t) => {
+  for (const status of [404, 409]) {
+    let calls = 0;
+    const o = setup(t, {
+      collectCheckpoint: async () => deployment(),
+      authenticatedFetch: async () => {
+        calls++;
+        return new Response("{}", {
+          status,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    await assert.rejects(createAutomation(o).run(), /preserve store/);
+    assert.equal(calls, 1);
+    // Also pin the unwrapped Runner contract: neither status is an absence probe.
+    const runner = new a.Runner({
+      fetch: async () => new Response("{}", { status }),
+    });
+    await assert.rejects(
+      runner.api("/api/router-credentials"),
+      new RegExp("API refused.*HTTP " + status),
+    );
+  }
+});
+
 test("host ceiling accepts three-phase budget but does not accept unbounded deadlines", (t) => {
   const o = setup(t, { maxDurationMs: 2700000 });
   createAutomation(o);

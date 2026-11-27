@@ -261,6 +261,7 @@ function createAutomation(options) {
     clearInterval(heartbeat);
     active.abort();
     checkpoint?.abort();
+    clearTimeout(cleanupTimer);
     cleanupTimer = setTimeout(() => cleanup.abort(), cleanupTimeoutMs);
     stopping = abortable(
       (async () => {
@@ -311,11 +312,14 @@ function createAutomation(options) {
         await abortable(runPromise, active.signal);
         need(!stopping, "Automation stopped");
         clearInterval(heartbeat);
+        clearTimeout(cleanupTimer);
         cleanupTimer = setTimeout(() => cleanup.abort(), cleanupTimeoutMs);
         await abortable(
           Promise.allSettled([...transports, ...collectors]),
           cleanup.signal,
         );
+        active.signal.throwIfAborted();
+        need(!stopping, "Automation stopped");
         clearTimeout(cleanupTimer);
         return JSON.parse(JSON.stringify(runner.state));
       } catch (error) {
