@@ -759,8 +759,12 @@ expect_bad "no deadline at all (a oneshot's default)" '/^TimeoutStartSec=/d' "ha
 expect_bad "RuntimeMaxSec instead of TimeoutStartSec on a oneshot" \
   's/^TimeoutStartSec=/RuntimeMaxSec=/' "RuntimeMaxSec does nothing on a oneshot"
 expect_bad "a stop time too short for the in-flight chunk" 's/^TimeoutStopSec=.*/TimeoutStopSec=180/' "TimeoutStopSec"
-expect_bad "the registry trim moved to Saturday, when ci-runner-9 runs" \
-  's/^OnCalendar=Sun /OnCalendar=Sat /' "ci-runner-9 .*overlaps the registry trim's span on Sat"
+# Was "moved to Saturday, when ci-runner-9 runs": ci-runner-9 (Mon-Sat 04:15-05:25) left ai-node1 for ai-node3 on
+# 2026-11-26, and node1's remaining windows (ci-runner-1 00:00-01:25, ci-runner-4 01:30-03:10) both end before
+# 03:15, so a Saturday move at the unit's 03:30 hits nothing there. Same intent - a registry trim moved onto a
+# runner's window is caught - now moved to Saturday 02:00, onto ci-runner-4.
+expect_bad "the registry trim moved to Saturday 02:00, onto ci-runner-4's window" \
+  's/^OnCalendar=Sun \*-\*-\* 03:30:00 UTC/OnCalendar=Sat *-*-* 02:00:00 UTC/' "ci-runner-4 .*overlaps the registry trim's span on Sat"
 o="$(schedule_check "$(fixture 's/^TimeoutStartSec=.*/TimeoutStartSec=19h45min/')" 2>&1)"
 eq "fixture: the shipped deadline itself passes" "" "$(grep '^BAD' <<< "$o")"
 # The tail is derived from the kill allowance AND the stuck grace: 301 s + 30 s + a group = 6 min no longer
