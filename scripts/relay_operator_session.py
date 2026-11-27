@@ -313,6 +313,7 @@ class Run:
     def __post_init__(self):
         self.evidence_failed = threading.Event()
         self.observer_fault = threading.Event()
+        self.observer_lease_lost = False
         self.observer_plan = None
         self.deferred_signals = []
         self.in_cleanup = False
@@ -519,7 +520,11 @@ class Run:
         self._until(lambda: runner.poll() is not None or self.evidence_failed.is_set() or observer_down(),
                     runner_deadline)
         if self.observer_fault.is_set():
-            self.fail(9, stage="observer", reason=(ctx["host"].fault_reason if ctx["host"] else None))
+            reason = ctx["host"].fault_reason if ctx["host"] else None
+            if self.observer_lease_lost:
+                self.fail(7, stage="observer", reason=reason)
+            elif not self.evidence_failed.is_set():
+                self.fail(9, stage="observer", reason=reason)
         if runner.poll() is None:
             why = ("evidence" if self.evidence_failed.is_set() else
                    "observer" if self.observer_fault.is_set() else "deadline")
@@ -581,20 +586,28 @@ class Run:
         except Refused as e:
             self.fail(2, stage="observer-prerun", reason=str(e)[:200])
             return False
-        except BaseException as e:  # noqa: BLE001 - every other pre-run failure is an observer fault
-            if type(e).__name__ == "Refuse":  # an existing ledger: refused before any authority
+        except BaseException as e:  # noqa: BLE001 - classified by the observer's own exception type
+            kind = type(e).__name__
+            if kind == "Refuse":  # an existing ledger: refused before any authority
                 self.fail(2, stage="observer-prerun", reason=str(e)[:200])
+            elif kind == "LeaseLostError":
+                raise LeaseLost(str(e)) from e
+            elif kind == "EvidenceFailure":
+                self.evidence_failed.set()
+                self.fail(6, stage="observer-prerun", reason=str(e)[:200])
             else:
-                self.fail(9, stage="observer-prerun", error=type(e).__name__, detail=str(e)[:200])
+                self.fail(9, stage="observer-prerun", error=kind, detail=str(e)[:200])
             return False
         self.note(stage="observer-prerun", holder=host.state.holder)
         return True
 
-    def _on_observer_fault(self, reason: str, evidence: bool = False) -> None:
+    def _on_observer_fault(self, reason: str, evidence: bool = False, lease: bool = False) -> None:
         if evidence:  # the observer's evidence could not be made durable: the broker's evidence path (6)
             self.evidence_failed.set()
+        if lease:  # the observer found the Lease gone: the broker's Lease path (7)
+            self.observer_lease_lost = True
         self.observer_fault.set()
-        self.note(stage="observer-fault", reason=str(reason)[:200], evidence=evidence)
+        self.note(stage="observer-fault", reason=str(reason)[:200], evidence=evidence, lease=lease)
 
     def _observer_start(self, names, ctx, sinks) -> bool:
         """Start the gate FROM THE VERIFIED COPY, wait for its ready line, start the host threads."""
@@ -655,20 +668,22 @@ class Run:
             self._stage("runner-kill", lambda: ops.docker(["kill", names["runner"]], timeout=20, check=False))
             self._stage("runner-wait", lambda: self._until(lambda: runner.poll() is not None, ops.now() + 20))
         gate = ctx.get("gate")
+        idle = True
         if host is not None:  # bounded by the remaining cleanup time, keeping 300 s for revoke and logout
             reserve = (cleanup_deadline - 300 - ops.now()) if cleanup_deadline else 10.0
-            idle = self._stage("observer-drain", lambda: host.drain(max(0.0, min(10.0, reserve))))
-            if idle is not True:
-                self.fail(9, stage="observer-drain", reason="a collector was still running; its evidence stays open")
+            idle = self._stage("observer-drain", lambda: host.drain(max(0.0, min(10.0, reserve)))) is True
+            if not idle:  # the worker may still be mid-mutation: say so durably, and keep its ledger and
+                # evidence OPEN so its own receipt can still land; revocation proceeds independently
+                self.fail(9, stage="observer-drain", reason="a collector was still running; ledger and evidence "
+                                                            "stay open for its receipt")
+                if ctx.get("ledger") is not None:
+                    self._stage("observer-ledger-unresolved", lambda: ctx["ledger"].append(
+                        op="cleanup", phase="receipt", outcome="unresolved-worker-still-running"))
+            if host.state.handoff_outcome is not None:
+                self.note(stage="observer-handoff", outcome=host.state.handoff_outcome)
         if gate is not None and gate.poll() is None:
             self._stage("observer-gate-stop", lambda: ops.docker(["stop", "-t", "3", names["gate"]], timeout=15,
                                                                   check=False))
-        if host is not None and idle is True:  # closing under a running worker could lose its last line
-            self._stage("observer-evidence-close", host.ev.close)
-        if ctx.get("ledger") is not None:
-            self._stage("observer-ledger-close", ctx["ledger"].close)
-        if ctx.get("observer_dir"):
-            shutil.rmtree(ctx["observer_dir"], ignore_errors=True)
         if proxy is not None and proxy.poll() is None:  # SIGTERM -> drain 5 s + logout 20 s, inside a 45 s grace
             self._stage("proxy-stop", lambda: ops.docker(["stop", "-t", "45", names["proxy"]], timeout=70,
                                                           check=False))
@@ -682,6 +697,7 @@ class Run:
         for t in ctx["threads"]:  # drain the evidence before anything is removed
             self._stage("evidence-join", lambda t=t: t.join(timeout=JOIN_TIMEOUT_S))
             incomplete = incomplete or t.is_alive()
+        self._authority_cleanup(ctx)  # BEFORE every optional stage: nothing below can eat the revoke's time
         if incomplete or self.evidence_failed.is_set():
             self.fail(6, stage="evidence", reason="a log stream failed or did not finish draining")
             for key in ("proxy", "runner"):  # recover what Docker kept, before the containers are removed
@@ -711,6 +727,20 @@ class Run:
                 return True
             if self._stage("state-export", export) is None:
                 self.fail(6, stage="state-export", volume=names["state"])
+        if host is not None and idle:  # closing under a running worker could lose its last line
+            self._stage("observer-evidence-close", host.ev.close)
+            if ctx.get("ledger") is not None:
+                self._stage("observer-ledger-close", ctx["ledger"].close)
+        if ctx.get("observer_dir") and idle:
+            shutil.rmtree(ctx["observer_dir"], ignore_errors=True)
+        if ctx["leased"]:
+            released = self._stage("lease-release", lambda: lease_release(ops, self.run_id))
+            if released is None:
+                self.fail(7, stage="lease-release", reason="release failed; the Lease expires on its own")
+
+    def _authority_cleanup(self, ctx):
+        """Revoke and the Keycloak logout, right after the work has stopped (only on positive Lease ownership)."""
+        ops = self.ops
         if ctx["granted"] and ctx["subject"]:
             owned = self._stage("lease-secure", lambda: lease_secure(ops, self.run_id, CLEANUP_LEASE_S))
             if owned is True:
@@ -725,10 +755,6 @@ class Run:
             else:
                 self.fail(7, stage="lease", reason="Lease ownership unconfirmed; NOT revoked: the reaper or "
                                                    "`relay-operator.py revoke` must clear it")
-        if ctx["leased"]:
-            released = self._stage("lease-release", lambda: lease_release(ops, self.run_id))
-            if released is None:
-                self.fail(7, stage="lease-release", reason="release failed; the Lease expires on its own")
 
 
 def run_session(ops: Ops, manifest_ref: str, bundle: str, runner_minutes: int, evidence_dir: str,
