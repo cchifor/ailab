@@ -7,6 +7,9 @@ on:
       - "ansible/relay-router-workers.yml"
       - "scripts/tests/integration/test_relay_router_workers.py"
       - "scripts/tests/integration/test_relay_holder_archives.py"
+      - "scripts/prepare-used-holder-handoff.py"
+      - "scripts/tests/test_prepare_used_holder_handoff.py"
+      - "scripts/tests/integration/test_used_holder_handoff_role.py"
       - ".gitea/workflows/relay-router-workers.yaml"
   push:
     branches: [main]
@@ -16,6 +19,9 @@ on:
       - "ansible/relay-router-workers.yml"
       - "scripts/tests/integration/test_relay_router_workers.py"
       - "scripts/tests/integration/test_relay_holder_archives.py"
+      - "scripts/prepare-used-holder-handoff.py"
+      - "scripts/tests/test_prepare_used_holder_handoff.py"
+      - "scripts/tests/integration/test_used_holder_handoff_role.py"
       - ".gitea/workflows/relay-router-workers.yaml"
 jobs:
   relay-router-workers:
@@ -41,3 +47,13 @@ jobs:
           docker run --rm --cap-drop=ALL --security-opt=no-new-privileges \
             -v "$PWD:/repo:ro" -w /repo python:3.13@sha256:debad600e8d6e754012528dc796488acc52438fea3d28596b87262df9b91c71e \
             sh -ec 'pip install --disable-pip-version-check ansible-core==2.20.0 PyYAML==6.0.3 && python scripts/tests/integration/test_relay_holder_archives.py'
+      - name: Validate stopped used-holder handoff through real Ansible transfer
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --read-only --user=1000:1000 --cap-drop=ALL --security-opt=no-new-privileges \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,mode=1777 \
+            --tmpfs /home/c4:rw,nosuid,nodev,uid=1000,gid=1000,mode=0700 \
+            -e HOME=/tmp -e USER=c4 -v "$PWD:/repo:ro" -w /repo \
+            python:3.13@sha256:debad600e8d6e754012528dc796488acc52438fea3d28596b87262df9b91c71e \
+            sh -ec 'pip install --disable-pip-version-check --no-cache-dir --target /tmp/deps ansible-core==2.20.0 PyYAML==6.0.3 && PYTHONPATH=/tmp/deps PATH=/tmp/deps/bin:$PATH python -B scripts/tests/integration/test_used_holder_handoff_role.py'
