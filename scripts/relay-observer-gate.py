@@ -46,10 +46,45 @@ def _constant(name):
     raise Bad("non-finite")
 
 
+MAX_DEPTH = 32
+
+
+def _float(s):
+    v = float(s)
+    if v != v or v in (float("inf"), float("-inf")):  # 1e999 overflows to infinity: refused like NaN
+        raise Bad("non-finite")
+    return v
+
+
+def _depth_ok(raw: bytes) -> bool:
+    """Bound nesting BEFORE parsing (a deep document would raise RecursionError inside json)."""
+    depth, in_str, esc = 0, False, False
+    for b in raw:
+        if in_str:
+            if esc:
+                esc = False
+            elif b == 0x5C:
+                esc = True
+            elif b == 0x22:
+                in_str = False
+        elif b == 0x22:
+            in_str = True
+        elif b in (0x5B, 0x7B):
+            depth += 1
+            if depth > MAX_DEPTH:
+                return False
+        elif b in (0x5D, 0x7D):
+            depth -= 1
+    return True
+
+
 def strict_json(raw: bytes):
+    if not _depth_ok(raw):
+        raise Bad("too-deep")
     try:
-        return json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_constant)
-    except (UnicodeDecodeError, ValueError) as e:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_constant,
+                          parse_float=_float)
+    except (UnicodeDecodeError, ValueError, RecursionError) as e:
         raise Bad("malformed") from e
 
 
@@ -99,6 +134,10 @@ class Gate:
                     break
                 try:
                     obj = strict_json(line)
+                    if isinstance(obj, dict) and set(obj) == {"clockProbe"} and isinstance(obj["clockProbe"], str) \
+                            and len(obj["clockProbe"]) <= 64:
+                        self.emit({"clockProbe": obj["clockProbe"], "gateNow": int(time.time() * 1000)})
+                        continue
                     seq = obj["seq"] if isinstance(obj, dict) else None
                 except (Bad, KeyError):
                     diag("reply-malformed")
@@ -186,6 +225,8 @@ class Gate:
                 diag("cancelled")
                 self.answer(conn, {"v": 1, "ok": False, "code": "cancelled"})
                 return
+            with self.cond:  # the request is complete: admit the next connection before sending (no busy race)
+                self.busy = False
             try:
                 conn.settimeout(READ_S)
                 conn.sendall(reply)
@@ -240,7 +281,7 @@ class Gate:
         finally:
             os.umask(old)
         srv.listen(8)
-        threading.Thread(target=self.read_host, daemon=True).start()
+        threading.Thread(target=self.guarded, args=(self.read_host,), daemon=True).start()
         self.emit({"ready": True})
         while True:
             conn, _ = srv.accept()
@@ -252,7 +293,18 @@ class Gate:
                 self.answer(conn, {"v": 1, "ok": False, "code": "busy"})
                 conn.close()
                 continue
-            threading.Thread(target=self.handle, args=(conn,), daemon=True).start()
+            threading.Thread(target=self.guarded, args=(self.handle, conn), daemon=True).start()
+
+    def guarded(self, fn, *args) -> None:
+        """Any unexpected error in a gate thread is terminal (observer-down), never a silently dead thread."""
+        try:
+            fn(*args)
+        except BaseException:  # noqa: BLE001
+            diag("thread-error")
+            with self.cond:
+                self.terminal = "observer-down"
+                self.busy = False
+                self.cond.notify_all()
 
 
 def main() -> int:
