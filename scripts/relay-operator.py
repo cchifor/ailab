@@ -6,7 +6,10 @@
     python scripts/relay-operator.py call OP [ARGS]       # grant admin -> one allowlisted call -> revoke
     python scripts/relay-operator.py revoke               # delete its membership + sessions (idempotent)
     python scripts/relay-operator.py session --manifest-ref COMMIT:PATH --bundle DIR --runner-minutes N
-                                     --evidence-dir NEW_DIR   # ONE bounded automated run (relay_operator_session.py)
+                                     --evidence-dir NEW_DIR [--predecessor-report FILE]
+                                     # ONE bounded automated run (relay_operator_session.py); an observer manifest
+                                     # (automated phase A) also needs the preserved predecessor report
+    python scripts/relay-operator.py observer-probe       # READ-ONLY phase A observer checks + latencies (no authority)
     python scripts/relay-operator.py status               # membership/session counts, Keycloak user state
 
 `call` OPs are relay-admin-call.py's allowlist (me, list-installations, get-installation ID,
@@ -335,7 +338,17 @@ def call(op_args: list[str]) -> int:
 def session(a) -> int:
     ros, o = ops()
     subprocess.run(["git", "-C", str(REPO), "fetch", "-q", "gitea", "main"], timeout=60, check=False)
-    return ros.run_session(o, a.manifest_ref, a.bundle, a.runner_minutes, a.evidence_dir)
+    return ros.run_session(o, a.manifest_ref, a.bundle, a.runner_minutes, a.evidence_dir, a.predecessor_report)
+
+
+def observer_probe() -> int:
+    """Read-only: the phase A observer's sources against the live estate, with per-call latency. No Relay session, no
+    Lease, no holder start (plans/2026-11-27-relay-phase-a-observer-plan.md, Verification 3)."""
+    _session_module()
+    import relay_phase_a_host as H  # noqa: E402
+    report = H.probe(REPO)
+    print(json.dumps(report, indent=1, sort_keys=True))
+    return 0 if report["ok"] else 1
 
 
 def main() -> int:
@@ -349,12 +362,16 @@ def main() -> int:
     se.add_argument("--bundle", required=True)
     se.add_argument("--runner-minutes", type=int, required=True)
     se.add_argument("--evidence-dir", required=True)
+    se.add_argument("--predecessor-report", help="the preserved original phase A report (observer manifests only)")
+    sub.add_parser("observer-probe")
     a = p.parse_args()
     if a.cmd == "provision":
         provision(a.rotate)
         return 0
     if a.cmd == "session":
         return session(a)
+    if a.cmd == "observer-probe":
+        return observer_probe()
     if a.cmd == "call":
         if not a.op:
             p.error("call needs an OP")
