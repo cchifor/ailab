@@ -193,7 +193,9 @@ adapter is required and remains separate from this core. Query/history/projectio
 hashes retain provenance, not independent database authentication.
 
 Before recovery, inspect the closed source. After import, its native receipt
-must match exactly. Without a pending receipt, continuation requires a matching
+must match exactly, and the retained Router branch, epoch, operation and state
+must still match with a nonregressing update timestamp. A change refuses before
+any continuation or reconciliation prompt. Without a pending receipt, continuation requires a matching
 complete parent. With a pending receipt, the Router operation must match either
 the pending operation or the complete parent, as required by Pi's reconciliation
 guard. This selects explicit reconciliation; it never acknowledges unknown tool

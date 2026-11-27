@@ -1095,6 +1095,48 @@ test("missing or mismatched branch evidence stops recovery without unknown-effec
     assert(!f.calls.some((c) => c.body?.acknowledgeUnknownToolEffects));
   }
 });
+test("imported native history cannot continue after the retained Router branch changes", async () => {
+  for (const change of [
+    (v, prior) => {
+      v.router.epoch = prior.router.epoch + "-changed";
+    },
+    (v, prior) => {
+      v.router.updatedAt = prior.router.updatedAt - 1;
+    },
+  ]) {
+    let prior,
+      observations = 0,
+      callsAtChange;
+    const f = phaseServer({
+      mutateCheckpoint: (ctx, value) => {
+        if (ctx.kind === "claude-branch" && !ctx.retiredBranch) {
+          observations++;
+          if (observations === 1) prior = clone(value);
+          if (observations === 2) {
+            change(value, prior);
+            callsAtChange = f.calls.length;
+          }
+        }
+        return value;
+      },
+    });
+    await assert.rejects(f.runner.start(), /Imported Router branch changed/);
+    assert.equal(observations, 2);
+    assert.equal(f.launches.length, 2);
+    assert.equal(
+      f.calls.filter((call) => call.path.endsWith("/resume")).length,
+      1,
+    );
+    assert(
+      !f.calls
+        .slice(callsAtChange)
+        .some((call) => call.method === "POST" && call.body?.kind === "prompt"),
+    );
+    assert(!f.calls.some((call) => call.body?.acknowledgeUnknownToolEffects));
+    assert.equal(f.runner.state.status, "stopped");
+  }
+});
+
 test("generic effort failure never permits reconciliation/high successor", async () => {
   const f = phaseServer({ configurationNotice: "Backend unavailable" });
   await assert.rejects(f.runner.start(), /Specific configuration/);

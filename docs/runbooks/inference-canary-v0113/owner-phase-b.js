@@ -546,6 +546,15 @@ class ClaudeRunner extends a.Runner {
               a.canonical(this.retainedBranch.native),
           "Imported branch receipt changed",
         );
+        const retained = this.retainedBranch.router;
+        need(
+          observed.router.branch === retained.branch &&
+            observed.router.epoch === retained.epoch &&
+            observed.router.operation === retained.operation &&
+            observed.router.state === retained.state &&
+            observed.router.updatedAt >= retained.updatedAt,
+          "Imported Router branch changed",
+        );
         this.beforeReconcile = observed.requiresReconcile ? observed : null;
         return observed.requiresReconcile;
       }
