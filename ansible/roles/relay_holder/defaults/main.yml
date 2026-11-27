@@ -10,6 +10,11 @@ relay_holder_transfer: /opt/relay-holder/transfer
 relay_holder_root: /opt/relay-holder/releases
 relay_holder_pi_root: /opt/relay-pi/releases
 relay_holder_state: "{{ relay_holder_home }}/.local/state/relay-holder"
+# Used Pi handoff keeps approved profile paths while moving only journal/IPC
+# state. A complete pinned stopped-handoff receipt is required for this split.
+relay_holder_profile_state: "{{ relay_holder_state }}"
+relay_holder_handoff_receipt: ""
+relay_holder_handoff_receipt_sha256: ""
 relay_holder_config: "{{ relay_holder_home }}/.config/relay-holder"
 # Controller-local, joined release archives and independently reviewed pins.
 relay_holder_archives: []

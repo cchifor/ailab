@@ -33,6 +33,7 @@
     - "{{ relay_holder_root }}"
     - "{{ relay_holder_pi_root }}"
     - "{{ relay_holder_state }}"
+    - "{{ relay_holder_profile_state }}"
     - "{{ relay_holder_config }}"
     - "{{ relay_holder_connector_state }}"
     - "{{ relay_holder_profiles_source }}"
@@ -54,6 +55,9 @@
     that:
       - relay_holder_uid | int > 0
       - ansible_facts.getent_passwd[relay_holder_user][4] == relay_holder_home
+
+- name: Verify explicit preserving handoff before any installation writes
+  ansible.builtin.import_tasks: handoff.yml
 
 - name: Require cgroup v2
   ansible.builtin.command: stat -fc %T /sys/fs/cgroup
