@@ -1,8 +1,9 @@
 # Owner-run phase A
 
 **Current operational hold (2026-11-27): do not run this driver.** The published
-holder/Pi source `2604c41b69c5d9c50a3324545a51f0bfa38435a0` rejects the required
-two-block reminder and slash/local-control cases. The renewal-metadata and
+holder at source `2604c41b69c5d9c50a3324545a51f0bfa38435a0` appends an inbox
+reminder to local slash commands as a second ACP text block; the pinned Pi
+launcher rejects that shape. The renewal-metadata and
 actual-API projection qualification below remains evidence only for that
 boundary. It does not qualify the complete Phase A workflow. The separate
 `HOLDER_CONTROLS_QUALIFIED = false` gate refuses the public start entry and

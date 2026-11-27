@@ -1,8 +1,9 @@
 # Exact dev-worker-1 Pi canary inputs
 
 **Current operational hold (2026-11-27): Phase A is not runnable.** The
-published holder/Pi source `2604c41b69c5d9c50a3324545a51f0bfa38435a0` rejects
-the required two-block reminder and slash/local-control cases. Correct renewal
+published holder at source `2604c41b69c5d9c50a3324545a51f0bfa38435a0` appends
+an inbox reminder to local slash commands as a second ACP text block; the
+pinned Pi launcher rejects that shape. Correct renewal
 metadata and passing API contract tests do not qualify those holder controls.
 The driver keeps a separate `HOLDER_CONTROLS_QUALIFIED = false` gate; do not
 change that flag locally or execute the candidate workflow below.
