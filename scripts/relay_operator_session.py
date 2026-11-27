@@ -186,7 +186,27 @@ def verify_observer(manifest: dict, repo_root: str, predecessor_report: str | No
     pred = Path(predecessor_report).read_bytes()
     if hashlib.sha256(pred).hexdigest() != o["predecessorSha256"]:
         raise Refused("the predecessor report does not match the manifest's predecessorSha256")
-    return {"files": files, "config": o["config"], "predecessor": pred}
+    return {"files": files, "config": o["config"], "predecessor": pred, "predecessorSha256": o["predecessorSha256"]}
+
+
+def _import_observer(tool_dir: str):
+    """Import the observer modules FROM THE VERIFIED COPY, never from the working tree (any already-imported copy
+    is dropped first)."""
+    import importlib
+    import sys
+    for m in ("relay_phase_a_observer", "relay_phase_a_collectors", "relay_phase_a_host"):
+        sys.modules.pop(m, None)
+    sys.path.insert(0, tool_dir)
+    try:
+        O = importlib.import_module("relay_phase_a_observer")
+        C = importlib.import_module("relay_phase_a_collectors")
+        H = importlib.import_module("relay_phase_a_host")
+    finally:
+        sys.path.remove(tool_dir)
+    for mod in (O, C, H):
+        if not str(Path(mod.__file__).resolve()).startswith(str(Path(tool_dir).resolve())):
+            raise Refused("an observer module was not loaded from the verified copy")
+    return O, C, H
 
 
 def lease_held(ops: "Ops", holder: str) -> bool:
@@ -392,7 +412,8 @@ class Run:
                  "volume": f"relay-session-{self.run_id}", "state": f"relay-state-{self.run_id}",
                  "gate": f"relay-observer-gate-{self.run_id}", "pred": f"relay-predecessor-{self.run_id}"}
         ctx = {"proxy": None, "runner": None, "threads": [], "granted": False, "subject": None, "uid": None,
-               "leased": False, "gate": None, "host": None, "pred": False}
+               "leased": False, "gate": None, "host": None, "pred": False, "ledger": None, "observer_dir": None,
+               "observer_tool_dir": None}
         try:
             self._run(ev, names, ctx, manifest, bundle_copy, sinks, runner_deadline, cleanup_deadline)
         except Interrupted:
@@ -403,7 +424,7 @@ class Run:
             self.fail(8, stage="error", error=type(e).__name__, detail=str(e)[:200])
         finally:
             self.in_cleanup = True
-            self._cleanup(names, ctx, sinks)
+            self._cleanup(names, ctx, sinks, cleanup_deadline)
             for s, h in prev.items():
                 signal.signal(s, h)
             shutil.rmtree(work, ignore_errors=True)
@@ -421,8 +442,15 @@ class Run:
         lease_acquire(ops, self.run_id, cleanup_deadline + LEASE_GRACE_S)
         ctx["leased"] = True
         self.note(stage="lease", holder=self.run_id)
+        ops.docker(["volume", "create", "--driver", "local", "--opt", "type=tmpfs", "--opt", "device=tmpfs",
+                    "--opt", "o=size=1m,uid=10001,gid=10001,mode=0700", names["volume"]], timeout=30)
+        ops.docker(["volume", "create", names["state"]], timeout=30)  # the library's durable store, KEPT
+        ops.docker(["run", "--rm", "--network", "none", "--mount", f"type=volume,src={names['state']},dst=/state",
+                    PROXY_IMAGE, "sh", "-c", "chown 10001:10001 /state && chmod 0700 /state && mkdir -p /state/run "
+                    "&& chown 10001:10001 /state/run && chmod 0700 /state/run"], timeout=120)
+        self.note(stage="state-volume", volume=names["state"])
         if self.observer_plan is not None:
-            if not self._observer_prepare(ev, ctx, runner_deadline):
+            if not self._observer_prepare(ev, names, ctx, runner_deadline, cleanup_deadline):
                 return
         c = ops.creds()
         ctx["subject"], ctx["uid"] = c["subject"], c["keycloak_user_id"]
@@ -435,13 +463,6 @@ class Run:
         ctx["granted"] = True  # inside the cleanup scope from here: a grant may commit and still report an error
         ops.grant(ctx["subject"])
         self.note(stage="granted")
-        ops.docker(["volume", "create", "--driver", "local", "--opt", "type=tmpfs", "--opt", "device=tmpfs",
-                    "--opt", "o=size=1m,uid=10001,gid=10001,mode=0700", names["volume"]], timeout=30)
-        ops.docker(["volume", "create", names["state"]], timeout=30)  # the library's durable store, KEPT
-        ops.docker(["run", "--rm", "--network", "none", "--mount", f"type=volume,src={names['state']},dst=/state",
-                    PROXY_IMAGE, "sh", "-c", "chown 10001:10001 /state && chmod 0700 /state && mkdir -p /state/run "
-                    "&& chown 10001:10001 /state/run && chmod 0700 /state/run"], timeout=120)
-        self.note(stage="state-volume", volume=names["state"])
         proxy = ctx["proxy"] = ops.popen(
             ["docker", "run", "-i", "--name", names["proxy"], "--read-only", "--cap-drop", "ALL",
              "--security-opt", "no-new-privileges", "--user", UID, "--pids-limit", "128", "--memory", "256m",
@@ -518,13 +539,28 @@ class Run:
         self.note(stage="runner-exited", exit=rrc)
 
     # ---------------- the phase A observer (plans/2026-11-27-relay-phase-a-observer-plan.md, section 9)
-    def _observer_prepare(self, ev, ctx, runner_deadline) -> bool:
-        """Build the host from the VERIFIED files and run the pre-run holder step under the Lease."""
-        import relay_phase_a_collectors as C  # imported only after verify_observer() matched every module
-        import relay_phase_a_host as H
-        import relay_phase_a_observer as O
+    def _observer_prepare(self, ev, names, ctx, runner_deadline, cleanup_deadline) -> bool:
+        """Stage the VERIFIED observer copy and the read-only predecessor volume, build the host from that copy, and
+        run the pre-run holder step under the Lease, before any Relay authority. Every failure here is an observer
+        fault (9), except an interrupt or a Lease loss, which keep their own codes."""
         plan, ops = self.observer_plan, self.ops
         try:
+            stage_dir = Path(tempfile.mkdtemp(prefix="relay-observer-"))
+            ctx["observer_dir"] = str(stage_dir)
+            for rel, data in plan["files"].items():  # the bytes verify_observer() hashed: nothing else is executed
+                out = stage_dir / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(data)
+                if hashlib.sha256(out.read_bytes()).hexdigest() != hashlib.sha256(data).hexdigest():
+                    raise Refused("the staged observer copy does not match")
+            ctx["observer_tool_dir"] = str(stage_dir / "scripts")
+            O, C, H = _import_observer(ctx["observer_tool_dir"])
+            ops.docker(["volume", "create", names["pred"]], timeout=30)
+            ctx["pred"] = True
+            ops.docker(["run", "-i", "--rm", "--network", "none", "--mount", f"type=volume,src={names['pred']},dst=/p",
+                        PROXY_IMAGE, "sh", "-c", "umask 077 && cat > /p/report.json && chown 10001:10001 /p "
+                        "/p/report.json && chmod 0400 /p/report.json && chmod 0500 /p"], stdin=plan["predecessor"],
+                       timeout=60)
             cfg = C.Config.load(plan["files"][plan["config"]],
                                 {k[len("scripts/"):]: v for k, v in plan["files"].items() if k.startswith("scripts/")})
             kh = Path(self.evidence_dir) / "observer-known_hosts"
@@ -533,47 +569,52 @@ class Run:
             evidence = O.Evidence(str(Path(self.evidence_dir) / "observer.jsonl"))
             ledger = H.Ledger(os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/state"),
                                            "relay-operator", "handoff-ledger"), cfg.raw["holder"]["preparationId"])
+            ctx["ledger"] = ledger
             host = ctx["host"] = H.ObserverHost(
                 gate=None, cfg=cfg, evidence=evidence, on_fault=self._on_observer_fault,
                 run_start_ms=int(ops.now() * 1000), runner_cutoff_ms=int((runner_deadline - 120) * 1000),
-                lease_ok=lambda: lease_held(ops, self.run_id), predecessor_bytes=plan["predecessor"], ledger=ledger)
-            H.prerun(host, O.Budget(150_000, host.cancelled))
-        except O.Refuse as e:
+                lease_ok=lambda: lease_held(ops, self.run_id), predecessor_bytes=plan["predecessor"],
+                predecessor_sha256=plan["predecessorSha256"], ledger=ledger)
+            H.prerun(host, O.Budget(min(180_000, int((cleanup_deadline - ops.now()) * 1000)), host.cancelled))
+        except (Interrupted, LeaseLost):
+            raise
+        except Refused as e:
             self.fail(2, stage="observer-prerun", reason=str(e)[:200])
             return False
-        except BaseException as e:  # noqa: BLE001 - Fault, Failed, Deadline, I/O: a pre-run failure is an observer fault
-            self.fail(9, stage="observer-prerun", error=type(e).__name__, detail=str(e)[:200])
+        except BaseException as e:  # noqa: BLE001 - every other pre-run failure is an observer fault
+            if type(e).__name__ == "Refuse":  # an existing ledger: refused before any authority
+                self.fail(2, stage="observer-prerun", reason=str(e)[:200])
+            else:
+                self.fail(9, stage="observer-prerun", error=type(e).__name__, detail=str(e)[:200])
             return False
         self.note(stage="observer-prerun", holder=host.state.holder)
         return True
 
-    def _on_observer_fault(self, reason: str) -> None:
+    def _on_observer_fault(self, reason: str, evidence: bool = False) -> None:
+        if evidence:  # the observer's evidence could not be made durable: the broker's evidence path (6)
+            self.evidence_failed.set()
         self.observer_fault.set()
-        self.note(stage="observer-fault", reason=str(reason)[:200])
+        self.note(stage="observer-fault", reason=str(reason)[:200], evidence=evidence)
 
     def _observer_start(self, names, ctx, sinks) -> bool:
-        """Stage the predecessor read-only volume, start the gate, wait for its ready line, start the host threads."""
+        """Start the gate FROM THE VERIFIED COPY, wait for its ready line, start the host threads."""
         ops, host = self.ops, ctx["host"]
-        ops.docker(["volume", "create", names["pred"]], timeout=30)
-        ctx["pred"] = True
-        ops.docker(["run", "-i", "--rm", "--network", "none", "--mount", f"type=volume,src={names['pred']},dst=/p",
-                    PROXY_IMAGE, "sh", "-c", "umask 077 && cat > /p/report.json && chown 10001:10001 /p /p/report.json "
-                    "&& chmod 0400 /p/report.json && chmod 0500 /p"], stdin=self.observer_plan["predecessor"],
-                   timeout=60)
-        sinks["observer-gate.err"] = open(Path(self.evidence_dir) / "observer-gate.err", "ab", buffering=0)
-        gate = ctx["gate"] = ops.popen(
-            ["docker", "run", "-i", "--name", names["gate"], "--network", "none", "--read-only", "--cap-drop", "ALL",
-             "--security-opt", "no-new-privileges", "--log-driver", "none", "--user", UID, "--pids-limit", "32",
-             "--memory", "64m", "--mount", f"type=bind,src={ops.tool_dir},dst=/tool,readonly",
-             "--mount", f"type=volume,src={names['volume']},dst={SOCKET_DIR}",
-             PROXY_IMAGE, "python3", "-I", "/tool/relay-observer-gate.py"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        t = threading.Thread(target=self._stream, args=(gate.stderr, sinks["observer-gate.err"]), daemon=True)
-        t.start()
-        ctx["threads"].append(t)
-        host.gate = gate  # its STDOUT frames are parsed in memory only: never streamed or logged raw
         try:
+            sinks["observer-gate.err"] = open(Path(self.evidence_dir) / "observer-gate.err", "ab", buffering=0)
+            gate = ctx["gate"] = ops.popen(
+                ["docker", "run", "-i", "--name", names["gate"], "--network", "none", "--read-only", "--cap-drop",
+                 "ALL", "--security-opt", "no-new-privileges", "--log-driver", "none", "--user", UID, "--pids-limit",
+                 "32", "--memory", "64m", "--mount", f"type=bind,src={ctx['observer_tool_dir']},dst=/tool,readonly",
+                 "--mount", f"type=volume,src={names['volume']},dst={SOCKET_DIR}",
+                 PROXY_IMAGE, "python3", "-I", "/tool/relay-observer-gate.py"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            t = threading.Thread(target=self._stream, args=(gate.stderr, sinks["observer-gate.err"]), daemon=True)
+            t.start()
+            ctx["threads"].append(t)
+            host.gate = gate  # its STDOUT frames are parsed in memory only: never streamed or logged raw
             host.start(ready_timeout=15.0)
+        except (Interrupted, LeaseLost):
+            raise
         except BaseException as e:  # noqa: BLE001
             self.fail(9, stage="observer-gate", error=type(e).__name__)
             return False
@@ -605,21 +646,29 @@ class Run:
         parts = out.decode(errors="replace").split() if out else []
         return int(parts[1]) if len(parts) == 2 and parts[0] == "false" and parts[1].lstrip("-").isdigit() else None
 
-    def _cleanup(self, names, ctx, sinks):
+    def _cleanup(self, names, ctx, sinks, cleanup_deadline=None):
         ops, proxy, runner = self.ops, ctx["proxy"], ctx["runner"]
+        host = ctx.get("host")
+        if host is not None:
+            host.stop()  # cancel at once: no collector dispatches after this point
         if runner is not None and runner.poll() is None:
             self._stage("runner-kill", lambda: ops.docker(["kill", names["runner"]], timeout=20, check=False))
             self._stage("runner-wait", lambda: self._until(lambda: runner.poll() is not None, ops.now() + 20))
-        host, gate = ctx.get("host"), ctx.get("gate")
-        if host is not None:  # bounded; it never delays the revoke cutoff
-            idle = self._stage("observer-drain", lambda: host.drain(10.0))
-            if idle is False:
-                self.note(stage="observer-drain", reason="a collector was still running after 10 s")
+        gate = ctx.get("gate")
+        if host is not None:  # bounded by the remaining cleanup time, keeping 300 s for revoke and logout
+            reserve = (cleanup_deadline - 300 - ops.now()) if cleanup_deadline else 10.0
+            idle = self._stage("observer-drain", lambda: host.drain(max(0.0, min(10.0, reserve))))
+            if idle is not True:
+                self.fail(9, stage="observer-drain", reason="a collector was still running; its evidence stays open")
         if gate is not None and gate.poll() is None:
-            self._stage("observer-gate-stop", lambda: ops.docker(["stop", "-t", "5", names["gate"]], timeout=30,
+            self._stage("observer-gate-stop", lambda: ops.docker(["stop", "-t", "3", names["gate"]], timeout=15,
                                                                   check=False))
-        if host is not None:
+        if host is not None and idle is True:  # closing under a running worker could lose its last line
             self._stage("observer-evidence-close", host.ev.close)
+        if ctx.get("ledger") is not None:
+            self._stage("observer-ledger-close", ctx["ledger"].close)
+        if ctx.get("observer_dir"):
+            shutil.rmtree(ctx["observer_dir"], ignore_errors=True)
         if proxy is not None and proxy.poll() is None:  # SIGTERM -> drain 5 s + logout 20 s, inside a 45 s grace
             self._stage("proxy-stop", lambda: ops.docker(["stop", "-t", "45", names["proxy"]], timeout=70,
                                                           check=False))
