@@ -11,9 +11,9 @@ const driverSource = fs.readFileSync(
   path.join(__dirname, "owner-phase-a.js"),
   "utf8",
 );
-// Metadata and lifecycle cases exercise the actual pinned module. Three retained
-// historical entry-point cases explicitly simulate removal of the holder hold;
-// they are not qualification of the known-broken published holder.
+// Metadata, lifecycle and pure handoff cases exercise the actual pinned module.
+// One retained historical owner-decline case simulates removal of the holder
+// hold; it does not qualify the known-broken published holder.
 assert.equal(a.RUN_SOURCE, "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613");
 assert.equal(a.HOLDER_CONTROLS_QUALIFIED, false);
 const historicalWrapperModule = { exports: {} };
@@ -58,11 +58,6 @@ const command = a.markerCommand("codex", p.run, "effects");
 const holderInputs = JSON.parse(
   fs.readFileSync(path.join(__dirname, "holder-inputs.json"), "utf8"),
 );
-const handoffHashes = {
-  profilesSha256: holderInputs.relay_holder_profiles_sha256,
-  holderBinarySha256: holderInputs.relay_holder_binary_sha256,
-};
-
 function harness(
   handler = () => {
     throw Error("Unexpected fetch");
@@ -1360,95 +1355,217 @@ test("unqualified draft start refuses before network, checkpoints or saved-run m
   assert.equal(h.saves.length, 0);
   assert.equal(h.runner.state.completed, false);
 });
-test("historical entry-point simulation refuses invalid holder handoff before launch", async () => {
-  const valid = {
+function preservingHandoffFixture() {
+  // Synthetic pins exercise the pure validator only. They are not publication
+  // evidence and never enable a Runner or replace the production null pins.
+  const pins = {
+    release: "v9.9.9",
+    source: "a".repeat(40),
+    binarySha256: "b".repeat(64),
+  };
+  const report = stoppedReport();
+  const prior = report.evidence.find((e) => e.kind === "launch");
+  const value = {
     holderId: SID,
-    journalId: OTHER,
+    journalId: LEASE,
+    oldHolderId: prior.holderId,
+    oldJournalId: prior.journalId,
+    preparationId: OP,
+    stateDirectory:
+      "/home/c4/.local/state/relay-holder-handoff-44444444-4444-4444-8444-444444444444",
+    handoffReceipt: {
+      path: "/home/c4/.config/relay-holder/used-handoffs/44444444-4444-4444-8444-444444444444/complete.json",
+      sha256: "c".repeat(64),
+    },
+    observedUtc: date(NOW),
+    qualifiedRelease: pins.release,
+    holderSource: pins.source,
+    holderBinarySha256: pins.binarySha256,
+    profilesSha256: holderInputs.relay_holder_profiles_sha256,
     nativeRecovery: 2,
     nativeStateReady: true,
-    qualifiedRelease: "v0.13.1",
+    activeSessions: 0,
+    pendingCommands: 0,
+    admissionPaused: false,
+    preservedOldStateConfirmed: true,
     operatorVerified: true,
-    ...handoffHashes,
   };
-  for (const input of [
-    null,
-    {},
-    { ...valid, holderId: "unknown" },
-    { ...valid, journalId: "unknown" },
-    { ...valid, nativeRecovery: 1 },
-    { ...valid, nativeStateReady: false },
-    { ...valid, qualifiedRelease: "v0.13.0" },
-    { ...valid, operatorVerified: false },
-    { ...valid, profilesSha256: undefined },
-    { ...valid, holderBinarySha256: undefined },
-    { ...valid, profilesSha256: "0".repeat(64) },
-    {
-      ...valid,
-      profilesSha256:
-        "58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39",
-    },
-    { ...valid, holderBinarySha256: "0".repeat(64) },
-  ]) {
-    const h = await renewalReviewHarness();
-    historicalWrapper(h.runner);
-    const priorAsk = h.runner.env.ask;
-    let asked = 0;
-    h.runner.env.ask = async (title, instructions, validate, timeout) => {
-      if (title !== "Fresh patched-holder handoff")
-        return priorAsk(title, instructions, validate, timeout);
-      asked++;
-      return validate(input);
-    };
-    await assert.rejects(
-      h.runner.replaceStopped(),
-      /Qualified holder handoff missing/,
-    );
-    assert.equal(asked, 1);
-    assert.equal(h.calls.length, 12);
-    assert(h.calls.every((c) => c.method === "GET"));
-    assert.equal(h.runner.state.operations.length, 0);
-    assert.equal(h.runner.state.runs.length, 0);
-    assert.equal(h.runner.state.completed, false);
+  return { value, prior, pins, earliest: NOW - 1000, now: NOW, report };
+}
+
+test("pure preserving handoff binds fresh identities and copies only reviewed evidence", () => {
+  for (const sameNewIds of [false, true]) {
+    for (const observed of [NOW - 1000, NOW, NOW + 5000]) {
+      const f = preservingHandoffFixture();
+      if (sameNewIds) f.value.journalId = f.value.holderId;
+      f.value.observedUtc = date(observed);
+      f.value.unreviewedField = "must not enter the receipt";
+      f.value.handoffReceipt.unreviewedField = "must not enter the receipt";
+      const before = structuredClone(f);
+      const result = a.preservingHandoff(
+        f.value,
+        f.prior,
+        f.pins,
+        f.earliest,
+        f.now,
+      );
+      assert.deepEqual(f, before, "validation must not alter prior accounting");
+      assert.equal(result.holderId, SID);
+      assert.equal(result.journalId, sameNewIds ? SID : LEASE);
+      assert.equal(result.oldHolderId, f.prior.holderId);
+      assert.equal(result.oldJournalId, f.prior.journalId);
+      assert.notEqual(result.holderId, f.prior.holderId);
+      assert.notEqual(result.journalId, f.prior.journalId);
+      assert.equal(result.preparationId, OP);
+      assert.equal(result.stateDirectory, f.value.stateDirectory);
+      assert.equal(result.observedUtc, date(observed));
+      assert.equal(result.qualifiedRelease, f.pins.release);
+      assert.equal(result.holderSource, f.pins.source);
+      assert.equal(result.holderBinarySha256, f.pins.binarySha256);
+      assert.equal(
+        result.profilesSha256,
+        holderInputs.relay_holder_profiles_sha256,
+      );
+      assert.deepEqual(result.handoffReceipt, {
+        path: f.value.handoffReceipt.path,
+        sha256: "c".repeat(64),
+      });
+      assert.notStrictEqual(result, f.value);
+      assert.notStrictEqual(result.handoffReceipt, f.value.handoffReceipt);
+      assert.equal(Object.hasOwn(result, "unreviewedField"), false);
+      assert.equal(result.nativeRecovery, 2);
+      assert.equal(result.nativeStateReady, true);
+      assert.equal(result.activeSessions, 0);
+      assert.equal(result.pendingCommands, 0);
+      assert.equal(result.admissionPaused, false);
+      assert.equal(result.preservedOldStateConfirmed, true);
+      assert.match(result.provenance, /operator-reported/);
+      assert.match(result.provenance, /not a browser host measurement/);
+      assert.match(result.provenance, /not .*a new acceptance window/);
+      result.handoffReceipt.sha256 = "d".repeat(64);
+      assert.deepEqual(f, before, "returned evidence must not alias the input");
+    }
   }
 });
-test("historical entry-point simulation keeps incarnation separate from journal identity", async () => {
-  const h = await renewalReviewHarness();
-  historicalWrapper(h.runner);
-  const priorAsk = h.runner.env.ask,
-    priorFetch = h.runner.env.fetch;
-  h.runner.env.fetch = async (path, init) => {
-    if (path === "/api/agent-profiles") {
-      h.calls.push({ path, method: init.method });
-      throw Error("Stop at first profile read");
-    }
-    return priorFetch(path, init);
-  };
-  h.runner.env.ask = async (title, instructions, validate, timeout) => {
-    if (title !== "Fresh patched-holder handoff")
-      return priorAsk(title, instructions, validate, timeout);
-    return validate({
-      holderId: SID,
-      journalId: OTHER,
-      nativeRecovery: 2,
-      nativeStateReady: true,
-      qualifiedRelease: "v0.13.1",
-      operatorVerified: true,
-      ...handoffHashes,
-    });
-  };
-  await assert.rejects(h.runner.replaceStopped(), /Stop at first profile read/);
-  assert.equal(h.runner.holderId, SID);
-  assert.equal(h.runner.journalId, OTHER);
-  const recorded = h.runner.state.evidence.find(
-    (e) => e.kind === "operator-holder-handoff",
-  );
-  assert.equal(recorded.profilesSha256, handoffHashes.profilesSha256);
-  assert.equal(recorded.holderBinarySha256, handoffHashes.holderBinarySha256);
-  assert.match(recorded.provenance, /operator-reported/);
-  assert.equal(h.calls.length, 13);
-  assert(h.calls.every((c) => c.method === "GET"));
-  assert.equal(h.runner.state.operations.length, 0);
-  assert.equal(h.runner.state.completed, false);
+
+test("pure preserving handoff refuses unqualified pins and drift without changing accounting", () => {
+  const cases = [
+    ["null pins", (f) => (f.pins = null)],
+    ["missing pins", (f) => (f.pins = undefined)],
+    ["empty pins", (f) => (f.pins = {})],
+    ["unversioned release", (f) => (f.pins.release = "latest")],
+    ["unqualified prerelease", (f) => (f.pins.release = "v9.9.9-rc.1")],
+    ["short source hash", (f) => (f.pins.source = "a".repeat(39))],
+    ["invalid binary hash", (f) => (f.pins.binarySha256 = "g".repeat(64))],
+    ["missing predecessor", (f) => (f.prior = null)],
+    ["invalid predecessor holder", (f) => (f.prior.holderId = "unknown")],
+    [
+      "relabelled predecessor journal",
+      (f) => (f.value.oldJournalId = f.prior.journalId = REQUEST),
+    ],
+    ["inverted observation window", (f) => (f.earliest = f.now + 1)],
+    ["nonfinite earliest", (f) => (f.earliest = NaN)],
+    ["nonfinite current clock", (f) => (f.now = Infinity)],
+    ["null handoff", (f) => (f.value = null)],
+    ["missing handoff", (f) => (f.value = undefined)],
+    ["empty handoff", (f) => (f.value = {})],
+    ["array handoff", (f) => (f.value = [])],
+    ["missing preparation", (f) => delete f.value.preparationId],
+    ["invalid preparation", (f) => (f.value.preparationId = "unknown")],
+    ["other preparation", (f) => (f.value.preparationId = REQUEST)],
+    ["changed old holder", (f) => (f.value.oldHolderId = SID)],
+    ["changed old journal", (f) => (f.value.oldJournalId = OTHER)],
+    ["missing old holder", (f) => delete f.value.oldHolderId],
+    ["missing old journal", (f) => delete f.value.oldJournalId],
+    ["invalid new holder", (f) => (f.value.holderId = "unknown")],
+    ["invalid new journal", (f) => (f.value.journalId = "unknown")],
+    ["reused old holder", (f) => (f.value.holderId = f.prior.holderId)],
+    ["reused old journal", (f) => (f.value.journalId = f.prior.journalId)],
+    [
+      "old state directory",
+      (f) => (f.value.stateDirectory = "/home/c4/.local/state/relay-holder"),
+    ],
+    ["state path alias", (f) => (f.value.stateDirectory += "/")],
+    [
+      "state in another root",
+      (f) => (f.value.stateDirectory = "/tmp/relay-holder-handoff-" + OP),
+    ],
+    ["missing receipt", (f) => delete f.value.handoffReceipt],
+    ["null receipt", (f) => (f.value.handoffReceipt = null)],
+    [
+      "another preparation receipt",
+      (f) =>
+        (f.value.handoffReceipt.path =
+          "/home/c4/.config/relay-holder/used-handoffs/" +
+          REQUEST +
+          "/complete.json"),
+    ],
+    [
+      "receipt path alias",
+      (f) => (f.value.handoffReceipt.path += "/../complete.json"),
+    ],
+    ["missing receipt hash", (f) => delete f.value.handoffReceipt.sha256],
+    [
+      "short receipt hash",
+      (f) => (f.value.handoffReceipt.sha256 = "c".repeat(63)),
+    ],
+    [
+      "invalid receipt hash",
+      (f) => (f.value.handoffReceipt.sha256 = "g".repeat(64)),
+    ],
+    ["missing observation", (f) => delete f.value.observedUtc],
+    ["invalid observation", (f) => (f.value.observedUtc = "unknown")],
+    ["stale observation", (f) => (f.value.observedUtc = date(f.earliest - 1))],
+    ["future observation", (f) => (f.value.observedUtc = date(f.now + 5001))],
+    ["different release", (f) => (f.value.qualifiedRelease = "v9.9.8")],
+    ["different source", (f) => (f.value.holderSource = "d".repeat(40))],
+    ["missing binary hash", (f) => delete f.value.holderBinarySha256],
+    ["different binary", (f) => (f.value.holderBinarySha256 = "d".repeat(64))],
+    ["missing profile hash", (f) => delete f.value.profilesSha256],
+    ["different profiles", (f) => (f.value.profilesSha256 = "d".repeat(64))],
+    [
+      "historical revision-three profiles",
+      (f) =>
+        (f.value.profilesSha256 =
+          "58120839759fdff7c8bcd4ef483c75711558613c1487366d8406de4bceaa3b39"),
+    ],
+    ["old recovery protocol", (f) => (f.value.nativeRecovery = 1)],
+    ["string recovery protocol", (f) => (f.value.nativeRecovery = "2")],
+    ["unready native state", (f) => (f.value.nativeStateReady = false)],
+    ["active session", (f) => (f.value.activeSessions = 1)],
+    ["string active count", (f) => (f.value.activeSessions = "0")],
+    ["pending command", (f) => (f.value.pendingCommands = 1)],
+    ["missing pending count", (f) => delete f.value.pendingCommands],
+    ["paused admission", (f) => (f.value.admissionPaused = true)],
+    [
+      "unconfirmed preserved state",
+      (f) => (f.value.preservedOldStateConfirmed = false),
+    ],
+    [
+      "missing preserved-state confirmation",
+      (f) => delete f.value.preservedOldStateConfirmed,
+    ],
+    ["unverified operator", (f) => (f.value.operatorVerified = false)],
+    [
+      "string operator confirmation",
+      (f) => (f.value.operatorVerified = "true"),
+    ],
+  ];
+  for (const [name, mutate] of cases) {
+    const f = preservingHandoffFixture();
+    mutate(f);
+    const before = structuredClone(f);
+    assert.throws(
+      () => a.preservingHandoff(f.value, f.prior, f.pins, f.earliest, f.now),
+      /inputs are not qualified|observation window changed|handoff missing or changed/,
+      name,
+    );
+    assert.deepEqual(
+      f,
+      before,
+      name + " must not change prior evidence/accounting",
+    );
+  }
 });
 test("profile hashes bind reviewed definitions after deployed schema defaults", async () => {
   const definitions = JSON.parse(

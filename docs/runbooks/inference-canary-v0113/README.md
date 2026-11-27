@@ -5,18 +5,32 @@ published holder at source `2604c41b69c5d9c50a3324545a51f0bfa38435a0` appends
 an inbox reminder to local slash commands as a second ACP text block; the
 pinned Pi launcher rejects that shape. Correct renewal
 metadata and passing API contract tests do not qualify those holder controls.
-The driver keeps a separate `HOLDER_CONTROLS_QUALIFIED = false` gate; do not
-change that flag locally or execute the candidate workflow below.
+The driver keeps `HOLDER_CONTROLS_QUALIFIED = false` and
+`QUALIFIED_HOLDER = null`. The corrected holder artifact is unassigned; do not
+change those inputs locally or execute the candidate workflow below. The Pi
+runtime remains source2604 and the revision-1 profile file remains SHA256
+`928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4`.
 
 Resumption requires a published, qualified corrected holder, a reviewed
-post-use upgrade handoff that preserves the holder journal and native homes,
-and reviewed replacement inputs. No corrected artifact or profile pin is
-declared here. This holder has already run commands: the never-used-holder
-[idle upgrade helper](UPGRADE-IDLE.md) is ineligible. Do not erase retained
+post-use handoff that preserves the old journal, native homes and seal intact,
+and reviewed replacement inputs. Its new holder uses a fresh sibling state
+directory, a new journal and a new incarnation. Each new identity must differ
+from its respective predecessor; the new journal and incarnation may equal
+one another. No corrected holder pin is declared here. This holder has already
+run commands; the [idle upgrade helper](UPGRADE-IDLE.md) is ineligible.
+Do not erase retained
 state, replay that helper or reset the saved report, marker identities or the
 stopped run's **one prompt and two attempts**. The remainder of this packet is
 candidate procedure and historical evidence, not a runnable handoff; see the
-[owner procedure's hold](OWNER-PHASE-A.md) before any future use.
+[owner procedure's hold and handoff](OWNER-PHASE-A.md#before-start) before use.
+
+The candidate handoff binds an actual preparation UUID to
+`/home/c4/.local/state/relay-holder-handoff-<preparationId>` and the receipt
+`/home/c4/.config/relay-holder/used-handoffs/<preparationId>/complete.json`,
+including that receipt's SHA256. Fresh operator evidence must identify the
+corrected published holder and unchanged profiles, zero sessions and pending
+commands, recovery2/readiness, and normally resumed **new** admission. It does
+not release the old seal, reset accounting or create or extend an owner window.
 
 These are proposed, nonsecret inputs for owner review. Committing them does not
 approve profiles, issue credentials or enable an inventory host. The operator
@@ -47,8 +61,8 @@ it adds no budget, automatic approval or authority to resume stopped work.
 
 ## Fixed scope
 
-**First-registration hold (2026-11-26):** holder/Pi v0.13.1 source
-`2604c41b69c5d9c50a3324545a51f0bfa38435a0` is reviewed and merged in
+**Historical first-registration correction (2026-11-26):** holder/Pi v0.13.1
+source `2604c41b69c5d9c50a3324545a51f0bfa38435a0` is reviewed and merged in
 [Relay PR705](https://git.chifor.me/cchifor/relay/pulls/705). It contains the
 permission-review and structured configuration-refusal corrections. Publication
 completed in [run150672](https://git.chifor.me/cchifor/relay/actions/runs/150672).
@@ -86,10 +100,12 @@ matching file-hash references, across four JSON files. It does not replace an
 approved revision or create placeholder approvals. Runtime pins, IDs, bindings,
 scopes, settings and budgets stay unchanged.
 
-Before the new configuration replacement, refresh the existing authorized
-tenant-scoped readback for these same three profile IDs, including revoked
-revisions. The 14:26 snapshot is not continuing proof of absence. The prepared
-operator helper is `.data/observe-pi-profile-approvals-e843-20261126.mjs` in the
+The following first-registration instructions and readbacks are historical;
+they are not the current post-use handoff or a request to repeat registration.
+Before that configuration replacement, the procedure required refreshing the
+authorized tenant-scoped readback for the same three profile IDs, including
+revoked revisions. The 14:26 snapshot is not continuing proof of absence. The
+prepared helper is `.data/observe-pi-profile-approvals-e843-20261126.mjs` in the
 Relay workspace; it uses the existing read-only tenant context, not a new API.
 `GET /api/agent-profiles` is capped at200: absence from a full list cannot prove
 that an ID has no history. If any revision now exists, stop and derive the next
@@ -112,11 +128,12 @@ The required Router correction is merged source
 actual deployment/readiness separately. Updating the holder installer image
 does not imply another hub rollout.
 
-The canary remains started but never launched in the reported readback. Before
-replacing the installed revision3 configuration, prove eligibility through the
-complete journal and use [the sealed idle upgrade](UPGRADE-IDLE.md) with a fresh
-preparation operation and current pause/seal. Preserve the first upgrade backup. The
-never-started restaging helper is no longer applicable. Publication, offline
+The canary was started but never launched in that historical readback. Replacing
+the installed revision3 configuration required eligibility through the complete
+journal and [the sealed idle upgrade](UPGRADE-IDLE.md), with a fresh preparation
+operation and then-current pause/seal; the first upgrade backup was retained.
+Neither the never-started restaging helper nor the never-used-holder idle
+upgrade applies to the now-used holder. Publication, offline
 qualification, exact successor approvals, preserved-seal activation, managed
 readiness and live acceptance remain distinct steps. No inference is authorized
 by this documentation refresh.
@@ -264,10 +281,15 @@ native-state fence or discard histories to make startup pass. Directory emptines
 alone is not proof of process containment. Verify final artifact pins and the
 layout plan against the existing covered scope before execution.
 The [stopped-stage restaging procedure](RESTAGE-RECOVERY.md) applies only before
-any holder startup and requires no journal. The current started, never-launched
-canary instead requires [UPGRADE-IDLE.md](UPGRADE-IDLE.md): normal pause/seal,
-both holder services stopped, exact old-file/journal proof, four-file backup,
-normal role with `start:false`, then explicit activation and seal release.
+any holder startup and requires no journal. The earlier started, never-launched
+canary used [UPGRADE-IDLE.md](UPGRADE-IDLE.md): normal pause/seal, stopped
+services, exact old-file/journal proof, four-file backup and a role run with
+`start:false` before activation. Neither procedure is eligible after the
+recorded commands.
+The current candidate [post-use handoff](OWNER-PHASE-A.md#before-start) keeps
+that old state and seal intact and qualifies a separate new state directory;
+it is not an instruction to empty a native-home directory or release the old
+seal.
 
 Host `dev-worker-1`, connector `b3b1be1a-275c-4a2e-b515-428b39c43171`, execution
 user `c4`/UID 1000. Tenant `00000000-0000-4000-8000-000000000001`, router connection
@@ -549,20 +571,25 @@ Do not force state changes. If a binding cannot use either supported path,
 replacement requires a separately reviewed binding/profile procedure; do not
 silently change IDs or restart this already-used holder.
 
-Startup is a separate explicit operator action using the reviewed holder role
-after prerequisites pass. Activate the Codex/Qwen profiles first if Claude is
-still pending; keep the installed profile array unchanged. Follow the
+Any future startup of the new sibling state directory is a separate explicit
+operator action after corrected-holder qualification and the reviewed
+[preserving handoff](OWNER-PHASE-A.md#before-start). The initial-startup
+references below do not authorize a restart of the old sealed state. Use the
+retained Codex/Qwen profiles first if Claude is still pending. Keep the
+installed profile array unchanged. Follow the
 [canary holder runbook](../relay-pi-canary-holder.md) for service readbacks and
 [inference rollout](../relay-inference-sessions-20261124.md) for denial/approval,
 one effect, native history, branch/compact, cancellation, reconciliation, restart,
 warm measurement and active warm-to-cold rollback. Preserve all durable receipts.
-After startup, allow at most 120 seconds for a successful holder IPC `hello` on
-its state directory's `control.sock`, as the execution user. Require
+After that qualified startup, allow at most 120 seconds for a holder IPC
+`hello` on its state directory's `control.sock`, as the execution user. Require
 `nativeRecovery: 2`, `nativeStateReady: true` and exactly the three IDs in `profiles.json`; require zero
-sessions before the first acceptance launch. Service-active status alone does not
+sessions and pending commands before the first acceptance launch. Confirm fresh
+incarnation/journal identities and resumed new admission through the handoff;
+keep the old seal intact. Service-active status alone does not
 prove profile admission has finished. If readiness times out, stop acceptance and
 inspect the holder journal without replacing its state. This startup allowance is
 separate from each profile's inference request deadline.
-The pinned holder advertises recovery capability version2 for this canary's
+The required holder recovery capability is version2 for this canary's
 owned-history recovery, separately from its current native-state readiness;
 the [activation procedure](ACTIVATE-CODEX-QWEN.md) links the exact source contract.

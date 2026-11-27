@@ -23,9 +23,10 @@
   const COMMUNICATION_TOOL = "mcp__relay__relay_messages_read";
   const PROFILES_SHA256 =
     "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4";
-  const HOLDER_BINARY_SHA256 =
-    "0b1a7907f6da2ef6b5794621d87c55c2e0ee6d5aeb1c4e0fdf35c9031a127003";
-  // Existing revision-1 profiles and v0.13.1 holder pins stay unchanged.
+  // Filled only from the corrected holder's authenticated publication and
+  // retained-Pi qualification. A debug binary cannot qualify this input.
+  const QUALIFIED_HOLDER = null;
+  // Existing revision-1 profiles stay unchanged.
   // Qualification does not supply a deployed hub, credentials or owner window.
   const QUALIFIED_INPUTS = true;
   // Published holder 2604 appends a communication block to Pi local commands,
@@ -618,6 +619,82 @@
       cleanup,
       commands,
       prompt,
+    };
+  }
+  function preservingHandoff(v, priorLaunch, pins, earliest, now) {
+    need(
+      pins &&
+        /^v\d+\.\d+\.\d+$/.test(pins.release) &&
+        /^[a-f0-9]{40}$/.test(pins.source) &&
+        /^[a-f0-9]{64}$/.test(pins.binarySha256),
+      "Corrected published holder inputs are not qualified",
+    );
+    need(
+      priorLaunch?.journalId === HOLDER &&
+        uuid(priorLaunch.holderId) &&
+        Number.isFinite(earliest) &&
+        Number.isFinite(now) &&
+        earliest <= now,
+      "Stopped predecessor or handoff observation window changed",
+    );
+    const observed = Date.parse(v?.observedUtc);
+    need(
+      uuid(v?.preparationId) &&
+        v.oldHolderId === priorLaunch.holderId &&
+        v.oldJournalId === priorLaunch.journalId &&
+        uuid(v.holderId) &&
+        uuid(v.journalId) &&
+        v.holderId !== priorLaunch.holderId &&
+        v.journalId !== priorLaunch.journalId &&
+        v.stateDirectory ===
+          "/home/c4/.local/state/relay-holder-handoff-" + v.preparationId &&
+        v.handoffReceipt?.path ===
+          "/home/c4/.config/relay-holder/used-handoffs/" +
+            v.preparationId +
+            "/complete.json" &&
+        /^[a-f0-9]{64}$/.test(v.handoffReceipt?.sha256) &&
+        Number.isFinite(observed) &&
+        observed >= earliest &&
+        observed <= now + CLOCK_SKEW_MS &&
+        v.qualifiedRelease === pins.release &&
+        v.holderSource === pins.source &&
+        v.holderBinarySha256 === pins.binarySha256 &&
+        v.profilesSha256 === PROFILES_SHA256 &&
+        v.nativeRecovery === 2 &&
+        v.nativeStateReady === true &&
+        v.activeSessions === 0 &&
+        v.pendingCommands === 0 &&
+        v.admissionPaused === false &&
+        v.preservedOldStateConfirmed === true &&
+        v.operatorVerified === true,
+      "Qualified preserving holder handoff missing or changed",
+    );
+    // On a fresh root, the first incarnation is also its journal ID. They must
+    // each differ from the predecessor, but need not differ from each other.
+    return {
+      holderId: v.holderId,
+      journalId: v.journalId,
+      oldHolderId: v.oldHolderId,
+      oldJournalId: v.oldJournalId,
+      preparationId: v.preparationId,
+      stateDirectory: v.stateDirectory,
+      handoffReceipt: {
+        path: v.handoffReceipt.path,
+        sha256: v.handoffReceipt.sha256,
+      },
+      observedUtc: v.observedUtc,
+      qualifiedRelease: v.qualifiedRelease,
+      holderSource: v.holderSource,
+      profilesSha256: v.profilesSha256,
+      holderBinarySha256: v.holderBinarySha256,
+      nativeRecovery: 2,
+      nativeStateReady: true,
+      activeSessions: 0,
+      pendingCommands: 0,
+      admissionPaused: false,
+      preservedOldStateConfirmed: true,
+      provenance:
+        "operator-reported installed hashes, receipt and fresh hello; not a browser host measurement or a new acceptance window",
     };
   }
   function permission(detail, session, generation, expected, kind, now) {
@@ -3030,30 +3107,18 @@
       try {
         await this.explicitReview();
         if (prior) await this.replacementPreflight(prior);
+        const handoffStarted = this.now();
         const handoff = await this.ask(
-          "Fresh patched-holder handoff",
-          "Paste {holderId:UUID,journalId:UUID,nativeRecovery:2,nativeStateReady:true,qualifiedRelease:'v0.13.1',profilesSha256:OBSERVED_PROFILE_FILE_SHA256,holderBinarySha256:OBSERVED_INSTALLED_BINARY_SHA256,operatorVerified:true}. Use the current operator readback after stopped upgrade and explicit seal release, not copied expected hashes. The journal ID may survive while incarnation changes.",
-          (v) => {
-            need(
-              uuid(v?.holderId) &&
-                uuid(v?.journalId) &&
-                v.nativeRecovery === 2 &&
-                v.nativeStateReady === true &&
-                v.qualifiedRelease === "v0.13.1" &&
-                v.profilesSha256 === PROFILES_SHA256 &&
-                v.holderBinarySha256 === HOLDER_BINARY_SHA256 &&
-                v.operatorVerified === true,
-              "Qualified holder handoff missing",
-            );
-            return {
-              holderId: v.holderId,
-              journalId: v.journalId,
-              profilesSha256: v.profilesSha256,
-              holderBinarySha256: v.holderBinarySha256,
-              provenance:
-                "operator-reported installed file hashes; not a browser host measurement",
-            };
-          },
+          "Fresh preserving-holder handoff",
+          "Paste {holderId:NEW_INCARNATION_UUID,journalId:NEW_JOURNAL_UUID,oldHolderId:OLD_INCARNATION_UUID,oldJournalId:OLD_JOURNAL_UUID,preparationId:PREPARATION_UUID,stateDirectory:OBSERVED_NEW_STATE_PATH,handoffReceipt:{path:OBSERVED_COMPLETE_RECEIPT_PATH,sha256:OBSERVED_RECEIPT_SHA256},observedUtc:OBSERVED_UTC,qualifiedRelease:OBSERVED_RELEASE,holderSource:OBSERVED_SOURCE_SHA,holderBinarySha256:OBSERVED_INSTALLED_BINARY_SHA256,profilesSha256:OBSERVED_PROFILE_FILE_SHA256,nativeRecovery:2,nativeStateReady:true,activeSessions:0,pendingCommands:0,admissionPaused:false,preservedOldStateConfirmed:true,operatorVerified:true}. Use a fresh operator readback after the preserving handoff and normal resume of NEW admission in the existing owner window. Keep the old seal and state intact. Both new identities must differ from their predecessor; they may equal each other. This observation does not renew a window or reset accounting.",
+          (v) =>
+            preservingHandoff(
+              v,
+              prior.launch,
+              QUALIFIED_HOLDER,
+              handoffStarted,
+              this.now(),
+            ),
         );
         this.holderId = handoff.holderId;
         this.journalId = handoff.journalId;
@@ -3306,6 +3371,7 @@
     SOURCE,
     RUN_SOURCE,
     HOLDER_CONTROLS_QUALIFIED,
+    preservingHandoff,
     renewedCredentials,
     CONFIGURATION_CHANGED_NOTICE,
     ROUTER,
