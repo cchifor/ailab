@@ -103,7 +103,7 @@ class Gate:
         self.out_lock = threading.Lock()
         self.cond = threading.Condition(self.lock)
         self.seq = 0
-        self.busy = False
+        self.busy = None  # the owning handler's token, or None
         self.terminal = None  # None, "cancelled" or "observer-down"
         self.replies = {}  # seq -> raw reply line (bytes)
         self.waiting = None  # the seq currently awaited
@@ -185,7 +185,13 @@ class Gate:
             raise Bad("request-shape")
         return req
 
-    def handle(self, conn) -> None:
+    def release(self, token) -> None:
+        """Admission is released exactly once, and only by its owner (a successor may already hold it)."""
+        with self.cond:
+            if self.busy == token:
+                self.busy = None
+
+    def handle(self, conn, token) -> None:
         try:
             try:
                 req = self.read_request(conn)
@@ -225,8 +231,7 @@ class Gate:
                 diag("cancelled")
                 self.answer(conn, {"v": 1, "ok": False, "code": "cancelled"})
                 return
-            with self.cond:  # the request is complete: admit the next connection before sending (no busy race)
-                self.busy = False
+            self.release(token)  # the request is complete: admit the next connection before sending
             try:
                 conn.settimeout(READ_S)
                 conn.sendall(reply)
@@ -244,8 +249,7 @@ class Gate:
                 conn.close()
             except OSError:
                 pass
-            with self.cond:
-                self.busy = False
+            self.release(token)
 
     def await_reply(self, conn, seq, wait_until):
         """The host's reply for seq, or None on client disconnect, deadline or a terminal state."""
@@ -285,15 +289,16 @@ class Gate:
         self.emit({"ready": True})
         while True:
             conn, _ = srv.accept()
+            token = object()
             with self.cond:
-                busy = self.busy
+                busy = self.busy is not None
                 if not busy:
-                    self.busy = True
+                    self.busy = token
             if busy:
                 self.answer(conn, {"v": 1, "ok": False, "code": "busy"})
                 conn.close()
                 continue
-            threading.Thread(target=self.guarded, args=(self.handle, conn), daemon=True).start()
+            threading.Thread(target=self.guarded, args=(self.handle, conn, token), daemon=True).start()
 
     def guarded(self, fn, *args) -> None:
         """Any unexpected error in a gate thread is terminal (observer-down), never a silently dead thread."""
@@ -301,10 +306,9 @@ class Gate:
             fn(*args)
         except BaseException:  # noqa: BLE001
             diag("thread-error")
-            with self.cond:
-                self.terminal = "observer-down"
-                self.busy = False
-                self.cond.notify_all()
+            # Terminal AND visible: exit the process, so the host sees EOF and the gate's exit (observer fault, 9)
+            # instead of a live gate that silently answers nothing.
+            os._exit(3)
 
 
 def main() -> int:
