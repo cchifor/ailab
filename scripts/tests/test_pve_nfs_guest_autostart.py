@@ -1,8 +1,10 @@
-"""pve-nfs-guest-autostart: start onboot containers whose /mnt/pve bind source was late at boot.
+"""pve-nfs-guest-autostart: start onboot guests whose NFS storage was late at boot.
 
-Drives the real script against a fake /etc/pve lxc directory and a stub `pct` that records what it
-was asked to start. 2026-10-30: after a power cut the QNAP served NFS minutes after pve-guests ran,
-both LLM containers failed lxc.hook.pre-start and stayed down until started by hand.
+Drives the real script against fake /etc/pve lxc and qemu-server directories, a fake storage.cfg, and
+a stub `pct`/`qm` that records what it was asked to start. 2026-10-30: after a power cut the QNAP
+served NFS minutes after pve-guests ran, both LLM containers failed lxc.hook.pre-start and stayed down
+until started by hand. 2026-11-27: the NAS was powered on after the hosts, and the three Talos
+control-plane VMs (disks on qnap-nfs) stayed stopped the same way.
 """
 import os
 import shutil
@@ -44,6 +46,14 @@ class PveNfsGuestAutostartTests(unittest.TestCase):
         self.prefix = self.tmp / 'mnt[1]' / 'pve'
         self.prefix.mkdir(parents=True)
         self.ha = self.tmp / 'resources.cfg'
+        self.vmconf = self.tmp / 'qemu-server'
+        self.vmconf.mkdir()
+        self.storage = self.tmp / 'storage.cfg'
+        self.storage.write_text(
+            'dir: local\n\tpath /var/lib/vz\n\tcontent iso\n\n'
+            'lvmthin: local-lvm\n\tthinpool data\n\tvgname pve\n\n'
+            f'nfs: qnap-nfs\n\texport /pve-nfs\n\tpath {(self.prefix / "qnap-nfs").as_posix()}\n'
+            '\tserver 10.55.0.254\n\tcontent images\n', newline='\n')
         pct = self.tmp / 'pct'
         pct.write_text(PCT_STUB, newline='\n')
         pct.chmod(0o755)
@@ -61,11 +71,24 @@ class PveNfsGuestAutostartTests(unittest.TestCase):
         if state:
             self.set_state(ctid, state)
 
+    def vm(self, vmid, *lines, state=None):
+        (self.vmconf / f'{vmid}.conf').write_text('\n'.join(lines) + '\n', newline='\n')
+        if state:
+            self.set_state(vmid, state)
+
+    def vm_images(self, vmid, create=True):
+        d = self.prefix / 'qnap-nfs' / 'images' / str(vmid)
+        if create:
+            d.mkdir(parents=True, exist_ok=True)
+        return d
+
     def set_state(self, ctid, state):
         (self.state / str(ctid)).write_text(state)
 
     def run_script(self, wait_s=2):
         env = dict(os.environ, CONF_DIR=self.conf.as_posix(), PCT=self.pct.as_posix(),
+                   VM_CONF_DIR=self.vmconf.as_posix(), QM=self.pct.as_posix(),
+                   STORAGE_CFG=self.storage.as_posix(),
                    MOUNT_PREFIX=self.prefix.as_posix() + '/', STATE_DIR=self.state.as_posix(),
                    HA_RESOURCES=self.ha.as_posix(), WAIT_S=str(wait_s), STEP_S='1', PROBE_S='2')
         env.update(self.env)
@@ -238,6 +261,83 @@ class PveNfsGuestAutostartTests(unittest.TestCase):
         run = self.run_script()
         self.assertEqual(run.returncode, 1)
         self.assertEqual(self.started(), ['5002', '5003'])
+
+
+    # --- VMs with a disk on an NFS storage (the Talos control planes, ADR 0043) ---------------------
+    CP_DISK = 'scsi0: qnap-nfs:4001/vm-4001-disk-0.raw,discard=on,iothread=1,size=64G'
+
+    def test_starts_a_stopped_onboot_vm_once_its_nfs_storage_is_mounted(self):
+        self.vm_images(4001)
+        self.vm(4001, 'onboot: 1', self.CP_DISK, 'ide2: local-lvm:vm-4001-cloudinit,media=cdrom')
+        run = self.run_script()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.started(), ['4001'])
+        self.assertIn('VM 4001: started', run.stdout)
+
+    def test_waits_for_a_vm_storage_that_mounts_late(self):
+        images = self.vm_images(4001, create=False)
+        self.vm(4001, 'onboot: 1', self.CP_DISK)
+        self.later(1.5, lambda: images.mkdir(parents=True))
+        run = self.run_script(wait_s=10)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.started(), ['4001'])
+
+    def test_a_vm_whose_storage_never_mounts_is_not_started(self):
+        self.vm(4001, 'onboot: 1', self.CP_DISK)
+        run = self.run_script(wait_s=2)
+        self.assertEqual(run.returncode, 1)
+        self.assertIn('VM 4001:', run.stdout)
+        self.assertIn('NOT starting it', run.stdout)
+        self.assertEqual(self.started(), [])
+
+    def test_ignores_vms_without_an_nfs_disk(self):
+        # pve-guests already decided these: a local-lvm disk, or an NFS volume that is only an ISO.
+        self.vm(4101, 'onboot: 1', 'scsi0: local-lvm:vm-4101-disk-0,size=200G')
+        self.vm(4102, 'onboot: 1', 'scsi0: local-lvm:vm-4102-disk-0,size=200G',
+                'ide2: qnap-nfs:iso/talos.iso,media=cdrom')
+        run = self.run_script()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.started(), [])
+
+    def test_ignores_vm_templates_running_vms_and_vms_without_onboot(self):
+        self.vm_images(4001)
+        self.vm(4001, 'onboot: 1', 'template: 1', self.CP_DISK)
+        self.vm_images(4002)
+        self.vm(4002, 'onboot: 1', self.CP_DISK.replace('4001', '4002'), state='running')
+        self.vm_images(4003)
+        self.vm(4003, 'onboot: 0', self.CP_DISK.replace('4001', '4003'))
+        run = self.run_script()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.started(), [])
+
+    def test_leaves_ha_managed_vms_to_ha_manager(self):
+        self.vm_images(4001)
+        self.ha.write_text('vm: 4001\n\tstate started\n', newline='\n')
+        self.vm(4001, 'onboot: 1', self.CP_DISK)
+        run = self.run_script()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.started(), [])
+
+    def test_a_vm_started_by_hand_during_the_wait_is_not_started_again(self):
+        images = self.vm_images(4001, create=False)
+        self.vm(4001, 'onboot: 1', self.CP_DISK)
+
+        def started_by_hand():
+            self.set_state(4001, 'running')
+            images.mkdir(parents=True)
+        self.later(1.5, started_by_hand)
+        run = self.run_script(wait_s=10)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(self.started(), [])
+
+    def test_containers_and_vms_share_one_pass(self):
+        src = self.nfs_src()
+        self.ct(5002, 'onboot: 1', f'mp0: {src.as_posix()},mp=/models')
+        self.vm_images(4001)
+        self.vm(4001, 'onboot: 1', self.CP_DISK)
+        run = self.run_script()
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(sorted(self.started()), ['4001', '5002'])
 
 
 if __name__ == '__main__':

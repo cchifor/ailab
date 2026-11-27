@@ -30,54 +30,54 @@ qcli_sharedfolder -T sharename=pve-nfs HostIP=10.55.0.0/24 Permission=rw Squash=
 qcli_sharedfolder -T sharename=pve-nfs HostIP=10.55.1.0/24 Permission=rw Squash=no_root_squash secure=1 sync=1 wdelay=0
 ```
 
-## 2. Thunderbolt bridge service IP — persisted as code (no UI)
-The two TB ports auto-bridge into the **"Thunderbolt Bridge (System Default)"** (`tbtbr0`), and
-T2E activates automatically when a node's Thunderbolt interface comes up
-(`/etc/init.d/thunderbolt_net.sh` adds the port to `tbtbr0`) — so no manual "enable T2E" step.
+## 2. Thunderbolt bridge service IP — static, in QNAP's own config
+The two TB ports auto-bridge into the **"Thunderbolt Bridge (System Default)"** (`tbtbr0`, members `dummy0`,
+`tbtnet0p0`, `tbtnet1p0`). When a host's Thunderbolt link comes up, QNAP's IP monitor adds the port to the bridge
+(`qs_util -M thunderbolt -A add_thunderbolt_to_vswitch -I tbtnetNpM`, logged in `/var/log/network/nvs_event.log`), so
+there is no manual "enable T2E" step. (`thunderbolt_net.sh` also calls `network.sh tbtrestart`, which this firmware
+does not support: it does nothing.)
 
-`qcli_network` can't target the system bridge (no interface ID), so `scripts/qnap-setup.sh`
-installs an **idempotent reconciler** on the persistent DOM and a cron entry:
-- `/etc/config/tb-storage-ip.sh` → `ip addr add 10.55.0.254/24 dev tbtbr0` (only if missing)
-- `* * * * * /etc/config/tb-storage-ip.sh` in `/etc/config/crontab` (survives reboot)
+**The bridge has the static address `10.55.0.254/255.255.255.0`, no gateway** (set 2026-11-27). This is QNAP's
+supported setting ([FAQ](https://www.qnap.com/en/how-to/faq/con_show.php?cid=3434)): Network & Virtual Switch →
+Advanced → Virtual Switch → Thunderbolt Bridge (system default) → Configure → IPv4 → Use static IP address. With it,
+`S45network` (~86 s uptime) creates the bridge with the address, before `S46iSCSItrgt` binds the iSCSI portals (§12)
+and before `S99nfs`. `qcli_network` cannot do this: it lists virtual switches without an interface ID.
 
-The IP self-heals within ~1 min of any QNAP reboot — this is the **NFS service IP** the whole
-cluster mounts.
+Read-only check (all five must read as shown):
 
-**The reconciler alone comes too late at boot (found 2026-11-24).** QNAP's own config (`/etc/config/nm.conf`,
-`[tbtbr0]`) has the bridge as `ip4_type = DHCP`. Nothing serves DHCP on the Thunderbolt link, so the boot goes:
+```bash
+python scripts/qnap-ssh.py --sudo 'for k in ip4_type ip subnet_mask domain_name_server_type domain_name_server4_type; do printf "%s=%s " $k "$(/usr/local/bin/nacli getcfg -f /etc/config/nm.conf tbtbr0 $k)"; done; echo'
+# ip4_type=STATIC ip=10.55.0.254 subnet_mask=255.255.255.0 domain_name_server_type=1 domain_name_server4_type=1
+```
 
-| Uptime | Step | `tbtbr0` |
-|---|---|---|
-| ~86 s | `S45network` creates the bridge from `nm.conf` | link-local `169.254.x.x` |
-| 116-191 s | `S46iSCSItrgt` binds every target's portal to the bridge's address **once** | portals on `169.254.x.x` (§12) |
-| ~245 s | `S70crond` starts | link-local |
-| ~261 s | `S99nfs` starts NFS, then `S99thunderbolt.sh` loads the Thunderbolt driver and brings `tbtbr0` up; the ports join at ~281 s | link-local |
-| ~301 s | the reconciler's first run (the next cron minute): adds `10.55.0.254`, then the once-per-boot NFS re-export. `avahi-autoipd` then drops its link-local address | `10.55.0.254` |
+**The DNS type matters.** A static interface must have DNS type 1 ("manual", even with no DNS server): QNAP's network
+library rejects STATIC with DNS type 0 at boot (`check_config_value() >>> Incompatible dns_type: 0 due to ipv4 type is
+STATIC`), and then **does not create the bridge at all**. The UI sets it by itself. On 2026-11-24 the address was
+written with `nacli setcfg` instead, which changed only `ip4_type`, `ip` and `subnet_mask`, so the 2026-11-27 cold boot
+came up with no `tbtbr0`: no NFS (the control planes stayed stopped) and every iSCSI target bound to `127.0.0.1` only
+(§12). Fixed the same evening.
 
-`S99thunderbolt.sh` logs `Remove tbtbr0` on every boot, but it only deletes the bridge when the loop-prevention flag
-`/tmp/nasconfig_tmp/tbtbr_disable` exists, and it only creates one when QNAP's network manager is absent. Normally it
-does neither: on 2026-11-24, `dummy0` stayed port 1 from 86 s and the Thunderbolt ports joined as ports 2 and 3.
-(An earlier version of this section said S99 recreates the bridge without an address. That was wrong.)
+**If the UI refuses to edit the bridge** ("Invalid interface name"), its own list of interfaces still has the state
+of a boot where the bridge failed (it is rebuilt when QNAP's network service starts). QNAP's network library can still
+validate and apply the bridge in place, with no outage. This is what fixed 2026-11-27 (bridge built by hand that
+night, see `plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`, "Results"):
 
-**The two layers:**
-1. **Static IP in QNAP's config** (`ip4_type=STATIC ip=10.55.0.254 subnet_mask=255.255.255.0`, the same layout as
-   QNAP's static `lxcbr0`), so `S45network` gives the bridge the service IP before iSCSI (and NFS) start.
-   `scripts/qnap-tbtbr0-static-ip.sh` writes it through QNAP's network CLI (`nacli setcfg`). It is config-only (it
-   takes effect at the next NAS boot). With sessions logged in, it needs `LIVE_WRITE=1`, and then checks for 30 s that
-   the bridge keeps its address and no session drops. A write was measured to apply nothing live: no network-stack
-   watcher on `nm.conf`, and `nacli setcfg` has no apply step (`plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`).
-   **Status: written live 2026-11-24 13:48Z** (15:48 EET, the NAS clock) with `APPLY=1 LIVE_WRITE=1`. To revert, use
-   the on-NAS pre-image `/etc/config/nm.conf.bak-tbtbr0-20261124-154806` (or `REVERT=1 LIVE_WRITE=1`). Nothing changed on the running bridge (the
-   plan's "Results"). Check the current state with the read-only mode (`bash scripts/qnap-tbtbr0-static-ip.sh` says
-   `already as wanted`). **Not yet proven:** the first NAS boot after the write is the test. Run the plan's step 4
-   checks then, and record them in the plan.
-2. **The cron reconciler** (`/etc/config/tb-storage-ip.sh`, every minute). Its address line exists only because QNAP's
-   config said DHCP. Once the static config is proven at a boot, nothing is left for it to do at boot. **Keep it until
-   then:** the running bridge still has the DHCP config (`dhclient` and `avahi-autoipd` run on it), and the reconciler
-   is what put `10.55.0.254` there. After a boot that passes the plan's step 4 checks, drop its address line. Its
-   other job, the once-per-boot NFS re-export, is judged separately (plan, "Results").
+```bash
+python scripts/qnap-ssh.py --sudo 'N=/usr/local/bin/nacli; for f in /etc/config/nm.conf /var/run/network/nm.curr; do
+  $N setcfg -f $f tbtbr0 domain_name_server_type 1; $N setcfg -f $f tbtbr0 domain_name_server4_type 1; done
+  $N setup_by_config tbtbr0; echo rc=$?'
+# rc=0, and main.log shows check_config_value() >>> Exit 0. Without the nm.curr edit it fails on the boot-time
+# record and copies that record back over nm.conf.
+```
 
-The UI route (Control Panel → Network & Virtual Switch → Interfaces → Thunderbolt → Static) writes the same keys.
+**The cron reconciler** (`scripts/qnap-tb-storage-ip.sh`, deployed as `/etc/config/tb-storage-ip.sh` by
+`bash scripts/qnap-tb-storage-ip-install.sh`; `DRY_RUN=1` first) is the fallback:
+- it re-adds `10.55.0.254/24` if the bridge ever lacks it (redundant with the static config: drop this line once a NAS
+  boot has proven the config);
+- once per boot it compares the kernel export table's read-write entries for the Thunderbolt subnet with the 10GbE
+  subnet's, and restarts NFS only if the Thunderbolt subnet has fewer (2026-06-14: node1/node2 were read-only after a
+  NAS reboot). It logs when it acts (`grep tb-storage-ip /var/log/messages`). Until 2026-11-27 it restarted NFS on
+  every boot, which lands under control planes that have just started from this share.
 
 ## 3. Optional cleanup of default datasets
 The factory left empty datasets (`ZFS1_DATA`, `ZFS530_DATA`, `Public`, `zfs1107`). They're harmless
@@ -562,7 +562,7 @@ monthly scrub (§4) is not on that list: it is a latency event to watch, not an 
 checklist is in `docs/runbooks/node-maintenance.md`, "QNAP maintenance is control-plane maintenance". Never move,
 rename or snapshot-roll-back `images/` by hand.
 
-## 12. After a cold boot, iSCSI targets can be bound to a vanished address (2026-10-30, 2026-11-24)
+## 12. After a cold boot, iSCSI targets can be bound to a vanished address (2026-10-30, 2026-11-24, 2026-11-27)
 
 **Symptom:** after a site power cut every node is `Ready`, but every `qnap-iscsi` volume fails
 `MountDevice … failed to stage volume: iSCSI login failed` (Trident logs `iscsiadm` exit 19, a non-retryable
@@ -574,25 +574,29 @@ everything looks fine: the zpool is ONLINE, `iscsi-scstd` listens on 3260, and `
 all targets `enable`. Yet SendTargets discovery answers "No portals found" from every initiator.
 
 **Mechanism:** the targets are bound to interfaces (`tbtbr0,lo`), and `scst_util --load` (`S46iSCSItrgt`, uptime
-~116-191 s) resolves each one to an IPv4 **once**. At that moment `tbtbr0` holds only the link-local address
-(`169.254.6.247`) that QNAP gives it: QNAP's own config has the bridge as DHCP, and `10.55.0.254` comes only from our
-cron reconciler (§2; crond is `S70`), which adds `10.55.0.254` after the targets are already bound. Nothing
-re-resolves them. This happens on every boot. Whether
-it bites depends on timing (2026-11-01 came back clean four times). **Root-cause fix:** §2's static config,
-which puts `10.55.0.254` on the bridge at `S45network` (~86 s), before `S46`. Whether it is written: §2's read-only
-check. Whether it worked: the first NAS boot after it (`plans/2026-11-24-qnap-tbtbr0-static-ip-plan.md`, step 4).
-Check the binding directly:
+~116-191 s) resolves each one to an IPv4 **once**, and nothing re-resolves them later. Whatever `tbtbr0` holds at
+that moment is what the targets allow:
+- 2026-10-30 and 2026-11-24: the bridge was DHCP in QNAP's config, so it held only a link-local `169.254.6.247`;
+  `10.55.0.254` came later from the cron reconciler (§2; crond is `S70`).
+- 2026-11-27: the bridge was not created at all (§2, the DNS type), so every target allowed `127.0.0.1` only.
+
+**Root-cause fix:** §2's static config, which puts `10.55.0.254` on the bridge at `S45network` (~86 s), before `S46`.
+Check it with §2's read-only check. Check the binding directly:
 
 ```bash
 python scripts/qnap-ssh.py --sudo 'iscsiadmin get_allow_portal "$(iscsiadmin get_target | sed -n "1s/^target = \([^,]*\),.*/\1/p")"'
-# broken: "Allow portal = 169.254.6.247"   healthy: "Allow portal = 10.55.0.254" (plus 127.0.0.1 either way)
+# healthy: "Allow portal = 10.55.0.254" plus 127.0.0.1
+# broken:  "Allow portal = 169.254.6.247" plus 127.0.0.1, or 127.0.0.1 alone
 ```
 
 **Fix (as code):** `scripts/qnap-iscsi-portal-watchdog.sh`, installed by
 `bash scripts/qnap-iscsi-portal-watchdog-install.sh` (`DRY_RUN=1` first) into
 `/share/ZFS2_DATA/.iscsi-portal-watchdog/` with one root cron line (every minute). It restarts the target
 service (`/etc/init.d/iscsitrgt.sh restart`, ~80 s), which re-resolves the interfaces, when ALL of these hold:
-- some target's allowed portal is an IPv4 that no local interface holds;
+- some target's allowed portal is an IPv4 that no local interface holds, or its only IPv4 portal is `127.0.0.1`
+  (`0.0.0.0` and IPv6 count as reachable);
+- the NAS holds `10.55.0.254` now (`EXPECT_PORTAL`; empty disables the condition): without it, a restart binds the
+  targets to loopback again, so it logs once, raises a QuLog event, and waits;
 - every target's portal query succeeded and listed a portal (a failed query is "cannot judge", never
   "healthy");
 - the same picture showed on two consecutive runs (a bridge mid-rebuild moves the addresses); a run that
@@ -606,7 +610,9 @@ It writes actions and refusals to syslog (tag `iscsi-portal-watchdog`), a QuLog 
 `/share/ZFS2_DATA/.iscsi-portal-watchdog/watchdog.log` (on the pool, so it survives the reboot it is for).
 `sh …/watchdog.sh --check` is the read-only verdict (exit 0 ok, 1 stale, 2 cannot judge).
 
-**Manual fallback** (what fixed both incidents, if the watchdog is absent or refuses):
+**Manual fallback** (what fixed all three incidents, if the watchdog is absent or refuses). `10.55.0.254` must be
+on `tbtbr0` first (§2). Adding the portal per target with `iscsiadmin add_allow_portal` is not a fix: tested
+2026-11-27, the target listed the new portal but SendTargets still answered "No portals found".
 1. Back up `/etc/config/hero_iscsi_scst.json`, `hero_iscsi_scst_init_lun_acl.json` and `hero_zfs_lun.json`
    to `kubernetes/infra/_out/qnap-*.<date>-before-iscsi-restart`.
 2. Confirm nothing is logged in **NAS-wide**: the restart drops every initiator's sessions, not just one node's.

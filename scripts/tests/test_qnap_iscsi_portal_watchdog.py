@@ -2,8 +2,11 @@
 
 The watchdog restarts the NAS's iSCSI target service. The restart drops every session, so most of
 these tests are NEGATIVE: they pin the cases where it must NOT restart.
-  * A target is stale only when an allowed portal is an IPv4 that no local interface holds
-    (0.0.0.0, 127.0.0.1 and IPv6 values never count).
+  * A target is stale only when an allowed portal is an IPv4 that no local interface holds, or
+    when 127.0.0.1 is its only IPv4 portal (2026-11-27: tbtbr0 was never created at boot).
+    0.0.0.0 and IPv6 values count as reachable.
+  * It never restarts while the NAS lacks the storage address (EXPECT_PORTAL): the restart would
+    bind the targets to loopback again.
   * It acts on the second consecutive run that shows the same picture, never on the first, and a
     picture that changes between runs (a bridge rebuild in progress) resets the count.
   * Any logged-in session, or a session count it cannot parse, blocks the restart.
@@ -33,8 +36,10 @@ IP_GOOD = """\
 9: tbtbr0    inet 10.55.0.254/24 brd 10.55.0.255 scope global tbtbr0
 """
 IP_PLACEHOLDER = IP_GOOD.replace("10.55.0.254/24 brd 10.55.0.255", "169.254.6.247/16 brd 169.254.255.255")
+IP_NO_BRIDGE = IP_GOOD.replace("9: tbtbr0    inet 10.55.0.254/24 brd 10.55.0.255 scope global tbtbr0\n", "")
 PORTALS_GOOD = "Allow portal = 10.55.0.254\nAllow portal = 127.0.0.1\n"
 PORTALS_STALE = "Allow portal = 169.254.6.247\nAllow portal = 127.0.0.1\n"
+PORTALS_LOOPBACK_ONLY = "Allow portal = 127.0.0.1\n"
 
 STUBS = {
     # get_target serves $FIX/targets, then swaps in $FIX/targets_next if present, so a test can change
@@ -208,11 +213,71 @@ class WatchdogTest(unittest.TestCase):
             self.run_wd()
         self.assertEqual(self.restarts(), [])
 
+    # --- 2026-11-27: tbtbr0 was never created, so every target allowed 127.0.0.1 only -------------
+    def test_loopback_only_targets_are_stale_and_restarted_once_the_storage_address_is_up(self):
+        self.put("portals", PORTALS_LOOPBACK_ONLY)
+        self.put("portals_after", PORTALS_GOOD)
+        self.put("restart_fixes", "")
+        r = self.run_wd("--check")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("loopback-only", r.stdout)
+
+        self.run_wd()
+        self.assertEqual(self.restarts(), [], "must not act on the first sighting")
+        self.run_wd()
+        self.assertEqual(self.restarts(), ["restart"])
+        self.run_wd()
+        self.assertIn("recovered", self.log())
+
+    def test_no_restart_while_the_storage_address_is_missing(self):
+        # The bridge does not exist yet: a restart would bind the targets to loopback again.
+        self.put("ip", IP_NO_BRIDGE)
+        self.put("portals", PORTALS_LOOPBACK_ONLY)
+        for _ in range(4):
+            self.run_wd()
+        self.assertEqual(self.restarts(), [])
+        self.assertEqual(self.log().count("is not on the NAS"), 1, "logged once, not every minute")
+        self.assertEqual(self.read("qulog").count("is not on the NAS"), 1)
+        self.assertEqual(self.run_wd("--check").returncode, 1, "the verdict is still STALE")
+        # The bridge comes up: a new picture, then the second identical run restarts.
+        self.put("ip", IP_GOOD)
+        self.run_wd()
+        self.assertEqual(self.restarts(), [])
+        self.run_wd()
+        self.assertEqual(self.restarts(), ["restart"])
+
+    def test_a_vanished_portal_waits_for_the_storage_address_too(self):
+        self.put("ip", IP_NO_BRIDGE)
+        self.put("portals", PORTALS_STALE)
+        for _ in range(3):
+            self.run_wd()
+        self.assertEqual(self.restarts(), [])
+
+    def test_an_empty_expect_portal_disables_the_address_condition(self):
+        self.put("ip", IP_NO_BRIDGE)
+        self.put("portals", PORTALS_STALE)
+        self.run_wd(EXPECT_PORTAL="")
+        self.run_wd(EXPECT_PORTAL="")
+        self.assertEqual(self.restarts(), ["restart"])
+
+    def test_a_wildcard_portal_counts_as_reachable(self):
+        self.put("portals", "Allow portal = 0.0.0.0\nAllow portal = 127.0.0.1\n")
+        for _ in range(3):
+            self.run_wd()
+        self.assertEqual(self.restarts(), [])
+        self.assertEqual(self.run_wd("--check").returncode, 0)
+
+    def test_one_loopback_only_target_among_healthy_ones_is_stale(self):
+        self.put(f"portal.{self.key(2)}", PORTALS_LOOPBACK_ONLY)
+        r = self.run_wd("--check")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("1 binding(s) on 3 targets", r.stdout)
+
     def test_changing_picture_resets_the_debounce(self):
         self.cold_boot()
         self.run_wd()
         # The bridge is mid-rebuild: the local addresses moved since the last run.
-        self.put("ip", IP_GOOD.replace("9: tbtbr0    inet 10.55.0.254/24 brd 10.55.0.255 scope global tbtbr0\n", ""))
+        self.put("ip", IP_NO_BRIDGE)
         self.run_wd()
         self.assertEqual(self.restarts(), [])
         self.put("ip", IP_GOOD)

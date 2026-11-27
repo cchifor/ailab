@@ -1,7 +1,8 @@
 # Give the QNAP Thunderbolt bridge its service IP at boot (static `tbtbr0`)
 
-Status: written live 2026-11-24 13:48Z (15:48 EET on the NAS; no window, no outage). Proof pending: the first NAS boot after it (see
-"Results") · Created: 2026-11-24 · Script: `scripts/qnap-tbtbr0-static-ip.sh`
+Status: **the first NAS boot after the write (2026-11-27) FAILED**: the written config was incomplete (DNS type), so the
+bridge was not created. Fixed the same evening through QNAP's own validation path, and the script below was deleted
+(see "Results"; runbook §2 is current) · Created: 2026-11-24 · Script: `scripts/qnap-tbtbr0-static-ip.sh` (deleted)
 Follows the 2026-11-24 power cut, the second outage of this kind. The first was 2026-10-30. Runbook:
 `docs/runbooks/qnap-storage-setup.md` §2 and §12. Backstop already live: the iSCSI portal watchdog (#1974).
 
@@ -115,8 +116,28 @@ reported, because counts lag a real flush and move for unrelated reasons. An unk
     - the watchdog check reports `ok: 44 targets … sessions=30`;
     - 7/7 nodes are Ready, with no unhealthy pod;
     - etcd shows the same raft index on all three members.
-- **First NAS boot after it:** pending. Record the step 4 checks: `bootup.log` says `STATIC`, the portals are on
-  `10.55.0.254` from boot (`hero_iscsi_scst.log`), and `watchdog.log` shows no restart.
+- **First NAS boot after it (2026-11-27, cold boot; the hosts were powered on ~6 min before the NAS): FAILED.**
+  - `bootup.log` at `S45network`: `check_config_value() >>> Incompatible dns_type: 0 due to ipv4 type is STATIC` →
+    `setup_by_config tbtbr0 failed`. **The bridge was not created at all.** The write had set `ip4_type`, `ip` and
+    `subnet_mask`, but every STATIC interface on the NAS (eth1, lxcbr0, docker0, lxdbr0) also has
+    `domain_name_server_type = 1` and `domain_name_server4_type = 1`; `/lib/libnetworkinterface.so` contains "With
+    'STATIC' IPv4_type, force setting dns_type to manual(1)", which QNAP's UI path does and `nacli setcfg` does not.
+    The claim above that the layout is "the same as QNAP's other static virtual switches" was never diffed.
+  - Consequences: the cron reconciler had no bridge to address; every host's NFS gate timed out, so all three CPs stayed
+    stopped; QNAP's own Thunderbolt hotplug (`add_thunderbolt_to_vswitch`) failed with `-0x1105`; and `S46` bound every
+    iSCSI target to `127.0.0.1` only, which the watchdog read as healthy.
+  - Recovery that night (~10 min): the bridge built by hand (`ip link add tbtbr0 type bridge`, members, address), an
+    `iscsitrgt.sh restart` at 0 sessions, `qm start` of the CPs.
+  - Fix (22:31–22:34 EET, cluster up, 31 iSCSI sessions, no interruption: 0 failures in ~200 one-second probes from
+    each host): QNAP's UI edit (`PUT /netmgr/api.fcgi/api/vswitch/n/tbtbr0`, which runs `qs_util -M vswitch -A edit`)
+    was refused ("Invalid interface name": its interface list still had the boot's failed state). `nacli setup_by_config
+    tbtbr0` takes the in-place `alterdev` path but first validates the boot-time record in `nm.curr`, failed on the
+    same DNS type, and copied that record back over `nm.conf`. With the two DNS keys set to 1 in both `nm.conf` and
+    `nm.curr`, it passed (`check_config_value() >>> Exit 0`, rc 0) and committed `nm.conf`. QNAP's hotplug command then
+    succeeded on a port ("Setup by Config Success : 0x0"). Runbook §2 has the procedure.
+  - Still to prove at the next NAS boot: `bootup.log` has no "Incompatible", `tbtbr0` comes up at `S45` with
+    `10.55.0.254`, the portals are on `10.55.0.254` from boot, `watchdog.log` and `grep tb-storage-ip
+    /var/log/messages` show no action, and the CPs start without help.
 
 The window procedure below is kept as the first written planned-NAS-outage procedure (for firmware updates or pool work),
 not as a precondition of this change. Its steps 3–4 apply to any planned NAS reboot.
