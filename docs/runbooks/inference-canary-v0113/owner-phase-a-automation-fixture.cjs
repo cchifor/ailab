@@ -904,7 +904,9 @@ async function createFixture(directory, outputDirectory) {
         (o) => o.body?.operationId === body.operationId,
       );
       assert(intent, "actual durable operation before socket dispatch");
-      assert.equal(intent.status, "sending");
+      // Runner.cleanup records this separate status before its once-only POST.
+      // The operation ID, complete body and path must still match exactly.
+      assert(["sending", "cleanup-dispatch"].includes(intent.status));
       assert.equal(intent.path, pathname);
       assert.deepEqual(intent.body, body);
     } else if (!body.leaseId) {
@@ -1067,8 +1069,10 @@ async function createFixture(directory, outputDirectory) {
     assert.equal(context.version, 1);
     assert(Object.isFrozen(context));
     contexts.push(clone(context));
-    if (context.notBefore)
-      await delay(Math.max(0, context.notBefore - Date.now() + 2), undefined, {
+    // A duration timer does not prove a wall-clock boundary was reached.
+    // Recheck after every wake; retain cancellation and real observed timestamps.
+    while (context.notBefore && Date.now() < context.notBefore)
+      await delay(Math.max(1, context.notBefore - Date.now() + 2), undefined, {
         signal,
       });
     const now = Date.now();

@@ -22,6 +22,7 @@ test(
     const reportFile = path.join(directory, "original.json");
     fs.writeFileSync(reportFile, f.raw, { mode: 0o600 });
     const reportHash = createHash("sha256").update(f.raw).digest("hex");
+    const observations = [];
     const records = [],
       signals = new EventEmitter();
     const stop = () => signals.emit("SIGTERM");
@@ -37,7 +38,13 @@ test(
           RUNNER_DEADLINE: String(f.deadline),
         },
         signals,
-        collectCheckpoint: f.collectCheckpoint,
+        collectCheckpoint: async (options) => {
+          const value = await f.collectCheckpoint(options);
+          observations.push(
+            JSON.parse(JSON.stringify({ context: options.context, value })),
+          );
+          return value;
+        },
         observeDeployment: f.observeDeployment,
         predecessorEvidencePin: f.projectionPin,
         readPredecessorEvidence: f.readPredecessorEvidence,
@@ -200,6 +207,10 @@ test(
       if (process.env.SYNTHETIC_HOST_EVIDENCE) {
         const target = process.env.SYNTHETIC_HOST_EVIDENCE;
         fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+        fs.writeFileSync(
+          path.join(target, "returned-observations.json"),
+          JSON.stringify(observations, null, 2),
+        );
         fs.writeFileSync(
           path.join(target, "http-trace.json"),
           JSON.stringify(f.requests, null, 2),
