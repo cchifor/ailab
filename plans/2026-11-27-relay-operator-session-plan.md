@@ -1,5 +1,13 @@
 # Bounded Relay session for automated phase A (relay-operator `session`)
 
+## Codex Review
+
+- The revision resolves the main transport, fixed-scope, request-reconstruction and binding-revocation concerns; the qualified rotation and login-binding claims match Relay v0.14.1.
+- Permission decisions and resume need exact contract corrections, and launch provenance still admits a replay from an earlier run of the same JIT user.
+- Cleanup must retain existing control leases while refusing new approvals; deadline enforcement, reaper coordination and reaper privileges need tighter definitions.
+- Verify the copied bundle's actual bytes and reviewed provenance, and preserve proxy evidence on failure paths before removing containers.
+- Deferring adapter integration is reasonable, but its acceptance gate must include complete predecessor receipts, observer prerequisites and exercised cleanup behavior.
+
 ## Context
 
 On 2026-11-27 the owner directed: "Automate the implementation, you should not require me to manually execute relay
@@ -77,12 +85,14 @@ The orchestrator takes no scope parameters. A change of scope is a reviewed code
       the Runner's reviewed responsibility;
     - POST `/api/agent-permissions/:pid/decision` `{operationId, optionId, generation}`, once per pid, the pid
       learned under a learned sid.
+      <!-- codex: [P1] Relay's PermissionDecision schema requires {operationId, generation, outcome:{outcome:"selected", optionId}} or outcome:{outcome:"cancelled"}; the proposed top-level optionId is rejected and cannot express Runner.cleanup() cancellation. Use the deployed nested union and test both ordinary decisions and cancellation while retaining the Runner's full permission-input validation. -->
   - Admin:
     - POST `/api/router-credentials/:binding/rotate` `{operationId, revision}`, a fixed binding, at most once per
       binding per run;
     - GET `/api/agent-sessions/:sid/native-recovery`;
     - POST `/api/agent-sessions/:sid/resume` `{operationId, generation}`. `acknowledgeUnknownToolEffects` must be
       absent or false.
+      <!-- codex: [P2] native-recovery.ts accepts acknowledgeUnknownToolEffects only as an optional literal true, so forwarding false also fails validation. Require omission upstream, normalizing an accepted false away during trusted reconstruction, and cover that case in the contract tests. -->
   - **Binding revoke is NOT in this session.** Revoking a binding disables every generation, including credentials
     in use elsewhere; the final revocation is a separate reviewed operation after acceptance.
 - **Learned IDs carry provenance, not loose sets.**
@@ -90,7 +100,9 @@ The orchestrator takes no scope parameters. A change of scope is a reviewed code
     GET `/api/agent-launches` row whose `operation_id` is one this run dispatched AND whose `actor_id` is the JIT user
     AND whose `profile_id` / `profile_revision` match the dispatched body. That second path reconciles a lost POST
     response read-only, without resending the launch.
+    <!-- codex: [P2] A resume request has no profileId or revision in its body, so this reconciliation rule cannot match its lost response as written. Record the learned source launch's profile/revision/cwd and require the recovered row's resume_from and resume_generation to match the dispatched sid/generation, applying equivalent provenance checks to direct POST responses. -->
   - A replayed launch receipt that predates this run (wrong actor or operation) is refused.
+    <!-- codex: [P1] An earlier run of this same JIT user has the same actor_id, and a Runner can copy its operation_id from the unfiltered inventory; profiles.ts returns the old launch for that actor/operation pair even under a new login. Add independently established run freshness, such as proxy-owned fresh upstream operation IDs or validated server creation-time provenance, and test a replay with the same actor, operation, profile and cwd rather than only mismatched fields. -->
   - A session is learned only from a learned launch's `session_id`.
   - A lease is learned from POST `/control` (`id`, `generation`, `expires_at`) and bound to its sid and generation.
   - A permission is learned from `/permissions` rows of a learned sid, with `id`.
@@ -100,6 +112,7 @@ The orchestrator takes no scope parameters. A change of scope is a reviewed code
 - **Bounds.**
   - The server is a `ThreadingHTTPServer` on the socket, so a slow request cannot starve the Runner's 20 s
     lease heartbeat.
+    <!-- codex: [P2] ThreadingHTTPServer creates unbounded handler threads, and the upstream timeout does not bound clients stalling request headers/body reads or response writes. Bound client I/O and concurrent handlers, preserving heartbeat/cleanup capacity, and test stalled Unix-socket clients alongside lease renewal. -->
   - Each upstream call has a 30 s total wall-clock deadline (connect, headers and body) and at most 8 MiB of
     response, read incrementally; it is aborted otherwise.
   - Responses pass through with `Set-Cookie` removed.
@@ -109,8 +122,11 @@ The orchestrator takes no scope parameters. A change of scope is a reviewed code
   grant) and an earlier `runner_deadline`.
   - After `runner_deadline` only cleanup-shaped requests pass: GETs, DELETE `/control`, `cancel` / `close` commands
     and permission decisions.
+    <!-- codex: [P1] This excludes renewal of an already owned control lease, although control.ts caps leases at 60 seconds and requires a live lease even for cancel/close; Runner.renew() also stops when cleaning is true. Permit renewal only of the existing learned sid/generation/lease during cleanup and make the adapter keep that heartbeat alive, or the advertised cleanup window can expire before Close is dispatched. -->
+    <!-- codex: [P1] Unrestricted permission decisions are not cleanup-only: selecting an allow option can authorize new tool effects after runner_deadline. Restrict this phase to outcome:{outcome:"cancelled"} for already learned permissions and test that approval selections are refused. -->
   - At `cleanup_deadline` everything is refused, the proxy logs out (logout plus `/api/auth/me` must answer 401) and
     exits.
+    <!-- codex: [P1] Define the wall-clock-to-monotonic conversion and recheck deadlines immediately before upstream dispatch, with in-flight I/O capped by the remaining budget. A fixed 30-second call timeout otherwise outlives a nearby cutoff; aborting HTTP must leave an already dispatched mutation recorded as uncertain, not imply that Relay cancelled it. -->
   - SIGTERM and SIGINT log out first.
   - Exit codes: 0 means logout confirmed, 4 means not confirmed.
 - **Evidence log** (stderr, flushed per line, JSON). One line per request: time, method, route template, path IDs
@@ -126,10 +142,13 @@ relay-operator.py session --bundle DIR --bundle-sha256 HEX --image REF@sha256:â€
 1. **Before any authority.**
    - Validate the arguments: N at most 50; the image is a digest reference; the bundle's manifest (every file +
      sha256, the entrypoint) hashes to `--bundle-sha256`.
+     <!-- codex: [P2] Identify the reviewed commit or published artifact that supplies the expected manifest and image digests, and record that association in run evidence. Matching caller-supplied hashes establishes integrity but not review provenance, which matters because prompt/attempt and permission validation remain entrusted to the bundle. -->
    - Copy the bundle to a private temp dir, so the mounted copy is the verified copy.
+     <!-- codex: [P1] Hash every actual file in the private copy against the manifest after copying; hashing the manifest alone, or checking source files before copying, does not verify the mounted bytes. Require an exact file set and entrypoint, reject escaping paths and symlinks, and test source mutation during copy plus an altered file with an unchanged manifest. -->
    - Fix `cleanup_deadline = now + N + 10 min` and `runner_deadline = now + N`.
 2. **Serialize.** Create the Kubernetes Lease `relay-operator-jit` in namespace `relay` (holder = run id, duration =
    until `cleanup_deadline`). If a live Lease exists, refuse. `call` takes the same Lease, for its duration.
+   <!-- codex: [P1] Define atomic Lease takeover/release, reaper exclusion and stale-holder fencing: a reaper can observe no live Lease and delete memberships after a new run grants them, while an expired run's late finally can revoke or release its successor. Serialize cleanup and admission under an ownership-preserving protocol, clear orphan authority before granting anew, and test both interleavings rather than only two simultaneous creates. -->
 3. **Grant, inside one `try/finally`.**
    1. Grant admin (member.js).
    2. Start the proxy container, detached and hardened: pinned IMAGE, `--read-only`, `--cap-drop ALL`,
@@ -144,8 +163,10 @@ relay-operator.py session --bundle DIR --bundle-sha256 HEX --image REF@sha256:â€
    5. At `runner_deadline`, SIGTERM the Runner (it runs `Runner.stop()` and its cleanup). Wait for it until
       `cleanup_deadline âˆ’ 2 min`, then kill and remove it. The proxy keeps the session valid for that cleanup.
    6. `docker stop -t 30` the proxy, then capture its exit code and logs into `--evidence-dir/proxy.jsonl`.
+      <!-- codex: [P2] Logout plus /api/auth/me can consume two 30-second upstream budgets, exceeding this stop grace even when each request meets its bound. Give logout a shared budget shorter than the grace and allocate explicit cumulative budgets for the following cleanup stages within the reserved two minutes. -->
 4. **`finally`: bounded and independent stages.** Every subprocess has a timeout, SIGTERM and SIGINT become an
    exception, and `BaseException` is caught per stage.
+   <!-- codex: [P1] READY timeout, SIGTERM or a Runner exception can skip step 3.6 and enter finally, which removes the proxy before its logs or exit status are captured. Start continuous proxy-log capture into pre-opened evidence files, retain a bounded final drain/inspect before removal on every path, and stop new work if evidence persistence fails. -->
    1. Force-remove both containers.
    2. Delete the subject's memberships and sessions and read back `0 memberships, 0 sessions`; rc 3 if not.
    3. Keycloak SSO logout.
@@ -159,10 +180,12 @@ relay-operator.py session --bundle DIR --bundle-sha256 HEX --image REF@sha256:â€
 A CronJob, `relay-operator-reaper` in namespace `relay`, runs every 5 minutes. If the JIT subject has any membership or
 session AND no unexpired `relay-operator-jit` Lease exists, it deletes them (the same SQL as `revoke()`) and logs one
 line. This bounds a SIGKILL of the orchestrator, or the loss of the workstation, to the Lease end plus 5 minutes.
+<!-- codex: [P1] A CronJob schedule is best-effort, and the reaper's DELETE can wait behind Relay's actorTenant membership/session locks, so this is not an unconditional five-minute revocation bound. Gate use on a successful deployed reaper check, qualify scheduler/API/database availability, and specify missed-run/failure alerting plus database lock/statement and Job deadlines; a rendered manifest and happy-path SQL test do not establish the claimed backstop. -->
 
 - It uses its own minimal service account, scoped to reading that Lease plus exec on relay-postgres-0. Alternatively
   it uses a dedicated database role allowed only those two DELETEs. The cheaper one that is still narrow is chosen at
   implementation time.
+  <!-- codex: [P1] Exec on relay-postgres-0 permits arbitrary commands and effectively database-superuser access, not just revocation of this subject; ordinary DELETE grants on the two tables are also not restricted to these particular statements or rows. Choose an enforced fixed-subject database operation, such as a narrowly executable function, and include its role, readback rights, credentials, Lease RBAC and necessary network-policy changes in the IaC scope. -->
 
 ### 4. Docs
 
@@ -188,6 +211,7 @@ fabricated attestations or weakened validators:
    projection of the predecessor session's command operations (id, kind, state, timestamps, no prompt text) as an
    evidence file pinned by sha256. The adapter's validator accepts that file in place of the live lookup. The
    inference session decides whether this is sound.
+   <!-- codex: [P1] The proposed projection omits evidence required by completed() and replacementPreflight(): operation_id, session_id, generation and native receipt status/result.stopReason or result.cancelSent. Include those sanitized fields and bind the export to the exact predecessor/report and authoritative query provenance; id/kind/state/timestamps alone would force the adapter to weaken the existing settlement checks. -->
 4. **The `env.ask()` observations** (holder, workspace markers, Router trajectory, renderer cleanup) need access beyond
    Relay. A separate, later plan adds an operator "observer" with fixed read-only queries on its own socket; this
    proxy does not grow for it.
@@ -231,7 +255,7 @@ fabricated attestations or weakened validators:
    membership gone, and the reaper finds nothing to do.
 6. **Codex implementation review** before the PR; then the normal reviewbot gate.
 
-<!-- codex: [P1] Exercise the actual pinned adapter and exported Runner through the proxy across stopped-run replacement, renewal, five launches including two resumes, permission decisions and cleanup, preserving deployed field names and actor-scoped operation lookup. Add an isolated server-backed check that ordinary issued credentials and queued revocations reconcile after JIT membership removal, and that a different login for the same user cannot renew, command through or release the original lease. -->
+<!-- codex: round-2: [P1] Deferring the adapter exercise to its prerequisite PR and omitting a disposable Relay stack are reasonable; source inspection supports the unchanged login-binding logic. However, step 5 must explicitly gate real execution on the reviewed adapter/observer and deployed-version pins, require integration evidence for five launches including two resumes, permission decisions and deadline cleanup, and read credentials after removal through an independent read-only identity: the reaper only removes login authority and cannot verify those behaviors. -->
 <!-- opus-pushback: The actual-adapter run cannot be part of this change because the adapter does not exist yet (it is the inference session's prerequisite PR); it becomes verification step 5's first real run, gated on that PR. A disposable Relay server stack to prove post-removal reconciliation and lease-session binding is out of proportion: the lease binding is enforced in control.ts by actor.userId+sessionHash, which the deployed code shows, and post-removal reconciliation is checked by step 5's live readback with the reaper as the backstop. -->
 
 <!-- codex-review-status: complete -->
