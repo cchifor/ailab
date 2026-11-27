@@ -9,6 +9,7 @@ SELECT json_build_object(
 FROM public.holder_router_installations i
 LEFT JOIN public.router_credential_consumers c ON c.tenant_id = i.tenant_id AND c.binding_id = i.binding_id
   AND c.credential_id = i.credential_id AND c.generation = i.generation AND c.state = 'active'
+  AND c.host_id = :'host_id'::uuid
 WHERE i.tenant_id = :'tenant'::uuid AND i.launch_id = :'launch_id'::uuid AND i.session_id = :'session_id'::uuid
   AND i.binding_id = :'binding_id'::uuid AND i.credential_id = :'credential_id'::uuid;
 COMMIT;

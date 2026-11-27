@@ -14,7 +14,9 @@
    "historicalKey": "key_d72ca9b617b83281d4a2706393693b61",
    "account": "codex",
    "model": "gpt-6-astra",
-   "cwd": "/home/c4/.local/state/relay-holder/workspaces/1d9a7d6e-4b26-49fd-9053-7b0a22e1baae"
+   "cwd": "/home/c4/.local/state/relay-holder/workspaces/1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
+   "protocol": "openai-responses",
+   "definitionHash": "0e15b7e39b0241c692b305c6c8d2f4579843c8e7fcfb86ea37534ab996fd194d"
   },
   "qwen": {
    "id": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
@@ -23,7 +25,9 @@
    "historicalKey": "key_9b01832ad0609853be340e03968b7d50",
    "account": "lan-192.168.0.28-18020",
    "model": "qwen3.8-27b",
-   "cwd": "/home/c4/.local/state/relay-holder/workspaces/f25c187b-1e50-4c7c-860e-52947bfdf39e"
+   "cwd": "/home/c4/.local/state/relay-holder/workspaces/f25c187b-1e50-4c7c-860e-52947bfdf39e",
+   "protocol": "openai-chat",
+   "definitionHash": "4ceab5d4122eab6b54ae04196feea258d4d290be381d6c018186f982c8081928"
   }
  },
  "router": {
@@ -88,14 +92,31 @@
    "control-plane",
    "--holder-dir",
    "/home/c4/.local/state/relay-holder-handoff-256a052b-75a6-4701-96ad-8b12afeaa50f"
-  ]
+  ],
+  "sealId": "5047800f-d9fd-4db0-be86-3fee445b94d2",
+  "oldJournalSha256": "299aafb6e3a84794287aff229e7525dcdcabd0b4082fb4948d9fbdb51f33e20b",
+  "newJournalId": "91e44418-a839-400a-a034-7172cf727f8e",
+  "artifacts": {
+   "relay-holder.service": "f0543d3f82fa135e95d0bd4421fb1042e2dc7c6f9a5b64019763444e417460de",
+   "relay-holder-control-plane.service": "ea017251d189982632ef9a7e8e40b1cfabbf3de8a742113da25240590e4d4550",
+   "service.json": "61cbe6c3926a48ec683e5174e617c9454dfc11284967ab5e2690d1d8199d4ca1",
+   "profiles.json": "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4"
+  }
  },
  "historicalRows": [
-  {"prefix": "338869f5-", "status": "complete"},
-  {"prefix": "811cab9f-", "status": "cancelled"}
+  {
+   "prefix": "338869f5-",
+   "status": "complete"
+  },
+  {
+   "prefix": "811cab9f-",
+   "status": "cancelled"
+  }
  ],
  "predecessor": {
-  "rawSha256": null,
-  "markerFiles": {"denied": {"state": "absent"}, "effects": {"state": "absent"}}
- }
+  "note": "the raw SHA-256 is pinned by the session manifest's observer.predecessorSha256; the historical scope and marker baseline are read from the report itself"
+ },
+ "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+ "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+ "configurationChangedNotice": "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used."
 }
