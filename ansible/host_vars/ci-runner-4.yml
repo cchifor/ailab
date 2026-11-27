@@ -5,3 +5,9 @@
 # (docs/runbooks/registry-cache.md): this window, with its 5-min tail, ends by 03:15, before it, every day.
 gitea_runner_fstrim_window_start: "01:30"
 gitea_runner_fstrim_window_end: "03:10"
+
+# workbricks PULL-REQUEST jobs run only on runners with this label - every runner except the push runners
+# ci-runner-3/-6 - so no runner switches between workbricks' push and pull_request caches (each switch
+# was a cold ~34 GiB Rust target rebuild). Why and the rollout order: docs/runbooks/ci-runners.md,
+# "workbricks push runners". Every other job keeps running on self-hosted-hv here.
+gitea_runner_extra_labels: [workbricks-pr]

@@ -228,12 +228,25 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
   - **Effect.** The other runners hold only the pull_request cache, under the cap.
     - Their stale push targets go by age through the Cargo target sweep above (72h unread, on-prem) or by
       workbricks' own least-recently-used cap.
-    - ci-runner-3/-6 still take workbricks pull requests now and then, so they can still churn. Removing
-      that needs a workbricks pull-request label the push runners lack.
+    - **Pull requests get their own label too (2026-11-27).** With only `workbricks-push`, ci-runner-3/-6 still
+      took workbricks pull requests, and a replay of 7 days (515 jobs) showed them switching events 6.3/6.5
+      times a day - more than before (1.6/1.9), each a cold target pair - and ci-runner-6 stayed in
+      `CIRunnerDiskPressureSustained`. So every OTHER runner (ci-runner-1, -2, -4, -5, -9, -10) declares
+      `workbricks-pr`, and workbricks' `runs-on` names it for pull requests: the replay gives 0 switches on
+      every runner. Only workbricks routes on these labels; every other repo's jobs still use all eight
+      runners through `self-hosted-hv`.
+    - **Order:** `workbricks-pr` must be live on all six (converge each as under "Changing the set" below:
+      with the runner RUNNING and no task in flight, since the label change restarts the daemon; then check
+      the forge lists it) BEFORE workbricks' `ci.yml` names it, or its pull requests wait. Keep at least two
+      `workbricks-pr` runners on different nodes; removing the label from a runner is safe only while others
+      carry it.
   - **One node.** Both push runners are on ai-node3, the least-worn NVMe. While that node is down or in
     maintenance, every workbricks push job waits; pull requests keep running elsewhere.
-    - **Fallback:** add `workbricks-push` to a runner on another node (its host_vars, then a converge as under
-      "Changing the set").
+    - **Fallback:** move a runner on another node from `workbricks-pr` to `workbricks-push`: set its
+      `gitea_runner_extra_labels` to `[workbricks-push]` ALONE (replace, do not append - a runner carrying
+      both labels takes both events again and brings back the cache switching), then converge as under
+      "Changing the set". That takes one runner out of `workbricks-pr`, so the two-nodes rule for the
+      pull-request runners above must still hold; move it back when ai-node3 returns.
     - The cost is a cold push cache there: its first push job builds about 34 GiB of targets.
   - **Changing the set.** Edit the two host_vars, converge those runners one at a time while the queue is
     quiet, and check the label in Gitea (Site/Org settings → Actions → Runners) before workbricks' `runs-on`
