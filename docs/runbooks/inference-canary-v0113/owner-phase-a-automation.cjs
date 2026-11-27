@@ -60,7 +60,7 @@ function createStore(directory, predecessorRaw, onSnapshot) {
   );
 }
 
-// Only the two named entries below choose the immutable input and runner.
+// Only the named entries below choose the immutable input and runner.
 // There is no caller-supplied runner, start method or input filename.
 function createRunStore(directory, inputName, inputRaw, onSnapshot, load) {
   need(
@@ -194,6 +194,104 @@ function createClaudePhaseBAutomation(options) {
           () => null,
         ),
       runner: (env) => b.createClaudePhaseBRunner(env, phaseInputs),
+      start: (runner) => runner.start(),
+    },
+  );
+}
+
+const CLAUDE_C_PORTS = Object.freeze({
+  readiness: ["read"],
+  process: ["start", "next", "stop"],
+  settings: ["read", "replace"],
+  fence: ["arm", "inspect", "advance", "close"],
+});
+const CLAUDE_C_CLEANUP = new Set([
+  "process.stop",
+  "settings.read",
+  "settings.replace",
+  "fence.inspect",
+  "fence.close",
+]);
+
+function createClaudePhaseCAutomation(options) {
+  const c = require("./owner-phase-c.cjs");
+  // Keep the exact completed B report string inside the private immutable input.
+  // Its schema and hash do not independently authenticate the earlier run.
+  const raw = JSON.stringify(options.phaseInputs);
+  need(
+    typeof raw === "string" && Buffer.byteLength(raw) <= 2 * 1024 * 1024,
+    "Bounded Phase C inputs required",
+  );
+  const phaseInputs = JSON.parse(raw);
+  const checked = c.inputs(phaseInputs, Date.now());
+  for (const field of [
+    "predecessorRaw",
+    "readPredecessorEvidence",
+    "predecessorEvidencePin",
+    "renewalPrelude",
+    "observeDeployment",
+  ])
+    need(
+      !Object.hasOwn(options, field),
+      "Phase A bootstrap is not a Phase C operation",
+    );
+  const maxDurationMs = options.maxDurationMs ?? 900000;
+  need(
+    Number.isInteger(maxDurationMs) &&
+      maxDurationMs > 0 &&
+      maxDurationMs <= 900000,
+    "Phase C host deadline exceeds fifteen minutes",
+  );
+  need(
+    options.deadline === undefined || Number.isSafeInteger(options.deadline),
+    "Phase C absolute deadline invalid",
+  );
+  const supplied = options.claudePorts;
+  need(
+    supplied &&
+      typeof supplied === "object" &&
+      Object.keys(supplied).length === Object.keys(CLAUDE_C_PORTS).length,
+    "Fixed Claude service ports required",
+  );
+  const callbacks = {};
+  for (const [group, names] of Object.entries(CLAUDE_C_PORTS)) {
+    need(
+      supplied[group] && Object.keys(supplied[group]).length === names.length,
+      "Fixed Claude service methods required",
+    );
+    callbacks[group] = {};
+    for (const name of names) {
+      need(
+        typeof supplied[group][name] === "function",
+        "Claude service callback missing",
+      );
+      callbacks[group][name] = supplied[group][name];
+    }
+    Object.freeze(callbacks[group]);
+  }
+  Object.freeze(callbacks);
+  return createHost(
+    {
+      ...options,
+      maxDurationMs,
+      deadline: Math.min(
+        options.deadline ?? Infinity,
+        checked.window.expiresAt,
+        Date.now() + maxDurationMs,
+      ),
+    },
+    {
+      store: (directory, onSnapshot) =>
+        createRunStore(
+          directory,
+          "phase-c-inputs",
+          raw,
+          onSnapshot,
+          () => null,
+        ),
+      claudePorts: callbacks,
+      runner: (env, ports) =>
+        c.createClaudePhaseCRunner(env, JSON.parse(raw), ports),
       start: (runner) => runner.start(),
     },
   );
@@ -407,7 +505,49 @@ function createHost(options, entry) {
       checkpoint?.abort();
     },
   };
-  runner = entry.runner(env);
+  let claudePorts;
+  if (entry.claudePorts) {
+    claudePorts = {
+      signal: active.signal,
+      cleanupSignal: cleanup.signal,
+      monotonicNs: () => process.hrtime.bigint(),
+    };
+    for (const [group, names] of Object.entries(CLAUDE_C_PORTS)) {
+      claudePorts[group] = {};
+      for (const name of names) {
+        const callback = entry.claudePorts[group][name];
+        claudePorts[group][name] = async (context) => {
+          need(started && !finished, "Claude service transport is closed");
+          need(
+            context && context.signal instanceof AbortSignal,
+            "Claude service cancellation signal required",
+          );
+          const cleanupCall = context.signal === cleanup.signal;
+          need(
+            !cleanupCall || CLAUDE_C_CLEANUP.has(`${group}.${name}`),
+            "Claude method is not available for cleanup",
+          );
+          const combined = cleanupCall
+            ? cleanup.signal
+            : AbortSignal.any([active.signal, context.signal]);
+          combined.throwIfAborted();
+          const operation = track(
+            collectors,
+            Promise.resolve().then(() => {
+              combined.throwIfAborted();
+              // The adapter resolves only after consuming and projecting its
+              // bounded response, including any observer shutdown acknowledgement.
+              return callback({ ...context, signal: combined });
+            }),
+          );
+          return abortable(operation, combined);
+        };
+      }
+      Object.freeze(claudePorts[group]);
+    }
+    Object.freeze(claudePorts);
+  }
+  runner = entry.runner(env, claudePorts);
   const stop = () => {
     if (finished) return Promise.resolve();
     if (stopping) return stopping;
@@ -557,6 +697,7 @@ function createHost(options, entry) {
 module.exports = {
   createAutomation,
   createClaudePhaseBAutomation,
+  createClaudePhaseCAutomation,
   createStore,
   abortable,
 };
