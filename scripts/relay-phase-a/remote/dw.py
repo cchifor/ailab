@@ -170,18 +170,20 @@ def systemd(unit):
 
 def journal(state_dir):
     """The last holder-started incarnation and the last admission event (paused, revision, operationId)."""
-    inc, adm, n = None, None, 0
-    with open(os.path.join(state_dir, "journal.jsonl"), "rb") as f:
+    inc, adm, n, kinds = None, None, 0, []
+    path = os.path.join(state_dir, "journal.jsonl")
+    with open(path, "rb") as f:
         for line in f:
             n += 1
             d = json.loads(line)
             e = d.get("event") or {}
+            kinds.append(str(e.get("kind")))
             if e.get("kind") == "holder-started":
                 inc = d.get("incarnation")
             elif e.get("kind") == "holder-admission":
                 adm = {"paused": e.get("paused") is True, "revision": e.get("revision"),
                        "operationId": e.get("operationId"), "incarnation": d.get("incarnation")}
-    return {"records": n, "lastStartedIncarnation": inc, "admission": adm}
+    return {"records": n, "lastStartedIncarnation": inc, "admission": adm, "kinds": kinds, "sha256": sha_file(path)}
 
 
 MAINTENANCE_IMAGE = ("registry.chifor.me/relay/control-plane@sha256:"
@@ -334,6 +336,8 @@ def prerun(state_dir, preparation):
             "oldJournalSha256": sha_file(old_journal) if old_journal else None,
             "oldJournalLast": last_event(old_journal) if old_journal else None,
             "journal": journal(state_dir), "units": {u: systemd(u) for u in UNITS},
+            "binarySha256": (sha_file(systemd("relay-holder.service")["argv"][0])
+                             if systemd("relay-holder.service")["argv"] else None),
             "artifacts": {"relay-holder.service": sha_file(unit_dir + "relay-holder.service"),
                           "relay-holder-control-plane.service": sha_file(unit_dir + "relay-holder-control-plane.service"),
                           "service.json": sha_file(HOME + "/.config/relay-holder/service.json"),
@@ -349,28 +353,46 @@ def run_bounded(argv, seconds):
     return p.returncode
 
 
-def mutate_start_holder(state_dir):
+STOPPED = ("inactive", "failed")
+STOP_RESERVE_S = 40  # always left for a verified stop (systemctl stop 30 s + readback)
+
+
+def stop_and_verify():
+    """Stop the holder and positively confirm a terminal stopped state."""
+    rc = run_bounded(["systemctl", "--user", "stop", "relay-holder.service"], 30)
+    after = systemd("relay-holder.service")
+    return {"stopRc": rc, "unitAfterStop": after["active"], "contained": rc == 0 and after["active"] in STOPPED}
+
+
+def mutate_start_holder(state_dir, deadline_s):
+    """Start ONLY the holder, then prove it came up paused; anything else (an unpaused start, an exception, an
+    unreadable status, running out of time) is contained HERE, with STOP_RESERVE_S always kept for the stop."""
     u = {x: systemd(x) for x in UNITS}
     j = journal(state_dir)
     if u["relay-holder.service"]["active"] != "inactive" or u["relay-holder-control-plane.service"]["active"] != "inactive":
         return {"started": False, "why": "units-not-inactive", "units": u}
     if not (j["admission"] and j["admission"]["paused"] is True):
         return {"started": False, "why": "journal-admission-not-paused", "journal": j}
-    rc = run_bounded(["systemctl", "--user", "start", "relay-holder.service"], 30)
-    hello(state_dir, wait_s=25)
-    rec = holder(state_dir)
-    paused = bool(rec.get("status")) and rec["status"].get("admissionPaused") is True
+    end = time.monotonic() + deadline_s - STOP_RESERVE_S
+    if end - time.monotonic() < 45:
+        return {"started": False, "why": "budget-too-small-for-a-contained-start"}
+    rc, rec, paused = None, None, False
+    try:
+        rc = run_bounded(["systemctl", "--user", "start", "relay-holder.service"],
+                         max(1, int(min(20, end - time.monotonic()))))
+        hello(state_dir, wait_s=max(0.0, min(15.0, end - time.monotonic() - 25)))
+        rec = holder(state_dir)
+        paused = bool(rec.get("status")) and rec["status"].get("admissionPaused") is True
+    except BaseException:  # noqa: BLE001 - an exception after the start is contained like an unpaused start
+        paused = False
     if not paused:  # contain HERE, on this host: not dependent on the response reaching the operator
-        stop_rc = run_bounded(["systemctl", "--user", "stop", "relay-holder.service"], 30)
-        after = systemd("relay-holder.service")
-        return {"started": rc == 0, "rc": rc, "paused": False, "contained": stop_rc == 0 and after["active"] in
-                ("inactive", "failed"), "unitAfterStop": after["active"], "holder": rec}
+        return {"started": rc == 0, "rc": rc, "paused": False, **stop_and_verify(), "holder": rec}
     return {"started": rc == 0, "rc": rc, "paused": True, "contained": False, "holder": rec}
 
 
 def mutate_stop_holder():
-    rc = run_bounded(["systemctl", "--user", "stop", "relay-holder.service"], 30)
-    return {"stopped": rc == 0, "rc": rc, "units": {x: systemd(x) for x in UNITS}}
+    s = stop_and_verify()
+    return {"stopped": s["contained"], **s, "units": {x: systemd(x) for x in UNITS}}
 
 
 def mutate_resume(state_dir, revision, operation):
@@ -399,8 +421,8 @@ def main():
     if os.getuid() != UID:
         die("run as c4", 2)
     m = a[0]
-    if m == "mutate-start-holder" and len(a) == 2:
-        out(mutate_start_holder(a[1]))
+    if m == "mutate-start-holder" and len(a) == 3 and a[2].isdigit():
+        out(mutate_start_holder(a[1], int(a[2])))
         return
     if m == "mutate-stop-holder" and len(a) == 1:
         out(mutate_stop_holder())
