@@ -241,10 +241,15 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
     - **Converge with the runner running; do not stop it first.** The role restarts act_runner once, from its
       handler at the end of the play. That restart drains the job in flight for up to
       `gitea_runner_shutdown_timeout_min` (10 min), and a job still running then is cut off.
-    - **Before each converge, check that this runner has no job in flight.** On the host:
-      `pgrep -P "$(systemctl show -p MainPID --value gitea-act-runner)"` must print nothing. If a job runs, wait
-      for it to end; do not start the play. A long one, such as a cold workbricks push build (about 34 GiB of
-      targets) or a platform e2e job, can outlast the drain.
+    - **Before each converge, check that the forge shows no running task on this runner.** That is the
+      authoritative state.
+      - In Gitea: Site Administration → Actions → Runners → the runner shows no task in progress.
+      - Or read-only on the infra-pg `gitea` database:
+        `select id from action_task where status = 6 and runner_id = (select id from action_runner where name = '<runner>' and deleted is null);`
+        must return no row (6 = running).
+      - A host-side `pgrep -P` of act_runner's children is not enough: a task still being set up has none yet.
+      - If a task runs, wait for it to end; do not start the play. A long one, such as a cold workbricks push
+        build (about 34 GiB of targets) or a platform e2e job, can outlast the drain.
     - **The check is best-effort.** The play takes minutes, and a new job can still land before the handler
       fires. Watch the drain (`journalctl -u gitea-act-runner -f`: `shutdown initiated, waiting 10m0s for
       running jobs`). Rerun a job it cuts off: the run's failed jobs, through the forge's
