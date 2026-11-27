@@ -18,12 +18,19 @@ operator integration is available and qualified.
 
 The operator is preparing a Unix-domain HTTP proxy that retains the JIT session.
 The socket transport in `owner-phase-a-socket.cjs` sends relative API requests
-through `RELAY_SESSION_SOCKET`, without forwarding credentials or following
-redirects. `owner-phase-a-cli.cjs` supplies Linux entrypoint mechanics: an exact
+through `RELAY_SESSION_SOCKET`, with exact control-lease paths sent through
+`RELAY_SESSION_CONTROL_SOCKET`. Both refer to the same broker-owned login;
+control refusals are never retried on the general socket. No credentials are
+forwarded and redirects are not followed. Single-socket callers remain supported
+for the direct fixture. `owner-phase-a-cli.cjs` supplies Linux entrypoint mechanics: an exact
 private predecessor file, an exclusive writable evidence directory, an absolute
-`RUNNER_DEADLINE` in epoch milliseconds, signal handling, and JSONL snapshots
+`RUNNER_DEADLINE`, signal handling, and JSONL snapshots
 after filesystem synchronization. The root filesystem can remain read-only;
 the evidence directory must be a separate private writable mount.
+The operator exports decimal epoch seconds; integer epoch milliseconds remain
+accepted for direct callers. `owner-phase-a-deadline.cjs` converts seconds to
+milliseconds by truncating submillisecond fractions, never extending expiry.
+Malformed, elapsed or over-45-minute deadlines refuse before dispatch.
 
 The CLI still requires the operator's reviewed checkpoint collector and
 deployment observer. Running it without those integrations refuses before
@@ -167,11 +174,13 @@ not the operator's authenticated proxy, a published holder or a live provider.
 
 The additional `test_offline_complete_session_proxy_flow` Python entry runs the
 same complete workflow through the unmodified operator proxy at
-`2c2deb5368c9121a3b28a9cc3341a8742dce1244`. Its source snapshot is hash checked.
-Only login and the HTTPS transport boundary are replaced by synthetic fixtures;
+`c8141ade36c4d90f9593121e380a2a11c193bfe1`. Its exact raw source snapshot is hash checked.
+Only login, DNS and the TLS connection boundary are replaced by synthetic fixtures;
 the actual planner, scope checks, learned IDs, cookie handling and logout run.
 Six out-of-scope requests must be refused before upstream dispatch. Final logout
-must produce a subsequent 401 and remove the private socket. This is proxy
+must produce a subsequent 401 and remove both private sockets. The fixture
+checks the actual bare Host header, both socket paths and decimal epoch-seconds
+deadline ingress. This is proxy
 orchestration qualification, not real JIT login, TLS, provider or holder evidence.
 
 Synthetic collectors recheck the real wall clock after each timer wake before
@@ -179,8 +188,10 @@ returning an observation. A controlled clock-backstep regression exercises the
 actual collector and cancellation without HTTP calls or relaxed validators.
 The proxy fixture retains returned observations, and command assertions accept
 the Runner's separately persisted cleanup-dispatch state only with the exact
-matching operation ID, path and body. The complete proxy rerun passed in 311.2
-seconds with 15 lease heartbeats and 286 durable snapshots.
+matching operation ID, path and body. The complete two-socket run with decimal
+epoch-seconds deadline ingress passed in 298.0 seconds with 13 lease heartbeats
+and 286 durable snapshots. These are synthetic orchestration checks, with the
+authority limits above.
 
 That entry needs Docker. It runs the pinned Node/Python image without a network,
 as UID 1000 with a read-only checkout and a private `/run/relay-session` tmpfs.

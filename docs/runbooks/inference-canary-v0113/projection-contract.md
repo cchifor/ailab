@@ -90,8 +90,34 @@ The returned JSON has exactly these fields:
 }
 ```
 
-The projection is bounded to 64 KiB and hashed as exact UTF-8 bytes, including
-whitespace. Do not reserialize it after the operator pins its hash. The current
+The projection is bounded to 64 KiB. The untagged pin shown above retains the
+original exact UTF-8 byte hash, including whitespace and `observedUtc`. Do not
+reserialize that document after pinning it. There is no automatic hash-mode
+selection or fallback.
+
+For repeated fresh observations of the same settled predecessor, the operator
+may instead supply the same independently reviewed pin fields with the explicit
+additional field `mode: "canonical-content-v1"`. In this mode `sha256` is:
+
+```text
+SHA256(UTF8("relay-predecessor-command-projection/content-v1\n" + canonical(content)))
+```
+
+Here `\n` is one LF byte. `content` is the full projection object with **only its
+top-level `observedUtc` removed**. `canonical` is the driver's existing JSON
+canonicalization: object keys sorted by JavaScript `sort()`, arrays in their
+original order, primitive values and keys encoded with `JSON.stringify`, with
+no whitespace between elements. Every source, schema, scope, command identity
+and receipt remains hashed. Command order remains significant; object key order
+and serialization whitespace do not. Unknown modes, additional pin fields or
+alternate hash domains refuse. The reader still returns the full raw JSON
+document, including a newly observed timestamp, and never supplies or updates
+the trusted pin. Pin generation belongs to the separate reviewed operator input,
+not the callback adapter. This is a content commitment, not authentication of a
+fresh database read: a trusted observer must actually make that read, not merely
+replace the timestamp on cached data.
+
+Both modes apply the same complete schema and semantic validation. The current
 hub source and schema must match, observation age must be less than 120 seconds
 with at most five seconds of future clock skew, and tenant/database/query identity
 must equal the independent pin. Prompt completion allows only `cancelled` or
@@ -107,6 +133,10 @@ permission GET still proves the exact cancelled permission. The driver never
 falls back to actor-scoped operation GETs when a configured projection fails.
 Only validated provenance and the selected receipts are recorded, explicitly as
 operator-attested evidence rather than independent database authentication.
+The provenance `sha256` always records the exact returned UTF-8 bytes. Content
+mode additionally records `pinMode`, `pinSha256` and the fixed `hashDomain`, so a
+refreshed timestamp never disguises which raw observation was used. Legacy raw
+mode retains its existing provenance fields.
 
 The original raw report, its canonical hash, carried one prompt/two attempts,
 fresh Router accounting and marker evidence, owner window, preserving-holder

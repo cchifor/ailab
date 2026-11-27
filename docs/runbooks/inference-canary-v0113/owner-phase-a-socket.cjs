@@ -8,7 +8,7 @@ function need(value, message) {
   if (!value) throw Error(message);
 }
 
-function createSessionFetch(socketPath) {
+function validateSocket(socketPath) {
   need(
     typeof socketPath === "string" && path.isAbsolute(socketPath),
     "Absolute session socket required",
@@ -17,6 +17,18 @@ function createSessionFetch(socketPath) {
   need(
     stat.isSocket() && !stat.isSymbolicLink(),
     "Session endpoint must be a Unix socket",
+  );
+}
+
+function createSessionFetch(socketPath, controlSocketPath) {
+  validateSocket(socketPath);
+  if (controlSocketPath !== undefined) {
+    validateSocket(controlSocketPath);
+    need(controlSocketPath !== socketPath, "Distinct control socket required");
+  }
+  const uuid = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+  const controlPath = new RegExp(
+    `^/api/agent-sessions/${uuid}/control(/${uuid})?$`,
   );
   return function sessionFetch(target, init = {}) {
     need(
@@ -76,7 +88,12 @@ function createSessionFetch(socketPath) {
       };
       const request = http.request(
         {
-          socketPath,
+          // The reviewed broker isolates lease reads/acquire/renew/release in
+          // its own pool. Never retry on the other socket after a refusal.
+          socketPath:
+            controlSocketPath && controlPath.test(target.split("?")[0])
+              ? controlSocketPath
+              : socketPath,
           path: target,
           method,
           agent: false,

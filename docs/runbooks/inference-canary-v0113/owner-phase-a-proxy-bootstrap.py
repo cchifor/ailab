@@ -5,17 +5,17 @@ credentials are read: the cookie is a fixed fixture token, not a Relay session.
 The original source snapshot is raw Git bytes from the named operator commit.
 """
 import hashlib
-import http.client
 import importlib.util
 import socket
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 
-SOURCE = Path(__file__).with_name("fixtures") / "relay-session-proxy-2c2deb.py"
+SOURCE = Path(__file__).with_name("fixtures") / "relay-session-proxy-c8141ade.py"
 assert hashlib.sha256(SOURCE.read_bytes()).hexdigest() == (
-    "611ab65a3590d836feb68dfaf15ae3e063fe47986543283f739d49e983cf0b24"
+    "012d1acc7639751989493fbf90d16c4e6361ea919656f683fb7ab970b369e114"
 )
 spec = importlib.util.spec_from_file_location("qualified_proxy", SOURCE)
 proxy = importlib.util.module_from_spec(spec)
@@ -33,18 +33,19 @@ def synthetic_login(username, password):
             {"relay_session": COOKIE})
 
 
-class UnixConnection(http.client.HTTPConnection):
-    def __init__(self, host, port, timeout=None, context=None):
-        assert host == proxy.HOST and port == 443
-        super().__init__(host, port, timeout=timeout)
-
-    def connect(self):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.settimeout(self.timeout)
-        self.sock.connect(upstream_socket)
+def synthetic_open(self, end, holder, expired):
+    # Only the network connection is synthetic. The actual call() retains its
+    # deadline, request serialization, cookies, Host/Origin and response parsing.
+    assert end > time.monotonic() and not expired.is_set()
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    holder["sock"] = sock
+    sock.settimeout(end - time.monotonic())
+    sock.connect(upstream_socket)
+    return sock
 
 
 # No State, planner, learning, Server, Handler, Upstream.call or logout overrides.
 proxy.login = synthetic_login
-proxy.http.client.HTTPSConnection = UnixConnection
+proxy.RESOLVER.start = lambda: None  # No DNS for the network-none Unix fixture.
+proxy.Upstream._open = synthetic_open
 sys.exit(proxy.main())
