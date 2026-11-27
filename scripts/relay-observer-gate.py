@@ -197,6 +197,7 @@ class Gate:
                 req = self.read_request(conn)
             except (Bad, OSError) as e:
                 diag(e.args[0] if isinstance(e, Bad) else "request-io")
+                self.release(token)  # admit the next connection BEFORE answering this one
                 self.answer(conn, {"v": 1, "ok": False, "code": "refused"})
                 return
             with self.cond:
@@ -208,6 +209,7 @@ class Gate:
                     seq = self.seq
                     self.waiting = seq
             if code:
+                self.release(token)  # admit the next connection BEFORE answering this one
                 self.answer(conn, {"v": 1, "ok": False, "code": code})
                 return
             now_ms = int(time.time() * 1000)
@@ -215,6 +217,7 @@ class Gate:
                 self.emit({"seq": seq, "gateNow": now_ms, "request": req})
             except (OSError, ValueError):
                 diag("stdout-failed")
+                self.release(token)  # admit the next connection BEFORE answering this one
                 self.answer(conn, {"v": 1, "ok": False, "code": "observer-down"})
                 return
             wait_until = time.monotonic() + max(0.0, min(MAX_WAIT_S, (req["deadline"] - now_ms) / 1000.0))
@@ -229,6 +232,7 @@ class Gate:
                 except (OSError, ValueError):
                     diag("stdout-failed")
                 diag("cancelled")
+                self.release(token)  # admit the next connection BEFORE answering this one
                 self.answer(conn, {"v": 1, "ok": False, "code": "cancelled"})
                 return
             self.release(token)  # the request is complete: admit the next connection before sending
@@ -291,9 +295,14 @@ class Gate:
             conn, _ = srv.accept()
             token = object()
             with self.cond:
-                busy = self.busy is not None
-                if not busy:
+                terminal = self.terminal  # a terminal state answers first: never "busy" after a cancel
+                busy = terminal is None and self.busy is not None
+                if terminal is None and not busy:
                     self.busy = token
+            if terminal is not None:
+                self.answer(conn, {"v": 1, "ok": False, "code": terminal})
+                conn.close()
+                continue
             if busy:
                 self.answer(conn, {"v": 1, "ok": False, "code": "busy"})
                 conn.close()
