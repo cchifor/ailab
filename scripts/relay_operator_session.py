@@ -240,9 +240,14 @@ class Run:
         self.in_cleanup = False
 
     def note(self, **kv):
+        """Record (always) and print (best effort). Reporting NEVER raises: a closed stdout (a piped consumer that
+        exited) must not abort cleanup before the revoke; result.json keeps the full record either way."""
         kv["t"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.notes.append(kv)
-        print("relay-operator session: " + json.dumps(kv), flush=True)
+        try:
+            print("relay-operator session: " + json.dumps(kv), flush=True)
+        except (OSError, ValueError):
+            pass
 
     def fail(self, code: int, **kv):
         if self.rc == 0 or (code in PRECEDENCE and (self.rc not in PRECEDENCE or

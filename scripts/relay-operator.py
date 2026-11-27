@@ -215,6 +215,33 @@ class _Interrupted(BaseException):
     pass
 
 
+class _SafeStream:
+    """Wraps stderr/stdout during a call: a write or flush failure (a closed pipe) is swallowed, so reporting can
+    never abort the cleanup that revokes the temporary admin."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def write(self, s):
+        try:
+            return self.inner.write(s)
+        except (OSError, ValueError):
+            return len(s)
+
+    def flush(self):
+        try:
+            self.inner.flush()
+        except (OSError, ValueError):
+            pass
+
+    @property
+    def buffer(self):
+        return _SafeStream(self.inner.buffer) if hasattr(self.inner, "buffer") else self
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
 def call(op_args: list[str]) -> int:
     ros, o = ops()
     holder = "call-" + secrets.token_hex(6)
@@ -230,6 +257,8 @@ def call(op_args: list[str]) -> int:
     prev = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
     for s in prev:
         signal.signal(s, on_signal)
+    saved_streams = (sys.stdout, sys.stderr)
+    sys.stdout, sys.stderr = _SafeStream(sys.stdout), _SafeStream(sys.stderr)
     rc = 1
     try:
         try:  # the same fenced Lease as `session`: a call never overlaps a run, and the reaper waits for it
@@ -299,6 +328,7 @@ def call(op_args: list[str]) -> int:
     finally:
         for s, h in prev.items():
             signal.signal(s, h)
+        sys.stdout, sys.stderr = saved_streams
     return rc
 
 

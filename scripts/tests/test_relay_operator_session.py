@@ -420,6 +420,37 @@ class LeaseAndEvidence(unittest.TestCase):
         self.assertEqual(w.revokes, 2)
 
 
+class BrokenOutput(unittest.TestCase):
+    """A closed stdout/stderr (a piped consumer that exited) must never abort cleanup before the revoke."""
+
+    class Broken:
+        def write(self, s):
+            raise BrokenPipeError("consumer gone")
+
+        def flush(self):
+            raise BrokenPipeError("consumer gone")
+
+    def test_session_cleanup_survives_a_broken_stdout(self):
+        tmp = tempfile.mkdtemp()
+        d, files = bundle(tmp, {"main.cjs": b"main"})
+        w = World(files)
+        orig = w.ops.grant
+
+        def grant_then_break(subject):
+            orig(subject)
+            sys.stdout = self.Broken()  # stdout dies right after the grant
+        w.ops.grant = grant_then_break
+        saved = sys.stdout
+        try:
+            rc, ev = run(w, tmp, d)
+        finally:
+            sys.stdout = saved
+        self.assertEqual(w.revokes, 2)
+        self.assertEqual(w.sso, ["kc"])
+        self.assertEqual(w.lease["spec"]["holderIdentity"], "")
+        self.assertEqual(json.loads(Path(ev, "result.json").read_text())["rc"], 0)
+
+
 class CallLifecycle(unittest.TestCase):
     """relay-operator.py call() with every collaborator faked."""
 
@@ -482,6 +513,23 @@ class CallLifecycle(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         i_rm, i_revoke = self.events.index("docker rm -f"), len(self.events) - 1 - self.events[::-1].index("revoke")
         self.assertLess(i_rm, i_revoke)
+
+    def test_call_cleanup_survives_a_broken_stderr(self):
+        self.fake_docker(lambda a, **k: None)
+        orig_grant = self.m.grant
+        saved = sys.stderr
+
+        def grant_then_break(subject):
+            orig_grant(subject)
+            sys.stderr.inner = BrokenOutput.Broken()  # the wrapped stream dies after the grant
+        self.m.grant = grant_then_break
+        try:
+            rc = self.m.call(["me"])
+        finally:
+            sys.stderr = saved
+        self.assertEqual(self.events[-2:], ["revoke", "sso"])
+        self.assertEqual(self.w.lease["spec"]["holderIdentity"], "")
+        self.assertEqual(rc, 0)
 
     def test_signal_during_cleanup_is_deferred(self):
         import signal as sig
