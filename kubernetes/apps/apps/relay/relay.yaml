@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.13.0-release-149439
-        chifor.me/source-commit: e843921b7cff76406b7da0b5b35cf653c7e458c5
+        chifor.me/release: relay-0.13.2-release-152253
+        chifor.me/source-commit: 74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -137,22 +137,22 @@ spec:
       # FORWARD-ONLY: schema 93 (093 by v0.13.0: native recovery versions 1/2 and explicit acknowledgement
       # of unknown tool effects on a resume). Older images may start on unsupported newer schemas, and
       # recovery:fence/initialize demand exactly 1..CURRENT_SCHEMA_VERSION, so a bare re-pin is never a
-      # rollback. Rollback to v0.12.1 (177c1af2...) = restore this roll's EARLIEST pre-migration generation
+      # rollback across schemas. Rollback to v0.12.1 (177c1af2...) = restore v0.13.0's EARLIEST generation
       # (schema 92, the first backup-database log of the v0.13.0 rollout), then recovery:fence with a FRESH
       # generation (relay-restore-fencing carries it), then a
       # reviewed PR re-pins v0.12.1. Its cost is H11's: every connector and agent key revoked, every session
       # ended, the undelivered outbox deleted, a new generation ConfigMap; writes after the backup are lost.
-      # docs/runbooks/relay-pi-v0130-20261125.md: production-copy 093 rehearsal passed; owner hold remains;
+      # docs/runbooks/relay-pi-v0130-20261125.md records the historical 92-to-93 rollout and restore fence;
       # never downgrade beneath connected holder-v2 sessions. Earlier rollback boundaries remain in
       # relay-researcher-hub-upgrade.md, H16/H15/H12/H11 and "Rollback: migrations are forward-only".
       # Further back: restore the matching rollout's earliest pre-migration generation, fence, re-pin
       # (H16 to v0.12.0, H15 to v0.11.6, H12 to v0.11.3, H11 to v0.10.25); below v0.10.2 restore the v0.10.2 rollout's
       # pre-migration generation 20261115T162747Z-119fcc01-b84d-4be5-a80c-ac5196caaf73 (else H1's), fence,
       # then a reviewed PR re-pins v0.9.1 (runbook "Rollback", the H2 mechanics).
-      # Relay v0.13.0, source e843921b7cff76406b7da0b5b35cf653c7e458c5.
-      # release v0.13.0 / run 149439; schema 93 (migration 093: owned Pi recovery).
-      # Hub-first rollout and Pi limits: docs/runbooks/relay-pi-v0130-20261125.md.
-      - image: registry.chifor.me/relay/control-plane@sha256:021a8fbed305c338dc46022abc992f3e0b2c538c6c491fd2aa9f0b279dbccdd8
+      # Relay v0.13.2, source 74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613.
+      # release v0.13.2 / run 152253; schema 93 unchanged; explicit expired-binding renewal.
+      # Owner-held rollout: docs/runbooks/relay-expired-binding-renewal-20261126.md.
+      - image: registry.chifor.me/relay/control-plane@sha256:ce79dec456861f3d70cf9c27be42b6fffd31ddcaf762b83974f42299d99e3b83
         workingDir: /app
         envFrom:
         - secretRef:
@@ -204,10 +204,10 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      # Relay v0.13.0, source e843921b7cff76406b7da0b5b35cf653c7e458c5.
-      # release v0.13.0 / run 149439; schema 93 (migration 093: owned Pi recovery).
-      # Hub-first rollout and Pi limits: docs/runbooks/relay-pi-v0130-20261125.md.
-      - image: registry.chifor.me/relay/control-plane@sha256:021a8fbed305c338dc46022abc992f3e0b2c538c6c491fd2aa9f0b279dbccdd8
+      # Relay v0.13.2, source 74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613.
+      # release v0.13.2 / run 152253; schema 93 unchanged; explicit expired-binding renewal.
+      # Owner-held rollout: docs/runbooks/relay-expired-binding-renewal-20261126.md.
+      - image: registry.chifor.me/relay/control-plane@sha256:ce79dec456861f3d70cf9c27be42b6fffd31ddcaf762b83974f42299d99e3b83
         workingDir: /app
         envFrom:
         - secretRef:
