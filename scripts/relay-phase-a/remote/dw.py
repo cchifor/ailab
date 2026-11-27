@@ -269,7 +269,7 @@ def transcript(native_home):
         files += [os.path.join(root, n) for n in names]
     if len(files) != 1:
         return {"state": "sessions-" + str(len(files))}
-    calls, results, shell, levels, notices, stops, n = {}, set(), [], [], [], [], 0
+    calls, results, shell, levels, notices, stops, n = {}, {}, [], [], [], [], 0
     with open(files[0], "rb") as f:
         for line in f:
             n += 1
@@ -292,22 +292,52 @@ def transcript(native_home):
                         elif part.get("type") == "text" and "SESSION_CONFIGURATION_CHANGED" in str(part.get("text")):
                             notices.append(hashlib.sha256(str(part.get("text")).encode()).hexdigest())
                 elif role == "toolResult":
-                    results.add(str(m.get("toolCallId")))
-    return {"state": "observed", "entries": n, "toolCalls": len(calls), "unsettled": sorted(set(calls) - results),
+                    results.setdefault(str(m.get("toolCallId")), []).append(
+                        m.get("isError") if isinstance(m.get("isError"), bool) else None)
+    for s in shell:  # each shell call's results: exactly one, with a boolean isError, or the outcome is unknown
+        s["results"] = results.get(s["id"], [])
+        del s["id"]
+    return {"state": "observed", "entries": n, "toolCalls": len(calls),
+            "unsettled": sorted(set(calls) - set(results)),
+            "duplicateResults": sorted(k for k, v in results.items() if len(v) > 1),
             "toolNames": sorted(set(calls.values())), "shellCommands": shell, "thinkingLevels": levels,
             "configChangedNotices": notices, "stopReasons": stops}
 
 
 # ------------------------------------------------------------------------------------------ pre-run facts
+def last_event(path):
+    last = None
+    with open(path, "rb") as f:
+        for line in f:
+            last = json.loads(line)
+    e = (last or {}).get("event") or {}
+    return {"kind": e.get("kind"), "sealId": e.get("sealId"), "sealed": e.get("sealed") is True,
+            "expectedIncarnation": e.get("expectedIncarnation")}
+
+
 def prerun(state_dir, preparation):
+    """Everything the pre-run must verify BEFORE the holder starts: the receipt and its preserved old journal, the
+    sealed old root, the prepared new root, the installed artifacts, and the units' effective definitions."""
     preparation = canon_uuid(preparation)
     receipt = HOME + "/.config/relay-holder/used-handoffs/" + preparation + "/complete.json"
     r = json.load(open(receipt))
+    pj = ((r.get("preserved") or {}).get("journal")) or {}
+    old_state = r.get("oldState")
+    old_journal = os.path.join(old_state, "journal.jsonl") if isinstance(old_state, str) else None
+    unit_dir = HOME + "/.config/systemd/user/"
     return {"receiptSha256": sha_file(receipt),
             "receipt": {"operationId": r.get("operationId"), "newState": r.get("newState"),
-                        "oldState": r.get("oldState"), "profilesFile": r.get("profilesFile"),
-                        "state": r.get("state") if isinstance(r.get("state"), str) else None},
+                        "oldState": old_state, "profilesFile": r.get("profilesFile"),
+                        "state": r.get("state") if isinstance(r.get("state"), str) else None,
+                        "preservedJournal": {k: pj.get(k) for k in ("incarnation", "journalId", "sealId", "sha256",
+                                                                     "records", "unknownCommands")}},
+            "oldJournalSha256": sha_file(old_journal) if old_journal else None,
+            "oldJournalLast": last_event(old_journal) if old_journal else None,
             "journal": journal(state_dir), "units": {u: systemd(u) for u in UNITS},
+            "artifacts": {"relay-holder.service": sha_file(unit_dir + "relay-holder.service"),
+                          "relay-holder-control-plane.service": sha_file(unit_dir + "relay-holder-control-plane.service"),
+                          "service.json": sha_file(HOME + "/.config/relay-holder/service.json"),
+                          "profiles.json": sha_file(HOME + "/.config/relay-holder/profiles.json")},
             "stateDirMode": oct(stat.S_IMODE(os.lstat(state_dir).st_mode))}
 
 
@@ -328,7 +358,14 @@ def mutate_start_holder(state_dir):
         return {"started": False, "why": "journal-admission-not-paused", "journal": j}
     rc = run_bounded(["systemctl", "--user", "start", "relay-holder.service"], 30)
     hello(state_dir, wait_s=25)
-    return {"started": rc == 0, "rc": rc, "holder": holder(state_dir)}
+    rec = holder(state_dir)
+    paused = bool(rec.get("status")) and rec["status"].get("admissionPaused") is True
+    if not paused:  # contain HERE, on this host: not dependent on the response reaching the operator
+        stop_rc = run_bounded(["systemctl", "--user", "stop", "relay-holder.service"], 30)
+        after = systemd("relay-holder.service")
+        return {"started": rc == 0, "rc": rc, "paused": False, "contained": stop_rc == 0 and after["active"] in
+                ("inactive", "failed"), "unitAfterStop": after["active"], "holder": rec}
+    return {"started": rc == 0, "rc": rc, "paused": True, "contained": False, "holder": rec}
 
 
 def mutate_stop_holder():

@@ -4,8 +4,11 @@
 Each collector returns exactly the object the driver's validator asks for, built from observations made in THIS call
 with the operator's host credentials (kubectl into the llm-router pod, read-only psql in relay-postgres-0, ssh to
 dev-worker-1 running the verified remote scripts over stdin). A failed named check raises Failed; an evidence source
-that is not established raises Unsupported (a gate, never a pass). Every observation is projected into `obs` for the
-evidence line; untrusted text is logged only as a hash.
+that is not established raises Unsupported (a gate, never a pass). Only explicit, typed projections reach `obs` (the
+evidence line): raw query rows are recorded as a count and a hash, and untrusted text only as a hash.
+
+Times the driver compares with ITS clock (the Runner's) are stamped with a proven lower bound of that clock:
+runner_now >= host_now + (gateNow - host receipt), because the gate stamped gateNow before the reader received it.
 """
 from __future__ import annotations
 
@@ -13,25 +16,25 @@ import datetime
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass
-from pathlib import Path
 
 from relay_phase_a_observer import (Deadline, Failed, Refuse, RunState, Unsupported, canonical, is_int, is_uuid,
                                     need, run_for, safe_text, sha256_bytes)
 
 KEY = re.compile(r"^key_[0-9a-f]{32}$")
+TOKEN = re.compile(r"[A-Za-z0-9_./:-]{1,200}")
 CHANNEL = "b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1"
 READ_TITLE = "Allow mcp__relay__relay_messages_read?"
+MARKER_TITLE = "Allow bash?"
 MAX_CURSOR = 9223372036854775807
 CLOCK_MS = 4000
+PROFILE_KEYS = {"id", "run", "binding", "credential", "key", "protocol", "definitionHash", "namespace", "connection",
+                "generation", "revision", "expiresAt"}
 
 
-def iso_ms(s) -> int:
-    need(isinstance(s, str), "time expected", Failed)
-    try:
-        return int(datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000)
-    except ValueError as e:
-        raise Failed("unparseable time") from e
+def now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 def utc(ms: int) -> str:
@@ -39,11 +42,16 @@ def utc(ms: int) -> str:
         .replace("+00:00", "Z")
 
 
+def runner_floor(host, gate_now: int) -> int:
+    """A proven lower bound of the Runner's clock now (see the module docstring)."""
+    return now_ms() + (gate_now - host.recv_ms)
+
+
 # ------------------------------------------------------------------------------------------ config
 @dataclass
 class Config:
     raw: dict
-    files: dict  # verified script/SQL bytes by relative path
+    files: dict  # verified script/SQL bytes by path relative to scripts/
 
     @property
     def runs(self) -> dict:
@@ -71,36 +79,33 @@ class Config:
 
 # ------------------------------------------------------------------------------------------ remote commands
 class Remote:
-    """kubectl / ssh with hard local timeouts; stdout bytes or Failed. `runner` is injectable for tests."""
+    """kubectl / ssh bounded by the request budget, locally AND remotely. `runner` is injectable for tests."""
 
     def __init__(self, cfg: Config, runner=subprocess.run):
         self.cfg, self.runner = cfg, runner
 
-    def _run(self, argv, stdin: bytes | None, budget, cap: float, what: str, obs: dict) -> bytes:
-        t = min(cap, budget.check(0.5))
+    def _run(self, argv, stdin: bytes | None, budget, t: float, what: str, obs: dict) -> bytes:
+        t0 = time.monotonic()
         try:
             p = self.runner(argv, input=stdin, capture_output=True, timeout=t)
         except subprocess.TimeoutExpired as e:
-            obs.setdefault("calls", []).append({"what": what, "rc": "timeout"})
+            obs.setdefault("calls", []).append({"what": what, "rc": "timeout", "ms": int((time.monotonic() - t0) * 1000)})
             raise Deadline(what + " timed out") from e
-        obs.setdefault("calls", []).append({"what": what, "rc": p.returncode, "stderr": safe_text(p.stderr)})
+        obs.setdefault("calls", []).append({"what": what, "rc": p.returncode, "ms": int((time.monotonic() - t0) * 1000),
+                                            "stderr": safe_text(p.stderr)})
         if p.returncode != 0:
             raise Failed(what + " failed")
         return p.stdout
 
-    def kubectl(self, ns: str, args: list, budget, obs, what: str, stdin=None, cap=30.0) -> bytes:
-        return self._run(["kubectl", "--context", self.cfg.raw["kubeContext"], "-n", ns] + args, stdin, budget, cap,
-                         what, obs)
+    def _bound(self, budget, cap: float) -> float:
+        return max(1.0, min(cap, budget.check(1.0)))
 
-    def router(self, mode_args: list, budget, obs, what: str, cap=60.0) -> dict:
-        r = self.cfg.raw["router"]
-        pod = obs.get("_routerPod") or self.router_pod(budget, obs)
-        raw = self.kubectl(r["namespace"], ["exec", "-i", pod["name"], "-c", r["container"], "--", "node", "-"]
-                           + mode_args, budget, obs, what, stdin=self.cfg.script("relay-phase-a/remote/router.js"),
-                           cap=cap)
-        return json.loads(raw)
+    def kubectl(self, ns: str, args: list, budget, obs, what: str, stdin=None, cap=30.0) -> bytes:
+        return self._run(["kubectl", "--context", self.cfg.raw["kubeContext"], "-n", ns] + args, stdin, budget,
+                         self._bound(budget, cap), what, obs)
 
     def router_pod(self, budget, obs) -> dict:
+        """A FRESH read of the single Router pod's identity (never cached across an observation)."""
         r = self.cfg.raw["router"]
         d = json.loads(self.kubectl(r["namespace"], ["get", "deploy", r["deployment"], "-o", "json"], budget, obs,
                                     "router-deploy"))
@@ -113,22 +118,32 @@ class Remote:
         p = live[0]
         cs = [c for c in p["status"].get("containerStatuses", []) if c["name"] == r["container"]]
         need(len(cs) == 1 and cs[0].get("ready") is True, "the Router container is not ready", Failed)
-        pod = {"name": p["metadata"]["name"], "uid": p["metadata"]["uid"], "restarts": cs[0]["restartCount"]}
-        obs["_routerPod"] = pod
-        obs["routerPod"] = pod
-        return pod
+        return {"name": p["metadata"]["name"], "uid": p["metadata"]["uid"], "restarts": cs[0]["restartCount"]}
+
+    def router(self, mode_args: list, budget, obs, what: str, cap=60.0, pod=None) -> dict:
+        r = self.cfg.raw["router"]
+        pod = pod or self.router_pod(budget, obs)
+        t = self._bound(budget, cap)
+        deadline = now_ms() + int((t - 1.0) * 1000)  # the in-pod script exits at this point and bounds its fetches
+        raw = self._run(["kubectl", "--context", self.cfg.raw["kubeContext"], "-n", r["namespace"], "exec", "-i",
+                         pod["name"], "-c", r["container"], "--", "node", "-", str(deadline)] + mode_args,
+                        self.cfg.script("relay-phase-a/remote/router.js"), budget, t, what, obs)
+        return json.loads(raw)
 
     def dw(self, args: list, budget, obs, what: str, cap=60.0) -> dict:
         h = self.cfg.raw["devWorker"]
+        for a in args:  # every argument is a validated token: no shell metacharacters reach the remote shell
+            need(TOKEN.fullmatch(a) is not None, "remote argument", Refuse)
+        t = self._bound(budget, cap)
+        remote = max(1, int(t - 4))  # the remote bound, inside the local one (ssh setup and transit)
         argv = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o",
                 "UserKnownHostsFile=" + h["knownHosts"], "-o", "ConnectTimeout=8", h["user"] + "@" + h["host"],
-                "timeout --kill-after=2 " + str(int(cap)) + " python3 -I - " + " ".join(args)]
-        for a in args:  # every argument is a validated token: no shell metacharacters reach the remote shell
-            need(re.fullmatch(r"[A-Za-z0-9_./:-]{1,200}", a) is not None, "remote argument", Refuse)
-        return json.loads(self._run(argv, self.cfg.script("relay-phase-a/remote/dw.py"), budget, cap + 8, what, obs))
+                f"timeout --kill-after=2 {remote} python3 -I - " + " ".join(args)]
+        return json.loads(self._run(argv, self.cfg.script("relay-phase-a/remote/dw.py"), budget, t, what, obs))
 
     def sql(self, name: str, variables: dict, budget, obs) -> list:
-        """One verified read-only SQL file over stdin; values only as psql variables; rows as JSON objects."""
+        """One verified read-only SQL file over stdin; values only as psql variables. The evidence gets the row count
+        and a hash of the rows, never the rows (collectors record explicit projections themselves)."""
         db = self.cfg.raw["hubDb"]
         argv = ["exec", "-i", db["pod"], "-c", db["container"], "--", "psql", "-X", "-At", "-v", "ON_ERROR_STOP=1",
                 "-U", db["user"], "-d", db["database"]]
@@ -140,47 +155,61 @@ class Remote:
         raw = self.kubectl(db["namespace"], argv, budget, obs, "sql:" + name,
                            stdin=self.cfg.script("relay-phase-a/sql/" + name), cap=20.0)
         rows = [json.loads(line) for line in raw.decode().splitlines() if line.strip().startswith("{")]
-        obs.setdefault("sql", {})[name] = rows
+        obs.setdefault("sql", {})[name] = {"rows": len(rows), "sha256": sha256_bytes(canonical(rows).encode())}
         return rows
 
 
 # ------------------------------------------------------------------------------------------ shared observations
+def coverage(host, pod: dict, ident: dict, obs: dict) -> None:
+    """coverageConfirmed's facts: the pinned Router pod, capture config and store, unchanged since the pre-run."""
+    want = host.state.router_pod
+    need(ident.get("captureLevel") not in (None, "off"), "Router capture disabled", Failed)
+    need(want is not None, "no pre-run Router identity", Failed)
+    need(pod["uid"] == want["uid"] and pod["restarts"] == want["restarts"], "Router pod restarted or replaced", Failed)
+    need(ident["captureSha256"] == want["capture"] and ident["storeSha256"] == want["store"],
+         "Router capture config or store changed", Failed)
+
+
+def pin_router(host, budget, obs) -> dict:
+    """The pre-run boundary: the Router identity every later observation must still match."""
+    pod = host.remote.router_pod(budget, obs)
+    ident = host.remote.router(["identity"], budget, obs, "identity", pod=pod)
+    need(ident.get("captureLevel") not in (None, "off"), "Router capture disabled", Failed)
+    host.state.router_pod = {"uid": pod["uid"], "restarts": pod["restarts"], "capture": ident["captureSha256"],
+                             "store": ident["storeSha256"]}
+    obs["routerPin"] = dict(host.state.router_pod)
+    return host.state.router_pod
+
+
 def trajectory(host, provider_key: str, provider: str, *, since=None, since_after=None, not_before=0,
                budget, obs, label: str) -> dict:
-    """The driver's snapshot envelope; unsettled rows are re-polled (same since) inside the budget."""
+    """The driver's snapshot envelope. Pod identity is read fresh before and after every poll; unsettled rows are
+    re-polled with the same since, and every row seen while polling must still be present at the end."""
     route = "canary-pi-" + provider
-    pod_before = host.state.router_pod
+    seen = {}
     while True:
+        pod = host.remote.router_pod(budget, obs)
         mode = ["fixed", str(since)] if since is not None else ["after", str(since_after)]
         r = host.remote.router(["trajectory", provider_key, route] + mode + [str(int(not_before))], budget, obs,
-                               "trajectory:" + label)
+                               "trajectory:" + label, pod=pod)
         env = r["envelope"]
         env["source"] = host.cfg.raw["router"]["source"]  # verified against the deployment annotation above
-        ident = r["identity"]
-        coverage(host, ident, obs)
+        coverage(host, pod, r["identity"], obs)
+        after = host.remote.router_pod(budget, obs)
+        need(after == pod, "Router pod changed during the observation", Failed)
+        ids = {row["id"]: row for row in env["rows"]}
+        need(set(seen) <= set(ids), "a row seen while polling vanished", Failed)
+        for rid, row in seen.items():
+            need(row.get("incomplete") is not False or ids[rid] == row, "a settled row changed", Failed)
+        seen = ids
         if r["unsettled"] == 0:
             break
         since = env["scope"]["since"]
         budget.sleep(2.0)
-    need(pod_before is None or obs.get("_routerPod", {}).get("uid") == pod_before["uid"], "Router pod changed", Failed)
     obs.setdefault("trajectories", []).append({"label": label, "since": env["scope"]["since"], "rows": len(env["rows"]),
                                                "totalAttempts": env["totalAttempts"],
                                                "sha256": sha256_bytes(canonical(env).encode())})
     return env
-
-
-def coverage(host, ident: dict, obs: dict) -> None:
-    """coverageConfirmed's facts: the pinned Router pod and capture config and store, unchanged since the pre-run."""
-    pod = obs["_routerPod"]
-    want = host.state.router_pod
-    need(ident.get("captureLevel") not in (None, "off"), "Router capture disabled", Failed)
-    if want is None:
-        host.state.router_pod = {"uid": pod["uid"], "restarts": pod["restarts"], "capture": ident["captureSha256"],
-                                 "store": ident["storeSha256"]}
-        return
-    need(pod["uid"] == want["uid"] and pod["restarts"] == want["restarts"], "Router pod restarted or replaced", Failed)
-    need(ident["captureSha256"] == want["capture"] and ident["storeSha256"] == want["store"],
-         "Router capture config or store changed", Failed)
 
 
 def rows_retained(prev: dict | None, env: dict) -> None:
@@ -215,44 +244,47 @@ def holder_record(host, budget, obs) -> dict:
         "binarySha256": rec["binarySha256"], "profilesSha256": rec["profilesSha256"],
         "holderMainPid": rec["units"]["relay-holder.service"]["mainPid"],
         "reconciliation": rec["units"]["relay-holder-control-plane.service"]["active"],
-        "profileDigests": hello["profileDigests"], "observedMs": rec["observedMs"],
+        "observedMs": rec["observedMs"],
     }
     for k, v in merged.items():
-        need(v is not None, "holder field missing: " + k, Failed)
+        need(v is not None, "a holder field is missing", Failed)
     need(is_uuid(merged["incarnation"]) and is_uuid(merged["journalId"]), "holder identity", Failed)
-    q = h["qualified"]
-    need(merged["binarySha256"] == q["binarySha256"], "holder binary is not the qualified one", Failed)
+    need(merged["journalId"] == h["newJournalId"], "the holder's journal is not the prepared one", Failed)
+    need(merged["binarySha256"] == h["qualified"]["binarySha256"], "holder binary is not the qualified one", Failed)
     need(merged["profilesSha256"] == h["profilesSha256"], "holder profiles drifted", Failed)
     obs["holder"] = merged
     return merged
 
 
-def clocks(host, budget, obs, gate_now: int, host_recv_ms: int) -> None:
-    """C5: every pair of clocks provably within 4 s. Each remote sample is bracketed by host wall-clock stamps."""
-    import time
-    samples = {}
-    t0 = int(time.time() * 1000)
-    pod = host.remote.router(["identity"], budget, obs, "clock:router")["podNow"]
-    t1 = int(time.time() * 1000)
-    dwn = host.remote.dw(["clock"], budget, obs, "clock:dw")["now"]
-    t2 = int(time.time() * 1000)
-    # offset intervals relative to the host: remote - host lies in [sample - t_after, sample - t_before]
-    samples["router"] = (pod - t1, pod - t0)
-    samples["devWorker"] = (dwn - t2, dwn - t1)
-    # the gate stamps gateNow just before writing the frame; the reader stamps its receipt on reading it. The pipe
-    # transit (gate -> docker -> host, a local pipe) is ASSUMED to be under 500 ms; the interval is exact only under
-    # that assumption, and the reader's receipt stamps are in the evidence to check it after the run.
-    samples["runner"] = (gate_now - host_recv_ms, gate_now - (host_recv_ms - 500))
-    samples["host"] = (0, 0)
-    worst = 0
-    names = list(samples)
+def clocks(host, budget, obs) -> None:
+    """C5: every pair of clocks provably within 4 s. Each remote sample is bracketed by host monotonic-derived
+    stamps; the Runner's clock comes from a measured round trip to the gate (Host.clock_probe)."""
+    def bracket(fn):
+        w0, m0 = now_ms(), time.monotonic()
+        v = fn()
+        return v, w0, w0 + int((time.monotonic() - m0) * 1000)
+
+    pod, a0, a1 = bracket(lambda: host.remote.router(["identity"], budget, obs, "clock:router")["podNow"])
+    dwn, b0, b1 = bracket(lambda: host.remote.dw(["clock"], budget, obs, "clock:dw")["now"])
+    c0, gate_now, c1 = host.clock_probe(budget)
+    # remote - host lies in [sample - stamp_after, sample - stamp_before]
+    iv = {"router": (pod - a1, pod - a0), "devWorker": (dwn - b1, dwn - b0), "runner": (gate_now - c1, gate_now - c0),
+          "host": (0, 0)}
+    worst, names = 0, list(iv)
     for i, a in enumerate(names):
         for b in names[i + 1:]:
-            lo_a, hi_a = samples[a]
-            lo_b, hi_b = samples[b]
-            worst = max(worst, abs(hi_a - lo_b), abs(hi_b - lo_a))
-    obs["clocks"] = {"intervalsMs": samples, "worstPairMs": worst}
+            worst = max(worst, abs(iv[a][1] - iv[b][0]), abs(iv[b][1] - iv[a][0]))
+    obs["clocks"] = {"intervalsMs": iv, "worstPairMs": worst}
     need(worst < CLOCK_MS, "clock skew cannot be proven under 4 s", Failed)
+
+
+def session_state(host, session_id: str, budget, obs) -> dict:
+    rows = host.remote.sql("session-state.sql", {"session_id": session_id, "tenant": host.cfg.raw["tenant"]}, budget,
+                           obs)
+    need(len(rows) == 1, "no single session row", Failed)
+    r = rows[0]
+    obs.setdefault("sessions", []).append({k: r[k] for k in ("id", "state", "generation", "rebinding", "control_epoch")})
+    return r
 
 
 # ------------------------------------------------------------------------------------------ hub deployment
@@ -285,7 +317,7 @@ def deployment(host, budget, obs) -> dict:
 # ------------------------------------------------------------------------------------------ collectors
 def c_deployment(host, req, ctx, budget, gate_now, obs):
     rec = deployment(host, budget, obs)
-    return {"hubSource": rec["source"], "ready": True, "observedUtc": utc(int(__import__("time").time() * 1000))}
+    return {"hubSource": rec["source"], "ready": True, "observedUtc": utc(runner_floor(host, gate_now))}
 
 
 def c_renewal_deployment(host, req, ctx, budget, gate_now, obs):
@@ -293,9 +325,11 @@ def c_renewal_deployment(host, req, ctx, budget, gate_now, obs):
     rec = deployment(host, budget, obs)
     need(rec["source"] == ctx["source"], "deployed hub source is not the run source", Failed)
     need(host.predecessor_ok(), "the preserved predecessor report does not match its pin", Failed)
+    observed = runner_floor(host, gate_now)
+    nb = ctx.get("notBefore")
+    need(not is_int(nb) or observed >= nb, "C1 observation precedes its boundary", Failed)
     return {"confirmMetadataReview": True, "reportDownloaded": True, "operatorVerified": True,
-            "deploymentVerified": True, "hubSource": rec["source"],
-            "observedUtc": utc(int(__import__("time").time() * 1000))}
+            "deploymentVerified": True, "hubSource": rec["source"], "observedUtc": utc(observed)}
 
 
 def c_renewed_credentials(host, req, ctx, budget, gate_now, obs):
@@ -309,6 +343,7 @@ def c_renewed_credentials(host, req, ctx, budget, gate_now, obs):
     renewed = {}
     for provider in ("codex", "qwen"):
         pin, p = host.cfg.profile(provider), profiles[provider]
+        need(isinstance(p, dict) and set(p) == PROFILE_KEYS, "C2 profile has unexpected or missing fields", Failed)
         r = by_binding.get(pin["binding"])
         need(r is not None, "binding row missing", Failed)
         state = r["binding_state"]
@@ -317,56 +352,58 @@ def c_renewed_credentials(host, req, ctx, budget, gate_now, obs):
              "binding state is neither ready nor installing", Failed)
         need(cred is not None and cred == r["credential_id"], "selected credential differs", Failed)
         exp = r["expires_ms"]
-        need(p.get("binding") == pin["binding"] and p.get("id") == pin["id"] and p.get("run") == pin["run"]
-             and p.get("credential") == cred and p.get("key") == r["router_key_id"]
-             and p.get("generation") == r["credential_generation"] and p.get("revision") == r["binding_revision"]
-             and p.get("namespace") == r["namespace"] == "default" and p.get("connection") == r["connection_id"]
-             and p.get("expiresAt") == exp, "the renewed profile projection differs from the database", Failed)
+        need(p["id"] == pin["id"] and p["run"] == pin["run"] and p["binding"] == pin["binding"]
+             and p["protocol"] == pin["protocol"] and p["definitionHash"] == pin["definitionHash"]
+             and p["credential"] == cred and p["key"] == r["router_key_id"]
+             and p["generation"] == r["credential_generation"] and p["revision"] == r["binding_revision"]
+             and p["namespace"] == r["namespace"] == "default" and p["connection"] == r["connection_id"]
+             == host.cfg.raw["connectionId"] and p["expiresAt"] == exp,
+             "the renewed profile projection differs from the database", Failed)
         need(KEY.match(r["router_key_id"]) is not None and r["router_key_id"] != pin["historicalKey"],
              "renewed key is historical or malformed", Failed)
         renewed[provider] = {"key": r["router_key_id"], "credential": cred, "binding": pin["binding"],
                              "generation": r["credential_generation"], "expiresAt": exp}
     need(expires == min(v["expiresAt"] for v in renewed.values()), "C2 expiry is not the earlier one", Failed)
     host.state.renewed, host.state.expires_at = renewed, expires
+    obs["renewed"] = renewed
+    # Every field of both profiles was checked above against the pins and the database: the echo carries no
+    # unvalidated input (the driver compares canonical(profiles) with its own read).
     return {"confirmRenewedCredentials": True, "profiles": profiles, "expiresAt": expires}
 
 
 def c_stopped_replacement(host, req, ctx, budget, gate_now, obs):
-    import time
     old = ctx.get("oldScope") or {}
     pin = host.cfg.profile("codex")
+    hist = host.predecessor_history()  # scope and baseline from the INDEPENDENT report, not from the Runner
     need(ctx.get("provider") == "codex" and ctx.get("runId") == pin["run"], "C3 run")
     need(ctx.get("source") == host.cfg.raw["router"]["source"], "C3 Router source")
-    need(old.get("principal") == "key:" + pin["historicalKey"] and old.get("route") == "canary-pi-codex"
-         and old.get("namespace") == "default" and is_int(old.get("since"), 1), "C3 old scope is not the pinned one")
+    need(old == hist["scope"], "C3 old scope is not the report's original scope")
+    need(old.get("principal") == "key:" + pin["historicalKey"], "C3 old principal is not the pinned historical key")
     need(ctx.get("canonicalReportSha256") == host.predecessor_canonical(), "C3 report hash differs", Failed)
     need(ctx.get("carriedPrompts") == 1 and ctx.get("carriedAttempts") == 2, "C3 accounting")
     nb = ctx.get("notBefore")
     need(is_int(nb, 1), "C3 notBefore")
-    env = trajectory(host, pin["historicalKey"], "codex", since=old["since"], not_before=nb, budget=budget, obs=obs,
-                     label="historical")
-    ids = sorted(r["id"] for r in env["rows"])
-    want = host.cfg.raw["historicalRows"]  # [{"prefix","status"}]
+    env = trajectory(host, pin["historicalKey"], "codex", since=hist["scope"]["since"], not_before=nb, budget=budget,
+                     obs=obs, label="historical")
     need(len(env["rows"]) == 2 and all(r["attempts"] == 1 for r in env["rows"]), "historical rows changed", Failed)
-    for w in want:
+    for w in host.cfg.raw["historicalRows"]:
         need(any(r["id"].startswith(w["prefix"]) and r["status"] == w["status"] for r in env["rows"]),
-             "historical row missing: " + w["prefix"], Failed)
+             "a historical row is missing", Failed)
     m = marker(host, "codex", pin["run"], "baseline", nb, budget, obs)
-    need(m["files"] == host.predecessor_marker_files(), "the codex marker baseline changed", Failed)
+    need(m["files"] == hist["markerFiles"], "the codex marker baseline changed since the predecessor", Failed)
     budget.check()
-    start = int(time.time() * 1000) - 2000  # stamped at reply time: the validator requires now - start <= 120 s
+    start = runner_floor(host, gate_now) - 1000  # <= the Runner's now (lower bound), <= 120 s old at its check
     end = min(start + 900_000, host.state.expires_at - 60_000, host.runner_cutoff_ms())
     need(end > start + 300_000, "less than 5 minutes left for the replacement window", Failed)
     host.state.window = (start, end)
     host.state.historical = {"trajectory": env, "marker": m}
-    obs["window"] = {"start": start, "end": end, "rowIds": ids}
+    obs["window"] = {"start": start, "end": end}
     return {"confirmReplacement": True, "reportDownloaded": True, "operatorVerified": True,
             "priorReportCanonicalSha256": ctx["canonicalReportSha256"], "windowStartUtc": utc(start),
             "windowEndUtc": utc(end), "trajectory": env, "marker": m}
 
 
 def c_pre_launch(host, req, ctx, budget, gate_now, obs):
-    import time
     provider = ctx.get("provider")
     need(provider in ("codex", "qwen") and ctx.get("phase") == "baseline", "C5 provider/phase")
     need(ctx.get("source") == host.cfg.raw["router"]["source"], "C5 Router source")
@@ -376,6 +413,11 @@ def c_pre_launch(host, req, ctx, budget, gate_now, obs):
          "C5 scope is not the renewed principal")
     need(ctx.get("holderId") == host.state.holder["incarnation"] and ctx.get("journalId") == host.state.holder["journal"],
          "C5 holder is not the handed-off holder")
+    prev = host.state.current()
+    if prev is not None:  # the previous run is finished only when its session is closed at the hub
+        need(prev.phase == "open2" and prev.session_id is not None, "the previous run is not finished", Failed)
+        need(session_state(host, prev.session_id, budget, obs)["state"] == "closed", "the previous session is open",
+             Failed)
     hrec = holder_record(host, budget, obs)
     need(hrec["incarnation"] == ctx["holderId"] and hrec["journalId"] == ctx["journalId"], "holder identity", Failed)
     need(hrec["sessions"] == 0 and hrec["activeSessions"] == 0 and hrec["pendingCommands"] == 0
@@ -384,10 +426,10 @@ def c_pre_launch(host, req, ctx, budget, gate_now, obs):
     pin = host.cfg.profile(provider)
     route = host.remote.router(["route", "canary-pi-" + provider, pin["account"], pin["model"]], budget, obs, "route")
     need(route.get("ok") is True, "the canary route is not the single approved target", Failed)
-    clocks(host, budget, obs, gate_now, host.recv_ms)
+    clocks(host, budget, obs)
     after = ctx.get("sinceAfter")
     need(after is None or is_int(after, 1), "sinceAfter")
-    env = trajectory(host, renewed["key"], provider, since_after=after or int(time.time() * 1000) - 1, not_before=0,
+    env = trajectory(host, renewed["key"], provider, since_after=after if after is not None else now_ms() - 60_000,
                      budget=budget, obs=obs, label="pre-launch")
     m = marker(host, provider, ctx["runId"], "baseline", 0, budget, obs)
     run = RunState(provider, ctx["runId"], bool(ctx.get("effort")))
@@ -398,25 +440,35 @@ def c_pre_launch(host, req, ctx, budget, gate_now, obs):
             "routeConfirmed": True, "clocksWithin5s": True}
 
 
-def bind_session(host, run, session_id: str, budget, obs, *, resume_from=None) -> dict:
-    """A session belongs to this execution only through its agent_session_launches row (plan section 3)."""
-    rows = host.remote.sql("session-launch.sql", {"session_id": session_id, "tenant": host.cfg.raw["tenant"]}, budget,
-                           obs)
+def bind_session(host, run, session_id: str, budget, obs, *, resume_from=None, after_ms=None) -> dict:
+    """A session belongs to this execution only through its launch row (plan section 3)."""
+    if resume_from is None:
+        rows = host.remote.sql("session-launch.sql", {"session_id": session_id, "tenant": host.cfg.raw["tenant"]},
+                               budget, obs)
+    else:
+        rows = host.remote.sql("session-resume.sql", {"resume_from": resume_from, "tenant": host.cfg.raw["tenant"]},
+                               budget, obs)
     need(len(rows) == 1, "no single launch row for the session", Failed)
     r = rows[0]
     pin = host.cfg.profile(run.provider)
-    need(r["actor_id"] == host.cfg.raw["jitUserId"] and is_int(r["created_ms"]) and r["created_ms"] >= host.run_start_ms,
+    need(r["actor_id"] == host.cfg.raw["jitUserId"] and is_int(r["created_ms"])
+         and r["created_ms"] >= (after_ms or host.run_start_ms),
          "the session was not launched by this execution's JIT actor", Failed)
     need(r["profile_id"] == pin["id"] and r["profile_revision"] == 1 and r["cwd"] == pin["cwd"],
          "the launch profile/cwd is not the pinned one", Failed)
     need(r["holder_id"] == host.state.holder["incarnation"] and r["holder_journal_id"] == host.state.holder["journal"],
          "the launch holder is not the handed-off holder", Failed)
+    need(is_uuid(r.get("session_id")), "the launch has no session", Failed)
     if resume_from is not None:
-        need(r["resume_from"] == resume_from and r["resume_native_id"] == run.native_id
-             and r["resume_acknowledge_unknown_tool_effects"] is False, "the resume is not bound to the closed session",
-             Failed)
-    host.state.sessions[session_id] = run
-    return r
+        need(r["resume_from"] == resume_from and r["resume_generation"] == run.generation
+             and r["resume_native_id"] == run.native_id and r["resume_acknowledge_unknown_tool_effects"] is False,
+             "the resume is not bound to the closed session", Failed)
+    s = session_state(host, r["session_id"], budget, obs)
+    need(s["state"] == "open" and s["rebinding"] is False and s["holder_id"] == host.state.holder["incarnation"],
+         "the bound session is not open on the handed-off holder", Failed)
+    host.state.sessions[r["session_id"]] = run
+    obs["binding"] = {"session": r["session_id"], "launch": r["id"], "resume": resume_from is not None}
+    return {**r, "generation": s["generation"]}
 
 
 def c_post_open(host, req, ctx, budget, gate_now, obs):
@@ -424,19 +476,26 @@ def c_post_open(host, req, ctx, budget, gate_now, obs):
     need(ctx.get("phase") == "baseline" and is_uuid(ctx.get("sessionId")) and is_int(ctx.get("generation"), 1)
          and is_int(ctx.get("notBefore"), 1), "C6 context")
     launch = bind_session(host, run, ctx["sessionId"], budget, obs)
+    need(launch["session_id"] == ctx["sessionId"] and launch["generation"] == ctx["generation"],
+         "the C6 session or generation differs from the hub", Failed)
     run.session_id, run.generation, run.launch_id = ctx["sessionId"], ctx["generation"], launch["id"]
     run.native_id = launch.get("native_id")
     renewed = host.state.renewed[run.provider]
-    rows = host.remote.sql("delivery.sql", {"launch_id": launch["id"], "session_id": ctx["sessionId"],
-                                            "binding_id": renewed["binding"], "credential_id": renewed["credential"],
-                                            "tenant": host.cfg.raw["tenant"]}, budget, obs)
-    need(len(rows) == 1, "no single install receipt for this launch", Failed)
+    v = {"launch_id": launch["id"], "session_id": ctx["sessionId"], "binding_id": renewed["binding"],
+         "credential_id": renewed["credential"], "host_id": host.cfg.raw["hostId"], "tenant": host.cfg.raw["tenant"]}
+    rows = host.remote.sql("delivery.sql", v, budget, obs)
+    if not rows and run.effort:  # the effort launch reuses the credential the codex lifecycle installed
+        rows = host.remote.sql("delivery-reuse.sql", {k: v[k] for k in ("binding_id", "credential_id", "host_id",
+                                                                         "tenant")}, budget, obs)
+    need(len(rows) == 1, "no single install receipt for this credential on this holder", Failed)
     r = rows[0]
     need(r["holder_id"] == host.state.holder["incarnation"] and r["generation"] == renewed["generation"]
          and r["rendered"] is True and r["render_failure"] is None and r["install_state"] == "completed"
-         and r["receipt_status"] == "completed",
-         "the install/render receipt is not terminal-installed", Failed)
-    need(r["consumer_state"] == "active" and r["consumer_lease_ok"] is True, "no active consumer lease", Failed)
+         and r["receipt_status"] == "completed", "the install/render receipt is not terminal-installed", Failed)
+    need(r["consumer_state"] == "active" and r["consumer_lease_ok"] is True, "no active consumer lease on this host",
+         Failed)
+    obs["delivery"] = {k: r[k] for k in ("install_state", "receipt_status", "rendered", "consumer_state",
+                                         "consumer_lease_ok")}
     f = host.remote.dw(["credfile", renewed["binding"]], budget, obs, "credfile")
     need(f.get("state") == "present" and f.get("regular") is True and f.get("uid") == 1000 and f.get("mode") == "0o600"
          and f.get("links") == 1, "credential.json is not c4/0600/single-link", Failed)
@@ -453,6 +512,12 @@ def c_observation(host, req, ctx, budget, gate_now, obs):
          and sc.get("namespace") == "default" and is_int(sc.get("since"), 1), "C7 scope is not this run's")
     need(run.c5_trajectory is not None and sc["since"] == run.c5_trajectory["scope"]["since"], "C7 since changed")
     need(is_int(nb, 1) and (phase is None or phase in ("baseline", "denied", "approved", "recovered")), "C7 context")
+    if run.phase == "recovering":  # launch(true) went straight here: bind the resumed session first
+        closed = run.session_id
+        need(session_state(host, closed, budget, obs)["state"] == "closed", "the recovered-from session is open",
+             Failed)
+        launch = bind_session(host, run, None, budget, obs, resume_from=closed, after_ms=run.recover_ms)
+        run.session_id, run.generation, run.launch_id = launch["session_id"], launch["generation"], launch["id"]
     env = trajectory(host, renewed["key"], run.provider, since=sc["since"], not_before=nb, budget=budget, obs=obs,
                      label="observation")
     rows_retained(run.last_trajectory, env)
@@ -473,6 +538,9 @@ def c_permission(host, req, ctx, budget, gate_now, obs):
          "C8 session is not this run's bound session")
     perm = ctx.get("permission") or {}
     need(is_uuid(perm.get("id")) and isinstance(opt, str) and kind in ("allow_once", "reject_once"), "C8 context")
+    s = session_state(host, sid, budget, obs)  # the hub's CURRENT generation and rebinding, not the Runner's
+    need(s["state"] == "open" and s["generation"] == gen and s["rebinding"] is False,
+         "the session's generation or binding changed", Failed)
     rows = host.remote.sql("permission.sql", {"permission_id": perm["id"], "session_id": sid,
                                               "tenant": host.cfg.raw["tenant"]}, budget, obs)
     need(len(rows) == 1, "no single pending permission", Failed)
@@ -480,20 +548,21 @@ def c_permission(host, req, ctx, budget, gate_now, obs):
     need(r["state"] == "pending" and r["unexpired"] is True, "the permission is not pending and unexpired", Failed)
     pctx = r["context"] or {}
     options = [o for o in pctx.get("options") or [] if isinstance(o, dict)]
-    matching = [o for o in options if o.get("optionId") == opt]
-    need(len(matching) == 1 and matching[0].get("kind") == kind, "the option is not exactly one of that kind", Failed)
+    of_kind = [o for o in options if o.get("kind") == kind]
+    need(len(of_kind) == 1 and of_kind[0].get("optionId") == opt, "the option is not the one of that kind", Failed)
     title, desc = pctx.get("title"), pctx.get("description")
-    obs["permission"] = {"title": safe_text(title), "description": safe_text(desc), "kind": kind}
+    obs["permission"] = {"id": perm["id"], "title": safe_text(title), "description": safe_text(desc), "kind": kind}
     purpose = ctx.get("purpose")
     if purpose == "relay-message-read":
         need(title == READ_TITLE and kind == "allow_once", "relay read must be the exact allow_once read", Failed)
-        inp = read_input(desc)
+        read_input(desc)
         need(run.reads < host.cfg.raw["maxReadsPerRun"], "relay read cap reached", Failed)
         run.reads += 1
-        obs["permission"]["read"] = sorted(inp)
+        run.confirmed.append({"permission": perm["id"], "option": opt, "kind": kind, "step": "read"})
         return True
     need(purpose == "marker", "unknown permission purpose", Failed)
     need(not run.effort, "no marker permission in the effort run", Failed)
+    need(title == MARKER_TITLE, "the marker tool is not exactly bash", Failed)
     cmd = marker_input(desc)
     renders = {k: host.marker_command(run.provider, run.run_id, k) for k in ("denied", "effects")}
     step = [k for k, v in renders.items() if v == cmd]
@@ -502,16 +571,16 @@ def c_permission(host, req, ctx, budget, gate_now, obs):
     need(kind == want, "the decision is not bound to this command", Failed)
     need(run.decisions[step[0]] == 0, "this marker decision was already confirmed", Failed)
     run.decisions[step[0]] += 1
+    run.confirmed.append({"permission": perm["id"], "option": opt, "kind": kind, "step": step[0]})
     obs["permission"]["marker"] = step[0]
     return True
 
 
-def _desc_json(desc) -> dict:
-    need(isinstance(desc, str) and len(desc) <= 16384, "permission description", Failed)
-    start = desc.find("{")
-    need(start >= 0, "permission input missing", Failed)
+def _desc_json(desc, limit: int) -> dict:
+    """The driver's rule: the WHOLE description is the JSON input (JSON.parse(c.description))."""
+    need(isinstance(desc, str) and len(desc.encode()) <= limit, "permission description", Failed)
     try:
-        v = json.loads(desc[start:])
+        v = json.loads(desc)
     except ValueError as e:
         raise Failed("permission input malformed") from e
     need(isinstance(v, dict), "permission input", Failed)
@@ -519,7 +588,7 @@ def _desc_json(desc) -> dict:
 
 
 def read_input(desc) -> dict:
-    v = _desc_json(desc)
+    v = _desc_json(desc, 4000)
     need(set(v) <= {"channelId", "after", "limit"}, "relay read input has extra fields", Failed)
     if "channelId" in v:
         need(v["channelId"] == CHANNEL, "relay read channel", Failed)
@@ -533,10 +602,12 @@ def read_input(desc) -> dict:
 
 
 def marker_input(desc) -> str:
-    v = _desc_json(desc)
+    v = _desc_json(desc, 16384)
     need(set(v) <= {"command", "timeout"} and isinstance(v.get("command"), str), "marker input shape", Failed)
     if "timeout" in v:
-        need(is_int(v["timeout"], 1) and v["timeout"] <= 120, "marker timeout", Failed)
+        t = v["timeout"]
+        need(isinstance(t, (int, float)) and not isinstance(t, bool) and t == t and 0 < t <= 120, "marker timeout",
+             Failed)
     return v["command"]
 
 
@@ -548,6 +619,7 @@ def c_recover_history(host, req, ctx, budget, gate_now, obs):
     hrec = holder_record(host, budget, obs)
     need(hrec["incarnation"] == ctx["holderId"] and hrec["journalId"] == ctx["journalId"] and hrec["sessions"] == 0
          and hrec["activeSessions"] == 0 and hrec["pendingCommands"] == 0, "holder not settled", Failed)
+    need(session_state(host, run.session_id, budget, obs)["state"] == "closed", "the session is not closed", Failed)
     rows = host.remote.sql("session-commands.sql", {"session_id": run.session_id, "generation": run.generation,
                                                     "tenant": host.cfg.raw["tenant"]}, budget, obs)
     control = [r for r in rows if r["table"] == "control"]
@@ -556,17 +628,30 @@ def c_recover_history(host, req, ctx, budget, gate_now, obs):
          "a control command is not completed", Failed)
     need(all(r["kind"] == "permission-decision" and r["receipt_status"] == "accepted" for r in agent),
          "an agent command is not an accepted permission decision", Failed)
-    perms = host.remote.sql("session-permissions.sql", {"session_id": run.session_id,
-                                                        "tenant": host.cfg.raw["tenant"]}, budget, obs)
-    need(all(p["state"] != "pending" for p in perms), "a permission is still pending", Failed)
+    perms = host.remote.sql("permission-decisions.sql", {"session_id": run.session_id,
+                                                         "tenant": host.cfg.raw["tenant"]}, budget, obs)
+    decided = {p["id"]: p for p in perms}
+    need(set(decided) == {c["permission"] for c in run.confirmed}, "the session's permissions are not exactly the "
+         "confirmed ones", Failed)
+    for c in run.confirmed:
+        p = decided[c["permission"]]
+        need(p["state"] == "resolved" and p["option_id"] == c["option"], "a permission was not resolved as confirmed",
+             Failed)
     t = host.remote.dw(["transcript", host.native_home(run)], budget, obs, "transcript")
     if t.get("state") != "observed":
         raise Unsupported("the native transcript source is not established")
-    need(t["unsettled"] == [], "a native tool call has no result", Failed)
-    want = sorted(sha256_bytes(host.marker_command(run.provider, run.run_id, k).encode()) for k in ("denied", "effects"))
-    need(sorted(s["sha256"] for s in t["shellCommands"]) == want, "shell calls are not exactly the two markers", Failed)
+    need(t["unsettled"] == [] and t["duplicateResults"] == [], "a native tool call is unsettled or duplicated", Failed)
+    outcome = {sha256_bytes(host.marker_command(run.provider, run.run_id, k).encode()): k for k in ("denied", "effects")}
+    shells = {s["sha256"]: s["results"] for s in t["shellCommands"]}
+    need(set(shells) == set(outcome), "shell calls are not exactly the two markers", Failed)
+    for sha, step in outcome.items():
+        res = shells[sha]
+        need(len(res) == 1 and isinstance(res[0], bool), "a marker call's native outcome is unknown", Unsupported)
+        need(res[0] is (step == "denied"), "a marker call's native outcome differs from the decision", Failed)
     m = marker(host, run.provider, run.run_id, "approved", 0, budget, obs)
     need(m["files"]["effects"].get("sha256") == run.approved_marker_sha, "the approved marker changed", Failed)
+    obs["recovery"] = {"permissions": len(run.confirmed), "shellCalls": len(shells)}
+    run.recover_ms = now_ms() - 5000
     return True
 
 
@@ -575,22 +660,7 @@ def c_reconcile_choice(host, req, ctx, budget, gate_now, obs):
 
 
 def c_retire_branch(host, req, ctx, budget, gate_now, obs):
-    run = run_for(host.state, ctx)
-    need(run.effort and ctx.get("sessionId") == run.session_id and ctx.get("generation") == run.generation, "C11 run")
-    t = host.remote.dw(["transcript", host.native_home(run)], budget, obs, "transcript")
-    if t.get("state") != "observed":
-        raise Unsupported("the native transcript source is not established")
-    need(t["thinkingLevels"] and t["thinkingLevels"][-1] == "high", "the applied effort is not high", Failed)
-    need(t["configChangedNotices"], "no SESSION_CONFIGURATION_CHANGED notice in the native record", Failed)
-    rows = host.remote.sql("session-commands.sql", {"session_id": run.session_id, "generation": run.generation,
-                                                    "tenant": host.cfg.raw["tenant"]}, budget, obs)
-    need(any(r["kind"] == "prompt" and r["stop_reason"] == "refusal" for r in rows), "no refused probe prompt", Failed)
-    renewed = host.state.renewed[run.provider]
-    env = trajectory(host, renewed["key"], run.provider, since=run.last_trajectory["scope"]["since"], not_before=0,
-                     budget=budget, obs=obs, label="retire")
-    rows_retained(run.last_trajectory, env)
-    need(env["totalAttempts"] == run.last_trajectory["totalAttempts"], "attempts were added", Failed)
-    return True
+    raise Unsupported("the settings-applied and probe-refusal sources are not established (gate)")
 
 
 def c_predecessor(host, req, ctx, budget, gate_now, obs):

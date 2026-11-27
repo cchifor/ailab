@@ -5,6 +5,7 @@
 //   route ALIAS ACCOUNT MODEL                         - the canary route is the single approved target
 //   identity                                          - pod clock, capture-config digest and store identity
 // Every wait happens on THIS clock (the clock of requestedAt/observedAt). Rows are projected to the driver's 11 fields.
+// The first argument is an absolute deadline (epoch ms): the script exits at it and every fetch is bounded by it.
 "use strict";
 const crypto = require("node:crypto");
 const ORIGIN = "http://127.0.0.1:8787";
@@ -13,7 +14,10 @@ const KEYS = ["id", "requestId", "namespace", "principalId", "route", "startedAt
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\n");
 const fail = (why, code = 1) => { process.stderr.write(why + "\n"); process.exit(code); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const h = { headers: { authorization: "Bearer " + process.env.ROUTER_ADMIN_TOKEN } };
+let DEADLINE = 0;
+const left = () => Math.max(1, DEADLINE - Date.now());
+const opts = () => ({ headers: { authorization: "Bearer " + process.env.ROUTER_ADMIN_TOKEN },
+  signal: AbortSignal.timeout(left()) });
 const canonical = (v) => (Array.isArray(v) ? "[" + v.map(canonical).join(",") + "]"
   : v && typeof v === "object" ? "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + canonical(v[k])).join(",") + "}"
   : JSON.stringify(v));
@@ -21,18 +25,29 @@ const sha = (s) => crypto.createHash("sha256").update(s).digest("hex");
 const int = (s) => { if (!/^[0-9]{1,16}$/.test(s)) fail("bad integer", 2); return Number(s); };
 
 async function config() {
-  const r = await fetch(ORIGIN + "/admin/v1/config", h);
+  const r = await fetch(ORIGIN + "/admin/v1/config", opts());
   if (!r.ok) fail("config HTTP " + r.status);
   return r.json();
 }
 
 async function identity() {
   const c = await config();
-  let store = "";
+  // The recording store: a SQLite file (the path plus its device and inode: replaced only if the file is), or a
+  // database URL (protocol, host, port and path; never its credentials). Anything else is not an identity.
+  const db = process.env.ROUTER_DATABASE || "";
+  let store;
   try {
-    const u = new URL(process.env.ROUTER_DATABASE || "");
-    store = sha(u.protocol + "//" + u.hostname + ":" + u.port + u.pathname);  // no credentials
-  } catch { store = sha("unparsed"); }
+    if (db.startsWith("/")) {
+      const st = require("node:fs").statSync(db);
+      if (!st.isFile()) throw new Error("not a file");
+      store = sha("file:" + db + ":" + st.dev + ":" + st.ino);
+    } else {
+      const u = new URL(db);
+      if (!u.hostname || !u.pathname || u.pathname === "/") throw new Error("incomplete");
+      store = sha(u.protocol + "//" + u.hostname + ":" + u.port + u.pathname);
+    }
+  } catch { fail("the recording store identity is not established"); }
+  if (!Number.isInteger(c.capture?.retentionDays) || c.capture.retentionDays < 1) fail("capture retention unknown");
   return { podNow: Date.now(), captureSha256: sha(canonical(c.capture ?? null)), captureLevel: c.capture?.level ?? null,
     retentionDays: c.capture?.retentionDays ?? null, storeSha256: store };
 }
@@ -40,6 +55,7 @@ async function identity() {
 async function trajectory(key, route, mode, value, notBefore) {
   if (!/^key_[0-9a-f]{32}$/.test(key) || !/^canary-pi-(codex|qwen)$/.test(route)) fail("bad scope", 2);
   if (Number(process.env.ROUTER_PORT || 8787) !== 8787) fail("router port", 3);
+  if (notBefore >= DEADLINE) fail("notBefore is past the deadline", 2);
   while (Date.now() < notBefore) await sleep(Math.min(250, notBefore - Date.now()));
   let since;
   if (mode === "fixed") since = value;
@@ -52,7 +68,7 @@ async function trajectory(key, route, mode, value, notBefore) {
   const requestedAt = Date.now();
   if (since > requestedAt) fail("since in the future", 2);
   const q = new URLSearchParams({ namespace: "default", principal, route, limit: "499" });
-  const r = await fetch(ORIGIN + "/admin/v1/trajectories?" + q, h);
+  const r = await fetch(ORIGIN + "/admin/v1/trajectories?" + q, opts());
   if (!r.ok) fail("trajectory HTTP " + r.status);
   const d = await r.json();
   let all;
@@ -80,7 +96,10 @@ async function routeCheck(alias, account, model) {
 }
 
 (async () => {
-  const [mode, ...a] = process.argv.slice(2);
+  const [deadline, mode, ...a] = process.argv.slice(2);
+  DEADLINE = int(deadline);
+  if (DEADLINE <= Date.now()) fail("deadline elapsed", 2);
+  setTimeout(() => fail("deadline", 4), left()).unref();
   if (mode === "trajectory" && a.length === 5) out(await trajectory(a[0], a[1], a[2], int(a[3]), int(a[4])));
   else if (mode === "route" && a.length === 3) out(await routeCheck(a[0], a[1], a[2]));
   else if (mode === "identity" && a.length === 0) out(await identity());
