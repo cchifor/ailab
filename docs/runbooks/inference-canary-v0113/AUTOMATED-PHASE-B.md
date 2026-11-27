@@ -379,3 +379,28 @@ schemas and raw-body digest checks. This host test uses synthetic fence,
 readiness, branch and terminal observations. The public release gate remains
 NULL; no final published release, live authority or deployed native/client drain
 qualification is claimed.
+
+The CLI accepts the operator's decimal epoch-second deadline or integer
+milliseconds through the shared parser, retaining the thirty-minute ceiling.
+Control-lease requests use `RELAY_SESSION_CONTROL_SOCKET` when supplied; other
+requests use `RELAY_SESSION_SOCKET`. Neither a refusal nor a timeout falls back
+to the other socket. Include `owner-phase-a-deadline.cjs` in the pinned bundle.
+
+The signed HTTP protocol check has an explicit offline reproduction command:
+
+```sh
+python scripts/qualify-pi-b-router-protocol.py \
+  --router-checkout /qualified/router \
+  --dependencies-volume qualified-router-dependencies \
+  --output /new/protocol-proof
+```
+
+The reviewed manifest in `scripts/qualification/pi-b-router-protocol.json`
+pins the local Router candidate, source archive, Node image, dependency lock,
+controller and test inputs. The command requires those existing inputs and
+fails if any are absent or different; it downloads nothing and never silently
+skips. It runs the actual controller against signed Router HTTP in a new
+container without external networking, then removes only its own container and
+volume. The packaged command passed typecheck and both cases with zero provider
+opens. This is a release qualification command, separate from the default unit
+suite; a final merged release needs reviewed pins and fresh execution evidence.
