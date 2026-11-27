@@ -1,301 +1,436 @@
 # Relay phase A observer: the checkpoint collector and deployment observer for automated phase A
 
-## Codex Review
-
-- The split between a credential-less runner and pinned host collectors is sensible, and retaining the driver's validators preserves important safeguards.
-- The predecessor projection's freshness/hash conflict is unresolved; neither proposed workaround satisfies the current driver contract.
-- Collector details need correction for renewed credentials, Router principals, collection boundaries, delivery evidence and confirmation-state tracking.
-- The writable mailbox and mutating handoff need stronger filesystem, cancellation and cross-run replay protections.
-- Verification must exercise actual collector outputs against the driver, broker integration and realistic timing, especially the shorter permission/projection deadlines and holder handoff.
-
 ## Context
 
 The owner's standing directive (2026-11-27) says Relay phase A must run without manual owner steps. The inference
 session's automation host (`docs/runbooks/inference-canary-v0113/AUTOMATED-PHASE-A.md`, ailab #2060) runs the unchanged
 `Runner.replaceStopped()` driver non-interactively. It refuses to start until the operator links three integrations:
 
-1. `collectCheckpoint({name, instructions, deadline, signal, context})` returns the evidence value for each driver
-   checkpoint. The driver's own validator then checks it. An empty object, a stale observation or an unconditional
-   `true` is not a substitute.
+1. `collectCheckpoint({name, instructions, deadline, signal, context})`: return the evidence value for each driver
+   checkpoint. The driver's own validator checks it. An empty object, a stale observation or an unconditional `true`
+   is not a substitute.
 2. `observeDeployment(context)` returns `{hubSource, ready, observedUtc}` before any credential request (renewal
    prelude).
-3. `readPredecessorEvidence(context)` plus `predecessorEvidencePin`: the optional, separately pinned read-only
-   projection of the stopped predecessor's three command receipts (`projection-contract.md`).
+3. `readPredecessorEvidence(context)` plus `predecessorEvidencePin`: the separately pinned read-only projection of the
+   stopped predecessor's three command receipts (`projection-contract.md`).
 
-The authenticated transport is done: the session broker (`scripts/relay-operator.py session`, ailab #2062) runs the
-runner bundle in a network-less container that talks only to the scoped Unix-socket proxy. This plan adds the missing
-**observer**. It collects real machine evidence (Router trajectories, the dev-worker-1 marker files, holder hello, hub
-deployment, read-only database facts), performs the one operator action the driver asks for (the preserving-holder
-handoff on dev-worker-1), and applies a fixed, reviewed canary policy to the confirmation checkpoints.
+The authenticated transport exists: the session broker (`scripts/relay-operator.py session`, ailab #2062) runs the
+runner bundle as UID 10001 in a `--network none` container. That container talks only to the scoped Unix-socket proxy
+on a 1 MiB tmpfs volume. This plan adds the missing **observer**, which:
+- collects real machine evidence: Router trajectories, the dev-worker-1 marker files, holder hello, hub deployment,
+  read-only database facts;
+- performs the one operator action the driver asks for, the preserving-holder handoff on dev-worker-1;
+- applies a fixed, reviewed canary policy to the confirmation checkpoints.
 
-The checkpoint inventory (from `owner-phase-a.js` at the #2060 head): 13 `ask` sites, 11 reachable from
-`replaceStopped()`. A run makes at least 51 checkpoint calls, up to about 79 with the Relay-read approvals. Each call
-carries a structured `context.kind`; collectors key on it and never parse `name`, `instructions` or provider text.
+**Checkpoint inventory** (`owner-phase-a.js` at the #2060 head):
+- 13 `ask` sites, 11 of them reachable from `replaceStopped()`;
+- at least 51 calls per run, up to about 79 with the Relay-read approvals;
+- every call carries a structured `context.kind`, and collectors key on it. They never parse `name`, `instructions` or
+  provider text.
+
+**Timeouts:**
+- ordinary checkpoints: 120 s;
+- permission (C8): at most 30 s;
+- the predecessor reader: 15 s;
+- C1 and C2 share one 120 s bootstrap budget with the metadata reads between them.
+
+## Review resolution (round 1: codex plus an independent Fable review)
+
+Both reviewers accepted the split into a credential-less runner and pinned host collectors. Every codex finding is
+accepted and folded into the sections below. Where the two reviews chose differently, the choice and the reason:
+
+- **Transport.** Both rejected the Windows file mailbox (rename races, reparse points, no quota, fictional modes).
+  **Chosen:** Fable's stdio-bridged gate sidecar (section 2). It reuses the broker's existing pattern for the proxy
+  (`docker run -i` plus a tmpfs socket volume) and keeps every credential on the host.
+- **C11 trajectory.** Fable proposed reusing the preceding zero-attempt observation. Codex required a fresh snapshot
+  against the retained one with an unchanged `since`. **Chosen:** codex's. It costs one read and proves the delta
+  rather than inferring it.
+- **Runtime pre-validation with the driver's exported validators (Fable).** **Not adopted at runtime.** Those
+  validators need Runner state that the client does not have, so the host performs the settle and `notBefore`
+  waits itself. **Adopted in tests** instead: every collector output is fed into the real driver validators
+  (Verification 1).
+- **C4 timing.** **Adopted:** Fable's move of the holder-only start before the runner, plus codex's measured end-to-end
+  budget.
+- **Blockers.** Both flagged C10 and the predecessor projection as blockers. Both become explicit gates that need
+  driver-side answers (section 10).
 
 ## Approach
 
 ### 1. Two halves: a credential-less client in the runner, collectors on the workstation
 
 - **Client** (`scripts/relay-phase-a/observer-client.cjs`, in the runner bundle) implements the three integration
-  functions. Each call becomes one request to the host; the returned value goes straight back to the driver.
-  The client holds no credentials, opens no network and never evaluates `instructions`. Only their SHA-256 travels,
-  for the evidence record.
-- **Entrypoint** (`scripts/relay-phase-a/phase-a-entry.cjs`, in the bundle): requires the inference session's pinned
-  `owner-phase-a-cli.cjs` and calls `runCli({collectCheckpoint, observeDeployment, readPredecessorEvidence,
-  predecessorEvidencePin})` with the client's functions.
-  <!-- codex: Blocking integration mismatch: the supplied broker exports RUNNER_DEADLINE as epoch seconds, while runCli requires a 13-digit epoch-millisecond string. Specify the conversion, exact --predecessor/--output arguments and propagation of runCli's returned exit code. -->
+  functions. There are three distinct envelopes (section 2), and `AbortSignal` is stripped before sending. The client
+  holds no credentials and never evaluates `instructions`; it sends only their SHA-256.
+- **Entrypoint** (`scripts/relay-phase-a/phase-a-entry.cjs`, in the bundle):
+  1. requires the inference session's pinned `owner-phase-a-cli.cjs`;
+  2. converts the broker's epoch-second `RUNNER_DEADLINE` into the 13-digit epoch-millisecond string that `runCli`
+     requires, by passing `runCli({env: {...process.env, RUNNER_DEADLINE: <ms>}})`;
+  3. calls `runCli` with argv `--predecessor /state/predecessor/report.json --output /state/run/phase-a`, plus the
+     client's functions and the pin (section 6);
+  4. propagates `runCli`'s return code as the process exit code.
 - **Host observer** (`scripts/relay_phase_a_observer.py`) runs inside the `relay-operator.py session` orchestrator
-  process on the workstation, as a thread active only while the runner container runs. Its collectors use the
-  operator's existing host credentials, which never enter a container:
-  - `kubectl --context admin@ai`, for `exec` into the llm-router pod (the Router admin token stays in the pod, as in
-    the existing collector), `get` of the hub deployment, and read-only `psql` in relay-postgres-0;
-  - `ssh c4@192.168.0.8` (dev-worker-1), running only pinned scripts copied from the repo.
+  process, as a thread started only for a manifest with an `observer` block. Its code, remote scripts, SQL and config
+  are loaded from the manifest's reviewed commit (`git show <commit>:<path>` into a private temporary directory, each
+  file hashed), never from the working tree. Its collectors use the operator's existing host credentials, which never
+  enter a container:
+  - `kubectl` with an explicit `--context admin@ai` and a namespace on every call;
+  - `ssh` to `c4@192.168.0.8` with `StrictHostKeyChecking=yes` against a pinned `known_hosts` entry (the probe checks
+    it).
 
-### 2. Transport: a file mailbox on a dedicated bind mount
+### 2. Transport: a stdio-bridged gate sidecar
 
-The runner stays `--network none` with no new socket. The orchestrator creates `<evidence-dir>/mailbox/`, an empty
-directory, and bind-mounts it read-write at `/observer`. This is the runner's only host-visible writable path; the
-state volume stays a Docker volume.
+**The gate.** It is a new container, `relay-observer-gate-<run>`, launched like the proxy:
+- `docker run -i --network none --read-only --cap-drop ALL --security-opt no-new-privileges`, UID 10001, a pids limit
+  of 32 and 64 MiB of memory;
+- the same tmpfs socket volume;
+- a small pinned Python script, `relay-observer-gate.py`, from the reviewed tool directory.
 
-<!-- codex: Explain why a mailbox is preferable to framed stdin/stdout on this workstation or a dedicated Unix socket where supported; --network none itself does not prohibit Unix sockets. The mailbox may be appropriate for Windows/Docker interoperability, but introduces filesystem races, polling and writable host storage that those alternatives avoid. -->
-<!-- codex: Specify ownership/ACL setup for the runner's UID 10001 and verify rename, visibility and permissions on the actual Docker backend. Bound total mailbox bytes and entries, including unexpected files, so the runner cannot exhaust the filesystem holding cleanup evidence. -->
+The gate holds no credentials. It serves `/run/relay-session/observer.sock`:
+- one connection at a time, refusing a second;
+- one request per connection: one JSON line of at most 64 KiB, with duplicate keys and non-finite numbers rejected;
+- it stamps the request with its own receipt time `gateNow` (the runner's clock: both containers share the Docker VM
+  clock);
+- it writes `{"seq": n, "gateNow": ms, "request": {...}}` as one line to stdout, then waits for the host's matching
+  `{"seq": n, ...}` line on stdin;
+- it relays that line to the client and closes the connection.
 
-- **Request.** The client writes `req-<seq>.json` (temp file plus rename) with
-  `{version:1, seq, call, kind, name, instructionsSha256, deadline, context}`:
-  - `call` is `checkpoint`, `deployment` or `predecessor`;
-  - `seq` starts at 1 and increases by one; exactly one request is outstanding (the host enforces both, matching
-    the driver, which allows one checkpoint at a time).
-  <!-- codex: Define separate envelopes for all three callbacks: deployment receives only deadline/signal, and predecessor receives source/schema/session/commands/deadline/signal without a checkpoint kind or name. Strip AbortSignal explicitly and specify absent fields instead of assuming every call has the checkpoint schema. -->
-- **Host handling.** The host polls every 100 ms. It accepts only the next `req-<seq>.json`: a regular file (lstat;
-  symlinks and other types refused), at most 64 KiB, strict JSON. It validates the request against the per-kind schema
-  in section 3:
-  - UUIDs canonical lowercase; provider in `{codex, qwen}`; phase in the fixed set; ISO or epoch times finite; unknown
-    keys refused;
-  - `name` checked against that kind's allowed labels, as a consistency check only.
-  <!-- codex: lstat followed by an ordinary open is vulnerable to replacement races in this runner-writable directory. Use race-safe opens and descriptor checks, bounded reads, exclusive temporary-file creation and safe response publication, with equivalent protection against Windows reparse points; reject duplicate JSON keys and non-finite numbers. -->
-  <!-- codex: Syntactically valid UUIDs are not authorization to use host credentials. Specify checks binding requests to the pinned tenant, permitted profiles/principals, this execution's sessions and allowed checkpoint transitions, especially before C4 or a true-only confirmation. -->
-- **Response.** The host writes `resp-<seq>.json` with either `{version:1, seq, ok:true, value}` or
-  `{version:1, seq, ok:false, code}`. `code` is a fixed word such as `refused`, `failed`, `deadline` or `unsupported`.
-  Host errors never travel; they go to the host evidence log only.
-  <!-- codex: Specify atomic response publication, response byte limits and strict client validation of version, sequence and shape, including oversized trajectory envelopes. Because the runner can alter files on this mount, retained mailbox responses cannot serve as independent host evidence. -->
-- **Deadlines.** The client polls for the response until `deadline` or abort. On abort or deadline it writes
-  `cancel-<seq>` and throws, and the driver stops. Every collector subprocess is bounded by the request deadline minus
-  a 2 s margin. A cancelled request whose collector already started a mutating step records an **uncertain** receipt
-  (section 5) and is never repeated.
-  <!-- codex: Budget against the actual contracts: ordinary checkpoints default to 120 s, permission has at most 30 s and predecessor reading has 15 s; C1/C2 and their intervening metadata reads share one 120 s bootstrap budget. Clamp caller deadlines to host-owned limits and use one remaining monotonic budget across waits, subprocesses, serialization and fsync. -->
-  <!-- codex: A blocking collector must not prevent the host from noticing cancellation, and killing ssh or kubectl does not establish that remote work stopped. Specify independent cancellation monitoring and remote deadline enforcement, with no later handoff writes after cancellation and uncertain status whenever termination cannot be established. -->
-- **After the runner exits.** The host stops, lists the mailbox and records any unexpected file names (not contents)
-  in the evidence. It leaves the mailbox in the evidence directory.
+On client disconnect or deadline, it writes `{"seq": n, "cancel": true}` to stdout.
 
-### 3. Collectors by checkpoint kind
+**The host thread** reads the gate's stdout, validates and executes the request, and writes the response to the gate's
+stdin. A request whose `seq` is not the next one is refused, as is a second outstanding request, so ordering is enforced
+on both sides.
 
-Each collector returns exactly the object the driver's validator asks for. Every boolean `...Confirmed` or
-`operatorVerified` field is set only when the named check passed in this call; any failed check returns
-`ok:false, code:failed`, and the driver stops. Times are observed at collection, never copied from context.
+**Envelopes:**
+- `checkpoint`: `{v:1, call:"checkpoint", kind, name, instructionsSha256, deadline, clientNow, context}`;
+- `deployment`: `{v:1, call:"deployment", deadline, clientNow, context}`, where context is the renewal prelude's
+  object;
+- `predecessor`: `{v:1, call:"predecessor", deadline, clientNow, context:{source, schemaVersion, sessionId, generation,
+  priorReportCanonicalSha256, commands}}`.
 
-<!-- codex: Specify the observer's retained state: C2 establishes renewed profiles/expiry, C3 establishes the replacement window, and later confirmations require earlier trajectory and marker observations. Key it by execution, provider and runId, distinguish returned evidence from driver-accepted evidence, and never restore it merely from runner-writable mailbox files. -->
+`name` is recorded but never validated or used.
 
-| kind / call | Collected (all read-only unless marked) | Returned |
+**Responses** are `{v:1, seq, ok:true, value}` or `{v:1, seq, ok:false, code}`:
+- `code` is a fixed word such as `refused`, `failed`, `deadline`, `unsupported` or `observer-down`;
+- a response holds at most 512 KiB (a full trajectory envelope fits);
+- the client checks `v`, `seq` and the shape strictly.
+
+Host error text never travels.
+
+**Deadlines and cancellation:**
+- The host clamps `deadline` to its own per-kind maxima: 120 s, 30 s for permission, 15 s for the predecessor, and the
+  shared C1/C2 budget. It runs every collector against one monotonic remaining budget, including waits, subprocesses
+  and fsync.
+- Collectors run in a worker thread, while the host thread keeps reading the gate's stdout, so a `cancel` line is seen
+  at once.
+- Every remote step is wrapped in a remote `timeout` (`timeout --kill-after=2 <s>` on dev-worker-1, and in-pod
+  `node` / `psql` statement timeouts), so a local kill is never the only stop.
+- After cancellation no further mutating step starts. A cancelled mutating stage is classified by a read-only readback
+  (section 5), never by assumption.
+
+**Liveness.** If the host thread or a worker dies, the host answers all further requests `observer-down` and signals the
+orchestrator's stop condition (section 9).
+
+### 3. Retained observer state
+
+The observer keeps a run-scoped state machine in host memory. It is never restored from anything the runner can write.
+It is keyed by execution, provider and runId, and records:
+- **from C2:** the renewed profiles projection, the new Router keys (principal allowlist for C5 and C7) and the earliest
+  expiry;
+- **from C3:** the granted replacement window;
+- **from the pre-run step:** the holder start and the pinned Router pod identity (UID, container restart count);
+- **per provider and runId:** the last returned trajectory, marker reports (bytes and SHA-256) and the marker-decision
+  counters.
+
+It distinguishes "returned" from "accepted": acceptance is inferred only when the driver's next checkpoint for that
+runId arrives.
+
+**Kind order is enforced.** For example, C4 is accepted only after this run's C3 returned `ok`. C5, C6, C7 and C8 for a
+runId are accepted only after its C5. A request outside the expected order is refused. Per-kind request counts are
+capped at the inventory maxima.
+
+### 4. Collectors by checkpoint kind
+
+**Shared rules:**
+- Every `...Confirmed` or `operatorVerified` field is set only when its named checks passed in this call. Any failed
+  check returns `ok:false, code:failed`, and the driver stops.
+- **Source clocks.** A trajectory's `requestedAt` is the Router pod's clock, and a marker's `observedUtc` is
+  dev-worker-1's. Every `notBefore` wait happens at the source: the remote script sleeps until its own clock passes
+  `notBefore` before observing.
+- **Clock gate.** On every request the host measures four clocks within one bounded round: the workstation, the Router
+  pod, dev-worker-1, and the runner (`gateNow`, with the gate round trip subtracted). It refuses if any pair differs by
+  4 s or more. C5's `clocksWithin5s` is this result.
+
+| kind / call | Collected (read-only unless marked) | Returned |
 |---|---|---|
-| `deployment` (observeDeployment) and `renewal-deployment` (C1) | Hub Deployment `relay` in namespace relay: `observedGeneration == generation`, updated, ready and available replicas equal to the spec, every pod's `imageID` digest equal to the pinned release receipt's digest; the hub source is looked up from that receipt (section 6). C1 adds the predecessor-file check (section 6) for `reportDownloaded`. | `{hubSource, ready, observedUtc}`; C1 `{confirmMetadataReview, reportDownloaded, operatorVerified, deploymentVerified, hubSource, observedUtc}` <!-- codex: Require a positive replica count and an explicit selection of the Deployment's current pods and hub container; equality at zero replicas otherwise passes vacuously. Both callbacks require a fresh observation during their own review, so the renewal-prelude result cannot simply be reused for C1. --> |
-| `renewed-credentials` (C2) | Read-only DB: for the two pinned bindings, the current credential IDs, their `ready` or `installing` states and the earlier expiry; must equal `context.profiles` and `context.expiresAt` | `{confirmRenewedCredentials:true, profiles, expiresAt}` <!-- codex: In the driver's valid installing case current_credential_id is null and pending_credential_id identifies the credential; a current-only query rejects normal renewal before holder startup. Validate the complete profiles projection, including renewed key, generation, revision and numeric expiresAt, rather than comparing only IDs and copying unchecked context fields. --> |
-| `stopped-replacement` (C3) | Router trajectory for `context.oldScope` (original `since`); the codex marker baseline; the predecessor file hash; the window `[now, min(now+900 s, earliest credential expiry - 60 s, runner deadline - cleanup budget)]` | `{confirmReplacement, reportDownloaded, operatorVerified, priorReportCanonicalSha256, windowStartUtc, windowEndUtc, trajectory, marker}` <!-- codex: C3 also requires trajectory.requestedAt and marker.observedUtc at or after context.notBefore, exactly the two known complete/cancelled historical rows with one attempt each, and the unchanged predecessor baseline. Its context has neither renewed expiry nor the overall runner deadline, so obtain those from verified retained state and the orchestrator, not originalDeadline or this checkpoint's timeout. --> |
-| `preserving-holder` (C4) | **MUTATING, once per run**: section 5 | the `preservingHandoff` object |
-| `pre-launch` (C5) | holder hello (ready, 0 sessions, incarnation and journal equal to `context.holderId` / `journalId`); the route `canary-pi-<provider>` with exactly one enabled deployment, the pinned account and model, `maxAttempts` 1 and no fallback; the three clocks (workstation, Router pod, dev-worker-1) within 4 s; a fresh trajectory with `since = max(now, sinceAfter + 1 ms)`; the marker baseline | `{trajectory, marker, coverageConfirmed, holderReadyConfirmed, routeConfirmed, clocksWithin5s}` <!-- codex: Choose since using the Router's measured clock after waiting beyond sinceAfter; a workstation timestamp up to four seconds ahead can violate snapshot's since <= requestedAt requirement. Clock verification must include the runner clock and account for measurement round-trip time, and holder readiness must include current published pins and absence of pending/unrelated work. --> |
-| `post-open` (C6) | `credential.json` for the provider's binding is owned by c4, mode 0600 and single-link; the DB binding and current credential are `ready/ready`; the marker baseline, collected at or after `notBefore` | `{marker, deliveryConfirmed}` <!-- codex: File permissions plus ready/ready do not prove installation of this run's selected credential/principal or holder/profile readiness, which this attestation covers. Add the matching delivery/install receipts and safe no-follow file inspection without logging credential contents. --> |
-| `observation` (C7, the most frequent) | the trajectory for `context.scope` (same `since`), collected at or after `notBefore`; the marker for `context.phase` when it is non-null | `{trajectory, marker?, coverageConfirmed}` |
-| `permission` (C8) | section 4 | `true` |
-| `recover-history` (C9) | holder hello: same incarnation and journal as the context, 0 sessions, 0 pending commands; the marker for the run's last observed phase unchanged; DB: the session's prior generation closed with no command in an unknown state | `true` <!-- codex: context.generation identifies the session just closed, not a generation to decrement, and recovery creates a new Relay session. Require settled command/native-effect evidence and comparison with the retained approved marker bytes/hash; absence of a DB command named unknown alone does not prove absence of unknown tool effects. --> |
-| `reconcile-choice` (C10) | section 4 | `{reconcile: <bool>}` |
-| `retire-branch` (C11) | the session is open at `context.generation`; a fresh trajectory since the previous observation shows 0 added attempts; the effort is `high` per the session read | `true` <!-- codex: The driver reads effort from /settings.snapshot.configOptions, bound to generation/controlEpoch, and requires the specific configuration-changed refusal before this checkpoint. Identify the equivalent verified sources and compare a fresh snapshot against the retained snapshot with unchanged scope.since; a new window cannot establish the required delta. --> |
-| `predecessor` (readPredecessorEvidence) | section 6 | raw UTF-8 projection |
+| `deployment` (observeDeployment) | Deployment `relay` in namespace relay: `spec.replicas >= 1`; `observedGeneration == generation`; updated, ready and available replicas equal to the spec. The current ReplicaSet's pods: every `relay` container's `imageID` digest equals the pinned release receipt's digest. The source comes from that receipt (section 6). | `{hubSource, ready, observedUtc}` |
+| `renewal-deployment` (C1) | A fresh deployment observation, never the prelude's. The predecessor report's raw SHA-256 is re-hashed from the staged copy and must equal the manifest pin. The C1 budget is 20 s. | `{confirmMetadataReview, reportDownloaded, operatorVerified, deploymentVerified, hubSource, observedUtc}` |
+| `renewed-credentials` (C2) | Read-only DB, both pinned bindings. In the `ready` case the credential is `current_credential_id`; in the `installing` case `current_credential_id` is null and it is `pending_credential_id`. The full projection must equal `context.profiles`: renewed key, generation, revision and expiry. `context.expiresAt` must equal the numeric earlier expiry. Stores the new keys and expiry (section 3). The budget is 10 s. | `{confirmRenewedCredentials:true, profiles, expiresAt}`, echoed only after the full match |
+| `stopped-replacement` (C3) | A trajectory for `context.oldScope`: the principal must be one of the pinned historical keys, with the original `since`. It must hold exactly the two known rows: ids starting `338869f5-` complete and `811cab9f-` cancelled, with one attempt each. The codex marker baseline must be unchanged from the retained predecessor baseline. Both are observed at or after `context.notBefore` on their source clocks. The window starts at `gateNow - 2 s` and ends at `min(start + 900 s, the C2 expiry - 60 s, the orchestrator's runner deadline - the cleanup budget)`. The raw report hash is re-checked, and `priorReportCanonicalSha256` is the host's own `canonical(parsed report)` hash, which must equal `context.canonicalReportSha256`. | `{confirmReplacement, reportDownloaded, operatorVerified, priorReportCanonicalSha256, windowStartUtc, windowEndUtc, trajectory, marker}` |
+| `preserving-holder` (C4) | **MUTATING** (section 5) | the `preservingHandoff` object |
+| `pre-launch` (C5) | **Holder hello:** ready, 0 sessions, 0 pending commands, incarnation and journal equal to `context.holderId` / `journalId`, and the published binary and profile hashes. **Route** `canary-pi-<provider>`: exactly one enabled deployment, the pinned account and model, `maxAttempts` 1, no fallback. **Clock gate.** **Trajectory:** the principal must be the C2-verified renewed key. `since` is chosen in the pod: the pod waits until its clock passes `sinceAfter`, then uses `since = podNow`, before `requestedAt`. **Marker baseline.** | `{trajectory, marker, coverageConfirmed, holderReadyConfirmed, routeConfirmed, clocksWithin5s}` |
+| `post-open` (C6) | **`credential.json`:** inspected with no-follow (`stat -L` refused, `find -maxdepth 0 -type f`); owner c4, mode 0600, one link; contents never read. **DB:** the binding's installation receipt for THIS run's credential (C2) is terminal `installed` after the launch, and the binding and credential are `ready/ready`. **Marker baseline** at or after `notBefore`, unchanged from C5's. | `{marker, deliveryConfirmed}` |
+| `observation` (C7) | A trajectory for `context.scope`, with its principal on the allowlist and the same `since`, at or after `notBefore`. Unsettled rows: re-poll with a bounded backoff inside the budget (the driver refuses unsettled rows); `since` never changes, no row is dropped, no provider work is retried. The marker for `context.phase` when non-null. | `{trajectory, marker?, coverageConfirmed}` |
+| `permission` (C8) | section 7 | `true` |
+| `recover-history` (C9) | `context.generation` is the session just closed. **Hello:** same incarnation and journal as the context, 0 sessions, 0 pending commands. **Marker:** the run's approved marker bytes equal the retained SHA-256. **DB:** every command of the closed session is settled (terminal state and receipt), with no native tool effect recorded as unknown. | `true` |
+| `reconcile-choice` (C10) | section 7 (gated) | `{reconcile}` |
+| `retire-branch` (C11) | **DB:** the session is at `context.generation`. Its settings snapshot `configOptions` shows effort `high`, bound to that generation and control epoch. The recorded `SESSION_CONFIGURATION_CHANGED` refusal is present. **Trajectory:** fresh, with the retained snapshot's `since`, and 0 attempts added since that snapshot. | `true` |
+| `predecessor` | section 6 | raw UTF-8 projection |
 
-- **Trajectories.** These use the existing collector's logic, moved into the repo as
-  `scripts/relay-phase-a/router-trajectory.js`. It runs inside the llm-router pod with `node`, against
-  `127.0.0.1:8787/admin/v1/trajectories` with the pinned key per provider. It projects the 11 row fields and emits the
-  envelope `{version, source, origin, scope, requestedAt, observedAt, fetchedRows, rows, totalAttempts}`. It refuses at
-  499 or more rows, or on a row outside the scope.
-  <!-- codex: The existing collect.sh hard-codes historical keys, but renewal requires distinct new keys: only C3 uses oldScope, while C5/C7 must use the verified renewed principal supplied in context.scope. Keeping one static key per provider will fail successor snapshot validation. -->
-  <!-- codex: coverageConfirmed needs evidence of continuously enabled recording, retained history and stable Router process/database identity, not merely a successful listing or a source string copied from config. Specify these checks and stop on gaps/restarts, including when both snapshots are empty and delta cannot detect lost coverage. -->
-  <!-- codex: Do not retain collect.sh's fallback from an unrecognized response shape to an empty items array, which can manufacture zero-attempt evidence. Refuse malformed envelopes and define bounded polling for unsettled rows or delayed recording without changing since, dropping rows or retrying provider work. -->
-- **Markers and hello.** These use the existing `observe.py` and `hello-state.py`, moved to `scripts/relay-phase-a/`.
-  They are copied to a fresh `mktemp -d` on dev-worker-1 per call and removed afterwards. They read only the fixed
-  paths.
-  <!-- codex: Define the exact adapter from hello-state.py's scalars/profiles/sessions summary to the requested fields; it does not preserve nested admission state, while resume.sh obtains paused/revision from maintenance status. Missing fields must fail rather than become zero/false, and the new holder socket root must remain distinct from the original fixed marker workspace root. -->
-  <!-- codex: Repeated temp-directory creation, copying and separate ssh connections add avoidable latency across 51–79 calls. Measure this cost and consider one verified private script directory per execution or batching reads within each checkpoint, while still collecting fresh observations. -->
+**`coverageConfirmed` is derived from these checks, not from a successful listing:**
+- The Router pod is the pinned one: same UID and same restart count as at the pre-run step.
+- Trajectory recording is enabled in its live config.
+- The new snapshot contains every row id of the retained one, unchanged.
+- The response is a recognized envelope. An unrecognized shape is a failure, never an empty row list.
+- A Router restart or any gap stops the run.
 
-### 4. Confirmation policy (C8 to C11)
+**Remote scripts** are piped over ssh stdin (`python3 -I - <args>`) or `kubectl exec -i ... node -`. Nothing is
+staged in a temporary directory. The scripts are:
+- `router-trajectory.js`: the collector logic from `collect.sh`, with keys passed as validated arguments;
+- `observe-marker.py`: reads only the fixed marker files;
+- `holder-hello.py`: emits only an allowlisted key set with typed values. A missing field is a failure, never a zero or
+  false.
 
-The driver validators for C8, C9 and C11 accept only `true`, and C10 accepts a boolean. The observer must therefore be
-the independent check, with its evidence recorded host-side (section 7).
+All reads for one checkpoint are batched into one ssh call and one `kubectl exec` call where possible. The live probe
+measures each call's latency (Verification 3).
 
-- **C8 `permission`.** The observer reads the pending permission row from the hub DB (read-only, by
-  `context.permission.id`). It requires the session, generation, pending state and option ID to equal the context, and
-  the option kind to equal `decisionKind`. Then the fixed policy:
-  <!-- codex: Pin the actual DB projection and joins: the driver validates context.title and JSON in context.description, not an established separate tool-name/input schema. Also require unexpired permission, no rebinding and exactly one matching once-only option, with the session tied to this execution. -->
-  - `relay-message-read`: `decisionKind` is `allow_once`. The DB tool name is exactly
-    `mcp__relay__relay_messages_read`. The input has only `channelId` (absent, or exactly
-    `b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1`), `after` (a canonical decimal at most 2^63-1) and `limit` (1 to 50). At most
-    one read is approved per prompt operation.
-    <!-- codex: All three input fields are optional in communicationPermission; when present, after is an exact decimal string and limit is a safe integer. The checkpoint supplies no prompt operation ID, so define a verified DB correlation for the one-read limit or explicitly retain that responsibility in the driver's existing guard. -->
-  - `marker`: the DB tool input equals the observer's own rendering of the fixed marker command for (provider, runId,
-    step) and equals `context.expectedCommand`. `decisionKind` is `reject_once` for the run's first marker permission
-    (`denied`) and `allow_once` for the second (`effects`). Any other marker permission stops the run.
-    <!-- codex: Permission context contains no provider, runId or step, so define their checked derivation from retained session/phase state rather than parsing expectedCommand. Count marker decisions per lifecycle provider/runId: the full flow has two for Codex and two for Qwen, and validate the command field plus the driver's optional timeout rule rather than comparing an input object to a string. -->
-  - Anything else stops the run. The observer never returns `false` to mean "deny": a denial is the driver's own
-    `reject_once` decision, which the observer confirms.
-- **C9 and C11.** `true` only after the table's checks pass.
-- **C10 `reconcile-choice`.** `reconcile` is derived from a fact, not a default: `true` exactly when the recovered
-  session's read-only state shows the prior branch still needs reconstruction. **Open: the inference session is to
-  name the field**; until it does, the policy is `false` only when the session shows no pending reconciliation and no
-  configuration-changed refusal, and anything ambiguous stops the run.
-  <!-- codex: Blocking: neither this checkpoint context nor the supplied session contract establishes such a field, and absence of a refusal before continuation is not positive evidence that reconstruction is unnecessary. Resolve and test an authoritative native-branch observation for both true and false before enabling C10; absent/unknown evidence must stop. -->
+### 5. The preserving-holder handoff (C4): the one mutating step
 
-### 5. The preserving-holder handoff (C4): the one mutating collector
+**Pre-run step** (orchestrator, after the Lease and before the runner starts):
+1. Verify both units' effective `ExecStart` paths, state directories and drop-ins against the pins:
+   - holder v0.13.4 at 64dc50f4, binary d406b1f3;
+   - the connector and holder-maintenance image digests from `resume.sh`;
+   - the state root `relay-holder-handoff-<preparationId>`.
+2. Validate the handoff receipt `used-handoffs/<preparationId>/complete.json`: preparation, old and new identities, new
+   root and seal ID. Its SHA-256 is recorded. Check that the old root is sealed with the pinned seal.
+3. Start only `relay-holder.service`.
+4. Wait for a hello that shows admission paused, 0 sessions, 0 pending commands, `nativeStateReady` and the pinned
+   incarnation.
 
-This is `scratchpad/handoff/resume.sh`, productionized as `scripts/relay-phase-a/holder-handoff.sh` (run on
-dev-worker-1 through `bash -s`), with every input pinned in the observer config:
+Admission is paused, so a started holder can take no work. If the run never reaches C4, the holder stays paused and
+running, and the result records it.
 
-<!-- codex: Enforce the previously granted C3 window and current orchestrator Lease before every mutating stage. At C4 the driver has not yet set this.run, so Runner.ask does not cap the handoff by the replacement window, and a syntactically valid C4 request alone is insufficient authorization. -->
-<!-- codex: The existing resume.sh allows a 30 s hello wait and up to 90 s of hub-health polling, before adding this plan's initial 30 s hello wait, service startup and transport overhead. Define a measured end-to-end budget fitting C4's actual 120 s limit minus response margin, or obtain an explicit reviewed driver timeout change; extending only the client deadline cannot work. -->
+**C4 itself.** Its total budget is at most 90 s, measured within C4's 120 s:
+1. **Authorization.** This run's C3 returned `ok`, the Lease is still held, and the time is inside the C3 window.
+2. **Durable ledger.** `%LOCALAPPDATA%\relay-operator\handoff-ledger\<preparationId>.jsonl` lives outside any per-run
+   directory and is written only under the Lease. It records the intent `{op: resume, operationId, revision}` with
+   fsync before dispatch.
+   - The operationId is deterministic: `uuid5(preparationId, "resume")`.
+   - Holder-maintenance `resume <revision> <operationId>` is a compare-and-swap. On re-entry the ledger plus a
+     read-only status readback decides: "already resumed with this operationId" goes straight to readback, and
+     "paused at the recorded revision" may dispatch.
+   - Any other state stops the run.
+3. **Resume** at the freshly observed revision, in 25 s or less.
+4. **Enable both units and start only reconciliation**, in 15 s or less. Enabling is the handoff's documented normal
+   reboot behaviour (UPGRADE-USED.md): the new holder must come back after a host reboot. The runbook records it.
+5. **Read back**, in 40 s or less:
+   - the reconciliation unit's effective state path;
+   - a fresh hello: `admissionPaused:false`, same incarnation, the holder did not restart (MainPID unchanged);
+   - the hub's `agent_holder_health` row: pinned tenant and host, the measured holder and journal, and a timestamp
+     after the resume.
+6. **Return** the `preservingHandoff` object.
+   - Every field comes from the hello, the receipt and the files, except `oldHolderId` and `oldJournalId`. Those come
+     from the context and are checked against the receipt.
+   - `context.qualifiedHolder` is compared with the config, never selected from.
+   - Each new identity must differ from its predecessor, and `observedUtc` must be at or after `context.startedAt`.
 
-1. **Preconditions (read-only).** The pinned holder binary hash is d406b1f3 (v0.13.4 at 64dc50f4) and the profiles
-   hash is pinned. The state directory `/home/c4/.local/state/relay-holder-handoff-<preparationId>` exists, and so does
-   the receipt `/home/c4/.config/relay-holder/used-handoffs/<preparationId>/complete.json`; its SHA-256 is computed.
-   The old state root is sealed. No `relay-holder*` unit is active, except the holder in a re-entry (step 3).
-   <!-- codex: Validate the completed receipt's contents and provenance against the preparation, old identities and new root, using full artifact hashes and safe file/path checks. Existence plus a newly computed hash does not prove a preserving handoff or that the old seal and retained state are the expected ones. -->
-   <!-- codex: Verify both units' effective executable/state paths, drop-ins and connector/maintenance-image pins before starting either service. Checking the reconciliation path only after starting it is too late to prevent acting on the wrong root, and resume.sh has additional pinned dependencies beyond the holder binary. -->
-2. **Once-only record.** `<evidence-dir>/observer-actions.jsonl` gets `{op: "holder-handoff", operationId, run}`, synced
-   before any write on dev-worker-1. A second C4 request in the same run is refused. A run that finds an earlier run's
-   uncertain or incomplete record refuses before acting, and the record is reviewed by hand. This is the one manual
-   fallback; it is reached only after an interruption.
-   <!-- codex: Blocking: #2062 requires a new evidence directory for every execution, so this per-run file cannot discover earlier incomplete handoffs by itself. Specify a durable registry keyed by preparation/holder, protected against concurrent runs, with intent and terminal stage receipts, directory synchronization and a defined read-only re-entry path that never redispatches uncertain mutations. -->
-3. **Holder-only start.** `systemctl --user start relay-holder.service`. Then wait (bounded to 30 s) for a fresh hello
-   on the new socket with admission paused, 0 sessions, 0 pending commands and `nativeStateReady`.
-4. **Resume.** The holder-maintenance `resume <revision> <operationId>` step at the freshly observed revision (never
-   from a snapshot). Then enable both units and start only `relay-holder-control-plane.service` (reconciliation).
-   <!-- codex: Enabling both units changes reboot behavior beyond this bounded execution; document why that persistent change is required and authorized as part of the fixed handoff. Preserve the existing helper's checks that the new root is unsealed, reconciliation was inactive and the holder did not restart during resume. -->
-5. **Read back.** The unit's effective state path, a fresh hello with `admissionPaused:false`, and the hub's
-   `agent_holder_health` for this holder. Return
-   `{holderId, journalId, oldHolderId, oldJournalId, preparationId, stateDirectory, handoffReceipt:{path, sha256},
-   observedUtc, qualifiedRelease, holderSource, holderBinarySha256, profilesSha256, nativeRecovery, nativeStateReady,
-   activeSessions, pendingCommands, admissionPaused, preservedOldStateConfirmed, operatorVerified}`. Every value comes
-   from the hello and the files, except `oldHolderId` and `oldJournalId`, which the context supplies and the observer
-   checks against the sealed old root's last hello record.
-   <!-- codex: Require the hub-health row to match the pinned tenant/host and measured holder/journal, with a fresh post-resume timestamp, rather than accepting a stale matching row. preservingHandoff also requires each new identity to differ from its corresponding predecessor and observedUtc to be at least context.startedAt; the two new identities may equal each other. -->
-6. **Stop on any failure.** Nothing is deleted or rolled back automatically: a half-started holder stays as found and is
-   recorded. Steps 3 and 4 are the only writes on dev-worker-1 in the whole run.
-   <!-- codex: Clarify that these are the only operational mutations: script staging/removal also writes remotely. Record the final known service/admission state and unresolved remote processes, since revoking the JIT session does not undo holder resume or stop these services. -->
+Each stage writes a terminal ledger receipt. On a failure, timeout or cancellation:
+- nothing is rolled back;
+- a read-only readback classifies the state;
+- the final service and admission state, plus any unresolved remote process, go into the result.
+
+Revoking the JIT session does not undo the resume or stop these services; the runbook states this.
 
 ### 6. Pins, release receipts and the predecessor
 
-- **The observer config** is `scripts/relay-phase-a/observer-config.json`. It pins the bindings, profiles, Router keys
-  and source `4e4bb34e…`, the marker-command template, the holder pins, the handoff `preparationId` (256a052b…) and the
-  hub release receipts (`{release, imageDigest, source}`; v0.14.1 now, v0.14.2 when it rolls). The orchestrator refuses
-  to start the observer unless the session manifest names the config and its SHA-256, and the config's commit is on
-  gitea/main (the manifest rule from #2062).
-  <!-- codex: Pin and execute verified copies of the host observer, remote scripts and SQL as well as the config; the runner bundle's existing hash check does not cover arbitrary host working-tree code. Define the manifest fields that bind that complete dependency set to reviewed commits. -->
-  <!-- codex: A v0.14.2 receipt alone is insufficient: the supplied driver and renewal prelude require RUN_SOURCE=5f90d03a..., and the predecessor projection requires that source plus schemaVersion 93. Gate the rollout on a matching reviewed driver/source bridge and revalidated schema contracts. -->
-- **The predecessor report** (the original saved report of `relay-pi-phase-a-20261126-v1`) reaches the runner as a
-  separate read-only, 0600 file. Its SHA-256 is pinned in the session manifest. C1 and C3 report
-  `reportDownloaded:true` only when the host re-hashes the evidence copy and gets the pin.
-  <!-- codex: Distinguish this raw-byte SHA-256 from C3's priorReportCanonicalSha256, which the driver computes over canonical(parsedReport) and supplies as context.canonicalReportSha256. Verify both against the same preserved report; they are generally different hashes. -->
-  <!-- codex: runCli also requires the mounted file to be canonical, regular, single-link, bounded and owned by the runner UID, so a host-owned 0600 bind mount can fail before startup. Specify a verified private staging copy with the required container-visible ownership and test it on the workstation's Docker backend. -->
-- **The predecessor projection** uses a reviewed read-only SQL file, `scripts/relay-phase-a/predecessor-commands.sql`,
-  whose SHA-256 is the pin's `querySha256`. The host runs it in a `BEGIN READ ONLY` transaction and emits the exact
-  projection bytes. **Open (for the inference session):** the pin's `sha256` is of the exact bytes, but the bytes
-  contain an `observedUtc` that must be under 120 s old when the driver checks it. That is at `replacementPreflight`,
-  minutes after construction. The proposal is that the pin carries tenant, database label, query hash and commands,
-  and the host supplies the fresh bytes at call time with their hash checked against a value the host commits to the
-  mailbox evidence before the call. Alternatively, `observedUtc` could be excluded from the hashed bytes.
-  <!-- codex: Blocking: Runner clones the independent pin at construction, predecessorProjection requires its sha256 field, and hashes all exact UTF-8 bytes including observedUtc; a later mailbox commitment satisfies none of these requirements. Excluding observedUtc also requires a reviewed contract change that preserves an independently pinned receipt payload and separately establishes freshness, rather than trusting a hash derived from the callback's own output. -->
-  <!-- codex: The plan and manifest do not specify how predecessorEvidencePin, including tenant/database/query identity and the three command IDs, is provisioned before runCli constructs Runner. Define that trusted input path and test stale bytes, changed receipts, tenant/query mismatch and the 15 s callback bound; omitting the projection is not a usable fallback for the JIT actor's inaccessible predecessor operations. -->
+**The observer config** is `scripts/relay-phase-a/observer-config.json`. It pins:
+- the tenant, the bindings, the profiles and the historical Router keys;
+- the Router source `4e4bb34e…`;
+- the marker-command template, the holder and connector pins, the handoff preparation and seal;
+- the hub release receipts (`{release, imageDigest, source}`);
+- the Router pod selector and the SQL file hashes.
 
-### 7. Evidence
+**The manifest's `observer` block** is `{configPath, configSha256, observerPaths: {path: sha256}, predecessorReport:
+{path, sha256}, predecessorPin: path}`. Every listed file is loaded from the manifest commit and hash-checked, and the
+commit must be on gitea/main (the #2062 rule).
 
-- **`<evidence-dir>/observer.jsonl`** is append-only, fsynced per line. Each line holds `seq`, `kind`, `name`,
-  `contextSha256`, `instructionsSha256`, the start and end times, every subcommand with its exit code and duration, the
-  raw collected outputs (trajectory envelopes, marker reports, hello scalars, DB rows), the returned value's SHA-256
-  and the outcome.
-  <!-- codex: Persist the validated, safely projected request identity, observations and decision before publishing success, and stop new work if evidence writing/fsync fails. A hash alone is insufficient to reconstruct an approval when its only underlying request copy remains runner-writable. -->
-- **No secrets exist in any of it.** The Router admin token stays in the pod, the DB rows selected hold no credential
-  columns, and the hello output carries no secrets. A test asserts the field allowlist.
-  <!-- codex: The existing hello helper allows arbitrary short scalar strings, and raw permission descriptions, subprocess stderr or exception messages can contain sensitive data even without credential-named columns. Apply explicit field/type/length projections before all logging, including errors and unexpected filenames, and test secret-bearing values rather than relying on token-pattern detection. -->
-- **`observer-actions.jsonl`** holds the C4 receipts (section 5).
+**Driver and source compatibility (gate).** The driver pins `RUN_SOURCE = 5f90d03a` (v0.14.1), and the projection
+requires schema 93. A v0.14.2 run therefore needs a reviewed driver source bridge and revalidated schema contracts, not
+only a new receipt.
 
-### 8. DB reads
+**The predecessor report** is the original saved report of `relay-pi-phase-a-20261126-v1`.
+- **Staging.** It is staged by the orchestrator into the state volume as `/state/predecessor/report.json`, using a
+  `--network none` helper container: copied, owned by 10001, mode 0400, regular, single-link. `runCli` requires all
+  of these.
+- **Hashes.** The raw SHA-256 is pinned in the manifest. The canonical hash (`canonical(parsed)`) is computed by the
+  host and must equal C3's `context.canonicalReportSha256`.
+- **Probe.** The live probe checks the staging on the real Docker backend.
 
-DB reads go through `kubectl exec relay-postgres-0 -c postgres -- psql -X -At -v ON_ERROR_STOP=1`, as postgres. Each
-query file starts with `BEGIN READ ONLY;` and sets a 5 s `statement_timeout`. Values pass only as psql variables
-(`:'session_id'`), never by string interpolation, after the host validates them as canonical UUIDs. The query files
-are pinned by hash in the observer config.
+**The predecessor projection (gate).** The current contract cannot be met.
+- **The contradiction.** The Runner clones `predecessorEvidencePin.sha256` at construction. The exact projection bytes
+  include an `observedUtc` that must be under 120 s old at `replacementPreflight`, which is minutes later.
+- **Requested resolution.** A driver change pins the SHA-256 of the canonical projection *excluding* `observedUtc`
+  (tenant, database label, query hash, session, generation, report hash and the three exact receipts), and checks
+  freshness on the unpinned field.
+- **Pin provisioning.** The pin is produced once by the reviewed read-only query, `predecessor-commands.sql` (its
+  SHA-256 is `querySha256`). It is reviewed in a PR as `scripts/relay-phase-a/predecessor-pin.json`, named by the
+  manifest, and loaded by the entry before the Runner is constructed. It is never derived from callback output.
+- **Tests.** They cover stale bytes, changed receipts, a tenant or query mismatch and the 15 s bound.
 
-<!-- codex: Pin the Kubernetes context/namespace, database and user explicitly, and execute query files through stdin or -f so psql variable substitution actually applies. Specify tenant/profile/session predicates, exact row cardinalities and typed handling for non-UUID values, with a consistent snapshot where a decision spans multiple reads. -->
+### 7. Confirmation policy (C8, C10)
 
-Using the postgres superuser keeps this slice small. A dedicated read-only role is a follow-up; it was not
-introduced here, because the reaper (#2063) shows the role and NetworkPolicy work is its own review.
+**C8 `permission`.** Reads the permission from the DB with explicit columns: id, session, generation, state, expiry,
+tool-call id, title, description and options. Requirements:
+- the permission is pending and unexpired;
+- the session is this run's, with no rebinding, at `context.generation`;
+- exactly one option has `context.optionId`, and its kind equals `decisionKind`.
 
-<!-- codex: BEGIN READ ONLY is an accident guard, not a superuser privilege boundary: it does not prevent sensitive SELECTs, privileged functions or psql metacommands. If the role remains deferred, constrain execution to verified immutable SQL with schema-qualified explicit columns and a fixed search_path, disallow request-controlled SQL/identifiers, and document that the reviewed host code remains fully trusted. -->
+Two purposes are allowed:
+- **`relay-message-read`:**
+  - the title is exactly `Allow mcp__relay__relay_messages_read?`;
+  - the description's JSON input has only optional `channelId` (exactly `b4f9f5f7-840f-4e62-b6cd-e16c9d46dff1`),
+    `after` (an exact canonical decimal string up to 2^63-1) and `limit` (a safe integer from 1 to 50);
+  - `decisionKind` is `allow_once`;
+  - a per-run cap equals the run's prompt budget. The one-read-per-prompt rule stays with the driver's own guard, since
+    the context names no prompt.
+- **`marker`:** the provider and runId come from retained state for this session, never from parsing. The input's
+  `command` field must equal the observer's own rendering for one of the two steps, and its optional `timeout` must
+  follow the driver's rule. The decision is bound to the command, not to the order:
+  - the `denied` rendering allows only `reject_once`, and the `effects` rendering only `allow_once`;
+  - each is allowed once per lifecycle runId: two for Codex and two for Qwen in the full flow;
+  - `context.expectedCommand` must equal the rendering.
+
+Anything else stops the run. The observer never returns `false` to mean "deny".
+
+The proxy already lets the runner post decisions, so this check is integrity and evidence, not containment.
+
+**C10 `reconcile-choice` (gate).** Neither the context nor the session contract has an authoritative field yet:
+- `true` costs a prompt and requires "Previous branch retired.";
+- `false` continues to `RECOVERED_OK`.
+
+The collector stays `unsupported` until the inference session names the native-branch observation. The policy is then:
+`true` exactly when it says reconstruction is required, `false` exactly when it positively says not, and absent or
+unknown stops the run. Both values are tested.
+
+### 8. Evidence and DB reads
+
+**`<evidence-dir>/observer.jsonl`** is host-only and append-only, fsynced per line.
+- Each line holds `seq`, `kind`, the context SHA-256 and a safely projected copy of the validated request, the
+  instructions SHA-256, the times, and each subcommand's name, exit code and duration.
+- It holds the projected observations (trajectory envelopes, marker reports, allowlisted hello fields, DB rows with
+  explicit columns), the returned value and its SHA-256, and the decision.
+- A line is written before the response is sent. An fsync failure stops new work and takes the broker's
+  evidence-failure path.
+- Permission descriptions and any stderr are logged only as SHA-256 plus length.
+- A test feeds secret-bearing values through every path.
+
+**`handoff-ledger`** holds the C4 receipts (section 5).
+
+**DB reads** go through `kubectl --context admin@ai -n relay exec -i relay-postgres-0 -c postgres -- psql -X -At -v
+ON_ERROR_STOP=1 -U postgres -d relay -f -`, with the verified SQL file on stdin:
+- each file is `BEGIN READ ONLY ISOLATION LEVEL REPEATABLE READ;` (one snapshot per decision),
+  `SET LOCAL statement_timeout = '5s'; SET LOCAL search_path = pg_catalog;`, schema-qualified explicit columns, tenant
+  and session predicates and an exact expected row count;
+- values come only from psql variables (`-v name=value`, validated canonical UUIDs or integers) and are referenced as
+  `:'name'`;
+- no SQL text, identifier or metacommand comes from a request.
+
+`BEGIN READ ONLY` is only an accident guard: the reviewed host code is fully trusted, and a dedicated read-only role is
+a follow-up.
 
 ### 9. Session integration (`relay_operator_session.py`, after #2062 merges)
 
-- The manifest gains an optional `observer` block: `{config, configSha256, predecessorReport, predecessorSha256}`.
-  Without it, a session behaves exactly as now; the smoke has no observer.
-- With it, the orchestrator does the following:
-  - creates and bind-mounts the mailbox;
-  - mounts the predecessor read-only;
-  - starts the observer thread before the runner starts, and stops it after the runner exits and before
-    cleanup;
-  - waits for the observer's in-flight collector (bounded) before the revoke.
-  <!-- codex: Integrate observer failure into the orchestrator's active stop condition, and place cancellation/drain in independent finally stages covering startup failure, runner exit and signals. A hung observer must not delay the broker's cleanup/revocation cutoff, and no collector may continue dispatching after the run loses its Lease. -->
-- **Exit code.** An observer internal failure is a new exit code (9) in the existing precedence, after the runner's
-  own code.
-  <!-- codex: The broker maps runner failure to 8 and uses an explicit PRECEDENCE list, so define the full updated order and retain the observer cause in result.json even when 8 wins. Evidence durability failure must still receive the existing evidence-failure treatment rather than disappearing behind a generic observer code. -->
+- **Without an `observer` block** a session behaves exactly as now; the smoke has none.
+- **With one,** the orchestrator:
+  - verifies and loads the observer files;
+  - stages the predecessor;
+  - runs the pre-run holder step;
+  - starts the gate and the host thread before the runner.
+
+An observer failure, a death or an evidence failure sets the run's stop condition (the same path as a signal). The
+orchestrator then stops the runner (SIGTERM, then the existing grace) and cancels the in-flight collector.
+
+The observer drain runs in its own `finally` stage. It is bounded to 10 s and never delays the broker's cleanup or
+revoke cutoff. No collector dispatches after the Lease is lost.
+
+**Exit codes.** A new code, 9, means an observer failure. `PRECEDENCE` becomes `[3, 4, 5, 6, 7, 9, 8, 2]`: an observer
+cause outranks the generic runner failure 8 it usually causes. `result.json` always records the observer cause, even
+when another code wins. Evidence durability keeps its existing code.
+
+### 10. Gates before a real run
+
+- #2060 merged, with the two-socket adapter and a driver source bridge matching the deployed hub.
+- #2062 merged, and its live smoke passed.
+- The reaper (#2063) merged, and its crash drill passed.
+- The projection-pin contract change is merged and the pin reviewed (section 6).
+- An authoritative C10 field is named and both branches tested (section 7).
+- The predecessor report is recovered and pinned.
+- The pre-run holder checks pass on the live dev-worker-1.
+- This implementation is reviewed and merged, and the live probe passes with measured latencies that fit the phase
+  budgets.
+
+**Acceptance evidence** for the real run:
+- five successor launches, including two resumes;
+- the phase results and accounting from the CLI's final record;
+- the C4 ledger and receipts;
+- the broker's logout, revoke and Lease release, or explicit unresolved outcomes.
+
+**Afterwards** the new holder and reconciliation stay running and enabled, and the renewed credentials stay live.
+Final grant revocation is a separate step, outside `replaceStopped()`.
 
 ## Critical files
 
-- `scripts/relay_phase_a_observer.py` (new): the mailbox loop, request schemas, collectors, policy, evidence.
+- `scripts/relay_phase_a_observer.py` (new): the host thread, request schemas, retained state, collectors, policy,
+  evidence and the C4 ledger.
+- `scripts/relay-observer-gate.py` (new): the credential-less gate sidecar.
 - `scripts/relay-phase-a/` (new):
   - `observer-client.cjs` and `phase-a-entry.cjs` (bundle);
-  - `router-trajectory.js`, `observe.py`, `hello-state.py` and `holder-handoff.sh` (pinned remote scripts);
-  - `observer-config.json`;
-  - `predecessor-commands.sql` and the read-only query files.
-- `scripts/relay_operator_session.py` and `scripts/relay-operator.py`: the manifest `observer` block, the mounts, the
-  thread lifecycle and exit code 9.
+  - `router-trajectory.js`, `observe-marker.py`, `holder-hello.py` and `holder-handoff.sh`;
+  - `observer-config.json` and `predecessor-pin.json`;
+  - `*.sql`.
+- `scripts/relay_operator_session.py` and `scripts/relay-operator.py`: the `observer` block, verified loading, staging,
+  the pre-run step, the gate and thread lifecycle, the stop condition, exit code 9 and the `observer-probe` subcommand.
 - `scripts/tests/test_relay_phase_a_observer.py` (new), and `scripts/relay-phase-a/observer-client.test.cjs` (new).
-- `docs/runbooks/relay.md` (the observer subsection) and the phase A runbook pointer (owned by the inference
-  session).
+- `docs/runbooks/relay.md`: the observer subsection, the services left running, and the gates.
 
 ## Verification
 
 1. **Unit tests (docker python:3.13-slim, node:22).**
-   - Request schema refusals: unknown kind, extra key, bad UUID, seq gap, a second outstanding request, symlink,
-     oversize.
-   - Each collector against faked `kubectl` and `ssh` runners: success, every failed check, deadline.
-   - The C8 policy table: read allowed; marker denied then effects allowed; a third marker refused; wrong option kind,
-     wrong command or wrong session refused.
-   - C10 refuses on ambiguous state.
-   - C4 once-only, including a re-entry after an uncertain record.
-   - The evidence field allowlist (no token-like strings).
-   <!-- codex: Feed actual collector-produced values into the pinned driver's real validators, covering installing credentials, renewed versus historical keys, all marker phases and the separate Codex effort runId, canonical hashes and future notBefore boundaries. Faked subprocess success alone can validate an incorrect collector contract. -->
-   <!-- codex: Add mailbox replacement/hard-link/reparse races, duplicate keys, response tampering/oversize, file flooding, disk/fsync failure and cancellation during each stage. Exercise C4 crashes before and after every mutation, lost responses, lingering remote work and restart with a different evidence directory, proving no replay and bounded independent revocation. -->
-2. **Offline full flow.** Run the inference session's synthetic Unix-HTTP integration with the real `phase-a-entry.cjs`
-   and client over a real mailbox directory, against a fake host observer whose collectors return the fixture's
-   synthetic evidence. This proves the wire and abort paths end to end, not live facts.
-   <!-- codex: Include a flow through the actual #2062 orchestrator/proxy specification and real observer collectors with faked external commands, at UID 10001 with the production mounts and environment. This must catch seconds/milliseconds conversion, predecessor ownership, two-socket routing, exit-code propagation and 20 s lease renewals while collectors block. -->
-3. **Live read-only probe.** `relay-operator.py observer-probe` exercises `deployment`, the trajectory for both
-   providers, the marker baseline, the route, the clocks and the DB reads against the live estate, with no Relay
-   session and no holder start. It expects every check to pass except the holder hello, because the holder is down by
-   design until C4.
-   <!-- codex: Distinguish successful read/query validation from phase-dependent predicates: renewed installation, live-session permissions, recovery and retirement cannot all pass before renewal and launch. Capture collector latency and use it to budget the full 15/15/10-minute phases, boundary waits and handoff; the supplied synthetic flow already takes about five minutes without real kubectl/ssh costs. -->
-4. **The real run** is gated on all of these:
-   - #2060 merged with the two-socket adapter;
-   - #2062 merged and its live smoke passed;
-   - the reaper (#2063) merged, with its crash drill passed;
-   - v0.14.2 rolled and its receipt pinned;
-   - the predecessor report recovered and pinned;
-   - this plan's implementation reviewed and merged.
-   <!-- codex: Add explicit gates for the resolved projection-pin contract, an authoritative C10 observation, verified holder preparation/maintenance dependencies and a mutually compatible driver/config/schema bundle. The existing gates do not resolve those open blockers merely by merging this implementation. -->
-   <!-- codex: Define real-run acceptance evidence as well as entry gates: five successor launches including two resumes, phase results and accounting, preserving-handoff receipts, and confirmed broker logout/revocation or explicit unresolved outcomes. State which holder services and renewed credentials remain afterward, since final grant revocation is outside replaceStopped(). -->
+   - **Driver validators:** every collector's output, produced from faked `kubectl` and `ssh` responses, is fed
+     through the pinned driver's real validators (`snapshot`, `marker`, `delta`, `preservingHandoff` and the inline
+     validators). Cases:
+     - installing and ready credentials;
+     - renewed versus historical keys;
+     - all marker phases;
+     - the separate effort runId;
+     - the canonical versus raw report hashes;
+     - a future `notBefore`;
+     - unsettled rows;
+     - a Router restart.
+   - **Gate and envelopes:**
+     - duplicate keys, oversize, a second connection, a sequence gap, response tampering and oversize;
+     - cancel on disconnect;
+     - the host's per-kind clamps;
+     - kind-order refusals.
+   - **C8:** read allowed; marker decisions bound to the command; a third marker refused; wrong option kind, session,
+     expiry or rebinding refused.
+   - **C10:** `unsupported` until the field is pinned, then both values.
+   - **C4:** a crash before and after every stage, a lost response, a lingering remote process, and a restart with a
+     different evidence directory (the ledger prevents a replay).
+   - **Secrets:** secret-bearing strings never reach the evidence. An fsync failure stops the run.
+2. **Offline full flow.** Run the inference session's synthetic Unix-HTTP integration through the real broker code path:
+   - the gate, the client and `phase-a-entry.cjs`;
+   - the real collectors with faked external commands;
+   - UID 10001 with the production mounts and environment.
 
-<!-- codex-review-status: complete -->
+   It must catch the seconds/milliseconds conversion, predecessor ownership, two-socket routing, exit-code propagation
+   and 20 s lease renewals while collectors block.
+3. **Live read-only probe** (`relay-operator.py observer-probe`). It runs, with no Relay session:
+   - the deployment check, the trajectory envelopes for both historical keys and the marker baselines;
+   - the route, the four-clock gate, the DB queries (shape and cardinality only), the pinned SSH host key and the
+     staging of the predecessor;
+   - the pre-run holder checks, read-only and without starting anything.
+
+   Phase-dependent predicates are reported as "not yet applicable", not passed: renewed installation, live permissions,
+   recovery, retirement. It records the per-call latency, which is used to budget the 15, 15 and 10-minute phases.
+
+<!-- codex-review-status: pending -->
