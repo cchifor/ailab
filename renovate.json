@@ -33,9 +33,11 @@
   ],
   "packageRules": [
     {
-      "description": "Keep Relay on its validated Node 22 runtime. A runtime major upgrade needs application and connector acceptance before deployment; tagless digest updates previously selected latest Node 26.",
+      "description": "Keep Relay on its validated Node 22 runtime. A runtime major upgrade needs application and connector acceptance before deployment; tagless digest updates previously selected latest Node 26. The script-tests workflow runs Relay's scripts and pins the SAME Node as Relay's image (22.23.5), and the relay-* components ship that image, so they move with Relay in one group, never ahead of it (#2034 proposed Node 26 for the workflow alone).",
       "matchFileNames": [
-        "kubernetes/apps/apps/relay/**"
+        "kubernetes/apps/apps/relay/**",
+        "kubernetes/components/relay-*/**",
+        ".gitea/workflows/script-tests.yaml"
       ],
       "matchPackageNames": [
         "docker.io/library/node",
