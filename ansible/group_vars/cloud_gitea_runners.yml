@@ -16,6 +16,14 @@ gitea_runner_instance_url: https://git.chifor.me
 # labels from config.yaml on every restart, so changing it later is a config change, not a re-register.
 gitea_runner_label: self-hosted-hv
 
+# workbricks PULL-REQUEST jobs run only on runners with this label, so the cloud pool declares it too: over
+# the 7 days to 2026-11-27 these runners ran 98 of workbricks' 211 runner-hours (46 %), and without the
+# label that work would move to the six on-prem pull-request runners, whose NVMe drives are near their
+# rated life. Never `workbricks-push` here: push jobs stay on ci-runner-3/-6. A cloud runner asleep at the
+# converge takes no workbricks pull request until its next one. Why: docs/runbooks/ci-runners.md,
+# "workbricks push runners".
+gitea_runner_extra_labels: [workbricks-pr]
+
 # No co-located GitHub agent to coordinate the cleanup timer with. `none` is the sentinel the script
 # understands; an empty string would fall back to the GitHub unit (see the role defaults).
 gitea_runner_cleanup_peer_services: "none"

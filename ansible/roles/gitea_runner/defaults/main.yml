@@ -28,7 +28,8 @@ gitea_runner_label_schema: host # HOST mode, NOT docker://: platform workflows h
 # name (lowercase letters, digits, inner dashes) and must differ from gitea_runner_label; tasks/main.yml
 # asserts it.
 # In use: `workbricks-push` on ci-runner-3/-6, and `workbricks-pr` on every OTHER runner (ci-runner-1, -2,
-# -4, -5, -9, -10), so workbricks' push and pull_request jobs never share a runner (host_vars say why).
+# -4, -5, -9, -10 in their host_vars, and the cloud pool in group_vars/cloud_gitea_runners.yml), so
+# workbricks' push and pull_request jobs never share a runner (those files say why).
 gitea_runner_extra_labels: []
 
 # ---- registration (ORG scope) ----

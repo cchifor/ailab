@@ -233,9 +233,16 @@ delete `/home/runner/act-runner/.runner` on the VM → `just gitea-runners`. Ret
       times a day - more than before (1.6/1.9), each a cold target pair - and ci-runner-6 stayed in
       `CIRunnerDiskPressureSustained`. So every OTHER runner (ci-runner-1, -2, -4, -5, -9, -10) declares
       `workbricks-pr`, and workbricks' `runs-on` names it for pull requests: the replay gives 0 switches on
-      every runner. Only workbricks routes on these labels; every other repo's jobs still use all eight
-      runners through `self-hosted-hv`.
-    - **Order:** `workbricks-pr` must be live on all six (converge each as under "Changing the set" below:
+      every runner. Only workbricks routes on these labels; every other repo's jobs still use every
+      runner through `self-hosted-hv`.
+    - **The cloud pool carries `workbricks-pr` too** (`group_vars/cloud_gitea_runners.yml`). The cloud
+      runners (cloud-ci-N) also take `self-hosted-hv`, and over the 7 days to 2026-11-27 they ran 98 of
+      workbricks' 211 runner-hours (46 %). Without the label, that pull-request work would move onto the six
+      on-prem pull-request runners, whose drives are near their rated life. They never carry
+      `workbricks-push`. A cloud runner asleep at the converge takes no workbricks pull request until its
+      next converge (`just cloud-runners -l cloud-ci-N`), and nothing else changes for it.
+    - **Order:** `workbricks-pr` must be live on all six, and on the cloud runners that are awake (converge
+      each as under "Changing the set" below:
       with the runner RUNNING and no task in flight, since the label change restarts the daemon; then check
       the forge lists it) BEFORE workbricks' `ci.yml` names it, or its pull requests wait. Keep at least two
       `workbricks-pr` runners on different nodes; removing the label from a runner is safe only while others
