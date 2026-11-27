@@ -152,7 +152,17 @@ node --test docs/runbooks/inference-canary-v0113/owner-phase-a.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-automation.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-socket.test.cjs
 node --test docs/runbooks/inference-canary-v0113/owner-phase-a-renewal.test.cjs
+node --test docs/runbooks/inference-canary-v0113/owner-phase-a-automation-integration.test.cjs
 ```
+
+The complete synthetic case uses the actual CLI, renewal prelude, automation
+host and Runner over a Unix HTTP socket. It covers five launches, two resumes,
+three phases, both rotations, real 20-second lease renewals and durable snapshots.
+It preserves the original report and accounting and checks final session closure.
+Its real observation delays take about five minutes; the case has a 360-second
+bound and the separate Python CI entry has a 390-second bound. The server,
+deployment and observer inputs are synthetic. This qualifies orchestration,
+not the operator's authenticated proxy, a published holder or a live provider.
 
 These checks use synthetic services and reports. They do not prove operator
 authentication, original browser-state recovery, a live provider outcome or a

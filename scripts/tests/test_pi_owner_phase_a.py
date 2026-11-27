@@ -10,6 +10,7 @@ FIXTURE = ROOT / "docs/runbooks/inference-canary-v0113/owner-phase-a.test.cjs"
 AUTOMATION_FIXTURE = ROOT / "docs/runbooks/inference-canary-v0113/owner-phase-a-automation.test.cjs"
 SOCKET_FIXTURE = ROOT / "docs/runbooks/inference-canary-v0113/owner-phase-a-socket.test.cjs"
 RENEWAL_FIXTURE = ROOT / "docs/runbooks/inference-canary-v0113/owner-phase-a-renewal.test.cjs"
+INTEGRATION_FIXTURE = ROOT / "docs/runbooks/inference-canary-v0113/owner-phase-a-automation-integration.test.cjs"
 
 
 class PiOwnerPhaseA(unittest.TestCase):
@@ -28,6 +29,15 @@ class PiOwnerPhaseA(unittest.TestCase):
         result = subprocess.run(
             [node, "--test", str(AUTOMATION_FIXTURE), str(SOCKET_FIXTURE), str(RENEWAL_FIXTURE)], cwd=ROOT,
             capture_output=True, text=True, encoding="utf-8", timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_offline_complete_noninteractive_flow(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "Node is required: do not skip the complete automation flow")
+        result = subprocess.run(
+            [node, "--test", str(INTEGRATION_FIXTURE)], cwd=ROOT,
+            capture_output=True, text=True, encoding="utf-8", timeout=390,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
