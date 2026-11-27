@@ -89,8 +89,11 @@ head `ae8f6b54f50733770e239c7d460bb899708cf42d`. It found no source-contract blo
   select the binding; a fresh launch still reserves a particular credential
   generation and reference. Old consumers do not inherit a renewed key.
 
-The final evidence packet is `pi-v0132-hub-driver-compatibility-74d1d9f.json`,
+The final evidence packet is [the exact JSON retained in PR #2042 comment 146692](https://git.chifor.me/cchifor/ailab/pulls/2042#issuecomment-146692),
+named `pi-v0132-hub-driver-compatibility-74d1d9f.json`,
 SHA-256 `add20433a1e23b859e77d5ede29b738717397eb51300d355e31abf757167a683`.
+The comment includes extraction instructions; its authenticated readback and
+extracted UTF-8 bytes were checked against that hash.
 Its historical publication-pending fields describe the comparison time; the
 separate release receipt above establishes publication. Reproducible source
 anchors are the [deployed-to-release diff](https://git.chifor.me/cchifor/relay/compare/e843921b7cff76406b7da0b5b35cf653c7e458c5...74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613),

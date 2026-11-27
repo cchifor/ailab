@@ -134,6 +134,8 @@ spec:
           mountPath: /tmp
       # Earlier schema history: 080-088 by v0.11.1, 089 by v0.11.4, 090-091 by v0.12.0, 092 by v0.12.1.
       # See relay-researcher-hub-upgrade.md H11/H12/H15/H16 for schema-matching recovery releases.
+      # Same-schema 93 rollback target: v0.13.0, sha256:021a8fbed305c338dc46022abc992f3e0b2c538c6c491fd2aa9f0b279dbccdd8.
+      # Procedure: docs/runbooks/relay-expired-binding-renewal-20261126.md#rollback-within-schema-93; renewal is not undone.
       # FORWARD-ONLY: schema 93 (093 by v0.13.0: native recovery versions 1/2 and explicit acknowledgement
       # of unknown tool effects on a resume). Older images may start on unsupported newer schemas, and
       # recovery:fence/initialize demand exactly 1..CURRENT_SCHEMA_VERSION, so a bare re-pin is never a
