@@ -1,0 +1,6 @@
+# Required status contexts on cchifor/workbricks `main`, one glob pattern per line; `#` starts a comment.
+# Read by scripts/gitea-owner-merge.sh, whose gate runs with NO owner credential.
+# From GET /repos/cchifor/workbricks/branches/main (readable by the non-admin workstation-bot) on 2026-11-27:
+# enable_status_check=true, status_check_contexts=["CI / verify (pull_request)"], required_approvals=2.
+# The gate also refuses if the live protection starts requiring a context that is not listed here.
+CI / verify (pull_request)
