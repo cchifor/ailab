@@ -1,14 +1,6 @@
 # Implementation review — relay-operator-session — round 2
 
-<!-- codex-impl-review-status: pending -->
-
-## Summary
-
-- Reviewed the current worktree at `2c2deb53`, the round-1 fixes, the finalized plan, and relevant Relay v0.14.1 server code.
-- Nine round-1 findings are fixed; eight remain wholly or partially unresolved, including the prompt-limit documentation mismatch.
-- Blocking issues remain in `call()` Lease fencing and signal handling. Additional defects affect container termination, admission capacity, deadlines, evidence capture, and shutdown.
-- Sixteen planner tests and two upstream HTTP tests passed using a Windows import shim. Targeted in-memory checks reproduced the failures described below; full Linux socket/container lifecycle tests were not run.
-- Neither repository was modified. The separately planned reaper remains outside this implementation review.
+<!-- codex-impl-review-status: finalized -->
 
 ## Findings
 
@@ -16,67 +8,67 @@
 
 **Location:** scripts/relay-operator.py:246; scripts/relay_operator_session.py:202  
 **Severity:** blocker  
-<!-- codex: The 900-second call Lease does not cover the sum of all allowed subprocess durations, and lease_secure(..., 300) actually shortens a live Lease even though revoke/readback plus Keycloak logout can consume 360 seconds; a fake-clock reproduction executed account-wide SSO logout under a successor at 301 seconds and returned rc 0. Enforce an overall call deadline, preserve any longer existing Lease expiry, and positively secure sufficient remaining validity before each destructive stage. -->
+**Resolution:** fixed in the round-2 fix commit (see its message), with regression tests.
 
 ### The call lifecycle still lacks signal-safe cleanup
 
 **Location:** scripts/relay-operator.py:209; scripts/relay-operator.py:244; scripts/relay-operator.py:164  
 **Severity:** blocker  
-<!-- codex: call() installs no SIGTERM handler or cleanup signal deferral, and its BaseException handler covers only the work body: SIGTERM can terminate without finally, while a reproduced KeyboardInterrupt during cleanup escaped and skipped both SSO logout and Lease release. Apply the session lifecycle's signal handling to call(), guard cleanup stages independently, and propagate cleanup and Lease-release failures through explicit exit-code precedence. -->
+**Resolution:** fixed in the round-2 fix commit (see its message), with regression tests.
 
 ### Timing out the Docker client does not terminate the call container
 
 **Location:** scripts/relay-operator.py:230  
 **Severity:** important  
-<!-- codex: subprocess.run(timeout=300) kills the local docker client, while the unnamed docker run container can continue executing; --rm removes a container only after it exits, so cleanup can release the Lease while the old authenticated workload remains alive. Give the call container a unique name and explicitly stop, inspect, and remove it within bounded cleanup before releasing ownership, including timeout and interrupt paths. -->
+**Resolution:** fixed in the round-2 fix commit (see its message), with regression tests.
 
 ### The shared reader pool can still exclude lease renewal
 
 **Location:** scripts/relay-session-proxy.py:639; scripts/relay-session-proxy.py:763  
 **Severity:** important  
-<!-- codex: Every connection must acquire the same 32-reader semaphore before its route is classified, so filling that pool with incomplete requests produces 503 for renewal even when both control slots are free; this was reproduced, and repeated saturation can outlast Relay's 60-second control lease. Protect control admission through a separate channel or ingress design that guarantees renewal access, release reader capacity when reading finishes, and test saturation of the entire ingress pool rather than ten stalled clients. -->
+**Resolution:** fixed in the round-2 fix commit (see its message), with regression tests.
 
 ### Reader timers exceed the container thread limit and can leak admission capacity
 
 **Location:** scripts/relay-session-proxy.py:653; scripts/relay_operator_session.py:362  
 **Severity:** important  
-<!-- codex: Thirty-two reader threads plus thirty-two Timer threads already exceed --pids-limit 64 once the main and watchdog threads are included, and deadline.start() runs before the protecting try/finally; an injected thread-start failure left both the reader permit and REQUEST_TIMERS entry allocated. Use a bounded timer/thread design compatible with the container limit and put timer creation/start, socket disposal, registry removal, and semaphore release under exception-safe ownership. -->
+**Resolution:** fixed in the round-2 fix commit (see its message), with regression tests.
 
 ### The upstream timer cannot interrupt connection setup
 
 **Location:** scripts/relay-session-proxy.py:580; scripts/relay-session-proxy.py:593  
 **Severity:** important  
-<!-- codex: cut() has no socket until conn.connect() returns, so DNS resolution, address attempts, and TLS setup can exceed the total budget despite the timer firing; a delayed-connect reproduction took approximately 0.32 seconds with a 0.06-second budget. Enforce the absolute deadline throughout connection establishment, including resolution and TLS, and refuse to send after expiration rather than merely shutting the socket down and continuing into conn.request(). -->
+**Resolution:** fixed in the round-2 fix commit (see its message), with regression tests.
 
 ### Evidence failures during draining can still report success
 
 **Location:** scripts/relay_operator_session.py:252; scripts/relay_operator_session.py:376; scripts/relay_operator_session.py:455  
 **Severity:** important  
-<!-- codex: _stream() does not catch pipe-read failures or check short writes, startup can launch the Runner with evidence_failed already set, and cleanup never checks that flag after joining the streams; reproductions showed a late write failure leaving rc 0 and a read exception escaping without setting the flag. Check evidence health before Runner startup and after draining, handle read/write failures completely, and recover available Docker logs before removal when streaming capture is incomplete. -->
+**Resolution:** fixed in the round-2 fix commit (see its message), with regression tests.
 
 ### Refusal logs still preserve arbitrary lowercase path content
 
 **Location:** scripts/relay-session-proxy.py:100; scripts/relay-session-proxy.py:729  
 **Severity:** important  
-<!-- codex: safe_route() accepts every lowercase word matching [a-z][a-z-]{0,30}, rather than a fixed vocabulary, so a refused /api/auth/secret-password is logged unchanged; the query/key regression test does not cover this remaining disclosure. Log matched allowlist templates or a constant unknown-route value, and add rejected-path tests containing lowercase secrets and content. -->
+**Resolution:** fixed in the round-2 fix commit (see its message), with regression tests.
 
 ### Startup signals do not interrupt authenticated network work
 
 **Location:** scripts/relay-session-proxy.py:890; scripts/relay-session-proxy.py:910; scripts/relay-session-proxy.py:927  
 **Severity:** important  
-<!-- codex: Installing handlers before login fixes handler timing, but stop() only sets flags while login continues through relay-admin-call.Client's per-read 30-second timeouts and unbounded response reads, and startup_inventory() is likewise not cancelled; Docker can therefore kill the proxy before it reaches logout. Make authenticated startup cancellable under an absolute shutdown budget and enter the logout path promptly when SIGTERM or SIGINT arrives. -->
+**Resolution:** fixed in the round-2 fix commit (see its message), with regression tests.
 
 ### The new drain consumes the Docker logout grace
 
 **Location:** scripts/relay-session-proxy.py:69; scripts/relay-session-proxy.py:951; scripts/relay_operator_session.py:447  
 **Severity:** important  
-<!-- codex: Shutdown now waits up to ten seconds for inflight requests before starting the twenty-second logout budget, while docker stop still allows only thirty seconds including serve_forever shutdown and scheduling overhead, so an otherwise bounded logout can be killed before confirmation. Allocate draining and logout from one shutdown deadline with explicit margin, or increase Docker's grace and subprocess timeout to cover their combined worst case. -->
+**Resolution:** fixed in the round-2 fix commit (see its message), with regression tests.
 
 ### The finalized prompt ceiling remains inconsistent
 
 **Location:** plans/2026-11-27-relay-operator-session-plan.md:77; scripts/relay-session-proxy.py:64  
 **Severity:** nit  
-<!-- codex: round-2: The UTF-8 counting fix addresses the implementation concern, but the finalized plan still specifies 8 KiB while the code allows 16 KiB; the pushback's server comparison is also incomplete because Relay v0.14.1 server/agent-sessions/control.ts:223 explicitly rejects Buffer.byteLength(body.text) > 16384. Keeping 16 KiB is consistent with that server limit: explicitly update the finalized plan and correct the claim that this byte ceiling is stricter than the server's. -->
+**Resolution:** fixed in the round-2 fix commit (see its message), with regression tests.
 
 ## Round-1 verification
 
@@ -112,3 +104,7 @@
  scripts/tests/test_relay_session_proxy.py          | 566 ++++++++++++
  9 files changed, 2749 insertions(+), 13 deletions(-)
 ```
+
+## Resolution (Opus, after round 2)
+
+Every round-2 finding was accepted and fixed; the prompt-limit nit by revising the plan to the server's own 16 KiB UTF-8 byte limit (as codex suggested). No disagreement remains, so nothing is escalated. The 2-round cap is reached: the PR goes through the reviewbot gate (reviewer-claude and reviewer-codex) as the independent check of the round-2 fixes.
