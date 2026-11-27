@@ -104,6 +104,19 @@ class RepoConfigTest(unittest.TestCase):
             self.assertTrue((REPO / path).is_file(), path)
             self.assertTrue(path.startswith('kubernetes/apps/apps/relay/'))
 
+    def test_open_webui_digest_bumps_disabled(self):
+        # Owner decision 2026-11-27 (closing #2004): Open WebUI's moving `main` digest runs one-way migrations on the
+        # shared openwebui database, so Renovate never proposes it; repins are deliberate and by hand.
+        rules = [r for r in self.config['packageRules']
+                 if r.get('matchPackageNames') == ['ghcr.io/open-webui/open-webui'] and r.get('enabled') is False]
+        self.assertEqual(len(rules), 1)
+        rule = rules[0]
+        self.assertEqual(rule['matchUpdateTypes'], ['digest'])
+        self.assertEqual(rule['matchFileNames'], ['kubernetes/apps/apps/ai/open-webui.yaml'])
+        self.assertTrue((REPO / rule['matchFileNames'][0]).is_file())
+        # It must not be the last rule: the campaign freeze stays last (test_campaign_freeze_holds_relay_paths).
+        self.assertIsNot(rule, self.config['packageRules'][-1])
+
     def test_litellm_held_at_its_audited_minor(self):
         # LiteLLM 1.110 changes the chatgpt/ route's wire body and drops accounting tables (#1968): the hold
         # stays until that audit lands, and the three gateway manifests stay on a tag the hold allows.
