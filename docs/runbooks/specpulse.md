@@ -50,10 +50,28 @@ Owner decisions (2026-11-26, operator session):
 The password is read from stdin, never from the command line:
 `kubectl --context admin@ai -n specpulse exec -i deploy/specpulse -c specpulse -- specpulse user add --db /data/specpulse.db <name> --role admin < <password-file>`.
 
-## GitHub token (optional, for private repositories)
-The owner saves a fine-grained read-only token to a local file. The operator adds it as `stringData.github-token` with
-a `sops edit` editor shim that reads that file (never the terminal), deletes the file, and restarts the pod
-(`kubectl -n specpulse rollout restart deploy/specpulse`). The app's init container stores it on start.
+## GitHub token (for the private repositories it analyses)
+The token is a **fine-grained** token whose **resource owner is the organization that owns the analysed repositories**
+(`kartrainc` for `kartra-ai` and `kartra-v4`), with Repository → **Contents: Read-only** and nothing else. A token
+whose resource owner is a personal account cannot see an organization's private repositories at all: they answer 404,
+and the run fails at its git preflight (2026-11-27, the first token). Never use a `gh` login or a classic `repo` token.
+Those can write to every repository the account reaches, including the GitHub mirror Flux deploys from.
+
+1. **Validate before storing.** The token goes only to api.github.com, in a header, and is never printed. It must read
+   each analysed repository and its branch. A non-mutating write probe (`POST /repos/R/git/refs` with an all-zero
+   sha) must answer 403 on each of them and on `cchifor/ailab`; 422 means write access, so stop. It must see no
+   private repository outside that organization.
+2. **Store it** as `stringData.github-token` with a `sops edit` editor shim that reads it from the owner's clipboard or
+   a private file (never the terminal or argv). Then clear the clipboard or delete the file.
+3. **Take effect.** The `github-token` init container sets it (`specpulse secret set github_token`) on every start, so
+   the Secret stays the source of truth. To switch the live app WITHOUT a restart (a long analysis is running), pipe
+   the same value into the running container: `specpulse secret set github_token --value-file <tmp> --db
+   /data/specpulse.db`, with the temp file under `/tmp`, removed at once. Otherwise roll the pod
+   (`kubectl -n specpulse rollout restart deploy/specpulse`).
+4. **Revoke the token it replaces** on GitHub, and confirm the old one answers 401. A rotation is complete only then.
+
+Rotation record: 2026-11-27, `e0784b` (personal resource owner, from #2054) was replaced by `310274` (`kartrainc`,
+Contents read-only; #2057). `e0784b` was revoked by the owner the same day; `/user` and both repositories answer 401.
 
 ## Making it reachable by name (after the first deploy)
 1. `just edge-smoke --host specpulse` from the LAN. It expects 303 to `/login` anonymously.
