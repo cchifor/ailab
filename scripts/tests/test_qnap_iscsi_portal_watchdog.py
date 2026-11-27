@@ -267,6 +267,12 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(self.restarts(), [])
         self.assertEqual(self.run_wd("--check").returncode, 0)
 
+    def test_ipv6_loopback_does_not_make_a_target_reachable(self):
+        self.put("portals", "Allow portal = 127.0.0.1\nAllow portal = ::1\n")
+        r = self.run_wd("--check")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("loopback-only", r.stdout)
+
     def test_one_loopback_only_target_among_healthy_ones_is_stale(self):
         self.put(f"portal.{self.key(2)}", PORTALS_LOOPBACK_ONLY)
         r = self.run_wd("--check")

@@ -16,10 +16,11 @@
 #      templates or HA-managed, depend on NFS (a container mount point sourced under /mnt/pve/, or a VM
 #      disk on a storage of type nfs in storage.cfg), and are STOPPED right after startall -- i.e.
 #      failed boot starts. One that is running now, or that an operator stops later, is never touched.
-#   2. For each, wait until its sources are directories (a container's bind sources; for a VM, its
-#      images/<vmid> directory, which exists only while the share is mounted), against ONE elapsed-time
-#      budget shared by all of them, then re-check onboot / HA / stopped immediately before the start:
-#      the wait can take long and the operator's intent may have changed meanwhile.
+#   2. In passes over all of them, start each as soon as its sources are directories (a container's
+#      bind sources; for a VM, its images/<vmid> directory, which exists only while the share is
+#      mounted), against ONE elapsed-time budget shared by all of them. One guest whose storage never
+#      returns holds up no other. Right before each start it re-checks onboot / HA / stopped: the wait
+#      can take long and the operator's intent may have changed meanwhile.
 #
 # A stat on a hard NFS mount that is still coming up can block past SIGTERM, and in D state past
 # SIGKILL too, so each probe runs in the background and is ABANDONED, not waited for, when it
@@ -178,50 +179,68 @@ for kind in ct vm; do
   done
 done
 
-for cand in "${candidates[@]}"; do
-  kind=${cand%%:*}
-  id=${cand#*:}
-  what=$(label "$kind" "$id")
-  conf=$(conf_of "$kind" "$id")
-  mapfile -t srcs < <(sources_of "$kind" "$id")
-  missing=""
-  for src in "${srcs[@]}"; do
-    # The deadline is checked BEFORE each probe and caps both the probe and the sleep, so the
-    # budget is a real bound: once it has passed, a remaining candidate costs nothing more
-    # instead of one more possibly-hung probe each.
-    while :; do
-      left=$((deadline - SECONDS))
-      if [ "$left" -le 0 ]; then missing="$src"; break; fi
-      source_ready "$src" "$((left < PROBE_S ? left : PROBE_S))" && break
-      left=$((deadline - SECONDS))
-      [ "$left" -le 0 ] || sleep "$((left < STEP_S ? left : STEP_S))"
-    done
-    [ -z "$missing" ] || break
-  done
-  if [ -n "$missing" ]; then
-    log "$what: $missing still missing after ${WAIT_S}s; NOT starting it"
-    rc=1
-    continue
-  fi
-
+# Re-check onboot / HA / stopped, then start. Called once a candidate's sources are all there.
+start_now() {  # $1 = ct|vm, $2 = id
+  local what conf state
+  what=$(label "$1" "$2")
+  conf=$(conf_of "$1" "$2")
   if ! { [ -f "$conf" ] && onboot "$conf"; }; then
     log "$what: no longer onboot; left stopped"
-    continue
+    return 0
   fi
-  if ha_managed "$kind" "$id"; then
+  if ha_managed "$1" "$2"; then
     log "$what: now HA-managed, left to ha-manager"
-    continue
+    return 0
   fi
-  state=$(guest_state "$kind" "$id") || { rc=1; continue; }
+  state=$(guest_state "$1" "$2") || return 1
   if [ "$state" != stopped ]; then
     log "$what: now $state; nothing to do"
-    continue
+    return 0
   fi
-  if guest_start "$kind" "$id"; then
+  if guest_start "$1" "$2"; then
     log "$what: started (its NFS storage was ready after $((SECONDS - start))s)"
   else
     log "$what: start failed"
-    rc=1
+    return 1
   fi
+}
+
+# Passes over every pending candidate until each has started or the shared deadline has passed, so
+# one guest whose storage never comes back does not hold up the others (a CP must not wait out a
+# container's missing bind source). The deadline is checked BEFORE each probe and caps both the probe
+# and the sleep, so the budget is a real bound: once it has passed, a remaining candidate costs
+# nothing more instead of one more possibly-hung probe each.
+declare -A missing=()
+pending=("${candidates[@]}")
+while [ "${#pending[@]}" -gt 0 ]; do
+  next=()
+  for cand in "${pending[@]}"; do
+    kind=${cand%%:*}
+    id=${cand#*:}
+    mapfile -t srcs < <(sources_of "$kind" "$id")
+    ready=1
+    for src in "${srcs[@]}"; do
+      left=$((deadline - SECONDS))
+      if [ "$left" -le 0 ] || ! source_ready "$src" "$((left < PROBE_S ? left : PROBE_S))"; then
+        missing[$cand]=$src
+        ready=""
+        break
+      fi
+    done
+    if [ -n "$ready" ]; then
+      start_now "$kind" "$id" || rc=1
+    else
+      next+=("$cand")
+    fi
+  done
+  pending=("${next[@]}")
+  [ "${#pending[@]}" -gt 0 ] || break
+  left=$((deadline - SECONDS))
+  [ "$left" -gt 0 ] || break
+  sleep "$((left < STEP_S ? left : STEP_S))"
+done
+for cand in "${pending[@]}"; do
+  log "$(label "${cand%%:*}" "${cand#*:}"): ${missing[$cand]} still missing after ${WAIT_S}s; NOT starting it"
+  rc=1
 done
 exit "$rc"

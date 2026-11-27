@@ -18,8 +18,8 @@
 #
 # Each run:
 #   - A target is STALE when one of its allowed portals is an IPv4 that no local interface holds, or
-#     when its only IPv4 portal is 127.0.0.1 (nothing outside the NAS can reach it). 0.0.0.0 ("any")
-#     and non-IPv4 values count as reachable.
+#     when its only portals are loopback (127.0.0.1, ::1: nothing outside the NAS can reach it).
+#     0.0.0.0 ("any") and other non-IPv4 values count as reachable.
 #   - It restarts only while the NAS holds EXPECT_PORTAL (default 10.55.0.254, the storage address;
 #     empty = no such condition): without it, a restart binds the targets to loopback again.
 #   - It acts only when the SAME picture (stale addresses + local addresses) shows on two runs in a
@@ -150,7 +150,7 @@ for q in $iqns; do
   reach=0
   vanished=0
   for p in $portals; do
-    case "$p" in 127.0.0.1) continue ;; 0.0.0.0|*:*) reach=1; continue ;; esac
+    case "$p" in 127.0.0.1|::1) continue ;; 0.0.0.0|*:*) reach=1; continue ;; esac
     case "$p" in [0-9]*.[0-9]*.[0-9]*.[0-9]*) ;; *) reach=1; continue ;; esac
     if printf '%s\n' "$addrs" | grep -qxF "$p"; then reach=1; continue; fi
     vanished=1

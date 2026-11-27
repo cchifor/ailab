@@ -330,6 +330,22 @@ class PveNfsGuestAutostartTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertEqual(self.started(), [])
 
+    def test_a_container_whose_source_never_appears_does_not_hold_up_a_ready_vm(self):
+        # Candidates are collected containers first. The CP's storage is ready at once; it must start
+        # in the first pass, not after the container's whole budget.
+        missing = self.nfs_src('never', create=False)
+        self.ct(5002, 'onboot: 1', f'mp0: {missing.as_posix()},mp=/models')
+        self.vm_images(4001)
+        self.vm(4001, 'onboot: 1', self.CP_DISK)
+        start = time.monotonic()
+        run = self.run_script(wait_s=6)
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertEqual(self.started(), ['4001'])
+        self.assertIn('VM 4001: started (its NFS storage was ready after 0s)', run.stdout)
+        self.assertIn('CT 5002:', run.stdout)
+        self.assertIn('NOT starting it', run.stdout)
+        self.assertGreaterEqual(time.monotonic() - start, 5, 'the container still gets its whole budget')
+
     def test_containers_and_vms_share_one_pass(self):
         src = self.nfs_src()
         self.ct(5002, 'onboot: 1', f'mp0: {src.as_posix()},mp=/models')

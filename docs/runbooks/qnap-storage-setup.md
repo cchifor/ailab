@@ -74,9 +74,9 @@ python scripts/qnap-ssh.py --sudo 'N=/usr/local/bin/nacli; for f in /etc/config/
 `bash scripts/qnap-tb-storage-ip-install.sh`; `DRY_RUN=1` first) is the fallback:
 - it re-adds `10.55.0.254/24` if the bridge ever lacks it (redundant with the static config: drop this line once a NAS
   boot has proven the config);
-- once per boot it compares the kernel export table's read-write entries for the Thunderbolt subnet with the 10GbE
-  subnet's, and restarts NFS only if the Thunderbolt subnet has fewer (2026-06-14: node1/node2 were read-only after a
-  NAS reboot). It logs when it acts (`grep tb-storage-ip /var/log/messages`). Until 2026-11-27 it restarted NFS on
+- once per boot it compares the kernel export table's read-write entries of the `pve-nfs` share for the Thunderbolt
+  subnet with the 10GbE subnet's, and restarts NFS only if the Thunderbolt subnet has fewer on two runs in a row
+  (2026-06-14: node1/node2 were read-only after a NAS reboot). It logs when it acts (`grep tb-storage-ip /var/log/messages`). Until 2026-11-27 it restarted NFS on
   every boot, which lands under control planes that have just started from this share.
 
 ## 3. Optional cleanup of default datasets
@@ -593,8 +593,8 @@ python scripts/qnap-ssh.py --sudo 'iscsiadmin get_allow_portal "$(iscsiadmin get
 `bash scripts/qnap-iscsi-portal-watchdog-install.sh` (`DRY_RUN=1` first) into
 `/share/ZFS2_DATA/.iscsi-portal-watchdog/` with one root cron line (every minute). It restarts the target
 service (`/etc/init.d/iscsitrgt.sh restart`, ~80 s), which re-resolves the interfaces, when ALL of these hold:
-- some target's allowed portal is an IPv4 that no local interface holds, or its only IPv4 portal is `127.0.0.1`
-  (`0.0.0.0` and IPv6 count as reachable);
+- some target's allowed portal is an IPv4 that no local interface holds, or its only portals are loopback
+  (`127.0.0.1`, `::1`; `0.0.0.0` and other IPv6 count as reachable);
 - the NAS holds `10.55.0.254` now (`EXPECT_PORTAL`; empty disables the condition): without it, a restart binds the
   targets to loopback again, so it logs once, raises a QuLog event, and waits;
 - every target's portal query succeeded and listed a portal (a failed query is "cannot judge", never

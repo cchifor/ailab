@@ -45,8 +45,12 @@ python scripts/qnap-ssh.py "
   echo '-- exportfs --'; exportfs -v 2>/dev/null | grep -i ${SHARE} || true
 "
 echo
-echo "== storage reconciler (service IP fallback + conditional NFS re-export) =="
-bash scripts/qnap-tb-storage-ip-install.sh
+echo "NOTE: on a fresh NAS, set the Thunderbolt Bridge's static IP ${SVC_IP}/24 in the QNAP UI"
+echo "      (runbook qnap-storage-setup.md §2). The reconciler below is only the fallback."
 echo
-echo "Done. QNAP storage configured (network + share + reconciler). Set the Thunderbolt Bridge's"
-echo "static IP ${SVC_IP}/24 in the QNAP UI if this is a fresh NAS (runbook qnap-storage-setup.md §2)."
+echo "== storage reconciler (service IP fallback + conditional NFS re-export) =="
+# Not fatal here: without a Thunderbolt link (a fresh NAS) the bridge may not exist yet, and the
+# installer's address assertion fails. Re-run it once the bridge is up.
+bash scripts/qnap-tb-storage-ip-install.sh || echo "WARNING: the reconciler installer failed (see above); re-run scripts/qnap-tb-storage-ip-install.sh once tbtbr0 is up"
+echo
+echo "Done. QNAP storage configured (network + share + reconciler)."

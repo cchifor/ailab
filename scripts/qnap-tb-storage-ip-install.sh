@@ -70,7 +70,6 @@ REMOTE_CMD="
   echo '== 3. run once now, and ASSERT the result =='
   [ \"\$DRY\" = 1 ] || /bin/sh '$DEST'
   echo \"  tbtbr0: \$(ip -4 -o addr show dev tbtbr0 2>/dev/null | awk '{print \$4}' | tr '\n' ' ')\"
-  echo \"  rw export entries: Thunderbolt subnet \$(exportfs -v 2>/dev/null | grep -c '10\.55\.0\.0/24(.*rw'), 10GbE subnet \$(exportfs -v 2>/dev/null | grep -c '10\.55\.1\.0/24(.*rw')\"
   if [ \"\$DRY\" != 1 ] && ! ip -4 -o addr show dev tbtbr0 2>/dev/null | grep -q ' 10\.55\.0\.254/24'; then
     echo 'FATAL: 10.55.0.254/24 is not on tbtbr0'; exit 1
   fi
