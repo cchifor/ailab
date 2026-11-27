@@ -31,8 +31,11 @@ CALLS = ("checkpoint", "deployment", "predecessor")
 KINDS = ("renewal-deployment", "renewed-credentials", "stopped-replacement", "preserving-holder", "pre-launch",
          "post-open", "observation", "permission", "recover-history", "reconcile-choice", "retire-branch")
 # Host maxima (ms) per request; the shorter of this and the Runner's own deadline applies.
-MAX_MS = {"permission": 30_000, "predecessor": 15_000, "deployment": 120_000}
+MAX_MS = {"permission": 30_000, "predecessor": 15_000, "deployment": 120_000, "renewal-deployment": 20_000,
+          "renewed-credentials": 10_000, "stopped-replacement": 100_000, "preserving-holder": 90_000}
 DEFAULT_MAX_MS = 120_000
+BOOTSTRAP_MS = 120_000  # C1 and C2 share one bootstrap budget, from C1's receipt
+STALL_S = 15.0  # a collector past its budget by this much, or a pipe write blocked this long, is a fault
 # Per-kind caps at the inventory maxima (a full run: 3 phases, up to 12 prompts each).
 CAPS = {"deployment": 1, "renewal-deployment": 1, "renewed-credentials": 1, "predecessor": 1,
         "stopped-replacement": 1, "preserving-holder": 1, "pre-launch": 3, "post-open": 3, "observation": 40,
@@ -84,17 +87,57 @@ def sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
+def js_number(x) -> str:
+    """JavaScript Number-to-string (ECMA-262 Number::toString) for a finite float, from Python's shortest repr."""
+    if x == 0:
+        return "0"  # also -0
+    if x != x or x in (float("inf"), float("-inf")):
+        raise ValueError("non-finite")
+    sign = "-" if x < 0 else ""
+    r = repr(abs(x))
+    mant, _, exp = r.partition("e")
+    digits, _, frac = mant.partition(".")
+    e = int(exp) if exp else 0
+    ds = (digits + frac).lstrip("0") or "0"
+    # position of the decimal point relative to the start of ds (n in the spec)
+    n = len(digits.lstrip("0")) + e if digits.strip("0") else e - (len(frac) - len(frac.lstrip("0")))
+    ds = ds.rstrip("0") or "0"
+    k = len(ds)
+    if k <= n <= 21:
+        return sign + ds + "0" * (n - k)
+    if 0 < n <= 21:
+        return sign + ds[:n] + "." + ds[n:]
+    if -6 < n <= 0:
+        return sign + "0." + "0" * (-n) + ds
+    e2 = n - 1
+    tail = ("." + ds[1:]) if k > 1 else ""
+    return sign + ds[0] + tail + "e" + ("+" if e2 >= 0 else "-") + str(abs(e2))
+
+
 def canonical(v) -> str:
-    """The driver's canonical(): sorted keys, no whitespace (JSON.stringify of a key-sorted clone)."""
-    return json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    """Byte-identical to the driver's canonical(): keys sorted by UTF-16 code units (Array.prototype.sort), values
+    as JSON.stringify writes them (JavaScript number formatting, the same string escapes)."""
+    if isinstance(v, bool) or v is None:
+        return json.dumps(v)
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return js_number(v)
+    if isinstance(v, str):
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, (list, tuple)):
+        return "[" + ",".join(canonical(x) for x in v) + "]"
+    if isinstance(v, dict):
+        keys = sorted(v, key=lambda k: k.encode("utf-16-be"))
+        return "{" + ",".join(json.dumps(k, ensure_ascii=False) + ":" + canonical(v[k]) for k in keys) + "}"
+    raise TypeError("not JSON")
 
 
 def only_keys(d: dict, allowed: set, required: set = frozenset()) -> None:
+    """Fixed refusal words only: runner-supplied key names never reach the evidence."""
     need(isinstance(d, dict), "object expected")
-    extra = set(d) - set(allowed)
-    need(not extra, "unexpected keys: " + ",".join(sorted(extra)))
-    missing = set(required) - set(d)
-    need(not missing, "missing keys: " + ",".join(sorted(missing)))
+    need(not (set(d) - set(allowed)), "unexpected keys")
+    need(not (set(required) - set(d)), "missing keys")
 
 
 # ---------------------------------------------------------------------------------------------- budget
@@ -123,8 +166,12 @@ class Budget:
 
 
 # ---------------------------------------------------------------------------------------------- evidence
+class EvidenceFailure(Fault):
+    """The evidence could not be made durable: the broker's evidence-failure path (exit 6), not an observer fault."""
+
+
 class Evidence:
-    """Append-only JSONL, one fsync per line. A failure is a Fault (the broker's evidence-failure path)."""
+    """Append-only JSONL, one fsync per line; a short write is completed or fails. Failure = EvidenceFailure."""
 
     def __init__(self, path: str):
         self.lock = threading.Lock()
@@ -135,10 +182,15 @@ class Evidence:
         line = (json.dumps(rec, separators=(",", ":"), sort_keys=True, default=str) + "\n").encode()
         with self.lock:
             try:
-                self.f.write(line)
+                view = memoryview(line)
+                while view:
+                    n = self.f.write(view)
+                    if not n:
+                        raise OSError("short write")
+                    view = view[n:]
                 os.fsync(self.f.fileno())
-            except OSError as e:
-                raise Fault(f"evidence write failed ({type(e).__name__})") from e
+            except (OSError, ValueError) as e:
+                raise EvidenceFailure(f"evidence write failed ({type(e).__name__})") from e
 
     def close(self) -> None:
         try:
@@ -169,7 +221,9 @@ class RunState:
     baseline_marker: dict | None = None
     approved_marker_sha: str | None = None
     decisions: dict = field(default_factory=lambda: {"denied": 0, "effects": 0})
+    confirmed: list = field(default_factory=list)  # every C8 confirmation: permission, option, kind, step
     reads: int = 0
+    recover_ms: int | None = None  # C9's time: the resumed launch must be created after it
 
 
 @dataclass
@@ -182,6 +236,8 @@ class ObserverState:
     holder: dict | None = None  # measured at the pre-run step: incarnation, journal, mainpid
     router_pod: dict | None = None  # uid, restarts, configDigest
     historical: dict | None = None  # {"trajectory", "marker"} from C3
+    bootstrap_end: int | None = None  # epoch ms: the shared C1/C2 budget's end
+    preservation: dict | None = None  # the pre-run's verified preservation facts (C4's preservedOldStateConfirmed)
     runs: list = field(default_factory=list)  # RunState, in RUN_ORDER
     pending: RunState | None = None  # C5's run, appended when its reply is sent
     sessions: dict = field(default_factory=dict)  # sessionId -> RunState
@@ -231,7 +287,8 @@ def admit(st: ObserverState, call: str, kind: str | None, ctx: dict, cfg) -> Non
     ph = r.phase
     allowed = {
         "post-open": ph == "c5",
-        "observation": ph in ("open", "recovering", "open2"),
+        "observation": ph in ("open", "open2") or (ph == "recovering" and ctx.get("phase") == "recovered"
+                                                   and ctx.get("zeroAttempts") is True),
         "permission": ph in ("open", "open2"),
         "recover-history": ph == "open" and not r.effort,
         "reconcile-choice": ph == "recovered" and not r.effort,
@@ -261,7 +318,9 @@ def advance(st: ObserverState, call: str, kind: str | None, ctx: dict, value, cf
         st.current().phase = "recovering"
     elif kind == "observation":
         r = st.current()
-        if r.phase == "recovering":
+        if r.phase == "recovering":  # only the recovered-phase, zero-attempt observation advances past C9
+            need(ctx.get("phase") == "recovered" and ctx.get("zeroAttempts") is True,
+                 "the first observation after recovery must be the recovered zero-attempt one")
             r.phase = "recovered"
     elif kind in ("reconcile-choice", "retire-branch"):
         st.current().phase = "open2"
@@ -289,34 +348,48 @@ def check_request(frame: dict) -> tuple[int, int, dict]:
     return seq, gate_now, req
 
 
-def clamp_ms(req: dict, gate_now: int) -> int:
+def clamp_ms(req: dict, gate_now: int, recv_ms: int, now_ms: int, st: "ObserverState") -> int:
+    """The remaining host-owned budget, measured from the reader's receipt (queueing and transit already spent):
+    min(the per-kind cap, the Runner's own deadline, the shared C1/C2 bootstrap budget)."""
     key = req.get("kind") if req["call"] == "checkpoint" else req["call"]
-    host_max = MAX_MS.get(key, DEFAULT_MAX_MS)
-    return max(0, min(host_max, req["deadline"] - gate_now))
+    spent = max(0, now_ms - recv_ms)
+    left = min(MAX_MS.get(key, DEFAULT_MAX_MS), req["deadline"] - gate_now) - spent
+    if key in ("renewal-deployment", "renewed-credentials"):
+        if st.bootstrap_end is None:
+            st.bootstrap_end = recv_ms + BOOTSTRAP_MS
+        left = min(left, st.bootstrap_end - now_ms)
+    return max(0, left)
 
 
 # ---------------------------------------------------------------------------------------------- the host
 class Host:
-    """Drives one gate process. `collectors` maps (call, kind) -> fn(host, req, ctx, budget, gate_now) -> value."""
+    """Drives one gate process. `collectors` maps (call, kind) -> fn(host, req, ctx, budget, gate_now, obs).
 
-    def __init__(self, *, gate, collectors: dict, cfg, evidence: Evidence, on_fault: Callable[[str], None],
-                 state: ObserverState | None = None, heartbeat_s: float = 5.0):
+    `lease_ok` (optional) is re-checked before EVERY dispatch: after a Lease loss no collector runs. `on_fault(reason,
+    evidence)` reports a terminal fault to the orchestrator; evidence=True means the evidence could not be made durable
+    (the broker's exit 6), otherwise it is an observer fault (exit 9)."""
+
+    def __init__(self, *, gate, collectors: dict, cfg, evidence: Evidence, on_fault, state: ObserverState | None = None,
+                 heartbeat_s: float = 1.0, lease_ok=None):
         self.gate = gate  # has .stdout (readable lines), .stdin (writable), .poll()
         self.collectors, self.cfg, self.ev, self.on_fault = collectors, cfg, evidence, on_fault
+        self.lease_ok = lease_ok
         self.state = state or ObserverState()
-        self.cancelled = threading.Event()  # the in-flight request's cancel (terminal per the gate's protocol)
+        self.cancelled = threading.Event()  # terminal per the gate's protocol, or the orchestrator's stop
         self.down = threading.Event()  # terminal: answer observer-down
-        self.stopping = threading.Event()  # the orchestrator's stop
+        self.stopping = threading.Event()
         self.work: queue.Queue = queue.Queue(maxsize=1)
         self.expected_seq = 1
-        self.inflight = None
+        self.inflight = None  # (seq, monotonic deadline)
+        self.writing_since = None  # monotonic start of a blocked gate-stdin write
         self.lock = threading.Lock()
         self.write_lock = threading.Lock()
         self.heartbeat_s = heartbeat_s
-        self.beats = {"reader": time.monotonic(), "worker": time.monotonic()}
         self.fault_reason = None
         self.ready = threading.Event()
         self.threads = []
+        self.clock_waits = {}  # probe id -> [threading.Event, gateNow]
+        self.recv_ms = 0
 
     # -------------------------------------------------------------- lifecycle
     def start(self, ready_timeout: float = 10.0) -> None:
@@ -336,18 +409,19 @@ class Host:
         """For the orchestrator's own loop: the supervisor itself can die, so liveness is also checked from outside."""
         return self.stopping.is_set() or (not self.down.is_set() and all(t.is_alive() for t in self.threads))
 
-    def drain(self, timeout: float = 10.0) -> bool:
-        """Bounded: True when the worker is idle."""
+    def drain(self, timeout: float) -> bool:
+        """Cancel, then wait (bounded) for the worker to go idle. True = idle."""
         self.stop()
-        end = time.monotonic() + timeout
+        end = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < end:
             with self.lock:
                 if self.inflight is None:
                     return True
             time.sleep(0.05)
-        return False
+        with self.lock:
+            return self.inflight is None
 
-    def fault(self, reason: str) -> None:
+    def fault(self, reason: str, evidence: bool = False) -> None:
         with self.lock:
             first = self.fault_reason is None
             if first:
@@ -355,38 +429,60 @@ class Host:
         self.down.set()
         self.cancelled.set()
         if first:
+            if not evidence:
+                try:
+                    self.ev.write(event="observer-fault", reason=reason)
+                except Fault:
+                    evidence = True
             try:
-                self.ev.write(event="observer-fault", reason=reason)
-            except Fault:
-                pass
-            try:
-                self.on_fault(reason)
+                self.on_fault(reason, evidence)
             except Exception:  # noqa: BLE001 - the orchestrator's callback must never kill the supervisor
                 pass
 
     def _guard(self, name: str, fn) -> None:
         try:
             fn()
+        except EvidenceFailure as e:
+            self.fault(str(e), evidence=True)
         except BaseException as e:  # noqa: BLE001
             if not self.stopping.is_set():
                 self.fault(f"{name}-died:{type(e).__name__}")
 
     # -------------------------------------------------------------- gate I/O
-    def _reply(self, seq: int, obj: dict) -> None:
-        line = (json.dumps({"seq": seq, **obj}, separators=(",", ":")) + "\n").encode()
-        if len(line) > MAX_REPLY:
-            line = (json.dumps({"seq": seq, "v": 1, "ok": False, "code": "failed"}) + "\n").encode()
+    def _write(self, line: bytes) -> None:
         with self.write_lock:
+            self.writing_since = time.monotonic()  # the supervisor faults a write blocked for STALL_S
             try:
                 self.gate.stdin.write(line)
                 self.gate.stdin.flush()
             except (OSError, ValueError) as e:
                 raise Fault(f"gate stdin ({type(e).__name__})") from e
+            finally:
+                self.writing_since = None
+
+    def _reply(self, seq: int, obj: dict) -> None:
+        line = (json.dumps({"seq": seq, **obj}, separators=(",", ":")) + "\n").encode()
+        if len(line) > MAX_REPLY:
+            line = (json.dumps({"seq": seq, "v": 1, "ok": False, "code": "failed"}) + "\n").encode()
+        self._write(line)
+
+    def clock_probe(self, budget) -> tuple[int, int, int]:
+        """A measured round trip to the gate's clock (the Runner's): (host wall before, gateNow, host wall after),
+        the 'after' derived from monotonic elapsed time so a host wall-clock step cannot hide skew."""
+        pid = uuid_hex()
+        ev = threading.Event()
+        self.clock_waits[pid] = [ev, None]
+        w0, m0 = int(time.time() * 1000), time.monotonic()
+        self._write((json.dumps({"clockProbe": pid}) + "\n").encode())
+        ok = ev.wait(min(5.0, max(0.0, budget.remaining())))
+        m1 = time.monotonic()
+        gate_now = self.clock_waits.pop(pid)[1]
+        need(ok and is_int(gate_now, 1), "no clock reply from the gate", Failed)
+        return w0, gate_now, w0 + int((m1 - m0) * 1000)
 
     def _reader(self) -> None:
         while not self.stopping.is_set():
             line = self.gate.stdout.readline(MAX_REPLY + 2)
-            self.beats["reader"] = time.monotonic()
             if not line:
                 if not self.stopping.is_set():
                     self.fault("gate-eof")
@@ -399,9 +495,15 @@ class Host:
             if frame == {"ready": True}:
                 self.ready.set()
                 continue
+            if isinstance(frame, dict) and set(frame) == {"clockProbe", "gateNow"}:
+                w = self.clock_waits.get(frame["clockProbe"])
+                if w is not None:
+                    w[1] = frame["gateNow"]
+                    w[0].set()
+                continue
             if isinstance(frame, dict) and set(frame) == {"seq", "cancel"} and frame["cancel"] is True:
                 with self.lock:
-                    match = self.inflight is not None and self.inflight == frame["seq"]
+                    match = self.inflight is not None and self.inflight[0] == frame["seq"]
                 self.cancelled.set()  # terminal by protocol: the gate refuses every later connection
                 self.ev.write(event="cancel", seq=frame["seq"], inflight=match)
                 continue
@@ -429,46 +531,60 @@ class Host:
             try:
                 seq, frame, recv_ms = self.work.get(timeout=0.5)
             except queue.Empty:
-                self.beats["worker"] = time.monotonic()
                 continue
             with self.lock:
-                self.inflight = seq
+                self.inflight = (seq, time.monotonic() + DEFAULT_MAX_MS / 1000.0)
             try:
                 self.handle(seq, frame, recv_ms)
             finally:
                 with self.lock:
                     self.inflight = None
-                self.beats["worker"] = time.monotonic()
 
     def _supervisor(self) -> None:
         while not self.stopping.is_set():
-            time.sleep(min(1.0, self.heartbeat_s))
-            if self.gate.poll() is not None and not self.stopping.is_set():
+            time.sleep(self.heartbeat_s)
+            if self.stopping.is_set():
+                return
+            if self.gate.poll() is not None:
                 self.fault("gate-exited")
                 return
             dead = [t.name for t in self.threads[:2] if not t.is_alive()]
-            if dead and not self.stopping.is_set():
+            if dead:
                 self.fault("thread-dead:" + ",".join(dead))
+                return
+            now = time.monotonic()
+            with self.lock:
+                stalled = self.inflight is not None and now > self.inflight[1] + STALL_S
+            if stalled:
+                self.fault("collector-stalled-past-its-budget")
+                return
+            ws = self.writing_since
+            if ws is not None and now - ws > STALL_S:
+                self.fault("gate-stdin-write-blocked")
                 return
 
     # -------------------------------------------------------------- one request
     def handle(self, seq: int, frame: dict, recv_ms: int | None = None) -> None:
         started = time.time()
-        rec = {"event": "request", "seq": seq}
+        self.recv_ms = recv_ms if recv_ms is not None else int(started * 1000)
+        rec = {"event": "request", "seq": seq, "recvMs": self.recv_ms}
+        obs: dict = {}
         try:
             seq_, gate_now, req = check_request(frame)
             call, kind = req["call"], req.get("kind")
             ctx = req["context"]
             rec.update(call=call, kind=kind, contextSha256=sha256_bytes(canonical(ctx).encode()),
-                       instructionsSha256=req.get("instructionsSha256"), gateNow=gate_now,
-                       hostNow=int(started * 1000))
+                       instructionsSha256=req.get("instructionsSha256"), gateNow=gate_now, hostNow=int(started * 1000))
             admit(self.state, call, kind, ctx, self.cfg)
-            ms = clamp_ms(req, gate_now)
-            need(ms > 0, "deadline already elapsed", Deadline)
+            if self.lease_ok is not None and not self.lease_ok():
+                raise Fault("the Lease is no longer held: no further dispatch")
+            ms = clamp_ms(req, gate_now, self.recv_ms, int(time.time() * 1000), self.state)
+            need(ms > 1500, "deadline already elapsed", Deadline)
             fn = self.collectors.get((call, kind))
             need(fn is not None, "no collector", Unsupported)
             budget = Budget(ms - 1500, self.cancelled)  # reply margin
-            obs: dict = {}
+            with self.lock:
+                self.inflight = (seq, budget.end)
             value = fn(self, req, ctx, budget, gate_now, obs)
             budget.check()
             advance(self.state, call, kind, ctx, value, self.cfg)
@@ -476,20 +592,40 @@ class Host:
             rec.update(outcome="ok", observations=obs, valueSha256=sha256_bytes(body), value=value)
             self.ev.write(**rec, durationMs=int((time.time() - started) * 1000))  # BEFORE the reply
             self._reply(seq, {"v": 1, "ok": True, "value": value})
+        except EvidenceFailure as e:
+            self.fault(str(e), evidence=True)
         except Fault as e:
-            self.fault(str(e))
-            raise
-        except (Refuse, Failed, Unsupported, Deadline) as e:
-            rec.update(outcome=e.code, reason=str(e)[:300])
-            self.ev.write(**rec, durationMs=int((time.time() - started) * 1000))
-            self._reply(seq, {"v": 1, "ok": False, "code": e.code})
-        except Exception as e:  # noqa: BLE001 - a collector bug is an observer fault, never a pass
-            rec.update(outcome="fault", reason=type(e).__name__)
+            rec.update(outcome="fault", reason=str(e)[:200], observations=obs)
             try:
                 self.ev.write(**rec)
-            finally:
-                self.fault(f"collector-error:{type(e).__name__}")
+            except EvidenceFailure as ee:
+                self.fault(str(ee), evidence=True)
+            self.fault(str(e))
             try:
                 self._reply(seq, {"v": 1, "ok": False, "code": "observer-down"})
             except Fault:
                 pass
+        except (Refuse, Failed, Unsupported, Deadline) as e:
+            rec.update(outcome=e.code, reason=str(e)[:200], observations=obs)
+            try:
+                self.ev.write(**rec, durationMs=int((time.time() - started) * 1000))
+            except EvidenceFailure as ee:
+                self.fault(str(ee), evidence=True)
+                return
+            self._reply(seq, {"v": 1, "ok": False, "code": e.code})
+        except Exception as e:  # noqa: BLE001 - a collector bug is an observer fault, never a pass
+            rec.update(outcome="fault", reason=type(e).__name__, observations=obs)
+            try:
+                self.ev.write(**rec)
+            except EvidenceFailure as ee:
+                self.fault(str(ee), evidence=True)
+            self.fault(f"collector-error:{type(e).__name__}")
+            try:
+                self._reply(seq, {"v": 1, "ok": False, "code": "observer-down"})
+            except Fault:
+                pass
+
+
+def uuid_hex() -> str:
+    import uuid
+    return uuid.uuid4().hex
