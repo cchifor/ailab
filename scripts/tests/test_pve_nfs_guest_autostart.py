@@ -354,7 +354,8 @@ class PveNfsGuestAutostartTests(unittest.TestCase):
         run = self.run_script(wait_s=6)
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertEqual(self.started(), ['4001'])
-        self.assertIn('VM 4001: started (its NFS storage was ready after 0s)', run.stdout)
+        # The first pass, not the container's 6 s budget: a loaded CI runner can report 1 s here.
+        self.assertRegex(run.stdout, r'VM 4001: started \(its NFS storage was ready after [0-2]s\)')
         self.assertIn('CT 5002:', run.stdout)
         self.assertIn('NOT starting it', run.stdout)
         self.assertGreaterEqual(time.monotonic() - start, 5, 'the container still gets its whole budget')
