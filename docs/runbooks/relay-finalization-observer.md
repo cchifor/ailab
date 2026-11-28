@@ -102,7 +102,11 @@ overflow, missing rows, foreign identity, unlisted sessions/launches or
 installations, pending commands/permissions/control leases, nonterminal
 credential operations, missing generations and active/blocked consumers all
 refuse. Session and renderer identities are joined to the immutable report
-launches. No newest-N API list is treated as completeness evidence.
+launches. No newest-N API list is treated as completeness evidence. The psql
+response must end with a newline and contain exactly one bounded JSON object;
+PostgreSQL formatting newlines inside that object are permitted. Duplicate
+keys, trailing JSON or banners, non-object roots and a different database
+identity refuse. Parsing a frame does not establish inventory completeness.
 
 The Router reader opens the existing SQLite store read-only with extensions
 disabled and a read transaction. SQL projects only managed-key metadata,
@@ -117,8 +121,11 @@ evidence must agree with the aggregate. Retained trajectory attempt totals
 must equal lifetime meter totals; eviction/retention gaps refuse. Process
 identities remain joined to the exact current Router runtime and parent root.
 The census reads real `/proc` PID/start identities, validates the root's actual
-executable hash, rejects unreadable/disappearing entries and changed membership,
-and includes both all current descendants and still-live journal-linked PIDs
+executable hash, and reads every member twice. Both scans must have identical
+PID membership, start ticks and parent PIDs; reuse or reparenting refuses even
+when the numeric PID list is unchanged. Scheduler-state changes of non-root
+processes alone do not change identity. The census includes all current
+descendants and still-live journal-linked PIDs
 even if reparented. It does not infer absence from a terminal trajectory.
 The settings API's saved and active cold values, pending flag, revision and
 runtime metadata bracket the read. Any descendant, ambiguous census or restart

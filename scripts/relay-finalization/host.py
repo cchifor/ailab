@@ -169,9 +169,12 @@ class Remote:
         c=self.config['hubDb']
         raw=self.kubectl(c['namespace'],['exec','-i',c['pod'],'-c',c['container'],'--','psql','-X','-qAt',
              '-v','ON_ERROR_STOP=1','-U',c['user'],'-d',c['database'],'-f','-'],budget,(HERE/'hub.sql').read_bytes())
-        self.F.need(raw.endswith(b'\n') and raw.count(b'\n')==1, 'sql-framing')
+        # PostgreSQL json_agg can contain formatting newlines inside one row.
+        # strict_json enforces one complete document, duplicate refusal and cap.
+        self.F.need(raw.endswith(b'\n'), 'sql-framing')
         v=self.F.strict_json(raw)
-        self.F.need(v['databaseIdentity']==c['database'], 'database-identity')
+        self.F.need(isinstance(v,dict), 'sql-framing')
+        self.F.need(v.get('databaseIdentity')==c['database'], 'database-identity')
         return v
 
     def router(self,credentials,budget):

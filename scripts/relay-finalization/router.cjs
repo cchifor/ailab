@@ -158,7 +158,13 @@ function processCensus(root, retained=[]) {
     }
     return false;
   });
-  need(JSON.stringify(ids)===JSON.stringify(list()) && JSON.stringify(first)===JSON.stringify(checkRoot()));
+  const finalIds=list();
+  need(JSON.stringify(ids)===JSON.stringify(finalIds));
+  // PID membership alone cannot exclude reuse or reparenting during the scan.
+  // Compare identity/ancestry, not transient scheduler state, for every member.
+  const final=finalIds.map(procStat);
+  need(all.every((p,i)=>p.pid===final[i].pid && p.startTicks===final[i].startTicks && p.ppid===final[i].ppid) &&
+       JSON.stringify(first)===JSON.stringify(checkRoot()));
   return {processes:descendants, processEvidence:{complete:true,root:first,
     censusSha256:sha(JSON.stringify(all)),observedMs:Date.now(),count:all.length}};
 }

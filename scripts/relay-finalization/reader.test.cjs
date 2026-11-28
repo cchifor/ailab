@@ -60,6 +60,43 @@ test('real process root, live child and actual joined absence',async t=>{
   assert.deepEqual(reader.processCensus(pin).processes,[]);
   assert.throws(()=>reader.processCensus({...pin,startTicks:'0'}));
 });
+function changingCensus(t, change) {
+  // Synthetic /proc boundary only: the actual census must distinguish the
+  // same numeric PID set from stable process identities and ancestry.
+  const records=[{pid:1,ppid:0,startTicks:'10',state:'S'},
+    {pid:10,ppid:1,startTicks:'100',state:'S'},
+    {pid:20,ppid:1,startTicks:'200',state:'S'}];
+  const executable=Buffer.from('synthetic-router-executable');let scans=0;
+  const realRead=fs.readFileSync,realList=fs.readdirSync;
+  t.mock.method(fs,'readdirSync',function(file,...args){
+    if(file!=='/proc')return realList.call(this,file,...args);
+    scans++;return records.map(p=>String(p.pid));
+  });
+  t.mock.method(fs,'readFileSync',function(file,...args){
+    if(file==='/proc/10/exe')return executable;
+    const match=typeof file==='string' && /^\/proc\/(1|10|20)\/stat$/.exec(file);
+    if(!match)return realRead.call(this,file,...args);
+    const p={...records.find(p=>p.pid===Number(match[1]))};
+    if(scans===2 && p.pid===20)Object.assign(p,change);
+    const fields=Array(22).fill('0');fields[0]=p.state;fields[1]=String(p.ppid);fields[19]=p.startTicks;
+    return p.pid+' (synthetic) '+fields.join(' ');
+  });
+  return ()=>reader.processCensus({pid:10,startTicks:'100',executableSha256:sha(executable)});
+}
+
+test('process census refuses non-root PID reuse between identical PID lists',t=>{
+  assert.throws(changingCensus(t,{startTicks:'201'}),/finalization-router-unavailable/);
+});
+
+test('process census refuses reparenting into Router with unchanged PID/start',t=>{
+  assert.throws(changingCensus(t,{ppid:10}),/finalization-router-unavailable/);
+});
+
+test('process census accepts stable identities despite unrelated scheduler-state change',t=>{
+  const value=changingCensus(t,{state:'R'})();
+  assert.deepEqual(value.processes,[]);assert.equal(value.processEvidence.complete,true);
+});
+
 test('exact node-stdin helper entry uses real SQLite/proc and only four metadata GETs',async t=>{
   const x=database(t),seen=[];
   const server=http.createServer((req,res)=>{

@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 import uuid
 
 SCRIPTS=Path(__file__).resolve().parents[1]
@@ -213,6 +214,44 @@ class Projection(unittest.TestCase):
         def fail(**kw):raise F.EvidenceFailure('synthetic write failure')
         self.ev.write=fail
         with self.assertRaises(F.EvidenceFailure):self.reader.observe(self.context(),threading.Event())
+
+
+class RemoteSqlFraming(unittest.TestCase):
+    def setUp(self):
+        self.config=dict(version=1,kubeContext='admin@ai',hub={},router={},devWorker={},
+            hubDb=dict(namespace='fixture',pod='postgres',container='db',user='reader',database='relay'))
+        qualification=dict(configSha256=F.sha(F.canonical(self.config).encode()),files={
+            name:F.sha((H.HERE/name).read_bytes()) for name in ('hub.sql','router.cjs','host.py')})
+        self.remote=H.Remote(self.config,qualification)
+
+    def read(self,raw):
+        budget=F.Budget(F.now_ms()+10000,threading.Event())
+        with patch.object(self.remote,'kubectl',return_value=raw) as call:
+            value=self.remote.hub(budget)
+        args=call.call_args.args
+        self.assertEqual(args[0],'fixture')
+        self.assertEqual(args[1],['exec','-i','postgres','-c','db','--','psql','-X','-qAt',
+            '-v','ON_ERROR_STOP=1','-U','reader','-d','relay','-f','-'])
+        self.assertIs(args[2],budget)
+        self.assertEqual(args[3],(H.HERE/'hub.sql').read_bytes())
+        return value
+
+    def test_postgres_multiline_single_json_object(self):
+        value=dict(databaseIdentity='relay',schemaVersion=93,rows=[dict(id=1),dict(id=2)])
+        raw=(json.dumps(value,indent=2)+'\n').encode()
+        self.assertGreater(raw.count(b'\n'),1)
+        self.assertEqual(self.read(raw),value)
+
+    def test_multiple_roots_duplicates_and_nonobjects_refused(self):
+        valid=b'{"databaseIdentity":"relay"}\n'
+        for raw in (valid+valid,valid+b'NOTICE\n',b'{"databaseIdentity":"relay","databaseIdentity":"relay"}\n',
+                    b'[{"databaseIdentity":"relay"}]\n',b'null\n',b'{"databaseIdentity":"relay","n":NaN}\n'):
+            with self.subTest(raw=raw),self.assertRaises(F.Refused):self.read(raw)
+
+    def test_terminator_limit_and_database_identity_retained(self):
+        for raw in (b'{"databaseIdentity":"relay"}',b'{"databaseIdentity":"foreign"}\n',
+                    b'{"databaseIdentity":"relay","x":"'+b'x'*F.MAX_BYTES+b'"}\n'):
+            with self.subTest(size=len(raw)),self.assertRaises(F.Refused):self.read(raw)
 
 
 class RealFiles(unittest.TestCase):
