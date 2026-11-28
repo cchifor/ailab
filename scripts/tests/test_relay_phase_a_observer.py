@@ -67,8 +67,10 @@ class Gate(unittest.TestCase):
             s.sendall(line)
         except (BrokenPipeError, ConnectionResetError):
             # A terminal gate answers and closes on accept, before reading the request; its answer is already in
-            # this socket's receive buffer, so a send that races that close must not lose it.
-            pass
+            # this socket's receive buffer, so a send that races that close must not lose it. A caller that keeps
+            # the socket (read=False) expects a live gate, so it gets the error, never a dead socket.
+            if not read:
+                raise
         if not read:
             return s
         buf = b""
