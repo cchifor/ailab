@@ -545,5 +545,22 @@ class CallLifecycle(unittest.TestCase):
         self.assertEqual(self.w.lease["spec"]["holderIdentity"], "")
 
 
+class CallFixtureIsolation(unittest.TestCase):
+    def test_timeout_fixture_restores_subprocess_for_later_tests(self):
+        import subprocess as sp
+        original = sp.run
+        try:
+            result = unittest.TestResult()
+            CallLifecycle("test_timed_out_container_is_removed_before_the_revoke").run(result)
+            self.assertTrue(result.wasSuccessful(), result.errors + result.failures)
+            self.assertIs(sp.run, original)
+            child = sp.run([sys.executable, "-c", "print('local-child-ok')"],
+                           capture_output=True, text=True, timeout=5)
+            self.assertEqual((child.returncode, child.stdout.strip()), (0, "local-child-ok"))
+        finally:
+            # A regression must not itself poison the rest of unittest discovery.
+            sp.run = original
+
+
 if __name__ == "__main__":
     unittest.main()

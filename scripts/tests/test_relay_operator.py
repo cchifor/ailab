@@ -28,9 +28,9 @@ class CallCleanup(unittest.TestCase):
         # `call` holds the fenced Lease (relay_operator_session.py); these tests are about the grant/revoke
         # cleanup, so the Lease is faked as always ours (its own behaviour is tested in test_relay_operator_session)
         ros = ro._session_module()
-        mock.patch.object(ros, "lease_acquire").start()
+        mock.patch.object(ros, "lease_acquire", return_value=None).start()
         mock.patch.object(ros, "lease_secure", return_value=True).start()
-        mock.patch.object(ros, "lease_release").start()
+        mock.patch.object(ros, "lease_release", return_value=True).start()
         mock.patch.object(ro, "run", return_value=b"").start()  # the named-container removal: no real docker
         self.addCleanup(mock.patch.stopall)
 
@@ -44,9 +44,11 @@ class CallCleanup(unittest.TestCase):
 
     def test_grant_failure_with_unconfirmed_revoke_exits_3(self):
         # the cleanup's verdict is not lost behind the grant's own failure
-        mock.patch.object(ro, "grant", side_effect=SystemExit("kubectl exec failed")).start()
-        self.revoke.return_value = "1 memberships, 0 sessions"
+        grant = mock.patch.object(ro, "grant", side_effect=SystemExit("kubectl exec failed")).start()
+        self.revoke.side_effect = [ro.REVOKED, "1 memberships, 0 sessions"]
         self.assertEqual(ro.call(["me"]), 3)
+        grant.assert_called_once()
+        self.assertEqual(self.revoke.call_args_list, [mock.call(SUBJECT), mock.call(SUBJECT)])
 
     def test_count_failure_after_grant_still_revokes(self):
         mock.patch.object(ro, "grant").start()
