@@ -1068,6 +1068,13 @@ async function createFixture(directory, outputDirectory) {
   async function collectCheckpoint({ context, signal }) {
     assert.equal(context.version, 1);
     assert(Object.isFrozen(context));
+    if (context.sinceAfter != null)
+      assert(
+        Number.isSafeInteger(context.sinceAfter) &&
+          context.sinceAfter >= 0 &&
+          context.sinceAfter < Number.MAX_SAFE_INTEGER,
+        "sinceAfter must be a bounded millisecond epoch",
+      );
     contexts.push(clone(context));
     const replacementBoundary =
       context.kind === "pre-launch" && context.sinceAfter != null
@@ -1155,6 +1162,8 @@ async function createFixture(directory, outputDirectory) {
       case "pre-launch":
         // The new scope starts at this observation, strictly after the prior
         // collector finished; holder handoff can occur in the same millisecond.
+        // Keep it for subsequent samples: the driver's delta requires identical
+        // scopes. Provider observations remain separated by principal and route.
         if (replacementBoundary !== null) phase.setTrajectorySince(now);
         return {
           trajectory: phase.observeTrajectory(context.provider),

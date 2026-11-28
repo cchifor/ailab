@@ -54,10 +54,24 @@ test(
         });
       const previous = await collect("stopped-replacement");
       await collect("preserving-holder");
-      assert.equal(Date.now(), previous.trajectory.observedAt - 1);
+      assert.equal(
+        Date.now(),
+        previous.trajectory.observedAt - 1,
+        "The stopped fixture's observation ends one millisecond after its requestedAt sample",
+      );
+      for (const sinceAfter of [
+        new Date().toISOString(),
+        new Date(),
+        1.5,
+        Number.MAX_SAFE_INTEGER,
+      ])
+        await assert.rejects(
+          collect("pre-launch", { sinceAfter }),
+          /millisecond epoch/,
+        );
       // The old collector returned immediately with a stale window. The fixed
       // collector must remain pending until the observed wall clock advances.
-      advance = setTimeout(() => t.mock.timers.tick(2), 10);
+      advance = setTimeout(() => t.mock.timers.tick(10), 10);
       const pre = await collect("pre-launch", {
         provider: "codex",
         runId: f.phase().profiles.codex.run,
@@ -71,6 +85,28 @@ test(
       );
       assert(pre.trajectory.scope.since <= pre.trajectory.requestedAt);
       assert.equal(pre.trajectory.rows.length, 0);
+      t.mock.timers.tick(10);
+      const later = await collect("observation", { provider: "codex" });
+      assert.equal(
+        a.delta(pre.trajectory, later.trajectory, "codex", f.phase().profiles),
+        0,
+        "The replacement scope persists for actual driver delta comparisons",
+      );
+      const repeated = await collect("pre-launch", {
+        provider: "codex",
+        runId: f.phase().profiles.codex.run,
+      });
+      assert.deepEqual(repeated.trajectory.scope, pre.trajectory.scope);
+      const other = await collect("pre-launch", {
+        provider: "qwen",
+        runId: f.phase().profiles.qwen.run,
+      });
+      a.snapshot(other.trajectory, "qwen", a.ROUTER, f.phase().profiles);
+      assert.notEqual(
+        other.trajectory.scope.principal,
+        pre.trajectory.scope.principal,
+      );
+      assert.notEqual(other.trajectory.scope.route, pre.trajectory.scope.route);
       assert.equal(f.phase().launches.length, 0);
       assert.deepEqual(f.failures, []);
     } finally {
@@ -79,6 +115,11 @@ test(
       controller.abort();
       await f.close();
       fs.rmSync(directory, { recursive: true, force: true });
+      assert.deepEqual(
+        f.failures,
+        [],
+        "No fixture failures after clock reset and server shutdown",
+      );
     }
   },
 );
