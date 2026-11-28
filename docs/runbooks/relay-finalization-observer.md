@@ -61,7 +61,9 @@ The separately retained decision bytes must be exact UTF-8 JSON with
 `{version:1,purpose:'canary-finalization',runId,reportPins,cleanupDeadline,qualificationSha256,bindingIds,noFurtherUse:true}`.
 `runId` is the broker's fixed cleanup-run UUID; `qualificationSha256` hashes the
 canonical pure plan's compiled `sources`, and `bindingIds` is the exact three
-fixed bindings in plan order. The pure plan supplies the fixed full scope.
+fixed bindings in ascending lexical order, matching the broker's retained
+decision contract. The pure plan's scope keeps its original profile order.
+The observer rejects noncanonical decision order without changing the raw bytes.
 Its hash must match both the validated plan and the broker's independently
 authorized ledger value. A matching hash is not authorization by itself. The
 broker must never obtain that ledger value from a callback or self-authored

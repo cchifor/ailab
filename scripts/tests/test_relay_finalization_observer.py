@@ -52,7 +52,7 @@ def fixture(d=False):
                      reportRouterSources={k:'d'*40 for k in 'abc'},observerQualificationSha256='e'*64))
     decision={k:plan[k] for k in ('version','purpose','reportPins','cleanupDeadline')}
     decision.update(runId=uid(999),qualificationSha256=F.sha(F.canonical(plan['sources']).encode()),
-                    bindingIds=copy.deepcopy(F.SCOPE['bindingIds']),noFurtherUse=True)
+                    bindingIds=sorted(F.SCOPE['bindingIds']),noFurtherUse=True)
     raw=F.canonical(decision).encode();plan['decisionSha256']=F.sha(raw)
     credentials=[dict(id=uid(300+i),binding_id=b,generation=1,router_key_id='key_'+str(i+1)*32,
        namespace='default',state='revoked',created_at=F.utc(now-20000),cleanup_pending=False,revoke_requested=True)
@@ -92,6 +92,33 @@ class Remote:
     def hub(self,b):b.left();self.calls.append('hub');return copy.deepcopy(self.h)
     def router(self,c,b):b.left();self.calls.append('router');return copy.deepcopy(self.r)
     def files(self,m,b):b.left();self.calls.append('files');return copy.deepcopy(self.f)
+
+
+class DecisionContract(unittest.TestCase):
+    def test_broker_sorted_decision_preserves_scope_and_raw_bytes(self):
+        plan, raw, *_ = fixture()
+        original_scope = copy.deepcopy(plan['scope'])
+        decision = F.strict_json(raw)
+        # prepare_finalization in the broker requires this canonical order.
+        decision['bindingIds'] = sorted(F.SCOPE['bindingIds'])
+        raw = F.canonical(decision).encode()
+        original_raw = bytes(raw)
+        plan['decisionSha256'] = F.sha(raw)
+        actual = F.validate_plan(plan, raw, F.sha(raw))
+        self.assertEqual(actual, plan)
+        self.assertEqual(actual['scope'], original_scope)
+        self.assertNotEqual(original_scope['bindingIds'], decision['bindingIds'])
+        self.assertEqual(raw, original_raw)
+
+    def test_noncanonical_decision_order_refused_even_with_matching_hash(self):
+        plan, raw, *_ = fixture()
+        decision = F.strict_json(raw)
+        decision['bindingIds'] = list(F.SCOPE['bindingIds'])
+        self.assertNotEqual(decision['bindingIds'], sorted(decision['bindingIds']))
+        raw = F.canonical(decision).encode()
+        plan['decisionSha256'] = F.sha(raw)
+        with self.assertRaises(F.Refused):
+            F.validate_plan(plan, raw, F.sha(raw))
 
 
 class Projection(unittest.TestCase):

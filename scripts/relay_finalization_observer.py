@@ -224,7 +224,7 @@ def validate_plan(plan, decision_raw, authorization_sha256):
          'qualificationSha256','bindingIds','noFurtherUse'} and isinstance(d['runId'],str) and UUID.fullmatch(d['runId']) and
          d == {k: plan[k] for k in ('version','purpose','reportPins','cleanupDeadline')} |
               {'runId':d['runId'], 'qualificationSha256':sha(canonical(plan['sources']).encode()),
-               'bindingIds':SCOPE['bindingIds'], 'noFurtherUse': True}, 'authorized-decision-scope')
+               'bindingIds':sorted(SCOPE['bindingIds']), 'noFurtherUse': True}, 'authorized-decision-scope')
     return copy.deepcopy(plan)
 
 
