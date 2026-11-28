@@ -12,8 +12,7 @@ reviewed readers; they do not authenticate a deployment or independently attest
 the Pi artifact. Unknown configured Hub/Router/holder revisions are unsupported.
 There is no 0.14.2 bridge, new live activation pin or execution-window grant here.
 
-Implemented here: predecessor, C9 retained native evidence, C10 reconstruction join.
-Remaining gates: C11. C10/C11 remain unsupported until their own collector changes arrive.
+Implemented here: predecessor, C9 retained native evidence, C10 reconstruction join, C11 configuration refusal.
 
 ## Predecessor projection
 
@@ -96,6 +95,37 @@ nondecreasing updatedAt. An epoch-only change refuses. Idle holder, session,
 control and permission evidence is also required. A true result authorizes only
 the driver's explicit reconstruction step; it does not prove that reconstruction
 succeeded. A has no B-style post-reconciliation receipt checkpoint in this patch.
+
+## C11 correlation
+
+[`retirement-evidence.sql`](../../scripts/relay-phase-a/sql/retirement-evidence.sql)
+uses generation-scoped control commands and actual holder journal sequences.
+The holder's `command-accepted` and `command-result` carry command IDs; update
+events do not. The collector therefore requires a unique accepted/completed
+interval for the exact high-setting command, followed by the exact probe's
+interval, with no overlapping accepted command and no retained journal gap.
+
+The high-setting completion must say `settingsApplied:true`; its interval must
+contain the latest generation-specific `session-settings` snapshot, an advanced
+revision and `thought_level=high`. The completed probe accepts `end_turn` **or**
+`refusal`, with exactly this untruncated message in its interval:
+
+```text
+Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used.
+```
+
+A generic refusal, historical substring or a notice outside that interval is
+insufficient. This reader supports one exact whole notice chunk. Split notices
+remain unsupported rather than being concatenated across ambiguous boundaries.
+The pinned f1 A driver's `effort()` makes one low-effort prompt and its completed
+observation, then changes to high and runs the refusal probe before C11. That low
+observation can contain multiple provider attempts; it is one immutable
+observation window, not a one-attempt assumption. A different flow with additional
+low prompts needs separate qualification, rather than advancing this baseline.
+The collector re-reads the original trajectory scope/since and requires identical
+rows and total attempts. Pending/unknown work and additional attempts refuse.
+SQL bounds command rows to 201 and events to 2001; the validator refuses the
+overflow sentinel. Both queries have a five-second statement timeout.
 
 ## Offline verification
 

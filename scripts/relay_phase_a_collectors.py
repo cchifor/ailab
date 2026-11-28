@@ -560,6 +560,8 @@ def c_observation(host, req, ctx, budget, gate_now, obs):
             run.approved_marker_sha = m["files"]["effects"].get("sha256")
         out["marker"] = m
     run.last_trajectory = env
+    if run.effort and run.effort_before is None and env['totalAttempts'] > 0:
+        run.effort_before = copy.deepcopy(env)
     return out
 
 
@@ -722,7 +724,21 @@ def c_reconcile_choice(host, req, ctx, budget, gate_now, obs):
 
 
 def c_retire_branch(host, req, ctx, budget, gate_now, obs):
-    raise Unsupported("the settings-applied and probe-refusal sources are not established (gate)")
+    support_sources(host)
+    run = checkpoint_run(host, ctx)
+    need(run.effort and run.provider == 'codex' and run.effort_before is not None,
+         'C11 retained effort observation unavailable', Unsupported)
+    evidence = idle_evidence(host, run, budget, obs)
+    validate_retirement(evidence, run.generation)
+    before = run.effort_before
+    env = trajectory(host, host.state.renewed[run.provider]['key'], run.provider,
+                     since=before['scope']['since'], not_before=0, budget=budget, obs=obs, label='retirement')
+    rows_retained(before, env)
+    need(env['rows'] == before['rows'] and env['totalAttempts'] == before['totalAttempts'],
+         'C11 probe added or changed attempts', Failed)
+    obs['retirement'] = {'sessionId': run.session_id, 'generation': run.generation,
+                         'evidenceSha256': sha256_bytes(canonical(evidence).encode()), 'zeroAttempts': True}
+    return True
 
 
 def c_predecessor(host, req, ctx, budget, gate_now, obs):
@@ -892,6 +908,47 @@ def idle_evidence(host, run, budget, obs):
          and h.get('journalId') == host.state.holder['journal'] and h.get('pendingCommands') == 0,
          'holder native work is pending', Failed)
     return value
+
+
+def validate_retirement(value, generation):
+    commands, events = value['commands'], value.get('events')
+    need(isinstance(events, list) and 0 < len(events) <= 2000, 'retirement events incomplete', Unsupported)
+    jr = value.get('journalRange') or {}
+    need(is_int(jr.get('first'), 1) and is_int(jr.get('last'), 1)
+         and jr.get('count') == jr['last'] - jr['first'] + 1, 'holder journal retention gap', Unsupported)
+    need(all(is_int(e.get('sequence'), 1) for e in events)
+         and [e['sequence'] for e in events] == sorted({e['sequence'] for e in events}),
+         'retirement event sequence differs', Failed)
+    high = [c for c in commands if c.get('kind') == 'set-config' and c.get('configId') == 'thought_level'
+            and c.get('value') == 'high']
+    probes = [c for c in commands if c.get('probe') is True]
+    need(len(high) == len(probes) == 1, 'exact effort/probe command unavailable', Unsupported)
+    high, probe = high[0], probes[0]
+    epoch = value['session']['control_epoch']
+    need(high.get('controlEpoch') == probe.get('controlEpoch') == epoch and high.get('settingsApplied') is True
+         and probe.get('stopReason') in ('end_turn', 'refusal'), 'effort/probe outcome differs', Failed)
+    def interval(command):
+        accepted = [e for e in events if e.get('kind') == 'command-accepted' and e.get('commandId') == command['id']]
+        ended = [e for e in events if e.get('kind') == 'command-result' and e.get('commandId') == command['id']]
+        need(len(accepted) == len(ended) == 1 and ended[0].get('status') == 'completed'
+             and accepted[0]['sequence'] < ended[0]['sequence'], 'command journal interval unavailable', Unsupported)
+        return accepted[0]['sequence'], ended[0]['sequence']
+    hs, he = interval(high)
+    ps, pe = interval(probe)
+    need(he < ps, 'probe preceded applied high setting', Failed)
+    need(not any(e.get('kind') == 'command-accepted' and e.get('commandId') not in (high['id'], probe['id'])
+                 and hs < e['sequence'] < pe for e in events), 'ambiguous command interval', Unsupported)
+    settings = [e for e in events if e.get('kind') == 'session-settings']
+    need(settings and hs < settings[-1]['sequence'] < he and settings[-1].get('generation') == generation,
+         'applied setting journal correlation unavailable', Unsupported)
+    snapshot = settings[-1].get('settings') or {}
+    options = [r for r in snapshot.get('configOptions', []) if r.get('id') == 'thought_level']
+    need(is_int(high.get('settingsRevision')) and is_int(snapshot.get('revision'), 1)
+         and snapshot['revision'] > high['settingsRevision']
+         and len(options) == 1 and options[0].get('currentValue') == 'high', 'high setting not observed', Failed)
+    notices = [e for e in events if e.get('notice') is True and ps < e['sequence'] < pe]
+    need(len(notices) == 1 and notices[0].get('truncated') is not True,
+         'exact correlated configuration-change notice unavailable', Unsupported)
 
 
 COLLECTORS = {

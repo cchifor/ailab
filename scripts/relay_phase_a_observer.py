@@ -238,6 +238,7 @@ class RunState:
     reads: int = 0
     recover_ms: int | None = None  # C9's time: the resumed launch must be created after it
     retained_branch: dict | None = None  # C9 source session/native/Router facts, never overwritten by resume
+    effort_before: dict | None = None  # immutable low-turn accounting, separate from the last observation
 
 
 @dataclass

@@ -388,6 +388,20 @@ class JoinTests(unittest.TestCase):
                        {**parent, 'state': 'uncertain'}, {**parent, 'epoch': None}):
             with self.assertRaises(O.Failed): C.branch_decision(n, record)
 
+    def test_refusal_end_turn_and_exact_interval(self):
+        for stop in ('end_turn', 'refusal'): C.validate_retirement(retirement(stop), 1)
+        changes = [lambda v:v['commands'][1].update(stopReason='cancelled'),
+                   lambda v:v['commands'][0].update(controlEpoch=1),
+                   lambda v:v['commands'][0].update(settingsApplied=False),
+                   lambda v:v['events'][1].update(generation=2),
+                   lambda v:v['events'][4].update(notice=False),
+                   lambda v:v['events'][4].update(truncated=True),
+                   lambda v:v['journalRange'].update(count=5),
+                   lambda v:v['events'].insert(4, {'sequence':14,'kind':'command-accepted','commandId':u(99)})]
+        for change in changes:
+            v=retirement(); change(v)
+            with self.assertRaises((O.Refuse, O.Failed, O.Unsupported)): C.validate_retirement(v,1)
+
 
 class ActualReaderRemote(T.FakeRemote):
     """Synthetic Hub/holder service; native files and SQLite are read for real."""
@@ -473,6 +487,26 @@ class CollectorIntegration(unittest.TestCase):
         with self.assertRaises(O.Unsupported): C.c_reconcile_choice(self.f.h,{},self.context(),T.budget(),0,{})
         self.assertEqual(len(self.remote.calls),count)
 
+    def test_c11_retained_since_and_extra_attempt_refusal(self):
+        r=self.f.run
+        r.effort=True; r.run_id=self.f.h.cfg.effort_run
+        evidence=retirement()
+        self.remote.answers['sql:retirement-evidence.sql']=[evidence]
+        before={'version':1,'source':C.SUPPORT_ROUTER,'scope':{'namespace':'default','principal':'key:'+KEY,
+                'route':'canary-pi-codex','since':C.now_ms()-1000},'rows':[{'id':'one','attempts':1}],
+                'totalAttempts':1,'requestedAt':C.now_ms(),'observedAt':C.now_ms()}
+        r.effort_before=copy.deepcopy(before)
+        after=copy.deepcopy(before)
+        self.remote.answers['trajectory:retirement']={'envelope':after,'unsettled':0,
+                                                      'identity':self.remote.answers['branch-identity']}
+        for stop in ('end_turn','refusal'):
+            evidence['commands'][1]['stopReason']=stop
+            self.assertTrue(C.c_retire_branch(self.f.h,{},self.context(),T.budget(),C.now_ms(),{}))
+        after['rows'].append({'id':'unexpected','attempts':1}); after['totalAttempts']=2
+        with self.assertRaisesRegex(O.Failed,'added or changed attempts'):
+            C.c_retire_branch(self.f.h,{},self.context(),T.budget(),C.now_ms(),{})
+        self.assertEqual(r.effort_before,before)
+
     def test_actual_c9_retains_original_reader_provenance(self):
         self.assertTrue(C.c_recover_history(self.f.h,{},self.context(),T.budget(),C.now_ms(),{}))
         saved=self.f.run.retained_branch
@@ -552,13 +586,19 @@ if __name__ == '__main__':
     elif len(sys.argv)==3 and sys.argv[1]=='--sql-readbacks':
         root=Path(sys.argv[2])
         r=json.loads((root/'retirement.json').read_text())
-        C.supported_schema(r); assert r['session']['state']=='open' and r['pendingPermissions']==0
+        C.supported_schema(r); C.validate_retirement(r,1)
         p=json.loads((root/'predecessor.json').read_text())
         C.supported_schema(p)
         assert [c['kind'] for c in p['commands']]==['prompt','cancel','close']
         assert [c['receipt']['result'] for c in p['commands']]==[{'stopReason':'cancelled'},{'cancelSent':True},{'cancelSent':True}]
         wrong=json.loads((root/'foreign.json').read_text())
         assert wrong['commands']==[]
-        print('actual PostgreSQL17 idle and predecessor readbacks PASS')
+        gap=json.loads((root/'gap.json').read_text())
+        try:
+            C.validate_retirement(gap,1)
+            raise AssertionError('retention gap accepted')
+        except O.Unsupported:
+            pass
+        print('actual PostgreSQL17 readbacks PASS')
     else:
         unittest.main()
