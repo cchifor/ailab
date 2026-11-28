@@ -7,16 +7,21 @@
 # At boot, `scst_util --load` (S46iSCSItrgt, at uptime ~190 s) resolves each interface to its IPv4
 # ONCE, through `iscsiadmin add_allow_portal`. At that moment tbtbr0 held only a link-local
 # 169.254.x.x (QNAP's config had it as DHCP). The service IP 10.55.0.254 came later, from the cron
-# reconciler (~300 s), and nothing re-resolved the targets. Root cause fixed by the static config
-# (scripts/qnap-tbtbr0-static-ip.sh); this watchdog is the backstop. Every target
-# then answers SendTargets with "No portals found", and every initiator login is rejected with
-# "target not found (02/03)" (iscsiadm exit 19). No qnap-iscsi volume in the cluster mounts: infra-pg,
-# gitea, openbao, prometheus and the rest stay down, and the whole estate 502s. Both times the fix was
-# one `/etc/init.d/iscsitrgt.sh restart` (~80 s), which re-resolves the interfaces.
+# reconciler (~300 s), and nothing re-resolved the targets. Every target then answers SendTargets
+# with "No portals found", and every initiator login is rejected with "target not found (02/03)"
+# (iscsiadm exit 19). No qnap-iscsi volume in the cluster mounts: infra-pg, gitea, openbao,
+# prometheus and the rest stay down, and the whole estate 502s. Each time the fix was one
+# `/etc/init.d/iscsitrgt.sh restart` (~80 s), which re-resolves the interfaces.
+# 2026-11-27: the bridge was not created at all at boot, so every target got 127.0.0.1 ONLY, which
+# the first version of this script read as healthy. The root cause is fixed by the bridge's static
+# IP in QNAP's own config (runbook qnap-storage-setup.md §2); this watchdog is the backstop.
 #
 # Each run:
-#   - A target is STALE when one of its allowed portals is an IPv4 that no local interface holds.
-#     0.0.0.0 ("any"), 127.0.0.1 and non-IPv4 values are ignored.
+#   - A target is STALE when one of its allowed portals is an IPv4 that no local interface holds, or
+#     when its only portals are loopback (127.0.0.1, ::1: nothing outside the NAS can reach it).
+#     0.0.0.0 ("any") and other non-IPv4 values count as reachable.
+#   - It restarts only while the NAS holds EXPECT_PORTAL (default 10.55.0.254, the storage address;
+#     empty = no such condition): without it, a restart binds the targets to loopback again.
 #   - It acts only when the SAME picture (stale addresses + local addresses) shows on two runs in a
 #     row. While addresses are still changing (boot, a network re-apply), a restart would bind to
 #     the half-done state again. A run that cannot judge breaks the sequence.
@@ -40,6 +45,7 @@ LOG_FILE="${ISCSI_WD_LOG:-$(dirname "$0")/watchdog.log}"
 LOG_TOOL="${LOG_TOOL:-/sbin/log_tool}"
 MAX_RESTARTS="${MAX_RESTARTS:-3}"
 MIN_GAP_SECS="${MIN_GAP_SECS:-600}"
+EXPECT_PORTAL="${EXPECT_PORTAL-10.55.0.254}"   # "-", not ":-": an explicit empty value disables it
 TAG=iscsi-portal-watchdog
 RUNBOOK="runbook qnap-storage-setup.md section 12"
 
@@ -141,13 +147,20 @@ for q in $iqns; do
     [ -n "$first_unjudged" ] || first_unjudged=$q
     continue
   fi
+  reach=0
+  vanished=0
   for p in $portals; do
-    case "$p" in 0.0.0.0|127.0.0.1|*:*) continue ;; esac
-    case "$p" in [0-9]*.[0-9]*.[0-9]*.[0-9]*) ;; *) continue ;; esac
-    printf '%s\n' "$addrs" | grep -qxF "$p" && continue
+    case "$p" in 127.0.0.1|::1) continue ;; 0.0.0.0|*:*) reach=1; continue ;; esac
+    case "$p" in [0-9]*.[0-9]*.[0-9]*.[0-9]*) ;; *) reach=1; continue ;; esac
+    if printf '%s\n' "$addrs" | grep -qxF "$p"; then reach=1; continue; fi
+    vanished=1
     stale="$stale$q $p
 "
   done
+  if [ "$reach" = 0 ] && [ "$vanished" = 0 ]; then
+    stale="$stale$q loopback-only
+"
+  fi
 done
 if [ "$unjudged" -gt 0 ]; then
   cannot_judge portals "get_allow_portal failed or listed no portal for $unjudged of $ntargets targets (first: $first_unjudged)" loud
@@ -174,11 +187,20 @@ fi
 
 nstale=$(printf '%s' "$stale" | grep -c .)
 stale_ips=$(printf '%s' "$stale" | awk '{ print $2 }' | sort -u | tr '\n' ' ' | sed 's/ *$//')
-what="$nstale binding(s) on $ntargets targets point at $stale_ips, which no local interface holds (local: $local_list)"
+what="$nstale binding(s) on $ntargets targets are stale ($stale_ips: an address no local interface holds, or loopback only; local: $local_list)"
 
 if [ "$MODE" = check ]; then
   echo "STALE: $what; sessions=$sessions"
   exit 1
+fi
+
+# A restart re-resolves the targets' interfaces. Without the storage address on the NAS it would
+# bind them to loopback again, so wait for it (this is the 2026-11-27 state while tbtbr0 is missing).
+if [ -n "$EXPECT_PORTAL" ] && ! printf '%s\n' "$addrs" | grep -qxF "$EXPECT_PORTAL"; then
+  if [ "$(cat "$STATE/unjudged" 2>/dev/null)" != expect-missing ]; then
+    event 2 "iSCSI targets are stale ($stale_ips) and $EXPECT_PORTAL is not on the NAS; not restarting ($RUNBOOK)"
+  fi
+  cannot_judge expect-missing "$what, but $EXPECT_PORTAL is not on the NAS (is tbtbr0 up?); a restart would not help" loud
 fi
 
 # --- 5. stale: debounce, then the safety gates, then at most one restart -------------------------
@@ -196,7 +218,7 @@ refuse() {  # $1 = session count (a number above 0, or "unknown")
   if [ "$(cat "$STATE/refused" 2>/dev/null)" != "$sig" ]; then
     printf '%s' "$sig" > "$STATE/refused"
     note err "$what, but sessions=$1; NOT restarting (a restart drops every live session). Restart by hand ($RUNBOOK)"
-    event 2 "$nstale target binding(s) on vanished $stale_ips with sessions=$1; not restarting automatically ($RUNBOOK)"
+    event 2 "$nstale stale target binding(s) ($stale_ips) with sessions=$1; not restarting automatically ($RUNBOOK)"
   fi
   exit 0
 }
@@ -208,7 +230,7 @@ if [ "$done_n" -ge "$MAX_RESTARTS" ]; then
   if [ ! -f "$STATE/exhausted" ]; then
     : > "$STATE/exhausted"
     note err "$what; restart budget spent ($done_n this boot). Not restarting again ($RUNBOOK)"
-    event 2 "iSCSI targets still bound to vanished $stale_ips after $done_n restarts; manual action needed ($RUNBOOK)"
+    event 2 "iSCSI targets still stale ($stale_ips) after $done_n restarts; manual action needed ($RUNBOOK)"
   fi
   exit 0
 fi
@@ -227,7 +249,7 @@ sessions=$(iscsiadmin get_target 2>/dev/null | count_sessions)
 
 echo "$now" >> "$STATE/restarts"
 note warning "$what; sessions=0; restarting the iSCSI target service (restart $((done_n + 1))/$MAX_RESTARTS)"
-event 1 "restarting the iSCSI target service: $nstale target binding(s) on vanished $stale_ips"
+event 1 "restarting the iSCSI target service: $nstale stale target binding(s) ($stale_ips)"
 "$INIT" restart >> "$STATE/restart.log" 2>&1 < /dev/null
 rc=$?
 rm -f "$STATE/seen"

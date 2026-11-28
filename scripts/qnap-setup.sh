@@ -3,12 +3,11 @@
 # Does NOT touch the existing zpool1 RAID-Z1 pool (only adds a shared folder + NFS access).
 #
 # Prereqs: .env filled (QNAP_SSH_USER/QNAP_ADMIN_PASSWORD), SSH enabled on the QNAP.
-# NOTE: the Thunderbolt *bridge* service IP (10.55.0.254) cannot be set via qcli (system
-#       bridge has no interface ID). The primary carrier is the static entry in QNAP's own
-#       config, written by scripts/qnap-tbtbr0-static-ip.sh (so it exists before iSCSI and NFS
-#       start at boot); on a fresh NAS with no cluster attached, run that script with APPLY=1
-#       after this one. The cron reconciler installed below came first. It is redundant once
-#       the static config is proven at a boot (runbook qnap-storage-setup.md §2).
+# NOTE: the Thunderbolt *bridge* service IP (10.55.0.254) cannot be set via qcli (the system
+#       bridge has no interface ID). Set it in the QNAP UI as a static address (QNAP FAQ: Network
+#       & Virtual Switch > Advanced > Virtual Switch > Thunderbolt Bridge > Configure > IPv4), so it
+#       exists before iSCSI and NFS start at boot: runbook qnap-storage-setup.md §2. The cron
+#       reconciler installed at the end (scripts/qnap-tb-storage-ip-install.sh) is the fallback.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -46,29 +45,12 @@ python scripts/qnap-ssh.py "
   echo '-- exportfs --'; exportfs -v 2>/dev/null | grep -i ${SHARE} || true
 "
 echo
-echo "== persist Thunderbolt-bridge service IP ${SVC_IP} via cron reconciler =="
-# qcli cannot set the system Thunderbolt bridge IP, so we use an idempotent reconciler on the
-# persistent DOM (/etc/config) + a cron entry. Self-heals the IP within 1 min of any reboot.
-python scripts/qnap-ssh.py <<PYEOF
-cat > /tmp/tb-storage-ip.sh <<'SH'
-#!/bin/sh
-# ailab QNAP storage reconciler (cron, every minute).
-# 1) ensure the Thunderbolt-bridge NFS service IP is present (idempotent)
-/usr/bin/ip addr show dev tbtbr0 2>/dev/null | grep -q "${SVC_IP}/24" || /usr/bin/ip addr add ${SVC_IP}/24 dev tbtbr0 2>/dev/null
-# 2) once per boot, after the share is mounted, re-export NFS: a QNAP boot-race drops the
-#    per-subnet rw rule from the kernel export table -> TB-subnet clients would be read-only.
-FLAG=/tmp/.ailab-nfs-reexported
-if [ ! -f "\$FLAG" ] && [ -d /share/${SHARE} ] && [ "\$(cut -d. -f1 /proc/uptime 2>/dev/null)" -gt 90 ] 2>/dev/null; then
-  /etc/init.d/nfs restart >/dev/null 2>&1
-  touch "\$FLAG"
-fi
-SH
-echo {{QNAP_PW}} | sudo -S -p "" cp /tmp/tb-storage-ip.sh /etc/config/tb-storage-ip.sh
-echo {{QNAP_PW}} | sudo -S -p "" chmod 755 /etc/config/tb-storage-ip.sh
-echo {{QNAP_PW}} | sudo -S -p "" sh -c 'grep -q tb-storage-ip /etc/config/crontab || echo "* * * * * /etc/config/tb-storage-ip.sh >/dev/null 2>&1" >> /etc/config/crontab'
-echo {{QNAP_PW}} | sudo -S -p "" crontab /etc/config/crontab
-echo {{QNAP_PW}} | sudo -S -p "" /etc/config/tb-storage-ip.sh
-ip -br addr show tbtbr0
-PYEOF
+echo "NOTE: on a fresh NAS, set the Thunderbolt Bridge's static IP ${SVC_IP}/24 in the QNAP UI"
+echo "      (runbook qnap-storage-setup.md §2). The reconciler below is only the fallback."
 echo
-echo "Done. QNAP storage configured (network + share + service-IP persistence) — all as code."
+echo "== storage reconciler (service IP fallback + conditional NFS re-export) =="
+# Not fatal here: without a Thunderbolt link (a fresh NAS) the bridge may not exist yet, and the
+# installer's address assertion fails. Re-run it once the bridge is up.
+bash scripts/qnap-tb-storage-ip-install.sh || echo "WARNING: the reconciler installer failed (see above); re-run scripts/qnap-tb-storage-ip-install.sh once tbtbr0 is up"
+echo
+echo "Done. QNAP storage configured (network + share + reconciler)."
