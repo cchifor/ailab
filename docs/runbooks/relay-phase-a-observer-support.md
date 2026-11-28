@@ -13,7 +13,7 @@ the Pi artifact. Unknown configured Hub/Router/holder revisions are unsupported.
 There is no 0.14.2 bridge, new live activation pin or execution-window grant here.
 
 Implemented here: predecessor, C9 retained native evidence, C10 reconstruction join.
-Remaining gates: C11. C10/C11 remain unsupported until their own collector changes arrive.
+Remaining gate: C11. It remains unsupported until its collector change arrives.
 
 ## Predecessor projection
 
