@@ -1,7 +1,9 @@
 """Offline fixed-reader tests. Real clock/files/children; synthetic scoped rows."""
 import base64
 import copy
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -12,6 +14,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 import uuid
 
 SCRIPTS=Path(__file__).resolve().parents[1]
@@ -286,6 +289,46 @@ class RealFiles(unittest.TestCase):
         with self.assertRaises(OSError):self.read()
 
 
+class GuardedHost(unittest.TestCase):
+    def run_bad_frame(self,frame,*,accept_error=False,evidence_error=False):
+        read_fd,write_fd=os.pipe()
+        read=os.fdopen(read_fd,'rb');write=os.fdopen(write_fd,'wb',buffering=0)
+        failed=threading.Event();calls=[]
+        def on_fault(reason,evidence,*_):calls.append((reason,evidence));failed.set()
+        ev=Evidence()
+        if evidence_error:
+            def failure(**record):raise F.EvidenceFailure('synthetic-evidence-failure')
+            ev.write=failure
+        host=F.FinalizationHost(gate=SimpleNamespace(stdout=read,stdin=io.BytesIO(),poll=lambda:None),
+            reader=None,evidence=ev,on_fault=on_fault,lease_ok=lambda:True)
+        host.heartbeat_s=.01
+        write.write(b'{"ready":true}\n')
+        try:
+            host.start(ready_timeout=2)
+            with patch.object(host,'_accept',side_effect=ValueError('synthetic-accept')) if accept_error else contextlib.nullcontext():
+                write.write(frame)
+                self.assertTrue(failed.wait(2),'framing fault not reported')
+                self.assertTrue(host.down.is_set() and host.cancelled.is_set())
+                self.assertFalse(host.alive())
+                self.assertEqual(calls[0][1],evidence_error)
+                self.assertTrue(calls[0][0].startswith('reader-died:') if not evidence_error else calls[0][0]=='synthetic-evidence-failure')
+        finally:
+            host.stop();write.close()
+            for thread in host.threads:thread.join(2)
+            read.close();host.gate.stdin.close()
+            self.assertFalse(any(thread.is_alive() for thread in host.threads))
+
+    def test_started_host_faults_on_invalid_frames(self):
+        for frame in (b'x'*524289+b'\n',b'\xff\n',b'{"seq":1,"seq":1}\n'):
+            with self.subTest(size=len(frame)):self.run_bad_frame(frame)
+
+    def test_started_host_faults_on_accept_exception(self):
+        self.run_bad_frame(b'{"seq":1}\n',accept_error=True)
+
+    def test_started_host_reports_cancel_evidence_failure(self):
+        self.run_bad_frame(b'{"seq":1,"cancel":true}\n',evidence_error=True)
+
+
 class SubprocessReader(unittest.TestCase):
     def test_private_exclusive_evidence_and_fsync(self):
         with tempfile.TemporaryDirectory() as d:
@@ -302,6 +345,12 @@ class SubprocessReader(unittest.TestCase):
         self.assertEqual(F.run_bounded([sys.executable,'-c','print("ok")'],b'',b),b'ok\n')
         with self.assertRaisesRegex(F.Refused,'reader-failed'):
             F.run_bounded([sys.executable,'-c','import sys;sys.stderr.write("secret");sys.exit(1)'],b'',b)
+    def test_stdin_delivery_failure_is_not_output_overflow(self):
+        budget=F.Budget(F.now_ms()+10000,threading.Event())
+        with self.assertRaisesRegex(F.Refused,'^reader-stdin-failed$'):
+            F.run_bounded([sys.executable,'-c','import os,time;os.close(0);time.sleep(30)'],
+                          b'x'*(1024*1024),budget)
+
     def test_output_overflow_stops_actual_child(self):
         b=F.Budget(F.now_ms()+10000,threading.Event())
         with self.assertRaises(F.Refused):F.run_bounded([sys.executable,'-c','print("x"*100000)'],b'',b,100)
@@ -398,6 +447,33 @@ def qualify_postgres(output):
         ctx={'notBefore':F.now_ms()-120000}
         first=query('complete');F.hub_projection(first,plan,ctx)
         assert len(first['sessions'])==10 and first['counts']['sessions']==10
+        # Nullable synthetic columns deliberately exercise SQL three-valued
+        # logic even where the deployed schema additionally declares NOT NULL.
+        unknown=[]
+        cases=[
+            ('agent_control_commands','state',uid(200),'completed','pending_commands'),
+            ('agent_commands','delivery',uid(200),'accepted','pending_commands'),
+            ('permission_requests','state',uid(200),'resolved','pending_permissions'),
+            ('agent_control_leases','expires_at',uid(200),'2000-01-01T00:00:00Z','control_leases'),
+            ('router_credential_consumers','state',F.SCOPE['bindingIds'][0],'released','active_consumers'),
+            ('router_credential_operations','state',uid(300),'ready','unresolvedOperations'),
+        ]
+        for table,column,scope,terminal,field in cases:
+            values="'"+F.TENANT+"','"+("','".join([uid(701),scope]) if table!='agent_control_leases' else scope)+"',NULL"
+            sql(('INSERT INTO '+table+' VALUES('+values+');').encode())
+            result=query('null-'+table)
+            if field=='unresolvedOperations':count=result[field]
+            elif field=='active_consumers':count=next(b[field] for b in result['bindings'] if b['id']==scope)
+            else:count=next(s[field] for s in result['sessions'] if s['id']==scope)
+            try:F.hub_projection(result,plan,ctx)
+            except F.Refused:refused=True
+            else:refused=False
+            if count!=1 or not refused:unknown.append(dict(table=table,count=count,refused=refused))
+            sql(("UPDATE "+table+" SET "+column+"='"+terminal+"';").encode())
+            F.hub_projection(query('terminal-'+table),plan,ctx)
+            sql(('TRUNCATE '+table+';').encode())
+        (out/'null-results.json').write_text(json.dumps(dict(cases=len(cases),unexpected=unknown),indent=2),encoding='utf-8')
+        assert not unknown,'NULL inventory silently counted as inactive'
         sql(("INSERT INTO agent_control_commands VALUES('"+F.TENANT+"','"+uid(700)+"','"+uid(200)+"','unknown');").encode())
         bad=query('pending-command')
         try:F.hub_projection(bad,plan,ctx)

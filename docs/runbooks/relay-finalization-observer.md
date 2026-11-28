@@ -44,8 +44,13 @@ The fixed Runner entry calls
 The digest comes from the compiled finalizer qualification, never a Runner
 override. Its credential-less Unix frame is exactly
 `{v:1,call:'checkpoint',kind:'finalization',deadline,context}`. The context's
-AbortSignal is handled locally; closing the socket triggers the existing
-Gate's terminal cancellation frame. Replies are bounded to 512 KiB, requests
+AbortSignal is handled locally; aborting closes the pending request socket,
+which triggers the Gate's terminal cancellation frame. Closing after a successful
+reply emits no cancel. A genuine cancel remains terminal even if its sequence
+has already left the Host's in-flight slot: the Gate refuses all later requests.
+The inherited Host starts framing work through its exception guard; malformed
+frames and acceptance exceptions fault the Host, and evidence failures also
+report failed durability. Replies are bounded to 512 KiB, requests
 to 64 KiB, and each stage to 120 seconds within the fixed cleanup deadline.
 
 `validated_plan` is the result of the actual finalizer's pure
@@ -101,7 +106,9 @@ the complete fixed-profile/binding inventory before applying bounded arrays;
 overflow, missing rows, foreign identity, unlisted sessions/launches or
 installations, pending commands/permissions/control leases, nonterminal
 credential operations, missing generations and active/blocked consumers all
-refuse. Session and renderer identities are joined to the immutable report
+refuse. NULL command/delivery/permission/operation states, lease expiry, or
+consumer state count as unresolved, never as inactive. Session and renderer
+identities are joined to the immutable report
 launches. No newest-N API list is treated as completeness evidence. The psql
 response must end with a newline and contain exactly one bounded JSON object;
 PostgreSQL formatting newlines inside that object are permitted. Duplicate
@@ -152,7 +159,8 @@ Each successful projection and bounded raw metadata evidence is fsynced before
 reply. Evidence paths are new/exclusive under an already-private broker
 directory; POSIX ownership/mode or Windows current-user ACL is checked. Output
 and stderr from child readers are bounded, and failures emit fixed codes rather
-than external text. Cancellation kills and joins owned local children. Remote
+than external text. Stdin delivery, output-read failure and output overflow have
+distinct codes, checked even when the child and pipe threads have already exited. Cancellation kills and joins owned local children. Remote
 reads also carry their own deadline; killing SSH/kubectl alone is never claimed
 as proof of remote termination. The remote operation is read-only regardless.
 

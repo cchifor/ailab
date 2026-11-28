@@ -20,19 +20,19 @@ WITH profiles(id,binding) AS (VALUES
 ), sessions AS (
  SELECT s.id,s.state,s.connector_id,s.profile->>'id' AS profile_id,s.generation,s.rebinding,
  (SELECT count(*) FROM public.agent_control_commands c WHERE c.tenant_id=s.tenant_id AND c.session_id=s.id
-   AND c.state NOT IN ('completed','rejected','withdrawn')) +
+   AND (c.state IS NULL OR c.state NOT IN ('completed','rejected','withdrawn'))) +
  (SELECT count(*) FROM public.agent_commands c WHERE c.tenant_id=s.tenant_id AND c.session_id=s.id
-   AND c.delivery NOT IN ('accepted','rejected','withdrawn')) AS pending_commands,
+   AND (c.delivery IS NULL OR c.delivery NOT IN ('accepted','rejected','withdrawn'))) AS pending_commands,
  (SELECT count(*) FROM public.permission_requests p WHERE p.tenant_id=s.tenant_id AND p.session_id=s.id
-   AND p.state NOT IN ('resolved','cancelled','expired','interrupted')) AS pending_permissions,
+   AND (p.state IS NULL OR p.state NOT IN ('resolved','cancelled','expired','interrupted'))) AS pending_permissions,
  (SELECT count(*) FROM public.agent_control_leases c WHERE c.tenant_id=s.tenant_id AND c.session_id=s.id
-   AND c.expires_at>clock_timestamp()) AS control_leases
+   AND (c.expires_at IS NULL OR c.expires_at>clock_timestamp())) AS control_leases
  FROM public.agent_sessions s WHERE s.tenant_id='00000000-0000-4000-8000-000000000001'::uuid
  AND (s.profile->>'id' IN (SELECT id::text FROM profiles) OR s.id IN (SELECT session_id FROM launches))
 ), bindings AS (
  SELECT b.id,b.connection_id,b.host_id,b.execution_identity,b.generation,
  (SELECT count(*) FROM public.router_credential_consumers x WHERE x.tenant_id=b.tenant_id
- AND x.binding_id=b.id AND x.state<>'released') AS active_consumers
+ AND x.binding_id=b.id AND x.state IS DISTINCT FROM 'released') AS active_consumers
  FROM public.router_credential_bindings b WHERE b.tenant_id='00000000-0000-4000-8000-000000000001'::uuid
  AND b.id IN (SELECT binding FROM profiles)
 ), credentials AS (
@@ -62,6 +62,6 @@ SELECT json_build_object(
    (SELECT * FROM installations ORDER BY launch_id LIMIT 1001)x),'[]'::json),
  'unresolvedOperations',(SELECT count(*) FROM public.router_credential_operations o
    WHERE o.tenant_id='00000000-0000-4000-8000-000000000001'::uuid
-   AND o.credential_id IN (SELECT id FROM credentials) AND o.state NOT IN ('ready','revoked','failed'))
+   AND o.credential_id IN (SELECT id FROM credentials) AND (o.state IS NULL OR o.state NOT IN ('ready','revoked','failed')))
 )::text;
 COMMIT;

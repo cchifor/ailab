@@ -146,22 +146,28 @@ def run_bounded(argv, stdin, budget, cap=MAX_BYTES):
     child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              start_new_session=os.name != 'nt')
     outputs = [bytearray(), bytearray()]
-    bad = threading.Event()
+    overflow = threading.Event()
+    input_failed = threading.Event()
+    output_failed = threading.Event()
     def read(pipe, result):
         try:
             while chunk := pipe.read(65536):
                 if len(result) + len(chunk) > cap:
-                    bad.set()
+                    overflow.set()
                     return
                 result.extend(chunk)
         except OSError:
-            bad.set()
+            output_failed.set()
     def write():
         try:
             child.stdin.write(stdin)
             child.stdin.close()
         except (OSError, ValueError):
-            bad.set()
+            input_failed.set()
+    def check_pipes():
+        need(not input_failed.is_set(), 'reader-stdin-failed')
+        need(not output_failed.is_set(), 'reader-output-failed')
+        need(not overflow.is_set(), 'reader-output-overflow')
     threads = [threading.Thread(target=read, args=(child.stdout, outputs[0]), daemon=True),
                threading.Thread(target=read, args=(child.stderr, outputs[1]), daemon=True),
                threading.Thread(target=write, daemon=True)]
@@ -170,9 +176,10 @@ def run_bounded(argv, stdin, budget, cap=MAX_BYTES):
     try:
         while child.poll() is None or any(t.is_alive() for t in threads):
             budget.left()
-            need(not bad.is_set(), 'reader-output-overflow')
+            check_pipes()
             time.sleep(.01)
-        need(child.returncode == 0 and not bad.is_set(), 'reader-failed')
+        check_pipes()
+        need(child.returncode == 0, 'reader-failed')
         budget.left()
         return bytes(outputs[0])
     finally:
