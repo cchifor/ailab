@@ -680,6 +680,34 @@ class RemoteContainment(unittest.TestCase):
         self.assertEqual([c[0] for c in self.calls], ["start", "stop"])
         self.assertEqual((out["paused"], out["contained"]), (False, True))
 
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX") and os.name == "posix", "Unix sockets")
+    def test_the_real_hello_stops_at_its_deadline_against_a_trickling_holder(self):
+        ns = dw_namespace()  # the ACTUAL hello(), no stubs
+        ns["UID"] = os.getuid()
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "control.sock")
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        os.chmod(path, 0o600)
+        srv.listen(1)
+        stop = threading.Event()
+
+        def trickle():  # answers one byte every 0.3 s and never a newline
+            conn, _ = srv.accept()
+            conn.recv(1024)
+            while not stop.is_set():
+                try:
+                    conn.sendall(b"x")
+                except OSError:
+                    return
+                time.sleep(0.3)
+        threading.Thread(target=trickle, daemon=True).start()
+        t0 = time.monotonic()
+        self.assertIsNone(ns["hello"](d, deadline=time.monotonic() + 1.5))
+        self.assertLess(time.monotonic() - t0, 2.2)  # bounded by the deadline, not by per-receive timeouts
+        stop.set()
+        srv.close()
+
     def test_an_exception_after_the_start_is_contained(self):
         def boom(state_dir, deadline=None):
             raise OSError("socket")

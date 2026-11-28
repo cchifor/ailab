@@ -136,26 +136,40 @@ def marker(provider, run, phase, not_before):
 
 # ------------------------------------------------------------------------------------------ holder
 def hello(state_dir, wait_s=0.0, deadline=None):
+    """One hello exchange per attempt. Each attempt has its own absolute deadline (at most 10 s, never past
+    `deadline`), re-applied before EVERY connect, send and receive: a holder that trickles bytes without a newline
+    cannot keep the read past the deadline."""
     sock = os.path.join(state_dir, "control.sock")
     end = time.monotonic() + left(deadline, wait_s)
     while True:
         if left(deadline, 10) <= 0.2:
             return None
+        attempt_end = time.monotonic() + left(deadline, 10)
+
+        def remaining():
+            r = attempt_end - time.monotonic()
+            if r <= 0:
+                raise socket.timeout("hello deadline")
+            return r
         try:
             st = os.lstat(sock)
             if not stat.S_ISSOCK(st.st_mode) or st.st_uid != UID or stat.S_IMODE(st.st_mode) & 0o077:
                 return None
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(max(0.2, left(deadline, 10)))
-            s.connect(sock)
-            s.sendall(b'{"version":1,"action":{"type":"hello"}}\n')
-            buf = b""
-            while not buf.endswith(b"\n") and len(buf) < 1 << 20:
-                c = s.recv(65536)
-                if not c:
-                    break
-                buf += c
-            s.close()
+            try:
+                s.settimeout(remaining())
+                s.connect(sock)
+                s.settimeout(remaining())
+                s.sendall(b'{"version":1,"action":{"type":"hello"}}\n')
+                buf = b""
+                while not buf.endswith(b"\n") and len(buf) < 1 << 20:
+                    s.settimeout(remaining())  # the ABSOLUTE deadline, recomputed before each receive
+                    c = s.recv(65536)
+                    if not c:
+                        break
+                    buf += c
+            finally:
+                s.close()
             r = json.loads(buf)
             if r.get("ok") is True and isinstance(r.get("result"), dict):
                 return r["result"]
