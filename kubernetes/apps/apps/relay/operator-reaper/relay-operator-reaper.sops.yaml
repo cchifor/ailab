@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Secret
+metadata:
+    name: relay-operator-reaper
+    namespace: relay
+    labels:
+        app.kubernetes.io/part-of: relay
+type: Opaque
+stringData:
+    password: ENC[AES256_GCM,data:KpEgTr6qKdeMs0dA7CUmLICzUl8npElyJfbWM+H09h9WRBvf3LcSkwq315DsJADD,iv:ifMX6z/7AY/t27eOT7zIeJhp1dFQ8ikL0MYGhs+0mUg=,tag:UfR4VWX+w8+ZPjPuuxGElw==,type:str]
+sops:
+    kms: []
+    gcp_kms: []
+    azure_kv: []
+    hc_vault: []
+    age:
+        - recipient: age1g0exjqgq9l52m8g7hqkqelc3kcam4wwlkngzjhn5wv6dzxfjdceqdyfl4t
+          enc: |
+            -----BEGIN AGE ENCRYPTED FILE-----
+            YWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSB2eWx2Vitsc1NsQUY0eUlB
+            TzVadk5aOVpwRkk5R2N4cTh0UFkwUExnTFdZCkl3T0dRd0JjTHFxWUhXa0dLZklB
+            MlRvRnhMUkw2RUVCZkdneVMzdjBMRW8KLS0tIEFBYzI3Qzl2YyttREszcnFvMG1M
+            Z09QNkU0TDNEOUZwUSs0ZnVWUFZhelkKQOaq0datA0aLPdZaPyhgyHBFDD7A63se
+            QSBt61ysIRUkLMyNqPXKPCJtRh2lp5wH35g3yOlCewRB3DaS6HbNYw==
+            -----END AGE ENCRYPTED FILE-----
+    lastmodified: "2026-11-27T21:40:49Z"
+    mac: ENC[AES256_GCM,data:gkMscnwTKWVccOXTZ5yzZZYBxES96Bar38Ef3V6eb2m1GrIIBIJPtsDo3IdRVRGFQo06OImrIyu19r5mUunA79OZCP9IrrH1j3GUmFmK8wWRKncOD19Gp6+9KD+ENg3Gba1sgc7UkQJ52v/ReGpjLq706BjoPzCdla26hE9Rabg=,iv:igQ1NoK+0DHZaS2gOxZyxQWS/mfagaI/yqeBKgzm6+g=,tag:NSz/xwfJLuXypXIPhAX4vQ==,type:str]
+    pgp: []
+    encrypted_regex: ^(data|stringData)$
+    version: 3.9.4

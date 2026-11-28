@@ -303,8 +303,9 @@ variable "runner_nodes" {
     # runners' fsyncs no longer reach the drive, so a single slow etcd minute no longer points at CI. It is
     # REPLACED by a stall budget: if a node's etcd member has more than 30 minutes a day with 1-min WAL fsync
     # p99 > 0.5 s on two consecutive days (11-18/19 baseline: 18 / 14 / 8 per day), that node's runners go back
-    # to 30 MiB/s and the owner is told. Wear trigger: alert AiNodeNvmeWearHigh (ci-runners-rules.yaml)
-    # pauses that node's runners in Gitea. Both rules are in ADR 0042. History below.
+    # to 30 MiB/s and the owner is told. Wear: alert AiNodeNvmeWearHigh (ci-runners-rules.yaml) is info only
+    # since 2026-11-28; the drives run to failure, so runners are NOT paused for wear (owner, 2026-11-27).
+    # Both rules are in ADR 0042. History below.
     # DISK WRITE CAPS (D1, owner-delegated 2026-11-17): 30 MiB/s, burstable 30, 1000 write IOPS,
     # burstable 1000, on the six ai-node1/ai-node2 runners: ci-runner-1, -4, -9 (ai-node1) and
     # ci-runner-2, -5, -10 (ai-node2). ci-runner-3 and ci-runner-6 (ai-node3) are NOT capped.

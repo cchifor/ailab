@@ -458,7 +458,8 @@ def build():
         stat("Life used (rated endurance)", 0, y, 4, 5, on_host(f"{used} * 100"), "percent",
              "SMART percentage_used: the drive's own estimate of its rated write endurance consumed. 100% is "
              "the rating, not a failure; the risk of the drive going read-only rises past it. AiNodeNvmeWearHigh "
-             "fires at 95% (ADR 0042: pause that node's CI runners).", steps=WEAR_STEPS, decimals=0),
+             "fires at 95% as info only: the drives run to failure (ADR 0042, amended 2026-11-28).",
+             steps=WEAR_STEPS, decimals=0),
         stat("Written · last 24 h", 4, y, 4, 5, on_host(written_bytes("1d")),
              "decbytes", "Bytes the host wrote to the drive in the last 24 h: the raw difference of the drive's "
              "own counter (data units written x 512,000 B) now and 24 h ago, not an extrapolated increase() "

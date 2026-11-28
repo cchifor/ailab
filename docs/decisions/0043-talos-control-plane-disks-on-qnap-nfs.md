@@ -11,8 +11,9 @@
 - The boot-order guard: **live on all three hosts** (#1899, `2552796b`, 2026-11-20; the deadline fix #1913, script
   sha256 `97590c24…`). The owner-gated reboot test **passed on ai-node3 on 2026-11-21**: the share mounted 5 s after
   pve-guests began, the gate held the starts until it was ready ("ready after 5s"), and cp3 started with no hand
-  `qm start`. ai-node1 and ai-node2 have not booted with the guard yet: after their next boot, read the gate line and
-  check that the CP is running (`qm status <vmid>`).
+  `qm start`. 2026-11-27 cold boot: on all three hosts the gate timed out (the NAS was powered on ~6 min after the
+  hosts and then came up without its storage bridge), handed over, and PVE refused the CPs as designed; they were
+  started by hand. The late start for CP VMs (`pve_nfs_guest_autostart`) followed the same day.
 
 **Supersedes:** the README's "Talos OS + etcd: NOT on the NAS ... (etcd belongs on local disk)".
 
@@ -85,7 +86,9 @@ NVMe.
      offline. The storage link comes up during boot, and after the 2026-10-30 power cut the NAS served NFS ~6 min
      after the hosts. Without the guard, a host reboot or a power cut could leave a CP stopped.
    - **After a timeout:** pve-guests starts everything anyway, and PVE refuses each CP whose share is still offline.
-     A refused CP needs `qm start <vmid>` once the share is back.
+     A refused CP is started by `pve-nfs-guest-autostart` once the share is back (role `pve_nfs_guest_autostart`,
+     up to 1 h after pve-guests; added 2026-11-27, when the NAS was powered on after the hosts and all three CPs
+     stayed stopped). Past that, `qm start <vmid>`.
    - #1899 carries the reasoning (`ansible/roles/pve_base/defaults/main.yml`), the rollout and the owner-gated reboot
      test (`docs/runbooks/node-maintenance.md`, "Boot-order guard").
 

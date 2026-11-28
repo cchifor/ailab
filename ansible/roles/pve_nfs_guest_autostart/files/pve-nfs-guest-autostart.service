@@ -1,5 +1,5 @@
 [Unit]
-Description=Start onboot containers whose /mnt/pve bind-mount source was late at boot
+Description=Start onboot guests whose NFS storage was late at boot
 After=pve-guests.service
 
 [Service]

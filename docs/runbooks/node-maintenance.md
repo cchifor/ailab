@@ -130,7 +130,8 @@ python scripts/node-ssh.py <host-ip> "for i in \$(seq 1 90); do qm status <vmid>
 python scripts/node-ssh.py <host-ip> "pct start <ctid>"
 
 # 5b. the CP's disk is on qnap-nfs: the boot-order guard must have said "ready" (section "Boot-order guard").
-#     A WARNING instead means the CP may be stopped: `qm start <vmid>` once the share is back.
+#     A WARNING instead means the CP was refused: pve-nfs-guest-autostart starts it once the share is back
+#     (journalctl -b -u pve-nfs-guest-autostart); past its hour, `qm start <vmid>`.
 python scripts/node-ssh.py <host-ip> "journalctl -b -u pve-guests --no-pager | grep pve-nfs-disk-gate; qm status <vmid>"
 
 # 6. gates before the next node: see the post-maintenance checklist below.
@@ -276,8 +277,10 @@ only a process stuck in uninterruptible NFS I/O can outlive it. With the share u
 guest as before. PVE's own storage check then fails a CP's start while the share is offline, so a CP never boots
 against a missing disk. If the share came back after the deadline, the CP starts with nobody involved. On PVE 9.2,
 startall runs starts in parallel worker slots (up to 8), so a CP start stuck on a hung share holds no other guest.
-The full reasoning is in `ansible/roles/pve_base/defaults/main.yml`. **A CP that PVE refused stays stopped:** run
-`qm start <vmid>` once the share is back, then check etcd 3/3.
+The full reasoning is in `ansible/roles/pve_base/defaults/main.yml`. **A CP that PVE refused is started late** by
+`pve-nfs-guest-autostart` (role `pve_nfs_guest_autostart`) once its share is mounted, for up to an hour after
+pve-guests; it skips a CP that someone started or stopped meanwhile. Past that, run `qm start <vmid>`. Either way,
+check etcd 3/3.
 
 Reading it after any host boot:
 
