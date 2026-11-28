@@ -506,6 +506,32 @@ class CollectorIntegration(unittest.TestCase):
         self.assertEqual(self.remote.calls.count('native-checkpoint'),2)
         self.assertEqual(self.remote.calls.count('branch-record'),2)
 
+    def test_c10_pending_or_foreign_work_refuses_before_native_and_branch_reads(self):
+        self.retain()
+        original=copy.deepcopy(self.remote.answers['sql:retirement-evidence.sql'][0])
+        changes=[lambda v:v.update(commands=[{'state':'accepted','receiptStatus':'completed'}]),
+                 lambda v:v.update(commands=[{'state':'completed','receiptStatus':'unknown'}]),
+                 lambda v:v.update(pendingPermissions=1),
+                 lambda v:v.update(commands=[{'state':'completed','receiptStatus':'completed'}]*201),
+                 lambda v:v['session'].update(holder_id=u(99))]
+        for change in changes:
+            value=copy.deepcopy(original);change(value)
+            self.remote.answers['sql:retirement-evidence.sql']=[value]
+            self.remote.calls.clear()
+            with self.subTest(change=change),self.assertRaisesRegex(O.Failed,'native work is pending or unknown'):
+                C.c_reconcile_choice(self.f.h,{},self.context(),T.budget(),C.now_ms(),{})
+            self.assertNotIn('native-checkpoint',self.remote.calls)
+            self.assertNotIn('branch-record',self.remote.calls)
+
+    def test_c10_pending_holder_refuses_before_native_and_branch_reads(self):
+        self.retain()
+        self.remote.answers['holder']['status']['pendingCommands']=1
+        self.remote.calls.clear()
+        with self.assertRaisesRegex(O.Failed,'holder native work is pending'):
+            C.c_reconcile_choice(self.f.h,{},self.context(),T.budget(),C.now_ms(),{})
+        self.assertNotIn('native-checkpoint',self.remote.calls)
+        self.assertNotIn('branch-record',self.remote.calls)
+
     def test_epoch_only_change_on_second_actual_read_refuses(self):
         self.retain()
         sqlite_read(self.remote.db,self.f.native,{**self.remote.branch['record'],'epoch':'changed'})

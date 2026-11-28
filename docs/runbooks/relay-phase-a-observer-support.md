@@ -106,7 +106,8 @@ C10 additionally requires the same C9 branch, epoch, operation and state, and
 nondecreasing updatedAt. An epoch-only change refuses. Idle holder, session,
 control and permission evidence is also required. A true result authorizes only
 the driver's explicit reconstruction step; it does not prove that reconstruction
-succeeded. A has no B-style post-reconciliation receipt checkpoint in this patch.
+succeeded. Phase A has no post-reconciliation receipt checkpoint in this patch;
+a true result does not confirm that the Router applied the reconstruction.
 
 ## Offline verification
 
