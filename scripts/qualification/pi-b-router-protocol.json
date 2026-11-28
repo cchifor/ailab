@@ -9,7 +9,7 @@
   "files": {
     "scripts/tests/fixtures/relay-b-fence-control-protocol.test.ts": "f319eed9d4a174dae7555c5d540fcc00bb7c9f513befbf4e4ab79f98dd361269",
     "docs/runbooks/inference-canary-v0113/owner-phase-b-fence.cjs": "beff49f0285479257c5cf0bc92a183c7668acc0a494bcbbdcb3ab08554708bf2",
-    "docs/runbooks/inference-canary-v0113/owner-phase-a.js": "a0ea344510511569673205291bb6ed37b94a07fe73c1b8a2b131858081a7b497"
+    "docs/runbooks/inference-canary-v0113/owner-phase-a.js": "1e430a0fdeef07ddf29fff50a0583a38e8997d7b080f68d1dba22f58021b5ce0"
   },
   "qualifiedProtocolProofSha256": "6c796c24785fd184e4d790b6cc432acafe846d1b7231254f2cd50d6df3d75597",
   "originalTestCommit": "19fe728a126eb8f137fb26d956d2104ffe8b58ac",
