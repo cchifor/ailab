@@ -94,7 +94,7 @@ function fresh(value, now, notBefore) {
     "Stale observation",
   );
 }
-function qualified(observer) {
+function qualification() {
   const q = QUALIFIED_FINALIZATION;
   const source = (s) => typeof s === "string" && /^[a-f0-9]{40}$/.test(s);
   const reportSources = (pins) =>
@@ -109,6 +109,10 @@ function qualified(observer) {
       hash(q.observerQualificationSha256),
     "Finalization source/adapters are not qualified",
   );
+  return q;
+}
+function qualified(observer) {
+  const q = qualification();
   need(
     observer &&
       observer.qualificationSha256 === q.observerQualificationSha256 &&
@@ -116,6 +120,276 @@ function qualified(observer) {
     "Qualified finalization observer missing",
   );
   return q;
+}
+function finalizationScope() {
+  return {
+    tenantId: TENANT,
+    hostId: HOST,
+    connectionId: CONNECTION,
+    executionIdentity: "c4",
+    bindingIds: BINDINGS,
+    profileIds: Object.values(FIXED).map((p) => p.id),
+  };
+}
+function reportArtifactNames(manifest) {
+  need(
+    manifest &&
+      (!Object.hasOwn(manifest, "activeDrain") ||
+        manifest.activeDrain === true),
+    "Unknown finalization report selection",
+  );
+  return [
+    "a",
+    "b",
+    "bInputs",
+    "c",
+    ...(manifest.activeDrain === true ? ["d"] : []),
+  ];
+}
+function activeDrainReport(d, c, manifest, q) {
+  const pins = q.activeDrainReportSources;
+  need(
+    pins &&
+      eq(Object.keys(pins).sort(), ["hubSource", "routerSource"]) &&
+      Object.values(pins).every(
+        (v) => typeof v === "string" && /^[a-f0-9]{40}$/.test(v),
+      ),
+    "Active drain historical source pins missing",
+  );
+  need(
+    d?.version === 1 &&
+      d.kind === "claude-active-drain" &&
+      d.status === "active-drain-passed" &&
+      d.activeDrainCompleted === true &&
+      d.completed === false &&
+      d.activeDrain === "observed" &&
+      d.capacity === "unexercised" &&
+      d.relay === pins.hubSource &&
+      d.router === pins.routerSource,
+    "Active drain incomplete/source differs",
+  );
+  need(
+    d.inputs?.phaseAReportSha256 === manifest.pins.a &&
+      d.inputs.phaseBReportSha256 === manifest.pins.b &&
+      d.inputs.phaseCReportSha256 === manifest.pins.c &&
+      d.inputs.phaseCRouterSource === c.router &&
+      uuid(d.inputs.runId) &&
+      uuid(d.inputs.phaseId) &&
+      d.inputs.runId !== c.inputs.runId &&
+      d.inputs.phaseId !== c.inputs.phaseId &&
+      ["account", "model", "coldReportSha256", "pairedReportSha256"].every(
+        (k) => d.inputs[k] === c.inputs[k] && typeof d.inputs[k] === "string",
+      ) &&
+      hash(d.inputs.exclusiveWindowSha256) &&
+      eq(d.claudeCredential, c.claudeCredential),
+    "Active drain prerequisite linkage differs",
+  );
+  need(
+    d.scope?.runId === d.inputs.runId &&
+      d.scope.hubSource === d.relay &&
+      d.scope.routerSource === d.router &&
+      d.scope.profileId === b.PROFILE.id &&
+      d.scope.profileRevision === 1 &&
+      d.scope.bindingId === b.PROFILE.binding &&
+      d.scope.credentialId === d.claudeCredential.credential &&
+      d.scope.credentialGeneration === d.claudeCredential.generation &&
+      d.scope.keyId === d.claudeCredential.key &&
+      d.scope.principalId === "key:" + d.claudeCredential.key &&
+      d.scope.account === d.inputs.account &&
+      d.scope.model === d.inputs.model &&
+      uuid(d.scope.runtimeInstanceId),
+    "Active drain scope differs",
+  );
+  const original = d.originalSettings,
+    final = d.finalSettings;
+  need(
+    original?.source === d.router &&
+      final?.source === d.router &&
+      original.values?.warmSessions === false &&
+      original.values.warmIdleMs === c.originalSettings.values.warmIdleMs &&
+      eq(original.values, final.values) &&
+      hash(original.revision) &&
+      hash(final.revision) &&
+      d.process?.processes?.length === 0 &&
+      !Object.hasOwn(d, "control") &&
+      d.processEpochs?.length === 3 &&
+      d.processEpochs.every(
+        (e, i) =>
+          e.transition ===
+            (i === 2 ? "final-drained-and-joined" : "drained-and-joined") &&
+          e.process?.processes?.length === 0 &&
+          e.scope?.runtimeInstanceId === d.scope.runtimeInstanceId &&
+          e.scope.routerSource === d.router,
+      ),
+    "Active drain settings/process closure incomplete",
+  );
+  const settings = d.activeSettings,
+    before = settings?.before,
+    after = settings?.after;
+  need(
+    before?.source === d.router &&
+      after?.source === d.router &&
+      before.values?.warmSessions === true &&
+      after.values?.warmSessions === false &&
+      eq({ ...before.values, warmSessions: false }, original.values) &&
+      eq(after.values, final.values) &&
+      after.revision === final.revision &&
+      before.revision !== after.revision &&
+      hash(before.revision) &&
+      [before, after, final].every(
+        (v) =>
+          v.providerRuntime?.runtimeInstanceId === d.scope.runtimeInstanceId,
+      ) &&
+      int(before.providerRuntime.providerGeneration) &&
+      int(after.providerRuntime.providerGeneration) &&
+      before.providerRuntime.providerGeneration !==
+        after.providerRuntime.providerGeneration &&
+      after.providerRuntime.providerGeneration === d.scope.providerGeneration &&
+      final.providerRuntime.providerGeneration === d.scope.providerGeneration,
+    "Active drain settings transition differs",
+  );
+  need(
+    d.settingsOperations?.length === 2,
+    "Active drain settings intents differ",
+  );
+  d.settingsOperations.forEach((op, i) =>
+    need(
+      uuid(op.intentId) &&
+        op.state === "confirmed" &&
+        hash(op.readbackSha256) &&
+        op.kind === (i ? "active-disable" : "enable") &&
+        (i
+          ? op.intentId === settings.intentId &&
+            op.expectedRevision === before.revision &&
+            op.afterRevision === after.revision &&
+            eq(op.before, before.values) &&
+            eq(op.values, after.values)
+          : op.expectedRevision === original.revision &&
+            op.afterRevision === before.revision &&
+            eq(op.before, original.values) &&
+            eq(op.values, before.values)),
+      "Active drain settings intent not confirmed",
+    ),
+  );
+  need(
+    d.rows?.length === 2 && d.fences?.length === 2 && d.subplans?.length === 2,
+    "Active drain row/fence inventory differs",
+  );
+  const baseline = d.drainBaseline;
+  need(
+    int(baseline?.attempts) && int(baseline.tokenUsageUnknown),
+    "Active drain baseline missing",
+  );
+  d.rows.forEach((row, i) => {
+    const f = d.fences[i],
+      p = d.subplans[i],
+      prev = d.fences[i - 1];
+    need(
+      row.rowId === "D" + (i + 1) &&
+        row.state === "passed" &&
+        row.cap === 2 &&
+        int(row.generations) &&
+        row.generations >= 1 &&
+        row.generations <= 2 &&
+        hash(row.terminalEvidenceSha256) &&
+        hash(row.scopeDigest) &&
+        uuid(row.phaseId) &&
+        uuid(row.fenceId) &&
+        p.kind === (i ? "cold" : "warm") &&
+        p.phaseId === row.phaseId &&
+        p.fenceId === row.fenceId &&
+        p.phaseLimit === 2 &&
+        eq(p.rows, [{ id: row.rowId, limit: 2 }]) &&
+        hash(p.planDigest) &&
+        f.fenceId === row.fenceId &&
+        f.phaseId === row.phaseId &&
+        f.runId === d.inputs.runId &&
+        f.planDigest === p.planDigest &&
+        f.phaseLimit === 2 &&
+        eq(f.rows, p.rows) &&
+        f.activeRowId === row.rowId &&
+        f.state === "closed" &&
+        f.keyId === d.scope.keyId &&
+        f.namespace === d.scope.namespace &&
+        f.principalId === d.scope.principalId &&
+        f.deploymentId === d.scope.deploymentId &&
+        f.selection?.providerGeneration ===
+          (i ? after : before).providerRuntime.providerGeneration &&
+        f.openRequests === 0 &&
+        f.staleOpenRequests === 0 &&
+        f.unattributed === 0 &&
+        int(f.revision) &&
+        f.revision > 0 &&
+        int(f.attempts) &&
+        int(f.tokenUsageUnknown) &&
+        f.tokenUsageUnknown <= f.attempts &&
+        f.baselineAttempts === (i ? prev.attempts : baseline.attempts) &&
+        f.rowStartAttempts === f.baselineAttempts &&
+        row.admittedBefore === f.baselineAttempts &&
+        f.attempts === row.admittedBefore + row.generations &&
+        f.baselineTokenUsageUnknown ===
+          (i ? prev.tokenUsageUnknown : baseline.tokenUsageUnknown) &&
+        f.rowStartTokenUsageUnknown === f.baselineTokenUsageUnknown &&
+        f.tokenUsageUnknown >= f.baselineTokenUsageUnknown &&
+        row.settledTokenUsageUnknown === f.tokenUsageUnknown &&
+        (!i || f.predecessorFenceId === prev.fenceId) &&
+        row.final?.dispatch?.mode === (i ? "cold" : "warm") &&
+        row.final.terminal?.phase === "terminal" &&
+        row.final.terminal.requestId === row.final.dispatch.requestId &&
+        row.final.terminal.attemptId === row.final.dispatch.attemptId,
+      "Active drain admission/terminal continuity differs",
+    );
+  });
+  need(
+    d.rows[0].fenceId !== d.rows[1].fenceId &&
+      d.rows[0].phaseId !== d.rows[1].phaseId &&
+      d.rows[0].phaseId === d.inputs.phaseId &&
+      d.rows[1].phaseId === d.scope.phaseId &&
+      d.drainUsage?.attempts ===
+        d.rows[0].generations + d.rows[1].generations &&
+      d.drainUsage.attempts === d.fences[1].attempts - baseline.attempts &&
+      d.drainUsage.attempts <= 4 &&
+      d.drainUsage.tokenUsageUnknown ===
+        d.fences[1].tokenUsageUnknown - baseline.tokenUsageUnknown,
+    "Active drain accounting differs",
+  );
+  need(
+    d.fenceOperations?.length === 4 &&
+      d.fenceOperations.every(
+        (op, i) =>
+          uuid(op.operationId) &&
+          op.state === "received" &&
+          hash(op.receiptSha256) &&
+          op.method === (i % 2 ? "close" : "arm") &&
+          op.body?.fenceId === d.fences[Math.floor(i / 2)].fenceId,
+      ),
+    "Active drain fence intents unresolved",
+  );
+  const overlap = d.rows[0].overlap,
+    ns = (v) => typeof v === "string" && /^(?:0|[1-9][0-9]{0,24})$/.test(v);
+  need(
+    overlap &&
+      ["fetchNs", "beforeNs", "afterNs", "nativeCompleteNs"].every((k) =>
+        ns(overlap[k]),
+      ) &&
+      overlap.beforeNs === before.providerRuntime.observedMonotonicNs &&
+      overlap.afterNs === after.providerRuntime.observedMonotonicNs &&
+      overlap.fetchNs === d.activeAttempt?.fetch?.observedMonotonicNs &&
+      BigInt(overlap.fetchNs) <= BigInt(overlap.beforeNs) &&
+      BigInt(overlap.beforeNs) <= BigInt(overlap.afterNs) &&
+      BigInt(overlap.afterNs) < BigInt(overlap.nativeCompleteNs),
+    "Active drain overlap unobserved",
+  );
+  const native = d.processEpochs[1].process.events?.find(
+    (e) =>
+      e.phase === "native-complete" &&
+      e.requestId === d.activeAttempt.dispatch?.requestId &&
+      e.attemptId === d.activeAttempt.dispatch?.attemptId,
+  );
+  need(
+    native?.observedMonotonicNs === overlap.nativeCompleteNs,
+    "Active drain native witness differs",
+  );
 }
 function parseReports(raws, manifest, now, q) {
   need(
@@ -127,9 +401,9 @@ function parseReports(raws, manifest, now, q) {
     "Cleanup-only deadline/scope invalid",
   );
   need(
-    eq(Object.keys(raws).sort(), ["a", "b", "bInputs", "c"].sort()) &&
+    eq(Object.keys(raws).sort(), reportArtifactNames(manifest).sort()) &&
       eq(Object.keys(manifest.pins || {}).sort(), Object.keys(raws).sort()),
-    "Exact four artifacts required",
+    "Exact selected artifacts required",
   );
   const r = {};
   for (const name of Object.keys(raws)) {
@@ -253,6 +527,7 @@ function parseReports(raws, manifest, now, q) {
       int(r.c.originalSettings.values.warmIdleMs),
     "Original cold settings missing",
   );
+  if (manifest.activeDrain === true) activeDrainReport(r.d, r.c, manifest, q);
   const selected = {
     ...r.a.successorCredentials?.profiles,
     claude: r.b.claudeCredential,
@@ -285,6 +560,7 @@ function parseReports(raws, manifest, now, q) {
     ["a", 5],
     ["b", 3],
     ["c", 1],
+    ...(manifest.activeDrain === true ? [["d", 1]] : []),
   ]) {
     const evidence = list(r[name].evidence, 10000, "Report evidence"),
       rows = evidence.filter((e) => e.kind === "launch");
@@ -387,6 +663,31 @@ function parseReports(raws, manifest, now, q) {
       selected,
     ),
   );
+  if (manifest.activeDrain === true) {
+    need(
+      r.d.runs?.length === 1 &&
+        r.d.runs[0].provider === "claude" &&
+        r.d.runs[0].effort === false &&
+        r.d.runs[0].runId === r.d.inputs.runId &&
+        r.d.runs[0].status === "passed-local-process-observations",
+      "Active drain run incomplete",
+    );
+    const baseline = exactly(
+      r.d.evidence,
+      (e) => e.kind === "warm-launch-baselines",
+      "D marker baseline",
+    );
+    for (const key of ["pre", "post"])
+      a.marker(
+        baseline[key],
+        "claude",
+        r.d.inputs.runId,
+        "baseline",
+        Date.parse(baseline[key]?.observedUtc),
+        selected,
+      );
+    markers.push(baseline.post);
+  }
   return {
     reports: r,
     selected,
@@ -396,6 +697,24 @@ function parseReports(raws, manifest, now, q) {
   };
 }
 
+function validateFinalizationInputs({ reports, manifest }) {
+  const q = qualification(),
+    raw = structuredClone(reports),
+    selected = structuredClone(manifest),
+    data = parseReports(raw, selected, Date.now(), q);
+  return structuredClone({
+    version: 1,
+    purpose: "canary-finalization",
+    scope: finalizationScope(),
+    reportPins: selected.pins,
+    decisionSha256: selected.decisionSha256,
+    cleanupDeadline: selected.cleanupDeadline,
+    launches: data.launches,
+    markers: data.markers,
+    originalIdle: data.originalIdle,
+    sources: q,
+  });
+}
 function createFinalization(options) {
   const q = qualified(options.observer);
   need(
@@ -426,6 +745,17 @@ function createFinalization(options) {
     evidence: [],
     capacity: data.reports.c.capacity,
     activeDrain: data.reports.c.activeDrain,
+    ...(manifest.activeDrain === true
+      ? {
+          selectedActiveDrain: {
+            reportSha256: manifest.pins.d,
+            hubSource: data.reports.d.relay,
+            routerSource: data.reports.d.router,
+            status: data.reports.d.status,
+            activeDrain: data.reports.d.activeDrain,
+          },
+        }
+      : {}),
   };
   const controller = new AbortController();
   let started = false,
@@ -450,14 +780,7 @@ function createFinalization(options) {
       "Durable save must be synchronous",
     );
   };
-  const scope = Object.freeze({
-    tenantId: TENANT,
-    hostId: HOST,
-    connectionId: CONNECTION,
-    executionIdentity: "c4",
-    bindingIds: BINDINGS,
-    profileIds: Object.values(FIXED).map((p) => p.id),
-  });
+  const scope = Object.freeze(finalizationScope());
   async function api(path, method = "GET", body, readback = false, intent) {
     check(readback);
     const session = data.launches.find(
@@ -826,16 +1149,47 @@ function createFinalization(options) {
             (k) => row[k] === l[k],
           ) &&
             uuid(row.commandId) &&
-            row.status === "absent" &&
+            ["absent", "not-current"].includes(row.status) &&
             row.fileAbsent === true &&
             Date.parse(row.cleanedAt) >= Date.parse(l.launchedAt) - 5000 &&
             Date.parse(row.cleanedAt) <= Date.parse(v.observedUtc) + 5000,
           "Renderer receipt/absence differs",
         );
+        // A historical removal can legitimately find a successor credential in
+        // the shared binding file. Keep that immutable receipt; fileAbsent is
+        // a separate fresh observation, never inferred from not-current.
+        if (row.status === "not-current" || row.reference !== undefined) {
+          const reference = row.reference,
+            target = state.targets.find((t) => t.bindingId === l.bindingId),
+            credential = target?.generations.find(
+              (c) => c.id === l.credentialId,
+            );
+          need(
+            reference &&
+              eq(Object.keys(reference).sort(), [
+                "creationOperationId",
+                "credentialId",
+                "generation",
+                "keyId",
+                "secretVersion",
+              ]) &&
+              reference.credentialId === l.credentialId &&
+              reference.generation === l.generation &&
+              credential?.generation === l.generation &&
+              reference.keyId === credential.routerKeyId &&
+              int(reference.secretVersion) &&
+              reference.secretVersion > 0 &&
+              uuid(reference.creationOperationId),
+            "Renderer immutable reference differs",
+          );
+        }
         return {
           ...l,
           commandId: row.commandId,
-          status: "absent",
+          status: row.status,
+          ...(row.reference === undefined
+            ? {}
+            : { reference: structuredClone(row.reference) }),
           fileAbsent: true,
           cleanedAt: row.cleanedAt,
         };
@@ -1115,6 +1469,8 @@ function createFinalization(options) {
 }
 module.exports = {
   createFinalization,
+  validateFinalizationInputs,
+  reportArtifactNames,
   qualified,
   sha,
   BINDINGS,

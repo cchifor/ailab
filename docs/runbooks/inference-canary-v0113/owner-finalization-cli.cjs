@@ -6,7 +6,12 @@ const { parseRunnerDeadline } = require("./owner-phase-a-deadline.cjs");
 const {
   createFinalizationAutomation,
 } = require("./owner-finalization-automation.cjs");
-const { qualified, diagnostic, failure } = require("./owner-finalization.cjs");
+const {
+  qualified,
+  diagnostic,
+  failure,
+  reportArtifactNames,
+} = require("./owner-finalization.cjs");
 function need(v, m) {
   if (!v) throw failure("cli-input-invalid");
 }
@@ -42,22 +47,28 @@ async function runFinalizationCli({
     need(process.platform === "linux", "Linux execution required");
     qualified(observer);
     stage = "arguments";
+    const withActiveDrain = argv.length === 14;
     need(
-      argv.length === 12 &&
+      (argv.length === 12 || withActiveDrain) &&
         [
           "--manifest",
           "--phase-a",
           "--phase-b",
           "--phase-b-inputs",
           "--phase-c",
+          ...(withActiveDrain ? ["--active-drain"] : []),
           "--output",
         ].every((v, i) => argv[i * 2] === v),
-      "Expected fixed manifest/A/B/B-inputs/C/output paths",
+      "Expected fixed selected finalization artifact paths",
     );
     stage = "deadline";
     const deadline = parseRunnerDeadline(env.RUNNER_DEADLINE, 900000);
     stage = "private-inputs";
     const manifest = JSON.parse(readPrivateUtf8(argv[1]));
+    need(
+      reportArtifactNames(manifest).includes("d") === withActiveDrain,
+      "Active-drain input differs from explicit manifest selection",
+    );
     need(
       manifest.cleanupDeadline === deadline,
       "Cleanup deadline differs from operator runner deadline",
@@ -67,10 +78,11 @@ async function runFinalizationCli({
       b: readPrivateUtf8(argv[5]),
       bInputs: readPrivateUtf8(argv[7]),
       c: readPrivateUtf8(argv[9]),
+      ...(withActiveDrain ? { d: readPrivateUtf8(argv[11]) } : {}),
     };
     stage = "host-preparation";
     host = createFinalizationAutomation({
-      directory: argv[11],
+      directory: argv[withActiveDrain ? 13 : 11],
       reports,
       manifest,
       observer,

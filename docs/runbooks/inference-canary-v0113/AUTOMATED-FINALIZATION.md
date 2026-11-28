@@ -9,7 +9,8 @@ must permit only the exact normal requests below. This code does not widen it.
 
 `canary-finalization-passed` means the scoped grants and renderer cleanup passed.
 It does not complete the entire plan or promote warm retention. Capacity and
-active drain keep their original C dispositions. Finalization may start only
+active drain keep their original C dispositions. A separately selected completed
+active-drain report adds its own disposition without rewriting C. Finalization may start only
 after all needed work on these bindings has ended; preserving a grant for a
 later selected check is incompatible with the required no-further-use decision.
 
@@ -68,6 +69,8 @@ for byte:
 - `bInputs`: the original host's `phase-b-inputs.json`. B's report alone does not
   contain the A hash; this artifact supplies the actual retained linkage.
 - `c`: completed selected four-prompt C report with its A/B hashes.
+- `d`, only with explicit `activeDrain:true`: the completed fixed two-prompt
+  active-drain report, independently hashed and linked to the exact A/B/C bytes.
 
 The external manifest is `{version:1, pins:{a,b,bInputs,c}, cleanupDeadline,
 decisionSha256}`. Each pin hashes exact UTF-8 bytes, not parsed/canonical JSON.
@@ -77,6 +80,20 @@ both pinned reports and the same account/model. All run/status/source checks
 remain strict; an arbitrary success flag is insufficient. Exact final compiled
 source pins are still unassigned. Synthetic test substitutions are qualification
 fixtures, not executable live inputs.
+
+Without `activeDrain`, the existing four-artifact ABC selection is unchanged.
+With literal `activeDrain:true`, `pins.d` and the raw D report are both required;
+false, unknown selections and unsolicited reports refuse. D requires its actual
+source-defined run, closed launch/delivery, both no-effect marker baselines,
+two passed rows capped at two admissions each, two closed fences with continuous
+attempt/token-uncertainty counters, confirmed settings/fence intents, causal
+same-runtime active-CAS witnesses and joined empty process epochs. Final settings
+must restore C's original cold/idle values. No inferred success or extra report
+list is accepted. The selected inventories contain eleven launches and five
+marker baselines; ABC alone retains ten and four, including original stopped A.
+The final state preserves C's `activeDrain` field and records selected D
+separately as `selectedActiveDrain:{reportSha256,hubSource,routerSource,status,
+activeDrain}`. This field is absent for the legacy ABC selection.
 
 The qualified bundle separates immutable report provenance from the cleanup
 deployment. `reportHubSources:{a,b,c}` and `reportRouterSources:{a,b,c}` each pin
@@ -88,11 +105,31 @@ rewrites report bytes, changes their retained hashes or relabels their sources.
 The bundle and observer still require qualification against the actual cleanup
 deployment before the public NULL gate can be replaced.
 
+Selected D additionally requires compiled
+`activeDrainReportSources:{hubSource,routerSource}`. These are historical D pins,
+independent of both C's source and the current cleanup deployment. The source
+gate remains NULL. Synthetic contract fixtures do not prove a full D producer,
+real process drainage or actual Hub/renderer compatibility.
+
+`validateFinalizationInputs({reports,manifest})` is the fixed pure pre-authority
+entry. It applies the same compiled qualification and report parser, returning a
+deep clone of `{version:1,purpose:"canary-finalization",scope,reportPins,
+decisionSha256,cleanupDeadline,launches,markers,originalIdle,sources}`. Launches
+contain only launch/session/profile/binding/credential IDs, generation and launch
+time. It invokes no observer, transport, storage or authority operation and
+accepts no caller-supplied qualification. The public NULL gate also refuses here.
+The operator broker must validate the same retained bytes before acquiring its
+scoped authority; a successful projection itself grants none.
+
 The CLI uses six fixed path pairs:
 
 ```text
 --manifest ABS --phase-a ABS --phase-b ABS --phase-b-inputs ABS --phase-c ABS --output NEW_ABS_DIRECTORY
 ```
+
+The sole additional CLI selection is `--active-drain ABS` immediately before
+`--output`, required exactly when the manifest selects D. All original raw
+artifacts remain byte-for-byte preserved in the new exclusive evidence directory.
 
 `RUNNER_DEADLINE` is normalized by the existing epoch-seconds/milliseconds parser
 and must equal the manifest cleanup deadline. `RELAY_SESSION_SOCKET` supplies the
@@ -128,13 +165,30 @@ modified. Extra generations or changed credentials refuse.
 
 After all grants are confirmed, `renderer` additionally requires every recorded
 launch, including the original stopped A generation1: exact session/binding/
-credential/generation, cleanup command UUID/time, status `absent`, and fresh
-managed-file absence. `not-current` is insufficient. Existing launch cleanup
+credential/generation, cleanup command UUID/time, raw status `absent` or
+`not-current`, and separate fresh managed-file absence. `not-current` alone is
+never evidence of absence: the renderer can encounter a newer credential at the
+shared binding path while processing an older generation's removal. Such a
+receipt requires the complete immutable `{credentialId,generation,secretVersion,
+keyId,creationOperationId}` reference, joined to the normal API credential/key
+inventory. The operator reader must also join it to the stored launch command
+and full local reference. The raw status/reference remain unchanged in evidence.
+All generations must already be revoked with cleanup complete, all sessions
+closed, consumers/requests absent and the scoped process census empty. The
+independent file read is for the current fixed binding path, never inferred from
+an old receipt. Existing launch cleanup
 receipts may predate revocation but cannot predate launch beyond clock skew.
-File observations and the four marker reports must follow the final collection
+File observations and all four or five selected marker reports must follow the final collection
 boundary. Codex/Qwen/Claude recovered effect hashes and byte counts must match
 their historical qualified observations; C's no-effect baseline remains absent.
 Escrow `cleanupPending:false` alone never proves renderer removal or halted work.
+
+Source evidence for this distinction is Relay `holder/src/renderer.rs` removal
+and `holder/tests/renderer.rs`'s
+`rotation_rejects_backwards_or_changed_generations_and_removal_is_exact`: old
+generation removal returns `not-current` while the successor file exists; only
+the successor removal makes it absent. Hub `routerCleanupReceipt` validates the
+exact command/reference and rejects any change to an already retained receipt.
 
 ## Durability, stop and qualification
 

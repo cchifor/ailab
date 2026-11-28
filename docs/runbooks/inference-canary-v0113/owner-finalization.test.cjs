@@ -24,6 +24,10 @@ const q = {
     c: "0bc835ab72fb9ea03b2b3ea51bba7a9789a5e171",
   },
   observerQualificationSha256: "a".repeat(64),
+  activeDrainReportSources: {
+    hubSource: "e".repeat(40),
+    routerSource: "f".repeat(40),
+  },
 };
 // Explicit synthetic qualification: change ONE source pin only, no Runner or
 // validator overrides. Host/CLI bytes are unchanged; dependencies are private.
@@ -64,8 +68,13 @@ const cli = load("owner-finalization-cli.cjs", {
   "./owner-finalization-automation.cjs": host,
 });
 
-function fixture({ live = false } = {}) {
-  let clock = Date.now(),
+function fixture({
+  live = false,
+  activeDrain = false,
+  profiles: suppliedProfiles,
+  now: fixtureNow,
+} = {}) {
+  let clock = fixtureNow ?? Date.now(),
     seq = 10;
   const now = () => (live ? Date.now() : clock),
     date = (v = now()) => new Date(v).toISOString(),
@@ -96,6 +105,21 @@ function fixture({ live = false } = {}) {
       expiresAt: now() - 1,
     },
   };
+  // Test-only bridge for real-PG integration: actual issued metadata replaces
+  // synthetic current generations before reports are built. Fixed profile and
+  // original stopped-predecessor identities still pass the production parser.
+  if (suppliedProfiles) {
+    assert.deepEqual(Object.keys(suppliedProfiles).sort(), [
+      "claude",
+      "codex",
+      "qwen",
+    ]);
+    for (const provider of Object.keys(profiles))
+      profiles[provider] = {
+        ...profiles[provider],
+        ...clone(suppliedProfiles[provider]),
+      };
+  }
   function marker(provider, runId, phase = "recovered") {
     return {
       version: 1,
@@ -366,6 +390,209 @@ function fixture({ live = false } = {}) {
     kind: "warm-launch-baselines",
     post: marker("claude", cr.inputs.runId, "baseline"),
   });
+  // Explicit synthetic report contract fixture, not an executed D producer or
+  // evidence of actual Router timing, renderer authority or native drainage.
+  let dr;
+  if (activeDrain) {
+    cr.inputs.phaseId = id();
+    cr.inputs.coldReportSha256 = "1".repeat(64);
+    cr.inputs.pairedReportSha256 = "2".repeat(64);
+    const source = q.activeDrainReportSources.routerSource,
+      runtime = id();
+    const setting = (warmSessions, generation, tick, revision) => ({
+      source,
+      revision: revision.repeat(64),
+      projectionSha256: "3".repeat(64),
+      pending: false,
+      values: { warmSessions, warmIdleMs: 300000 },
+      providerRuntime: {
+        runtimeInstanceId: runtime,
+        providerGeneration: generation,
+        observedAt: now(),
+        observedMonotonicNs: tick,
+      },
+    });
+    const original = setting(false, 1, "1", "4"),
+      before = setting(true, 2, "20", "5"),
+      after = setting(false, 3, "30", "6"),
+      final = setting(false, 3, "60", "6");
+    dr = {
+      version: 1,
+      kind: "claude-active-drain",
+      relay: q.activeDrainReportSources.hubSource,
+      router: source,
+      status: "active-drain-passed",
+      activeDrainCompleted: true,
+      completed: false,
+      activeDrain: "observed",
+      capacity: "unexercised",
+      inputs: {
+        ...clone(cr.inputs),
+        runId: id(),
+        phaseId: id(),
+        phaseCRouterSource: cr.router,
+        exclusiveWindowSha256: "7".repeat(64),
+      },
+      claudeCredential: clone(profiles.claude),
+      evidence: evidence(["claude"]),
+      originalSettings: original,
+      finalSettings: final,
+      settingsOperations: [],
+      fenceOperations: [],
+      drainBaseline: { attempts: 100, tokenUsageUnknown: 2 },
+      drainUsage: { attempts: 4, tokenUsageUnknown: 1 },
+      process: { processes: [] },
+    };
+    dr.scope = {
+      runId: dr.inputs.runId,
+      phaseId: id(),
+      hubSource: dr.relay,
+      routerSource: source,
+      profileId: b.PROFILE.id,
+      profileRevision: 1,
+      bindingId: b.PROFILE.binding,
+      credentialId: profiles.claude.credential,
+      credentialGeneration: profiles.claude.generation,
+      keyId: profiles.claude.key,
+      namespace: "default",
+      principalId: "key:" + profiles.claude.key,
+      account: dr.inputs.account,
+      model: dr.inputs.model,
+      runtimeInstanceId: runtime,
+      deploymentId: id(),
+      providerGeneration: 3,
+    };
+    dr.runs = [
+      {
+        provider: "claude",
+        effort: false,
+        runId: dr.inputs.runId,
+        status: "passed-local-process-observations",
+      },
+    ];
+    dr.evidence.push({
+      kind: "warm-launch-baselines",
+      pre: marker("claude", dr.inputs.runId, "baseline"),
+      post: marker("claude", dr.inputs.runId, "baseline"),
+    });
+    dr.subplans = [0, 1].map((i) => ({
+      kind: i ? "cold" : "warm",
+      phaseLimit: 2,
+      rows: [{ id: "D" + (i + 1), limit: 2 }],
+      phaseId: i ? dr.scope.phaseId : dr.inputs.phaseId,
+      fenceId: id(),
+      planDigest: "8".repeat(64),
+    }));
+    dr.fences = dr.subplans.map((p, i) => ({
+      ...clone(p),
+      runId: dr.inputs.runId,
+      keyId: dr.scope.keyId,
+      namespace: dr.scope.namespace,
+      principalId: dr.scope.principalId,
+      deploymentId: dr.scope.deploymentId,
+      selection: { providerGeneration: i + 2 },
+      activeRowId: "D" + (i + 1),
+      state: "closed",
+      revision: 2 + i * 2,
+      baselineAttempts: 100 + i * 2,
+      rowStartAttempts: 100 + i * 2,
+      attempts: 102 + i * 2,
+      baselineTokenUsageUnknown: 2,
+      rowStartTokenUsageUnknown: 2,
+      tokenUsageUnknown: i ? 3 : 2,
+      openRequests: 0,
+      staleOpenRequests: 0,
+      unattributed: 0,
+      ...(i ? { predecessorFenceId: dr.subplans[0].fenceId } : {}),
+    }));
+    dr.rows = dr.subplans.map((p, i) => {
+      const event = {
+        requestId: id(),
+        attemptId: id(),
+        mode: i ? "cold" : "warm",
+      };
+      return {
+        rowId: "D" + (i + 1),
+        state: "passed",
+        cap: 2,
+        generations: 2,
+        phaseId: p.phaseId,
+        fenceId: p.fenceId,
+        scopeDigest: "9".repeat(64),
+        admittedBefore: 100 + i * 2,
+        settledTokenUsageUnknown: i ? 3 : 2,
+        terminalEvidenceSha256: "a".repeat(64),
+        final: {
+          dispatch: { ...event, phase: "dispatch" },
+          terminal: { ...event, phase: "terminal" },
+          ...(!i
+            ? {
+                fetch: {
+                  ...event,
+                  phase: "fetch-invoked",
+                  observedMonotonicNs: "10",
+                },
+                native: {
+                  ...event,
+                  phase: "native-complete",
+                  observedMonotonicNs: "40",
+                },
+              }
+            : {}),
+        },
+      };
+    });
+    dr.rows[0].overlap = {
+      fetchNs: "10",
+      beforeNs: "20",
+      afterNs: "30",
+      nativeCompleteNs: "40",
+    };
+    dr.activeAttempt = {
+      dispatch: dr.rows[0].final.dispatch,
+      fetch: dr.rows[0].final.fetch,
+    };
+    dr.settingsOperations = [
+      [original, before, "enable"],
+      [before, after, "active-disable"],
+    ].map(([from, to, kind]) => ({
+      intentId: id(),
+      kind,
+      state: "confirmed",
+      expectedRevision: from.revision,
+      afterRevision: to.revision,
+      before: from.values,
+      values: to.values,
+      readbackSha256: to.projectionSha256,
+      providerRuntime: to.providerRuntime,
+    }));
+    dr.activeSettings = {
+      before,
+      after,
+      intentId: dr.settingsOperations[1].intentId,
+    };
+    dr.fenceOperations = dr.fences.flatMap((f) =>
+      ["arm", "close"].map((method) => ({
+        operationId: id(),
+        method,
+        state: "received",
+        receiptSha256: "b".repeat(64),
+        body: { fenceId: f.fenceId },
+      })),
+    );
+    dr.processEpochs = [0, 1, 2].map((i) => ({
+      scope: {
+        ...dr.scope,
+        phaseId: i < 2 ? dr.inputs.phaseId : dr.scope.phaseId,
+        providerGeneration: i + 1,
+      },
+      process: {
+        processes: [],
+        events: i === 1 ? Object.values(dr.rows[0].final) : [],
+      },
+      transition: i === 2 ? "final-drained-and-joined" : "drained-and-joined",
+    }));
+  }
   let reports, manifest;
   const repin = () => {
     reports = { a: JSON.stringify(ar), b: JSON.stringify(br) };
@@ -378,6 +605,12 @@ function fixture({ live = false } = {}) {
     cr.inputs.phaseAReportSha256 = hash(reports.a);
     cr.inputs.phaseBReportSha256 = hash(reports.b);
     reports.c = JSON.stringify(cr);
+    if (activeDrain) {
+      dr.inputs.phaseAReportSha256 = hash(reports.a);
+      dr.inputs.phaseBReportSha256 = hash(reports.b);
+      dr.inputs.phaseCReportSha256 = hash(reports.c);
+      reports.d = JSON.stringify(dr);
+    }
     manifest = {
       version: 1,
       pins: Object.fromEntries(
@@ -385,6 +618,7 @@ function fixture({ live = false } = {}) {
       ),
       cleanupDeadline: now() + 90000,
       decisionSha256: "c".repeat(64),
+      ...(activeDrain ? { activeDrain: true } : {}),
     };
   };
   repin();
@@ -583,6 +817,7 @@ function fixture({ live = false } = {}) {
     ar,
     br,
     cr,
+    dr,
     profiles,
     bindings,
     credentials,
@@ -730,6 +965,376 @@ for (const name of ["a", "b", "c"])
         assert.equal(f.requests.length, 0);
       },
     );
+test("pure fixed input validator refuses the public NULL gate without invoking authority", () => {
+  const f = fixture();
+  assert.throws(
+    () =>
+      production.validateFinalizationInputs({
+        reports: f.reports,
+        manifest: f.manifest,
+      }),
+    /not qualified/,
+  );
+  assert.equal(f.requests.length, 0);
+});
+for (const activeDrain of [false, true])
+  test("pure selected plan is cloned and complete: " + activeDrain, () => {
+    const f = fixture({ activeDrain });
+    const raw = clone(f.reports),
+      manifest = clone(f.manifest);
+    const plan = candidate.validateFinalizationInputs({
+      reports: raw,
+      manifest,
+    });
+    assert.equal(plan.purpose, "canary-finalization");
+    assert.equal(plan.launches.length, activeDrain ? 11 : 10);
+    assert.equal(plan.markers.length, activeDrain ? 5 : 4);
+    assert.equal(plan.scope.bindingIds.length, 3);
+    assert.deepEqual(plan.reportPins, f.manifest.pins);
+    assert.equal(f.requests.length + f.saves.length, 0);
+    plan.scope.bindingIds.pop();
+    plan.sources.reportHubSources.a = "0".repeat(40);
+    plan.markers[0].files.effects.sha256 = "0".repeat(64);
+    assert.deepEqual(raw, f.reports);
+    assert.deepEqual(manifest, f.manifest);
+    const again = candidate.validateFinalizationInputs({
+      reports: raw,
+      manifest,
+    });
+    assert.equal(again.scope.bindingIds.length, 3);
+    assert.equal(again.sources.reportHubSources.a, q.reportHubSources.a);
+    assert.notDeepEqual(again.markers, plan.markers);
+  });
+for (const [name, change] of [
+  [
+    "false selector",
+    (f) => {
+      f.manifest.activeDrain = false;
+    },
+  ],
+  [
+    "missing selector",
+    (f) => {
+      delete f.manifest.activeDrain;
+    },
+  ],
+  [
+    "missing D",
+    (f) => {
+      delete f.reports.d;
+      delete f.manifest.pins.d;
+    },
+  ],
+  [
+    "changed raw D",
+    (f) => {
+      f.reports.d += " ";
+    },
+  ],
+  [
+    "unsolicited report",
+    (f) => {
+      f.reports.extra = "{}";
+      f.manifest.pins.extra = hash("{}");
+    },
+  ],
+])
+  test("selected D refuses " + name + " before authority", () => {
+    const f = fixture({ activeDrain: true });
+    change(f);
+    assert.throws(() =>
+      candidate.validateFinalizationInputs({
+        reports: f.reports,
+        manifest: f.manifest,
+      }),
+    );
+    assert.throws(() => candidate.createFinalization(f.options()));
+    assert.equal(f.requests.length + f.saves.length, 0);
+  });
+for (const [name, change] of [
+  [
+    "historical Hub changed",
+    (d) => {
+      d.relay = q.hubSource;
+    },
+  ],
+  [
+    "historical Router changed",
+    (d) => {
+      d.router = q.routerSource;
+    },
+  ],
+  [
+    "unfinished D",
+    (d) => {
+      d.activeDrainCompleted = false;
+    },
+  ],
+  [
+    "wrong C hash",
+    (d) => {
+      d.inputs.phaseCReportSha256 = "0".repeat(64);
+    },
+  ],
+  [
+    "changed credential",
+    (d) => {
+      d.claudeCredential.generation++;
+    },
+  ],
+  [
+    "open session",
+    (d) => {
+      d.evidence = d.evidence.filter((e) => e.kind !== "closed");
+    },
+  ],
+  [
+    "additional launch",
+    (d) => {
+      d.evidence.push(clone(d.evidence.find((e) => e.kind === "launch")));
+    },
+  ],
+  [
+    "missing delivery",
+    (d) => {
+      d.evidence = d.evidence.filter((e) => e.kind !== "delivery");
+    },
+  ],
+  [
+    "missing pre marker",
+    (d) => {
+      delete d.evidence.find((e) => e.kind === "warm-launch-baselines").pre;
+    },
+  ],
+  [
+    "open fence",
+    (d) => {
+      d.fences[0].state = "active";
+    },
+  ],
+  [
+    "borrowed row",
+    (d) => {
+      d.rows[0].generations = 3;
+    },
+  ],
+  [
+    "reset accounting",
+    (d) => {
+      d.fences[1].baselineAttempts = 0;
+    },
+  ],
+  [
+    "lost settings receipt",
+    (d) => {
+      d.settingsOperations[1].state = "uncertain";
+    },
+  ],
+  [
+    "lost close receipt",
+    (d) => {
+      d.fenceOperations[3].state = "uncertain";
+    },
+  ],
+  [
+    "warm remains enabled",
+    (d) => {
+      d.finalSettings.values.warmSessions = true;
+    },
+  ],
+  [
+    "remaining child",
+    (d) => {
+      d.process.processes.push({ pid: 1 });
+    },
+  ],
+  [
+    "unfinished observer",
+    (d) => {
+      d.processEpochs[2].transition = "running";
+    },
+  ],
+  [
+    "late CAS",
+    (d) => {
+      d.rows[0].overlap.afterNs = "41";
+    },
+  ],
+  [
+    "wrong native clock",
+    (d) => {
+      d.processEpochs[1].process.events.find(
+        (e) => e.phase === "native-complete",
+      ).observedMonotonicNs = "45";
+    },
+  ],
+])
+  test("independently pinned D still refuses " + name, () => {
+    const f = fixture({ activeDrain: true }),
+      d = JSON.parse(f.reports.d);
+    change(d);
+    f.reports.d = JSON.stringify(d);
+    f.manifest.pins.d = hash(f.reports.d);
+    assert.throws(() => candidate.createFinalization(f.options()));
+    assert.equal(f.requests.length + f.saves.length, 0);
+  });
+test("D historical pins are separately required while legacy ABC still uses its exact pins", () => {
+  const pins = clone(q);
+  delete pins.activeDrainReportSources;
+  const old = load("owner-finalization.cjs", {}, [
+    "const QUALIFIED_FINALIZATION = null;",
+    "const QUALIFIED_FINALIZATION = " + JSON.stringify(pins) + ";",
+  ]);
+  const f = fixture(),
+    d = fixture({ activeDrain: true });
+  assert.doesNotThrow(() =>
+    old.validateFinalizationInputs({
+      reports: f.reports,
+      manifest: f.manifest,
+    }),
+  );
+  assert.throws(
+    () =>
+      old.validateFinalizationInputs({
+        reports: d.reports,
+        manifest: d.manifest,
+      }),
+    /historical source pins/,
+  );
+  assert.equal(f.requests.length + d.requests.length, 0);
+});
+function historicalRenderer(f, v) {
+  if (v.stage !== "renderer") return;
+  const old = v.launches.find(
+    (l) => l.credentialId === a.PROFILES.codex.credential,
+  );
+  old.status = "not-current";
+  old.reference = {
+    credentialId: old.credentialId,
+    generation: old.generation,
+    keyId: a.PROFILES.codex.key,
+    secretVersion: 1,
+    creationOperationId: "11111111-1111-4111-8111-111111111111",
+  };
+}
+test("historical not-current receipt remains distinct from fresh current-file absence", async () => {
+  const f = fixture({ activeDrain: true });
+  f.onObserve = (v) => historicalRenderer(f, v);
+  const result = await candidate.createFinalization(f.options()).run();
+  assert.equal(result.activeDrain, "unexercised");
+  assert.deepEqual(result.selectedActiveDrain, {
+    reportSha256: f.manifest.pins.d,
+    hubSource: f.dr.relay,
+    routerSource: f.dr.router,
+    status: "active-drain-passed",
+    activeDrain: "observed",
+  });
+  const rows = result.evidence.find((v) => v.stage === "renderer").launches;
+  const old = rows.find((l) => l.credentialId === a.PROFILES.codex.credential);
+  assert.equal(old.status, "not-current");
+  assert.equal(old.fileAbsent, true);
+  assert.equal(old.reference.keyId, a.PROFILES.codex.key);
+  assert.ok(
+    rows.some(
+      (l) =>
+        l.status === "absent" && l.credentialId === f.profiles.codex.credential,
+    ),
+  );
+  assert.equal(posts(f).length, 3);
+});
+for (const [name, change] of [
+  [
+    "file still present",
+    (v) => {
+      v.fileAbsent = false;
+    },
+  ],
+  [
+    "missing immutable reference",
+    (v) => {
+      delete v.reference;
+    },
+  ],
+  [
+    "wrong credential",
+    (v) => {
+      v.reference.credentialId = "11111111-1111-4111-8111-111111111111";
+    },
+  ],
+  [
+    "wrong generation",
+    (v) => {
+      v.reference.generation++;
+    },
+  ],
+  [
+    "wrong key",
+    (v) => {
+      v.reference.keyId = "key_" + "a".repeat(24);
+    },
+  ],
+  [
+    "missing version",
+    (v) => {
+      delete v.reference.secretVersion;
+    },
+  ],
+  [
+    "missing creation operation",
+    (v) => {
+      delete v.reference.creationOperationId;
+    },
+  ],
+])
+  test(
+    "not-current alone never completes renderer cleanup: " + name,
+    async () => {
+      const f = fixture();
+      f.onObserve = (v) => {
+        historicalRenderer(f, v);
+        if (v.stage === "renderer")
+          change(v.launches.find((l) => l.status === "not-current"));
+      };
+      await assert.rejects(
+        candidate.createFinalization(f.options()).run(),
+        /Renderer/,
+      );
+      assert.equal(f.saves.at(-1).status, "finalization-unresolved");
+      assert.equal(posts(f).length, 3);
+    },
+  );
+for (const [name, change] of [
+  [
+    "unlisted D session",
+    (v) => {
+      v.unlistedSessions = 1;
+    },
+  ],
+  [
+    "missing D session",
+    (v) => {
+      v.sessions.pop();
+    },
+  ],
+  [
+    "live consumer",
+    (v) => {
+      v.bindings[2].activeConsumers = 1;
+    },
+  ],
+  [
+    "running process",
+    (v) => {
+      v.router.processes.push({ pid: 1 });
+    },
+  ],
+])
+  test("current D inventory refuses " + name + " before revoke", async () => {
+    const f = fixture({ activeDrain: true });
+    f.onObserve = (v) => change(v);
+    await assert.rejects(candidate.createFinalization(f.options()).run());
+    assert.equal(posts(f).length, 0);
+  });
 test("retired enabled FAILED/null-pointer binding uses normal revoke; already disabled/revoked is verified without POST", async () => {
   const f = fixture();
   for (const [i, t] of f.bindings.entries())
@@ -1429,107 +2034,137 @@ test(
   },
 );
 
-test(
-  "actual Unix socket CLI/host preserves raw reports and fsynced intent before each fixed POST",
-  { skip: process.platform !== "linux", timeout: 30000 },
-  async (t) => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "finalization-"));
-    fs.chmodSync(root, 0o700);
-    const socket = path.join(root, "broker.sock"),
-      out = path.join(root, "evidence"),
-      f = fixture({ live: true }),
-      server = http.createServer(async (req, res) => {
-        try {
-          let raw = "";
-          for await (const chunk of req) raw += chunk;
-          const r = await f.fetch(req.url, {
-            method: req.method,
-            ...(raw ? { body: raw } : {}),
-          });
-          res.writeHead(r.status, { "content-type": "application/json" });
-          res.end(await r.text());
-        } catch {
-          req.socket.destroy();
-        }
+for (const activeDrain of [false, true])
+  test(
+    "actual Unix socket CLI/host preserves " +
+      (activeDrain ? "ABC+D" : "ABC") +
+      " raw reports and fsynced intent before each fixed POST",
+    { skip: process.platform !== "linux", timeout: 30000 },
+    async (t) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "finalization-"));
+      fs.chmodSync(root, 0o700);
+      const socket = path.join(root, "broker.sock"),
+        out = path.join(root, "evidence"),
+        f = fixture({ live: true, activeDrain }),
+        server = http.createServer(async (req, res) => {
+          try {
+            let raw = "";
+            for await (const chunk of req) raw += chunk;
+            const r = await f.fetch(req.url, {
+              method: req.method,
+              ...(raw ? { body: raw } : {}),
+            });
+            res.writeHead(r.status, { "content-type": "application/json" });
+            res.end(await r.text());
+          } catch {
+            req.socket.destroy();
+          }
+        });
+      await new Promise((r) => server.listen(socket, r));
+      t.after(async () => {
+        server.closeAllConnections();
+        await new Promise((r) => server.close(r));
+        fs.rmSync(root, { recursive: true, force: true });
       });
-    await new Promise((r) => server.listen(socket, r));
-    t.after(async () => {
-      server.closeAllConnections();
-      await new Promise((r) => server.close(r));
-      fs.rmSync(root, { recursive: true, force: true });
-    });
-    const args = [];
-    for (const [flag, name, value] of [
-      ["--manifest", "manifest", JSON.stringify(f.manifest)],
-      ["--phase-a", "a", f.reports.a],
-      ["--phase-b", "b", f.reports.b],
-      ["--phase-b-inputs", "bInputs", f.reports.bInputs],
-      ["--phase-c", "c", f.reports.c],
-    ]) {
-      const file = path.join(root, name + ".json");
-      fs.writeFileSync(file, value, { mode: 0o600 });
-      args.push(flag, file);
-    }
-    args.push("--output", out);
-    f.onPost = (_target, body) => {
-      const files = fs
-        .readdirSync(out)
-        .filter((s) => s.startsWith("state-"))
-        .sort();
-      const saved = JSON.parse(
-        fs.readFileSync(path.join(out, files.at(-1)), "utf8"),
-      );
-      assert.ok(
-        saved.intents.some(
-          (i) =>
-            i.status === "sending" && i.body.operationId === body.operationId,
+      const args = [];
+      for (const [flag, name, value] of [
+        ["--manifest", "manifest", JSON.stringify(f.manifest)],
+        ["--phase-a", "a", f.reports.a],
+        ["--phase-b", "b", f.reports.b],
+        ["--phase-b-inputs", "bInputs", f.reports.bInputs],
+        ["--phase-c", "c", f.reports.c],
+        ...(activeDrain ? [["--active-drain", "d", f.reports.d]] : []),
+      ]) {
+        const file = path.join(root, name + ".json");
+        fs.writeFileSync(file, value, { mode: 0o600 });
+        args.push(flag, file);
+      }
+      args.push("--output", out);
+      f.onPost = (_target, body) => {
+        const files = fs
+          .readdirSync(out)
+          .filter((s) => s.startsWith("state-"))
+          .sort();
+        const saved = JSON.parse(
+          fs.readFileSync(path.join(out, files.at(-1)), "utf8"),
+        );
+        assert.ok(
+          saved.intents.some(
+            (i) =>
+              i.status === "sending" && i.body.operationId === body.operationId,
+          ),
+        );
+      };
+      f.lose = true;
+      const lines = [];
+      const result = await cli.runFinalizationCli({
+        argv: args,
+        env: {
+          RUNNER_DEADLINE: String(f.manifest.cleanupDeadline),
+          RELAY_SESSION_SOCKET: socket,
+        },
+        observer: {
+          qualificationSha256: q.observerQualificationSha256,
+          observe: f.observe,
+        },
+        writeLine: (s) => lines.push(JSON.parse(s)),
+      });
+      assert.equal(result, 0);
+      assert.equal(posts(f).length, 3);
+      assert.equal(lines.at(-1).completed, false);
+      const last = JSON.parse(
+        fs.readFileSync(
+          path.join(
+            out,
+            fs
+              .readdirSync(out)
+              .filter((name) => name.startsWith("state-"))
+              .sort()
+              .at(-1),
+          ),
+          "utf8",
         ),
       );
-    };
-    f.lose = true;
-    const lines = [];
-    const result = await cli.runFinalizationCli({
-      argv: args,
-      env: {
-        RUNNER_DEADLINE: String(f.manifest.cleanupDeadline),
-        RELAY_SESSION_SOCKET: socket,
-      },
-      observer: {
-        qualificationSha256: q.observerQualificationSha256,
-        observe: f.observe,
-      },
-      writeLine: (s) => lines.push(JSON.parse(s)),
-    });
-    assert.equal(result, 0);
-    assert.equal(posts(f).length, 3);
-    assert.equal(lines.at(-1).completed, false);
-    for (const [name, raw] of Object.entries(f.reports))
-      assert.equal(
-        fs.readFileSync(path.join(out, name + ".json"), "utf8"),
-        raw,
+      const renderer = last.evidence.find((e) => e.stage === "renderer");
+      assert.equal(last.activeDrain, "unexercised");
+      assert.equal(Object.hasOwn(last, "selectedActiveDrain"), activeDrain);
+      if (activeDrain)
+        assert.deepEqual(last.selectedActiveDrain, {
+          reportSha256: f.manifest.pins.d,
+          hubSource: f.dr.relay,
+          routerSource: f.dr.router,
+          status: "active-drain-passed",
+          activeDrain: "observed",
+        });
+      assert.equal(renderer.launches.length, activeDrain ? 11 : 10);
+      assert.equal(renderer.markers.length, activeDrain ? 5 : 4);
+      for (const [name, raw] of Object.entries(f.reports))
+        assert.equal(
+          fs.readFileSync(path.join(out, name + ".json"), "utf8"),
+          raw,
+        );
+      const before = f.requests.length;
+      assert.throws(
+        () =>
+          host.createFinalizationAutomation({
+            directory: out,
+            reports: f.reports,
+            manifest: f.manifest,
+            authenticatedFetch: createSessionFetch(socket),
+            observer: {
+              qualificationSha256: q.observerQualificationSha256,
+              observe: f.observe,
+            },
+          }),
+        /EEXIST/,
       );
-    const before = f.requests.length;
-    assert.throws(
-      () =>
-        host.createFinalizationAutomation({
-          directory: out,
-          reports: f.reports,
-          manifest: f.manifest,
-          authenticatedFetch: createSessionFetch(socket),
-          observer: {
-            qualificationSha256: q.observerQualificationSha256,
-            observe: f.observe,
-          },
+      assert.equal(f.requests.length, before);
+      assert.ok(proof.every((p) => p.liveQualified === false));
+      t.diagnostic(
+        JSON.stringify({
+          kind: "synthetic-finalization-source-pin-qualification",
+          files: proof,
         }),
-      /EEXIST/,
-    );
-    assert.equal(f.requests.length, before);
-    assert.ok(proof.every((p) => p.liveQualified === false));
-    t.diagnostic(
-      JSON.stringify({
-        kind: "synthetic-finalization-source-pin-qualification",
-        files: proof,
-      }),
-    );
-  },
-);
+      );
+    },
+  );

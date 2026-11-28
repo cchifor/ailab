@@ -61,7 +61,7 @@ function createStore(destination, reports, manifest) {
     path.join(destination, "manifest.json"),
     JSON.stringify(manifest) + "\n",
   );
-  for (const name of ["a", "b", "bInputs", "c"]) {
+  for (const name of core.reportArtifactNames(manifest)) {
     write(path.join(destination, name + ".json"), reports[name]);
     write(
       path.join(destination, name + ".sha256"),
