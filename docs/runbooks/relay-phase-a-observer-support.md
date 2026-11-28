@@ -2,8 +2,9 @@
 
 This extends the operator observer at `823afac686eb69ef6be6f0bff5d46822e26dbf4e`.
 It supplies the previously unsupported predecessor, C10 and C11 collectors and
-replaces C9's physical-file scan with a retained-state reader. Gate transport,
-handoff mutations, permission policy and A/B/C acceptance programs are unchanged.
+replaces C9's physical-file scan with a retained-state reader. The combined
+observer also bounds concurrent Gate refusals as described below. Handoff
+mutations, permission policy and A/B/C acceptance programs are unchanged.
 
 The supported source tuple remains Hub `5f90d03a6ed291e6c62dfde75938ba07c20d8902`
 (schema versions exactly 1 through 93), Router
@@ -35,6 +36,8 @@ reads only the three operations from the independently retained report, scoped
 by tenant, session and generation. It projects terminal receipt fields and reads
 `clock_timestamp()` in the same read-only transaction. The collector checks all
 three identities, kinds and outcomes. Missing or extra rows refuse.
+`SUPPORT_PREDECESSOR_SESSION` explicitly names the pinned A driver's
+`STOPPED_SESSION`; this support does not generalize the accepted predecessor.
 
 The operator must independently provision the Runner's projection pin before the
 callback. The observer never returns or replaces that pin. Legacy untagged raw
@@ -127,10 +130,31 @@ Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Ex
 A generic refusal, historical substring or a notice outside that interval is
 insufficient. This reader supports one exact whole notice chunk. Split notices
 remain unsupported rather than being concatenated across ambiguous boundaries.
+The pinned f1 A driver's `effort()` makes one low-effort prompt and its completed
+observation, then changes to high and runs the refusal probe before C11. That low
+observation can contain multiple provider attempts; it is one immutable
+observation window, not a one-attempt assumption. A different flow with additional
+low prompts needs separate qualification, rather than advancing this baseline.
 The collector re-reads the original trajectory scope/since and requires identical
 rows and total attempts. Pending/unknown work and additional attempts refuse.
 SQL bounds command rows to 201 and events to 2001; the validator refuses the
 overflow sentinel. Both queries have a five-second statement timeout.
+
+## Concurrent gate refusals
+
+The gate reads declined busy or terminal connections in at most eight separate
+workers. Each reader keeps the existing 64 KiB frame limit and five-second I/O
+budget, then rechecks terminal state before replying. Refusal workers never own
+the admitted request's token or forward requests to the host. A slow declined
+writer therefore cannot prevent a completed request's successor from being
+accepted. When all eight refusal slots are occupied, additional declined sockets
+are closed immediately; an overload connection may observe EOF/reset instead of
+a JSON refusal. The admitted slot remains independent of that cap.
+
+When the accept loop exits, it closes all owned refusal sockets and joins their
+workers within one five-second budget. An unexpected worker failure retains the
+gate's existing immediate process-exit behavior, which closes process-owned
+sockets. These transport limits do not change observer authority or source pins.
 
 ## Offline qualification and integration
 

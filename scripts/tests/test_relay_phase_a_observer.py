@@ -7,6 +7,7 @@ import importlib.util
 import io
 import json
 import os
+import select
 import shutil
 import socket
 import subprocess
@@ -219,6 +220,136 @@ class Gate(unittest.TestCase):
             self.assertIs(self.gate.busy, owner)
             self.assertEqual(self.gate.seq, 0)
             self.assertIsNone(self.gate.waiting)
+
+    def slow_refusal_does_not_block(self, terminal=None, release_owner=False):
+        entered = threading.Event()
+        read = self.gate.read_request
+        owner = object()
+        with self.gate.cond:
+            self.gate.busy, self.gate.terminal = owner, terminal
+
+        def observed_read(conn):
+            entered.set()
+            return read(conn)
+
+        self.gate.read_request = observed_read
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as slow:
+            slow.connect(self.sock)
+            self.assertTrue(entered.wait(1), "first refusal never started reading")
+            if release_owner:
+                self.gate.release(owner)
+            with self.client(self.req(), read=False) as fast:
+                if release_owner:
+                    readable, _, _ = select.select([self.frames], [], [], 1)
+                    self.assertTrue(readable, "slow refused writer blocked the next admitted request")
+                    f = self.reply_to_next({"v": 1, "ok": True, "value": "next"})
+                    self.assertEqual(f["seq"], 1)
+                readable, _, _ = select.select([fast], [], [], 1)
+                self.assertTrue(readable, "slow refused writer blocked another client's reply")
+                with fast.makefile("rb") as reply:
+                    value = json.loads(reply.readline())
+                if release_owner:
+                    self.assertEqual(value["value"], "next")
+                else:
+                    self.assertEqual(value["code"], terminal or "busy")
+                    self.assertIs(self.gate.busy, owner)
+                    self.assertEqual(self.gate.seq, 0)
+                    self.assertIsNone(self.gate.waiting)
+
+    def test_slow_busy_writer_does_not_block_another_refusal(self):
+        self.slow_refusal_does_not_block()
+
+    def test_slow_cancelled_writer_does_not_block_another_refusal(self):
+        self.slow_refusal_does_not_block("cancelled")
+
+    def test_slow_down_writer_does_not_block_another_refusal(self):
+        self.slow_refusal_does_not_block("observer-down")
+
+    def test_slow_busy_writer_does_not_block_a_new_admission(self):
+        self.slow_refusal_does_not_block(release_owner=True)
+
+    def test_completed_owner_can_be_followed_while_a_refused_writer_is_still_waiting(self):
+        with self.client(self.req(), read=False) as first:
+            f = json.loads(self.frames.readline())
+            entered = threading.Event()
+            read = self.gate.read_request
+
+            def observed_read(conn):
+                entered.set()
+                return read(conn)
+
+            self.gate.read_request = observed_read
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as slow:
+                slow.connect(self.sock)
+                self.assertTrue(entered.wait(1))
+                self.host_in.write((json.dumps({"seq": f["seq"], "v": 1, "ok": True, "value": "first"}) + "\n").encode())
+                self.host_in.flush()
+                with first.makefile("rb") as reply:
+                    self.assertEqual(json.loads(reply.readline())["value"], "first")
+                with self.client(self.req(), read=False) as second:
+                    readable, _, _ = select.select([self.frames], [], [], 1)
+                    self.assertTrue(readable, "completed owner's successor blocked behind a declined writer")
+                    f = self.reply_to_next({"v": 1, "ok": True, "value": "second"})
+                    self.assertEqual(f["seq"], 2)
+                    with second.makefile("rb") as reply:
+                        self.assertEqual(json.loads(reply.readline())["value"], "second")
+                self.assertIsNone(self.gate.terminal)
+
+    def test_refusal_capacity_is_bounded_and_shutdown_joins_pending_readers(self):
+        owner, clients = object(), []
+        with self.gate.cond:
+            self.gate.busy = owner
+        try:
+            for count in range(1, self.G.MAX_REFUSALS + 1):
+                slow = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                clients.append(slow)
+                slow.connect(self.sock)
+                with self.gate.cond:
+                    self.assertTrue(self.gate.cond.wait_for(lambda: len(self.gate.refusals) == count, 1))
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as excess:
+                excess.settimeout(1)
+                excess.connect(self.sock)
+                self.assertEqual(excess.recv(1), b"")  # overload: close, never wait for a worker or frame
+            with self.gate.cond:
+                workers = tuple(self.gate.refusals.values())
+                self.assertEqual(len(workers), self.G.MAX_REFUSALS)
+                self.assertIs(self.gate.busy, owner)
+                self.assertEqual(self.gate.seq, 0)
+                self.assertIsNone(self.gate.waiting)
+            self.gate.release(owner)
+            with self.client(self.req(), read=False) as admitted:
+                readable, _, _ = select.select([self.frames], [], [], 1)
+                self.assertTrue(readable, "full refusal capacity blocked the admitted slot")
+                self.reply_to_next({"v": 1, "ok": True, "value": "admitted"})
+                with admitted.makefile("rb") as reply:
+                    self.assertEqual(json.loads(reply.readline())["value"], "admitted")
+            self.gate.close_refusals()
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(self.gate.refusals, {})
+            with self.gate.cond:
+                self.gate.terminal = "observer-down"
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as after:
+                after.settimeout(1)
+                after.connect(self.sock)
+                self.assertEqual(after.recv(1), b"")  # shutdown cannot start another refusal reader
+            self.assertEqual(self.gate.seq, 1)
+        finally:
+            for client in clients:
+                client.close()
+            self.gate.close_refusals()
+
+    def test_disconnected_refusal_peer_does_not_kill_the_gate(self):
+        dead, peer = socket.socketpair()
+        peer.close()
+        self.gate.start_refusal(dead, "busy")
+        with self.gate.cond:
+            self.assertTrue(self.gate.cond.wait_for(lambda: not self.gate.refusals, 1))
+            self.assertIsNone(self.gate.terminal)
+            self.assertEqual(self.gate.seq, 0)
+        with self.client(self.req(), read=False) as live:
+            self.reply_to_next({"v": 1, "ok": True, "value": "alive"})
+            with live.makefile("rb") as reply:
+                self.assertEqual(json.loads(reply.readline())["value"], "alive")
 
 
 # ------------------------------------------------------------------------------------------ the host protocol

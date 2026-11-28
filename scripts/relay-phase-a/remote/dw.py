@@ -688,7 +688,7 @@ def main():
         try:
             native_need(a[1].startswith(HOME + '/.local/state/'))
             out(native_checkpoint(*a[1:]))
-        except (ValueError, TypeError, KeyError, OSError, RecursionError):
+        except (ValueError, TypeError, KeyError, AttributeError, OSError, RecursionError):
             die('native checkpoint unavailable', 3)
     elif m == "prerun" and len(a) == 3:
         out(prerun(a[1], a[2]))

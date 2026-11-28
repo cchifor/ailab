@@ -271,6 +271,42 @@ class ReaderTests(unittest.TestCase):
             private(p,encode(value))
         with self.assertRaises(ValueError): self.f.read(u(12))
 
+    def test_native_entry_normalizes_nonobject_private_records(self):
+        local = self.f.root / '.local/state/fixture'
+        local.mkdir(mode=0o700, parents=True)
+        f = NativeFixture(local)
+        f.imported()
+        # Only the allowed home root is redirected to this private synthetic tree.
+        # The actual entry and file reader execute unchanged in a child process.
+        entry = ('import importlib.util,sys; path,home,args=sys.argv[1],sys.argv[2],sys.argv[3:]; '
+                 's=importlib.util.spec_from_file_location("entry",path); d=importlib.util.module_from_spec(s); '
+                 's.loader.exec_module(d); d.HOME=home; sys.argv=[path,*args]; d.main()')
+        argv = [sys.executable, '-c', entry, str(SCRIPTS/'relay-phase-a/remote/dw.py'), str(self.f.root),
+                'native-checkpoint', str(f.state), u(12), u(11), T.CODEX['id'], str(f.workspace), u(7), u(7)]
+        valid = subprocess.run(argv, capture_output=True, timeout=5)
+        self.assertEqual(valid.returncode, 0, valid.stderr)
+        self.assertEqual(json.loads(valid.stdout)['native'], NATIVE)
+        journal = f.state/'journal.jsonl'
+        wrong_opened = copy.deepcopy(f.records)
+        wrong_opened[-1]['event']['value'] = []  # current resumed session's opening, not its predecessor
+        history = f.resume/'resumed-session.jsonl'
+        for label, path, data in (
+                ('journal', journal, b'[]\n'),
+                ('opened', journal, b'\n'.join(encode(r) for r in wrong_opened)+b'\n'),
+                ('native-recovery', f.resume/'native-recovery.json', b'[]'),
+                ('holder-recovery', f.resume/'holder-recovery.json', b'[]'),
+                ('resumed-line', history, history.read_bytes()+b'[]\n')):
+            with self.subTest(record=label):
+                original = path.read_bytes()
+                try:
+                    private(path, data)
+                    refused = subprocess.run(argv, capture_output=True, timeout=5)
+                    self.assertEqual(refused.returncode, 3)
+                    self.assertEqual(refused.stdout, b'')
+                    self.assertEqual(refused.stderr, b'native checkpoint unavailable\n')
+                finally:
+                    private(path, original)
+
 
 def retirement(stop='end_turn'):
     high, probe = u(30), u(31)

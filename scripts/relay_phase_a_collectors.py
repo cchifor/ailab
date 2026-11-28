@@ -34,6 +34,7 @@ SUPPORT_HUB = '5f90d03a6ed291e6c62dfde75938ba07c20d8902'
 SUPPORT_ROUTER = '4e4bb34e2f968f9450aabe9cf228d3e70c8bab71'
 SUPPORT_HOLDER = '64dc50f47a4867a6d9a7afc2e7d5ae24068c59af'
 SUPPORT_PI = '2604c41b69c5d9c50a3324545a51f0bfa38435a0'
+SUPPORT_PREDECESSOR_SESSION = '45724087-335a-4c55-ad0f-cb278afe608a'  # pinned A STOPPED_SESSION
 CONTENT_DOMAIN = 'relay-predecessor-command-projection/content-v1\n'
 SHA = re.compile(r'^[a-f0-9]{64}$')
 LABEL = re.compile(r'^[A-Za-z0-9._:-]{1,200}$')
@@ -746,7 +747,7 @@ def c_predecessor(host, req, ctx, budget, gate_now, obs):
     need(len(wanted) == 3 and {r['kind'] for r in wanted} == {'prompt', 'cancel', 'close'}
          and all(is_uuid(r['operationId']) for r in wanted), 'predecessor report commands differ', Failed)
     need(ctx.get('source') == SUPPORT_HUB and ctx.get('schemaVersion') == 93
-         and ctx.get('sessionId') == '45724087-335a-4c55-ad0f-cb278afe608a' and ctx.get('generation') == 1
+         and ctx.get('sessionId') == SUPPORT_PREDECESSOR_SESSION and ctx.get('generation') == 1
          and ctx.get('priorReportCanonicalSha256') == host.predecessor_canonical()
          and ctx.get('commands') == wanted, 'predecessor context differs from independent report', Failed)
     deployment(host, budget, obs)
