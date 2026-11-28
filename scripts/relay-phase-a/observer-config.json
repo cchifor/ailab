@@ -47,6 +47,11 @@
     "release": "v0.14.1",
     "imageDigest": "sha256:eb6a99bf99c0ed2e1a3db3ebe42e93aebf3e0ae3cabe3498ed2a19094e3227da",
     "source": "5f90d03a6ed291e6c62dfde75938ba07c20d8902"
+   },
+   {
+    "release": "v0.14.2",
+    "imageDigest": "sha256:662e32c7cb8584344e04101ae0557a8d0f0f34ef7ee47d4258ce415b2d0cd26f",
+    "source": "82cc8cb98dfb941256e341facdce4a7f9b453ed9"
    }
   ]
  },
