@@ -318,15 +318,102 @@ def prepare_finalization(ops: Ops, manifest: dict, bundle: str, inputs: str, pla
         raise
 
 
+def _new_evidence_directory(path: Path) -> None:
+    """Create a NEW private directory; never repair permissions on an existing path."""
+    if os.name != "nt":
+        path.mkdir(mode=0o700, parents=False, exist_ok=False)
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    path = path.absolute()
+    if path.parent.resolve() != path.parent or not path.parent.is_dir():
+        raise OSError("private evidence parent must be canonical")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    class TokenUser(ctypes.Structure):
+        _fields_ = [("Sid", ctypes.c_void_p), ("Attributes", wintypes.DWORD)]
+
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [("nLength", wintypes.DWORD), ("lpSecurityDescriptor", ctypes.c_void_p),
+                    ("bInheritHandle", wintypes.BOOL)]
+
+    kernel.GetCurrentProcess.argtypes, kernel.GetCurrentProcess.restype = [], wintypes.HANDLE
+    kernel.CloseHandle.argtypes, kernel.CloseHandle.restype = [wintypes.HANDLE], wintypes.BOOL
+    kernel.LocalFree.argtypes, kernel.LocalFree.restype = [ctypes.c_void_p], ctypes.c_void_p
+    kernel.CreateDirectoryW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(SecurityAttributes)]
+    kernel.CreateDirectoryW.restype = wintypes.BOOL
+    security.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    security.OpenProcessToken.restype = wintypes.BOOL
+    security.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                             wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    security.GetTokenInformation.restype = wintypes.BOOL
+    security.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    security.ConvertSidToStringSidW.restype = wintypes.BOOL
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+    token, sid, descriptor = wintypes.HANDLE(), wintypes.LPWSTR(), ctypes.c_void_p()
+    try:
+        if not security.OpenProcessToken(kernel.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        size = wintypes.DWORD()
+        if security.GetTokenInformation(token, 1, None, 0, ctypes.byref(size)) or \
+                ctypes.get_last_error() != 122 or not 0 < size.value <= 65536:
+            raise OSError("current token identity unavailable")
+        info = ctypes.create_string_buffer(size.value)
+        if not security.GetTokenInformation(token, 1, info, size, ctypes.byref(size)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        user = ctypes.cast(info, ctypes.POINTER(TokenUser)).contents
+        if not security.ConvertSidToStringSidW(user.Sid, ctypes.byref(sid)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        # Protected DACL: one explicit full-control ACE, inherited by children.
+        # Both ownership and permission come from the process token, not USERNAME.
+        sddl = f"O:{sid.value}D:P(A;OICI;FA;;;{sid.value})"
+        if not security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl, 1, ctypes.byref(descriptor), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+        if not kernel.CreateDirectoryW(str(path), ctypes.byref(attributes)):
+            # ERROR_ALREADY_EXISTS is a refusal; no ACL is changed on that path.
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        if descriptor.value:
+            kernel.LocalFree(descriptor)
+        if sid:
+            kernel.LocalFree(ctypes.cast(sid, ctypes.c_void_p))
+        if token.value:
+            kernel.CloseHandle(token)
+
+
 def claim_finalization(prepared: dict) -> None:
     """Retain a one-use authorization claim even if a later step fails; no automatic restart/reset."""
-    root = Path(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/state"))/"relay-operator"/"finalization-ledger"
+    state_root = Path(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/state"))
+    root = state_root/"relay-operator"/"finalization-ledger"
+    if not state_root.is_absolute() or root.resolve() != root.absolute():
+        raise Refused("finalization ledger must be canonical")
+
+    def check_directory(directory: Path) -> None:
+        info = directory.lstat()
+        # The user's state root may be readable, but nobody else may replace
+        # its children. Application-owned ledger ancestors must be private.
+        forbidden = 0o022 if directory == state_root else 0o077
+        if not stat.S_ISDIR(info.st_mode) or os.name != "nt" and \
+                (info.st_uid != os.getuid() or info.st_mode & forbidden):
+            raise Refused("finalization ledger ownership or mode differs")
+
+    ancestors = (state_root, root.parent, root)
+    for directory in ancestors:
+        if directory.exists():
+            check_directory(directory)
     missing, current = [], root
     while not current.exists():
         missing.append(current)
         current = current.parent
     for directory in reversed(missing):
         directory.mkdir(mode=0o700)
+        check_directory(directory)
         if os.name != "nt":
             fd = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
@@ -335,10 +422,8 @@ def claim_finalization(prepared: dict) -> None:
                 os.close(fd)
     if root.resolve() != root.absolute():
         raise Refused("finalization ledger must be canonical")
-    info = root.stat()
-    if not stat.S_ISDIR(info.st_mode) or os.name != "nt" and \
-            (info.st_uid != os.getuid() or info.st_mode & 0o077):
-        raise Refused("finalization ledger ownership or mode differs")
+    for directory in ancestors:
+        check_directory(directory)
     target = root/(prepared["plan"]["runId"]+".json")
     try:
         fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -627,7 +712,7 @@ class Run:
             return self.rc
         ev = Path(self.evidence_dir)
         try:
-            ev.mkdir(mode=0o700, parents=False, exist_ok=False)
+            _new_evidence_directory(ev)
         except OSError as e:
             self.fail(2, reason=f"--evidence-dir must be NEW ({type(e).__name__})")
             return self.rc
@@ -675,6 +760,8 @@ class Run:
             "runId": self.run_id, "manifestCommit": commit, "manifestRef": self.manifest_ref,
             "image": manifest["image"], "entrypoint": manifest["entrypoint"], "files": files,
             "runnerDeadline": runner_deadline, "cleanupDeadline": cleanup_deadline,
+            "runnerMinutesRequested": self.runner_minutes,
+            "runnerDeadlinePolicy": "finalization-plan" if self.finalization else "runner-minutes",
             "purpose": manifest.get("purpose", "phase-a"),
             "finalizationPlanSha256": self.finalization["planSha256"] if self.finalization else None}, indent=1))
 
@@ -735,7 +822,8 @@ class Run:
         if self.finalization is not None:
             self._finalization_prepare(ctx)
             if ops.now() >= runner_deadline:
-                raise Refused("cleanup-only deadline elapsed before authority")
+                self.fail(8, stage="finalization-deadline", boundary="before-authority")
+                return
         c = ops.creds()
         ctx["subject"], ctx["uid"] = c["subject"], c["keycloak_user_id"]
         username, password = c["username"], c["password"]
@@ -745,7 +833,8 @@ class Run:
             self.fail(3, stage="orphan-clear", readback=orphan)
             return
         if self.finalization is not None and ops.now() >= runner_deadline:
-            raise Refused("cleanup-only deadline elapsed before grant")
+            self.fail(8, stage="finalization-deadline", boundary="before-grant")
+            return
         ctx["granted"] = True  # inside the cleanup scope from here: a grant may commit and still report an error
         ops.grant(ctx["subject"])
         self.note(stage="granted")
@@ -784,7 +873,8 @@ class Run:
         entry_args = manifest["entrypoint"][1:]
         if self.finalization is not None:
             if ops.now() >= runner_deadline:
-                raise Refused("cleanup-only deadline elapsed before Runner")
+                self.fail(8, stage="finalization-deadline", boundary="before-runner")
+                return
             if not self._observer_start(names, ctx, sinks):
                 return
             extra = ["--mount", f"type=volume,src={self.finalization['volume']},dst=/inputs,readonly",

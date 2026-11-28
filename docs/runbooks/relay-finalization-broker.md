@@ -39,14 +39,24 @@ canary calls at T, including reads and revokes. The existing T+600-second
 authority-teardown allowance does not extend those routes. An uncertain or
 non-successful revoke keeps its operation and binding reservation; the Runner
 may inspect original operation evidence but cannot resend the mutation.
+The session command still accepts `--runner-minutes` for Phase A compatibility;
+finalization uses the independently authorized T. `run.json` records the requested
+minutes, `runnerDeadlinePolicy: "finalization-plan"`, and the actual deadline so
+the choice is explicit. A deadline reached during startup records the
+`finalization-deadline` stage and still tears down any acquired authority.
 
 Before authority, the broker keeps an exclusive, fsynced authorization claim in
 `relay-operator/finalization-ledger` under LOCALAPPDATA, or `~/.local/state`.
 Any later attempt to consume that run UUID refuses. Keep the claim and all
 reports after failure; reconciliation must precede a separately authorized
-future run. Newly created ledger ancestors are synced on Linux. Windows ACL
-and power-loss durability remain a separate qualification requirement; the
-observer rejects a staging directory that does not meet its private-ACL check.
+future run. The canonical path is checked before any directory creation. On
+Linux, the state root must be owned and not writable by group or others; the
+`relay-operator` and ledger directories must also be private. Newly created
+ledger ancestors are synced on Linux. On Windows, a new evidence directory is
+created atomically with a protected DACL granting only the current process's
+user SID, before any evidence or authority exists. An existing directory is
+refused and its ACL is never modified. The observer retains its strict private
+ACL check. Platform and power-loss durability require their separate evidence.
 
 The bundle pins the fixed `owner-finalization-entry.cjs`, its complete module
 dependencies and `scripts/relay-finalization/client.cjs`. The observer manifest
@@ -55,6 +65,9 @@ module and Gate, the fixed hub/Router/host readers, and their exact configuratio
 and referenced host-key files. Only those verified copies are staged. A cached
 Phase A module cannot replace the pinned framing module. Finalization never
 calls Phase A preparation, credential renewal or holder activation.
+The fixed entry reports only its own branded refusal codes on stderr. Module,
+filesystem and other imported errors use `external-failure`; their messages and
+report contents are not copied into diagnostics.
 
 `inference-canary-v0113/finalization-bundle.example.json` is deliberately
 non-executable: null pins must not be treated as a release. Both compiled source

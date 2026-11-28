@@ -6,6 +6,7 @@ scripted proxy/Runner processes on a controllable clock. Linux (symlinks); run i
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -376,6 +377,16 @@ class Lifecycle(unittest.TestCase):
         w = World(self.files)
         self.assertEqual(run(w, self.tmp, self.dir)[0], 2)
 
+    def test_private_evidence_setup_failure_precedes_material_and_authority(self):
+        w = World(self.files)
+        with mock.patch.object(ros, "_new_evidence_directory", side_effect=OSError("synthetic ACL failure")), \
+                mock.patch.object(ros, "load_manifest", side_effect=AssertionError("manifest read before private directory")):
+            self.assertEqual(run(w, self.tmp, self.dir)[0], 2)
+        self.assertEqual(w.calls, [])
+        self.assertEqual(w.granted, [])
+        self.assertEqual(w.revokes, 0)
+        self.assertFalse((Path(self.tmp)/"evidence").exists())
+
 
 class LeaseAndEvidence(unittest.TestCase):
     def setUp(self):
@@ -657,6 +668,34 @@ class FinalizationPreparation(unittest.TestCase):
         self.assertEqual(self.w.granted, [])
         self.assertFalse((Path(self.tmp)/"relay-operator/finalization-ledger"/(self.plan["runId"]+".json")).exists())
 
+    def test_claim_symlink_state_root_refuses_before_creating_ancestors(self):
+        prepared = self.prepare()
+        actual = Path(self.tmp)/"actual-state"
+        actual.mkdir(mode=0o700)
+        alias = Path(self.tmp)/"state-alias"
+        alias.symlink_to(actual, target_is_directory=True)
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(alias)}):
+            with self.assertRaises(ros.Refused): ros.claim_finalization(prepared)
+        self.assertFalse((actual/"relay-operator").exists())
+
+    def test_claim_writable_parent_refuses_before_leaf_creation(self):
+        prepared = self.prepare()
+        parent = Path(self.tmp)/"relay-operator"
+        parent.mkdir(mode=0o770)
+        parent.chmod(0o770)
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp}):
+            with self.assertRaises(ros.Refused): ros.claim_finalization(prepared)
+        self.assertFalse((parent/"finalization-ledger").exists())
+
+    def test_claim_writable_state_root_refuses_before_write(self):
+        prepared = self.prepare()
+        state = Path(self.tmp)/"unsafe-state"
+        state.mkdir(mode=0o770)
+        state.chmod(0o770)
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(state)}):
+            with self.assertRaises(ros.Refused): ros.claim_finalization(prepared)
+        self.assertFalse((state/"relay-operator").exists())
+
     def test_reader_requires_complete_pinned_closure_and_same_client(self):
         paths = ("relay_finalization_observer.py", "relay_phase_a_observer.py", "relay-observer-gate.py",
                  "relay-finalization/hub.sql", "relay-finalization/router.cjs", "relay-finalization/host.py",
@@ -750,6 +789,82 @@ class FinalizationPreparation(unittest.TestCase):
         runner = next(c[1] for c in self.w.calls if c[0] == "popen" and "--run" in c[1])
         self.assertIn("/state/run/finalization", runner)
         self.assertNotIn("/predecessor", " ".join(runner))
+        recorded = json.loads((Path(ev)/"run.json").read_text())
+        self.assertEqual(recorded["runnerMinutesRequested"], 45)
+        self.assertEqual(recorded["runnerDeadlinePolicy"], "finalization-plan")
+        self.assertEqual(recorded["runnerDeadline"]*1000, self.plan["cleanupDeadline"])
+
+    def test_deadline_after_grant_records_stage_and_tears_down_without_runner(self):
+        from types import SimpleNamespace
+        calls = []
+        def prepare_host(run, ctx):
+            ctx["host"] = SimpleNamespace(stop=lambda: calls.append("stop"), drain=lambda _: True,
+                                         alive=lambda: True, ev=SimpleNamespace(close=lambda: None), fault_reason=None)
+        original_grant = self.w.ops.grant
+        def grant(subject):
+            original_grant(subject)
+            self.w.clock.t = self.plan["cleanupDeadline"]/1000
+        self.w.ops.grant = grant
+        ev = str(Path(self.tmp)/"expired-after-grant")
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp}), \
+                mock.patch.object(ros, "verify_finalization_observer", return_value={"files": {}, "config": {}}), \
+                mock.patch.object(ros.Run, "_finalization_prepare", prepare_host), \
+                mock.patch.object(ros.Run, "_observer_start", side_effect=AssertionError("Runner observer started")):
+            run = ros.Run(self.w.ops, COMMIT+":manifest.json", self.dir, 45, ev,
+                          finalization_inputs=str(self.root), finalization_plan_file=str(self.planpath),
+                          finalization_plan_sha256=self.expected, run_id="session-test")
+            self.assertNotEqual(run.main(), 0)
+        self.assertEqual(self.w.granted, ["iss|sub"])
+        self.assertEqual(self.w.revokes, 2)
+        self.assertEqual(self.w.sso, ["kc"])
+        self.assertEqual(calls, ["stop"])
+        self.assertFalse(any(c[0] == "popen" and "--run" in c[1] for c in self.w.calls))
+        result = json.loads((Path(ev)/"result.json").read_text())
+        self.assertNotEqual(result["rc"], 0)
+        self.assertTrue(any(n.get("stage") == "finalization-deadline" for n in result["notes"]))
+
+
+class FinalizationEntryDiagnostics(unittest.TestCase):
+    """Actual fixed entry with synthetic imports; no finalizer qualification or authority."""
+    def invoke(self, args, *, core=None, missing=False):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = ROOT/ros.FINALIZATION_ENTRY
+            entry = root/"owner-finalization-entry.cjs"
+            entry.write_bytes(source.read_bytes())
+            if not missing:
+                (root/"owner-phase-a-cli.cjs").write_text("exports.readPredecessor=()=> '{}';")
+                (root/"owner-finalization.cjs").write_text(core or "exports.reportArtifactNames=()=> ['a','b','bInputs','c'];")
+            inputs = root/"inputs"
+            inputs.mkdir()
+            return subprocess.run(["node", str(entry), *[str(inputs) if x == "INPUTS" else x for x in args]],
+                                  capture_output=True, text=True, timeout=5)
+
+    def test_local_code_is_diagnostic_without_inputs(self):
+        result = self.invoke(["--invalid"])
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "finalization-entry-refused: entry-arguments\n")
+
+    def test_local_input_files_code_is_preserved(self):
+        result = self.invoke(["--validate-inputs", "INPUTS"])
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "finalization-entry-refused: input-files\n")
+
+    def test_foreign_message_is_not_trusted_even_when_it_matches_a_local_code(self):
+        for message in ("input-files", "secret-value-from-untrusted-error"):
+            with self.subTest(message=message):
+                result = self.invoke(["--validate-inputs", "INPUTS"],
+                    core="exports.reportArtifactNames=()=>{throw Error("+json.dumps(message)+")};")
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, "finalization-entry-refused: external-failure\n")
+
+    def test_missing_fixed_dependency_is_a_redacted_failure(self):
+        result = self.invoke(["--validate-inputs", "INPUTS"], missing=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "finalization-entry-refused: external-failure\n")
 
 
 def shutil_cleanup(path):

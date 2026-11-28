@@ -5,6 +5,17 @@
   "entrypoint": ["node", "/bundle/docs/runbooks/inference-canary-v0113/owner-finalization-entry.cjs"],
   "files": {
     "docs/runbooks/inference-canary-v0113/owner-finalization-entry.cjs": null,
+    "docs/runbooks/inference-canary-v0113/owner-finalization.cjs": null,
+    "docs/runbooks/inference-canary-v0113/owner-finalization-cli.cjs": null,
+    "docs/runbooks/inference-canary-v0113/owner-finalization-automation.cjs": null,
+    "docs/runbooks/inference-canary-v0113/owner-phase-a.js": null,
+    "docs/runbooks/inference-canary-v0113/owner-phase-a-cli.cjs": null,
+    "docs/runbooks/inference-canary-v0113/owner-phase-a-automation.cjs": null,
+    "docs/runbooks/inference-canary-v0113/owner-phase-a-renewal.cjs": null,
+    "docs/runbooks/inference-canary-v0113/owner-phase-a-socket.cjs": null,
+    "docs/runbooks/inference-canary-v0113/owner-phase-a-deadline.cjs": null,
+    "docs/runbooks/inference-canary-v0113/owner-phase-b.js": null,
+    "docs/runbooks/inference-canary-v0113/owner-phase-b-fence.cjs": null,
     "scripts/relay-finalization/client.cjs": null
   },
   "finalizationObserver": {
