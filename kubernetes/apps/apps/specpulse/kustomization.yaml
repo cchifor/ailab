@@ -11,6 +11,11 @@ resources:
 images:
   # The publish workflow (cchifor/specpulse .gitea/workflows/publish.yml, workflow_dispatch from main) pushes
   # specpulse/specpulse:sha-<40 hex>; the digest of that tag is pinned here.
+  # Rollback: re-pin sha256:731eec81b7676f8b4f21df4b90595dea7e8567d486d7d9706ddbb5d9d00d0c5a (main 289d6243); no data
+  # restore is needed. The only migration since then, 0009_session_epoch, is additive (users.session_epoch INTEGER NOT
+  # NULL DEFAULT 0). The older image names every users column it reads or writes (web/auth.py), and its db.migrate()
+  # applies pending migrations only, never refusing an applied one it does not know. A rollback loses only 0009's
+  # behaviour: a password change no longer signs out the user's other sessions.
   - name: REGISTRY_PLACEHOLDER/specpulse/specpulse
     newName: registry.chifor.me/specpulse/specpulse
     digest: sha256:44b828bcb2bda6ac29d0bd4bfaae47c4dcc45de9ce6ac8adb6581b9c94d53a30 # publish run 155646, main 63bcc4cf (tag sha-63bcc4cf32bb5d7959f9a58bf7e20af1d4010f38)
