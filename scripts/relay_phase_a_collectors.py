@@ -13,6 +13,7 @@ runner_now >= host_now + (gateNow - host receipt), because the gate stamped gate
 from __future__ import annotations
 
 import datetime
+import copy
 import json
 import re
 import subprocess
@@ -29,6 +30,13 @@ READ_TITLE = "Allow mcp__relay__relay_messages_read?"
 MARKER_TITLE = "Allow bash?"
 MAX_CURSOR = 9223372036854775807
 CLOCK_MS = 4000
+SUPPORT_HUB = '5f90d03a6ed291e6c62dfde75938ba07c20d8902'
+SUPPORT_ROUTER = '4e4bb34e2f968f9450aabe9cf228d3e70c8bab71'
+SUPPORT_HOLDER = '64dc50f47a4867a6d9a7afc2e7d5ae24068c59af'
+SUPPORT_PI = '2604c41b69c5d9c50a3324545a51f0bfa38435a0'
+CONTENT_DOMAIN = 'relay-predecessor-command-projection/content-v1\n'
+SHA = re.compile(r'^[a-f0-9]{64}$')
+LABEL = re.compile(r'^[A-Za-z0-9._:-]{1,200}$')
 PROFILE_KEYS = {"id", "run", "binding", "credential", "key", "protocol", "definitionHash", "namespace", "connection",
                 "generation", "revision", "expiresAt"}
 
@@ -456,7 +464,8 @@ def c_pre_launch(host, req, ctx, budget, gate_now, obs):
             "routeConfirmed": True, "clocksWithin5s": True}
 
 
-def bind_session(host, run, session_id: str, budget, obs, *, resume_from=None, after_ms=None) -> dict:
+def bind_session(host, run, session_id: str, budget, obs, *, resume_from=None, after_ms=None,
+                 resume_generation=None) -> dict:
     """A session belongs to this execution only through its launch row (plan section 3)."""
     if resume_from is None:
         rows = host.remote.sql("session-launch.sql", {"session_id": session_id, "tenant": host.cfg.raw["tenant"]},
@@ -476,7 +485,8 @@ def bind_session(host, run, session_id: str, budget, obs, *, resume_from=None, a
          "the launch holder is not the handed-off holder", Failed)
     need(is_uuid(r.get("session_id")), "the launch has no session", Failed)
     if resume_from is not None:
-        need(r["resume_from"] == resume_from and r["resume_generation"] == run.generation
+        need(r["resume_from"] == resume_from and r["resume_generation"] ==
+             (run.generation if resume_generation is None else resume_generation)
              and r["resume_native_id"] == run.native_id and r["resume_acknowledge_unknown_tool_effects"] is False,
              "the resume is not bound to the closed session", Failed)
     s = session_state(host, r["session_id"], budget, obs)
@@ -544,6 +554,8 @@ def c_observation(host, req, ctx, budget, gate_now, obs):
             run.approved_marker_sha = m["files"]["effects"].get("sha256")
         out["marker"] = m
     run.last_trajectory = env
+    if run.effort and run.effort_before is None and env['totalAttempts'] > 0:
+        run.effort_before = copy.deepcopy(env)
     return out
 
 
@@ -630,6 +642,7 @@ def marker_input(desc) -> str:
 
 
 def c_recover_history(host, req, ctx, budget, gate_now, obs):
+    support_sources(host)
     run = run_for(host.state, ctx)
     need(ctx.get("sessionId") == run.session_id and ctx.get("generation") == run.generation, "C9 session")
     need(ctx.get("holderId") == host.state.holder["incarnation"] and ctx.get("journalId") == host.state.holder["journal"],
@@ -655,11 +668,12 @@ def c_recover_history(host, req, ctx, budget, gate_now, obs):
         p = decided[c["permission"]]
         need(p["state"] == "resolved" and p["option_id"] == c["option"], "a permission was not resolved as confirmed",
              Failed)
-    t = host.remote.dw(["transcript", host.native_home(run)], budget, obs, "transcript")
+    t = read_native_checkpoint(host, run, budget, obs)
     if t.get("state") != "observed":
         raise Unsupported("the native transcript source is not established")
     need(t["unsettled"] == [] and t["duplicateResults"] == [], "a native tool call is unsettled or duplicated", Failed)
     outcome = {sha256_bytes(host.marker_command(run.provider, run.run_id, k).encode()): k for k in ("denied", "effects")}
+    need(set(t['toolNames']) <= {'bash', 'mcp__relay__relay_messages_read'}, 'unapproved native tool', Failed)
     calls = t["shellCommands"]  # every call, in order: multiplicity matters (a repeat is never merged away)
     need(len(calls) == 2 and sorted(c["sha256"] for c in calls) == sorted(outcome),
          "shell calls are not exactly one denied and one effects marker call", Failed)
@@ -671,20 +685,264 @@ def c_recover_history(host, req, ctx, budget, gate_now, obs):
     m = marker(host, run.provider, run.run_id, "approved", 0, budget, obs)
     need(m["files"]["effects"].get("sha256") == run.approved_marker_sha, "the approved marker changed", Failed)
     obs["recovery"] = {"permissions": len(run.confirmed), "shellCalls": len(shells)}
+    branch = read_router_branch(host, run, t, budget, obs)
+    branch_decision(t['native'], branch['record'])  # no unknown join retained as permission to resume
+    run.retained_branch = {'sessionId': run.session_id, 'generation': run.generation,
+                           'native': copy.deepcopy(t), 'router': copy.deepcopy(branch)}
     run.recover_ms = now_ms() - 5000
     return True
 
 
 def c_reconcile_choice(host, req, ctx, budget, gate_now, obs):
-    raise Unsupported("no authoritative reconstruction-required field is pinned (plan section 7, gate)")
+    support_sources(host)
+    run = checkpoint_run(host, ctx)
+    old = run.retained_branch
+    need(old is not None and run.session_id != old['sessionId'], 'C9 retained branch unavailable', Unsupported)
+    launch = bind_session(host, run, None, budget, obs, resume_from=old['sessionId'], after_ms=run.recover_ms,
+                          resume_generation=old['generation'])
+    need(launch['session_id'] == run.session_id and launch['resume_generation'] == old['generation'],
+         'C10 resume binding changed', Failed)
+    idle_evidence(host, run, budget, obs)
+    t = read_native_checkpoint(host, run, budget, obs)
+    need(t['sourceSessionId'] == old['sessionId'] and t['native'] == old['native']['native']
+         and t['sourceSha256'] == old['native']['currentSha256']
+         and t['retainedReceiptSha256'] == old['native']['retainedReceiptSha256']
+         and SHA.fullmatch(str(t.get('importedSha256', ''))) and t['unsettled'] == [],
+         'C10 imported native receipt changed', Failed)
+    branch = read_router_branch(host, run, t, budget, obs)
+    previous, current = old['router'], branch
+    need(all(current[k] == previous[k] for k in ('namespace', 'principal', 'conversation', 'branch', 'key', 'storeSha256'))
+         and all(current['record'][k] == previous['record'][k] for k in ('epoch', 'operation', 'state'))
+         and current['record']['updatedAt'] >= previous['record']['updatedAt'], 'C10 retained Router branch changed', Failed)
+    return {'reconcile': branch_decision(t['native'], branch['record'])}
 
 
 def c_retire_branch(host, req, ctx, budget, gate_now, obs):
-    raise Unsupported("the settings-applied and probe-refusal sources are not established (gate)")
+    support_sources(host)
+    run = checkpoint_run(host, ctx)
+    need(run.effort and run.provider == 'codex' and run.effort_before is not None,
+         'C11 retained effort observation unavailable', Unsupported)
+    evidence = idle_evidence(host, run, budget, obs)
+    validate_retirement(evidence, run.generation)
+    before = run.effort_before
+    env = trajectory(host, host.state.renewed[run.provider]['key'], run.provider,
+                     since=before['scope']['since'], not_before=0, budget=budget, obs=obs, label='retirement')
+    rows_retained(before, env)
+    need(env['rows'] == before['rows'] and env['totalAttempts'] == before['totalAttempts'],
+         'C11 probe added or changed attempts', Failed)
+    obs['retirement'] = {'sessionId': run.session_id, 'generation': run.generation,
+                         'evidenceSha256': sha256_bytes(canonical(evidence).encode()), 'zeroAttempts': True}
+    return True
 
 
 def c_predecessor(host, req, ctx, budget, gate_now, obs):
-    raise Unsupported("the predecessor projection pin contract is unresolved (plan section 6, gate)")
+    support_sources(host)
+    need(host.predecessor_ok(), 'independent predecessor report changed', Failed)
+    report = json.loads(host.predecessor_bytes)
+    prior = report.get('operations')
+    need(isinstance(prior, list), 'predecessor commands unavailable', Unsupported)
+    wanted = [{'operationId': c.get('body', {}).get('operationId'), 'kind': c.get('body', {}).get('kind')}
+              for c in prior if c.get('body', {}).get('kind') in ('prompt', 'cancel', 'close')]
+    need(len(wanted) == 3 and {r['kind'] for r in wanted} == {'prompt', 'cancel', 'close'}
+         and all(is_uuid(r['operationId']) for r in wanted), 'predecessor report commands differ', Failed)
+    need(ctx.get('source') == SUPPORT_HUB and ctx.get('schemaVersion') == 93
+         and ctx.get('sessionId') == '45724087-335a-4c55-ad0f-cb278afe608a' and ctx.get('generation') == 1
+         and ctx.get('priorReportCanonicalSha256') == host.predecessor_canonical()
+         and ctx.get('commands') == wanted, 'predecessor context differs from independent report', Failed)
+    deployment(host, budget, obs)
+    rows = host.remote.sql('predecessor-projection.sql', {'tenant': host.cfg.raw['tenant'],
+        'session_id': ctx['sessionId'], 'generation': 1,
+        **{r['kind'] + '_operation': r['operationId'] for r in wanted}}, budget, obs)
+    need(len(rows) == 1, 'predecessor projection unavailable', Failed)
+    row = rows[0]
+    supported_schema(row)
+    observed = fresh_ms(row.get('observedMs'))
+    need(row.get('databaseName') == host.cfg.raw['hubDb']['database'], 'predecessor database changed', Failed)
+    commands = row.get('commands')
+    need(isinstance(commands, list) and len(commands) == 3, 'predecessor command cardinality', Failed)
+    ids = set()
+    for expected, c in zip(wanted, commands):
+        need(set(c) == {'id', 'operation_id', 'session_id', 'generation', 'kind', 'state', 'receipt'}
+             and is_uuid(c['id']) and c['id'] not in ids and c['operation_id'] == expected['operationId']
+             and c['kind'] == expected['kind'] and c['session_id'] == ctx['sessionId'] and c['generation'] == 1
+             and c['state'] == 'completed', 'predecessor command differs', Failed)
+        ids.add(c['id'])
+        receipt = c['receipt']
+        need(isinstance(receipt, dict) and set(receipt) == {'status', 'result'} and receipt['status'] == 'completed',
+             'predecessor receipt not completed', Failed)
+        need((c['kind'] == 'prompt' and receipt['result'] in ({'stopReason': 'cancelled'}, {'stopReason': 'end_turn'}))
+             or (c['kind'] in ('cancel', 'close') and receipt['result'] == {'cancelSent': True}),
+             'predecessor native outcome unknown', Failed)
+    db = host.cfg.raw['hubDb']
+    label = '.'.join(db[k] for k in ('namespace', 'pod', 'database'))
+    need(re.fullmatch(r'[A-Za-z0-9._-]{1,128}', label), 'database label unavailable', Unsupported)
+    value = {'kind': 'relay-predecessor-command-projection', 'version': 1, 'source': SUPPORT_HUB,
+             'schemaVersion': 93, 'observedUtc': utc(observed), 'tenantId': host.cfg.raw['tenant'],
+             'databaseIdentity': label,
+             'querySha256': sha256_bytes(host.cfg.script('relay-phase-a/sql/predecessor-projection.sql')),
+             'sessionId': ctx['sessionId'], 'generation': 1,
+             'priorReportCanonicalSha256': ctx['priorReportCanonicalSha256'], 'commands': commands}
+    raw = canonical(value)
+    need(len(raw.encode()) <= 65536, 'predecessor projection too large', Failed)
+    content = {k: v for k, v in value.items() if k != 'observedUtc'}
+    obs['predecessor'] = {'rawSha256': sha256_bytes(raw.encode()),
+                          'contentSha256': sha256_bytes((CONTENT_DOMAIN + canonical(content)).encode()),
+                          'hashDomain': CONTENT_DOMAIN, 'observedMs': observed}
+    return raw
+
+
+def support_sources(host):
+    raw = getattr(getattr(host, 'cfg', None), 'raw', {})
+    need(raw.get('hub', {}).get('runSource') == SUPPORT_HUB and raw.get('router', {}).get('source') == SUPPORT_ROUTER
+         and raw.get('holder', {}).get('qualified', {}).get('source') == SUPPORT_HOLDER,
+         'unqualified observer support source tuple', Unsupported)
+
+
+def supported_schema(row):
+    need(row.get('schemaVersions') == list(range(1, 94)), 'unqualified hub schema', Unsupported)
+
+
+def fresh_ms(value):
+    now = now_ms()
+    need(is_int(value, 1) and now - value < 120000 and value - now <= 5000, 'stale source observation', Failed)
+    return value
+
+
+def checkpoint_run(host, ctx):
+    run = run_for(host.state, ctx)
+    need(ctx.get('sessionId') == run.session_id and ctx.get('generation') == run.generation
+         and ctx.get('holderId') == host.state.holder['incarnation']
+         and ctx.get('journalId') == host.state.holder['journal'], 'checkpoint ownership differs', Failed)
+    return run
+
+
+def read_native_checkpoint(host, run, budget, obs):
+    need(is_uuid(run.native_id), 'native UUID unavailable', Unsupported)
+    pin, h = host.cfg.profile(run.provider), host.state.holder
+    value = host.remote.dw(['native-checkpoint', host.cfg.raw['holder']['stateDir'], run.session_id,
+                           run.native_id, pin['id'], pin['cwd'], h['incarnation'], h['journal']],
+                          budget, obs, 'native-checkpoint')
+    need(value.get('state') == 'observed' and value.get('version') == 1, 'native source unsupported', Unsupported)
+    need(all(value.get(k) == v for k, v in {'sessionId': run.session_id, 'nativeSessionId': run.native_id,
+         'profileId': pin['id'], 'generation': run.generation, 'holderId': h['incarnation'],
+         'journalId': h['journal']}.items()), 'native checkpoint identity differs', Failed)
+    fresh_ms(value.get('observedMs'))
+    need(all(SHA.fullmatch(str(value.get(k, ''))) for k in ('retainedReceiptSha256', 'currentSha256',
+         'sourceSha256', 'journalSha256', 'profileDigest')), 'native checkpoint provenance missing', Failed)
+    obs.setdefault('nativeCheckpoints', []).append(value)
+    return value
+
+
+def read_router_branch(host, run, native, budget, obs):
+    n = native['native']
+    need(isinstance(n, dict) and all(isinstance(n.get(k), str) and LABEL.fullmatch(n[k])
+         for k in ('conversation', 'branch', 'nativeSession')) and n['nativeSession'] == run.native_id,
+         'native receipt invalid', Failed)
+    principal = 'key:' + host.state.renewed[run.provider]['key']
+    pod = host.remote.router_pod(budget, obs)
+    ident = host.remote.router(['identity'], budget, obs, 'branch-identity', pod=pod)
+    coverage(host, pod, ident, obs)
+    value = host.remote.router(['branch', 'default', principal, n['conversation'], n['branch']],
+                               budget, obs, 'branch-record', pod=pod)
+    expected_key = sha256_bytes(json.dumps(['default', principal, n['conversation'], n['branch']],
+                                           separators=(',', ':'), ensure_ascii=False).encode())
+    need(value.get('version') == 1 and value.get('key') == expected_key
+         and value.get('namespace') == 'default' and value.get('principal') == principal
+         and value.get('conversation') == n['conversation'] and value.get('branch') == n['branch']
+         and value.get('kvNamespace') == 'inference-session-v1' and value.get('storeSha256') == ident['storeSha256']
+         and SHA.fullmatch(str(value.get('rawRecordSha256', '')))
+         and value.get('querySha256') == sha256_bytes(b'SELECT value FROM kv WHERE ns=? AND key=?'),
+         'Router branch provenance differs', Failed)
+    fresh_ms(value.get('requestedAt'))
+    fresh_ms(value.get('observedAt'))
+    need(is_int(value.get('record', {}).get('updatedAt'))
+         and value['record']['updatedAt'] <= value['observedAt'] + 5000,
+         'Router branch timestamp is in the future', Failed)
+    need(value['observedAt'] >= value['requestedAt'] and host.remote.router_pod(budget, obs) == pod,
+         'Router branch source changed', Failed)
+    obs.setdefault('branchCheckpoints', []).append(value)
+    return value
+
+
+def branch_decision(native, router):
+    need(isinstance(native, dict) and isinstance(router, dict) and router.get('state') in ('complete', 'uncertain')
+         and 'successor' not in router and is_int(router.get('updatedAt'))
+         and all(isinstance(router.get(k), str) and LABEL.fullmatch(router[k]) for k in ('epoch', 'operation')),
+         'Router branch is not safely settled', Failed)
+    pending, parent = native.get('pending'), native.get('parent')
+    need(all(v is None or (isinstance(v, str) and LABEL.fullmatch(v)) for v in (pending, parent)),
+         'native receipt malformed', Failed)
+    if pending is not None:
+        need(router['operation'] == pending or (parent is not None and router['operation'] == parent
+             and router['state'] == 'complete'), 'native pending does not join Router', Failed)
+        return True
+    need(parent is not None and router['operation'] == parent and router['state'] == 'complete',
+         'native parent does not join Router', Failed)
+    return False
+
+
+def idle_evidence(host, run, budget, obs):
+    rows = host.remote.sql('retirement-evidence.sql', {'tenant': host.cfg.raw['tenant'],
+        'session_id': run.session_id, 'generation': run.generation,
+        'holder_id': host.state.holder['incarnation'], 'journal_id': host.state.holder['journal']}, budget, obs)
+    need(len(rows) == 1, 'current native work unavailable', Unsupported)
+    value = rows[0]
+    supported_schema(value)
+    fresh_ms(value.get('observedMs'))
+    session = value.get('session') or {}
+    need(session.get('id') == run.session_id and session.get('generation') == run.generation
+         and session.get('state') == 'open' and session.get('rebinding') is False
+         and session.get('holder_id') == host.state.holder['incarnation']
+         and value.get('pendingPermissions') == 0 and isinstance(value.get('commands'), list)
+         and len(value['commands']) <= 200
+         and all(c.get('state') == 'completed' and c.get('receiptStatus') == 'completed'
+             for c in value['commands']), 'native work is pending or unknown', Failed)
+    h = holder_record(host, budget, obs)
+    need(h.get('incarnation') == host.state.holder['incarnation']
+         and h.get('journalId') == host.state.holder['journal'] and h.get('pendingCommands') == 0,
+         'holder native work is pending', Failed)
+    return value
+
+
+def validate_retirement(value, generation):
+    commands, events = value['commands'], value.get('events')
+    need(isinstance(events, list) and 0 < len(events) <= 2000, 'retirement events incomplete', Unsupported)
+    jr = value.get('journalRange') or {}
+    need(is_int(jr.get('first'), 1) and is_int(jr.get('last'), 1)
+         and jr.get('count') == jr['last'] - jr['first'] + 1, 'holder journal retention gap', Unsupported)
+    need(all(is_int(e.get('sequence'), 1) for e in events)
+         and [e['sequence'] for e in events] == sorted({e['sequence'] for e in events}),
+         'retirement event sequence differs', Failed)
+    high = [c for c in commands if c.get('kind') == 'set-config' and c.get('configId') == 'thought_level'
+            and c.get('value') == 'high']
+    probes = [c for c in commands if c.get('probe') is True]
+    need(len(high) == len(probes) == 1, 'exact effort/probe command unavailable', Unsupported)
+    high, probe = high[0], probes[0]
+    epoch = value['session']['control_epoch']
+    need(high.get('controlEpoch') == probe.get('controlEpoch') == epoch and high.get('settingsApplied') is True
+         and probe.get('stopReason') in ('end_turn', 'refusal'), 'effort/probe outcome differs', Failed)
+    def interval(command):
+        accepted = [e for e in events if e.get('kind') == 'command-accepted' and e.get('commandId') == command['id']]
+        ended = [e for e in events if e.get('kind') == 'command-result' and e.get('commandId') == command['id']]
+        need(len(accepted) == len(ended) == 1 and ended[0].get('status') == 'completed'
+             and accepted[0]['sequence'] < ended[0]['sequence'], 'command journal interval unavailable', Unsupported)
+        return accepted[0]['sequence'], ended[0]['sequence']
+    hs, he = interval(high)
+    ps, pe = interval(probe)
+    need(he < ps, 'probe preceded applied high setting', Failed)
+    need(not any(e.get('kind') == 'command-accepted' and e.get('commandId') not in (high['id'], probe['id'])
+                 and hs < e['sequence'] < pe for e in events), 'ambiguous command interval', Unsupported)
+    settings = [e for e in events if e.get('kind') == 'session-settings']
+    need(settings and hs < settings[-1]['sequence'] < he and settings[-1].get('generation') == generation,
+         'applied setting journal correlation unavailable', Unsupported)
+    snapshot = settings[-1].get('settings') or {}
+    options = [r for r in snapshot.get('configOptions', []) if r.get('id') == 'thought_level']
+    need(is_int(high.get('settingsRevision')) and is_int(snapshot.get('revision'), 1)
+         and snapshot['revision'] > high['settingsRevision']
+         and len(options) == 1 and options[0].get('currentValue') == 'high', 'high setting not observed', Failed)
+    notices = [e for e in events if e.get('notice') is True and ps < e['sequence'] < pe]
+    need(len(notices) == 1 and notices[0].get('truncated') is not True,
+         'exact correlated configuration-change notice unavailable', Unsupported)
 
 
 COLLECTORS = {
