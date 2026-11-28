@@ -377,6 +377,17 @@ def retirement(stop='end_turn'):
 
 
 class JoinTests(unittest.TestCase):
+    def test_event_bounds_must_match_journal_range(self):
+        for first,last in ((9,15),(10,16),(1,6)):
+            value=retirement();value['journalRange']={'first':first,'last':last,'count':last-first+1}
+            with self.subTest(first=first,last=last),self.assertRaises(O.Unsupported):C.validate_retirement(value,1)
+
+    def test_other_session_journal_entries_do_not_require_scoped_events(self):
+        value=retirement()
+        for event in value['events']:event['sequence']*=2
+        value['journalRange']={'first':20,'last':30,'count':11}
+        C.validate_retirement(value,1)
+
     def foreign_interval(self, start, end, *, omit=None, status='completed'):
         value=retirement()
         for event in value['events']:event['sequence']*=2

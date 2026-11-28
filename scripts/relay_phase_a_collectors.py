@@ -919,6 +919,10 @@ def validate_retirement(value, generation):
     need(all(is_int(e.get('sequence'), 1) for e in events)
          and [e['sequence'] for e in events] == sorted({e['sequence'] for e in events}),
          'retirement event sequence differs', Failed)
+    # events is session-scoped; count covers the entire holder journal, including
+    # other sessions interleaved between these endpoints. Do not equate their sizes.
+    need(events[0]['sequence'] == jr['first'] and events[-1]['sequence'] == jr['last'],
+         'retirement events differ from journal range', Unsupported)
     high = [c for c in commands if c.get('kind') == 'set-config' and c.get('configId') == 'thought_level'
             and c.get('value') == 'high']
     probes = [c for c in commands if c.get('probe') is True]

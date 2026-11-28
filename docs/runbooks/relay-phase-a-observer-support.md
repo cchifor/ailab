@@ -108,6 +108,12 @@ Every other command with an accepted/result event before the probe ends must
 have one unambiguous completed interval ending before high was accepted. An
 earlier acceptance with a missing, unknown, duplicate or overlapping result
 refuses; unrelated commands starting only after the probe ends are outside it.
+The first and last projected event must match the journal range endpoints.
+The range count covers all holder journal entries, including interleaved events
+from other sessions; the returned events are scoped to this session, so their
+count need not equal the range count. Exact notice equality is evaluated by the
+fixed SQL literal and only its boolean result is projected, avoiding transcript
+export. `Remote.sql` sends those verified SQL bytes directly over stdin.
 
 The high-setting completion must say `settingsApplied:true`; its interval must
 contain the latest generation-specific `session-settings` snapshot, an advanced
