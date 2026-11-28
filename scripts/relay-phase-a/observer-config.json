@@ -1,0 +1,123 @@
+{
+ "version": 1,
+ "kubeContext": "admin@ai",
+ "tenant": "00000000-0000-4000-8000-000000000001",
+ "jitUserId": "a2d7daaa-27e1-422b-9909-d8ba5ae9c9c8",
+ "effortRun": "45027fc9-083b-41ff-8cc7-a46a98ae510e",
+ "maxReadsPerRun": 12,
+ "markerRoot": "/home/c4/.local/state/relay-holder/workspaces",
+ "profiles": {
+  "codex": {
+   "id": "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
+   "run": "9120da55-d870-431a-aba7-0ba4fe5b84f8",
+   "binding": "a0f57684-747f-4c3e-8d90-e684b7262590",
+   "historicalKey": "key_d72ca9b617b83281d4a2706393693b61",
+   "account": "codex",
+   "model": "gpt-6-astra",
+   "cwd": "/home/c4/.local/state/relay-holder/workspaces/1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
+   "protocol": "openai-responses",
+   "definitionHash": "0e15b7e39b0241c692b305c6c8d2f4579843c8e7fcfb86ea37534ab996fd194d"
+  },
+  "qwen": {
+   "id": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
+   "run": "b69505b2-f61a-42b8-ad08-ce183b2ebc2a",
+   "binding": "d2871eec-8f5a-4afe-a917-014f0ae8e14d",
+   "historicalKey": "key_9b01832ad0609853be340e03968b7d50",
+   "account": "lan-192.168.0.28-18020",
+   "model": "qwen3.8-27b",
+   "cwd": "/home/c4/.local/state/relay-holder/workspaces/f25c187b-1e50-4c7c-860e-52947bfdf39e",
+   "protocol": "openai-chat",
+   "definitionHash": "4ceab5d4122eab6b54ae04196feea258d4d290be381d6c018186f982c8081928"
+  }
+ },
+ "router": {
+  "namespace": "llm-router",
+  "deployment": "llm-router",
+  "selector": "app=llm-router",
+  "container": "router",
+  "source": "4e4bb34e2f968f9450aabe9cf228d3e70c8bab71"
+ },
+ "hub": {
+  "namespace": "relay",
+  "deployment": "relay",
+  "container": "relay",
+  "runSource": "5f90d03a6ed291e6c62dfde75938ba07c20d8902",
+  "receipts": [
+   {
+    "release": "v0.14.1",
+    "imageDigest": "sha256:eb6a99bf99c0ed2e1a3db3ebe42e93aebf3e0ae3cabe3498ed2a19094e3227da",
+    "source": "5f90d03a6ed291e6c62dfde75938ba07c20d8902"
+   }
+  ]
+ },
+ "hubDb": {
+  "namespace": "relay",
+  "pod": "relay-postgres-0",
+  "container": "postgres",
+  "user": "postgres",
+  "database": "relay"
+ },
+ "devWorker": {
+  "host": "192.168.0.8",
+  "user": "c4",
+  "knownHosts": "relay-phase-a/known_hosts"
+ },
+ "holder": {
+  "stateDir": "/home/c4/.local/state/relay-holder-handoff-256a052b-75a6-4701-96ad-8b12afeaa50f",
+  "oldStateDir": "/home/c4/.local/state/relay-holder",
+  "preparationId": "256a052b-75a6-4701-96ad-8b12afeaa50f",
+  "pauseOperationId": "9f64d2aa-292e-4ca4-a359-953802855daa",
+  "receiptPath": "/home/c4/.config/relay-holder/used-handoffs/256a052b-75a6-4701-96ad-8b12afeaa50f/complete.json",
+  "receiptSha256": "424ff3e00bedb4d7cac0cb3845d06162824b3521193e44f33d98cb927c1ca0cd",
+  "oldHolderId": "bbb151f1-a615-4e42-a8ef-215134a72dc5",
+  "oldJournalId": "bbe0a6fb-25ea-44f8-8c21-5cba89f07aeb",
+  "profilesSha256": "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4",
+  "qualified": {
+   "release": "v0.13.4",
+   "source": "64dc50f47a4867a6d9a7afc2e7d5ae24068c59af",
+   "binarySha256": "d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926"
+  },
+  "holderArgv": [
+   "/opt/relay-holder/releases/216d338b6cfb8bddfb1ccc5f7bbb999386084d4257de9a9e9639e348e8499caf/relay-holder-linux-amd64",
+   "--qualification",
+   "--state-dir",
+   "/home/c4/.local/state/relay-holder-handoff-256a052b-75a6-4701-96ad-8b12afeaa50f",
+   "--profiles",
+   "/home/c4/.config/relay-holder/profiles.json"
+  ],
+  "reconciliationArgv": [
+   "/opt/relay-holder/connectors/bc2a0b69aa763ffcf9182d1d6ffc8fc25862cf325d7baa66982d989a4a1defe6/relay-connector",
+   "--state",
+   "/home/c4/.config/relay-connector/connector.json",
+   "control-plane",
+   "--holder-dir",
+   "/home/c4/.local/state/relay-holder-handoff-256a052b-75a6-4701-96ad-8b12afeaa50f"
+  ],
+  "sealId": "5047800f-d9fd-4db0-be86-3fee445b94d2",
+  "oldJournalSha256": "299aafb6e3a84794287aff229e7525dcdcabd0b4082fb4948d9fbdb51f33e20b",
+  "newJournalId": "91e44418-a839-400a-a034-7172cf727f8e",
+  "artifacts": {
+   "relay-holder.service": "f0543d3f82fa135e95d0bd4421fb1042e2dc7c6f9a5b64019763444e417460de",
+   "relay-holder-control-plane.service": "ea017251d189982632ef9a7e8e40b1cfabbf3de8a742113da25240590e4d4550",
+   "service.json": "61cbe6c3926a48ec683e5174e617c9454dfc11284967ab5e2690d1d8199d4ca1",
+   "profiles.json": "928d41f0b24c0d1d2493458e7fac23cfd686c045b1aa9daaee480684a0aea9a4"
+  },
+  "newJournalSha256": "8c4de447fae5ddf60b98b9cdeb0076063741d2ebc881e8f413ae04311e502d01"
+ },
+ "historicalRows": [
+  {
+   "prefix": "338869f5-",
+   "status": "complete"
+  },
+  {
+   "prefix": "811cab9f-",
+   "status": "cancelled"
+  }
+ ],
+ "predecessor": {
+  "note": "the raw SHA-256 is pinned by the session manifest's observer.predecessorSha256; the historical scope and marker baseline are read from the report itself"
+ },
+ "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+ "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8",
+ "configurationChangedNotice": "Router refused changed session configuration (SESSION_CONFIGURATION_CHANGED). Explicit reconciliation is required. No provider or model fallback was used."
+}

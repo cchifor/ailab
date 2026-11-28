@@ -7,7 +7,9 @@ independent, bounded cleanup stages. No caller-supplied Docker arguments; no sco
 
 Exit codes (precedence order): 3 revoke not confirmed, 4 proxy logout not confirmed, 5 Keycloak logout failed,
 6 evidence capture failed, 7 Lease lost, contended or ownership unconfirmed (revocation left to the holder or the
-reaper), 8 Runner failed or exceeded its deadline, 2 refused before any authority, 0 success.
+reaper), 9 phase A observer internal fault (gate or thread death, protocol violation, pre-run holder step;
+plans/2026-11-27-relay-phase-a-observer-plan.md), 8 Runner failed or exceeded its deadline, 2 refused before any
+authority, 0 success.
 
 Destructive cleanup (revoke, the account-wide Keycloak logout, the Lease release) runs ONLY after this run positively
 re-confirms Lease ownership (a resourceVersion-conditioned extension of its own Lease, or a conditional takeover of an
@@ -49,7 +51,7 @@ DIGEST_IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/:-]*@sha256:[0-9a-f]{64}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REL_PATH = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
 REVOKED = "0 memberships, 0 sessions"
-PRECEDENCE = [3, 4, 5, 6, 7, 8, 2]
+PRECEDENCE = [3, 4, 5, 6, 7, 9, 8, 2]
 
 
 class Refused(Exception):
@@ -92,8 +94,20 @@ def load_manifest(ops: Ops, ref: str) -> tuple[str, dict]:
         m = json.loads(ops.git_show(commit, path))
     except BaseException as e:  # noqa: BLE001 - SystemExit from the real wrapper, ValueError, timeouts
         raise Refused(f"manifest unreadable at {ref}: {type(e).__name__}")
-    if not isinstance(m, dict) or m.get("version") != 1 or set(m) != {"version", "image", "entrypoint", "files"}:
-        raise Refused("manifest must be {version: 1, image, entrypoint, files}")
+    if not isinstance(m, dict) or m.get("version") != 1 or \
+            set(m) - {"observer"} != {"version", "image", "entrypoint", "files"}:
+        raise Refused("manifest must be {version: 1, image, entrypoint, files[, observer]}")
+    if "observer" in m:
+        o = m["observer"]
+        if not isinstance(o, dict) or set(o) != {"files", "config", "predecessorSha256"} or \
+                not isinstance(o["files"], dict) or not o["files"] or len(o["files"]) > 40 or \
+                not isinstance(o["config"], str) or o["config"] not in o["files"] or \
+                not isinstance(o["predecessorSha256"], str) or not SHA256.match(o["predecessorSha256"]):
+            raise Refused("manifest observer must be {files, config, predecessorSha256}")
+        for rel, digest in o["files"].items():
+            if not isinstance(rel, str) or not REL_PATH.match(rel) or ".." in rel.split("/") or \
+                    not isinstance(digest, str) or not SHA256.match(digest):
+                raise Refused(f"bad observer entry {rel!r}")
     if not isinstance(m["image"], str) or not DIGEST_IMAGE.match(m["image"]):
         raise Refused("manifest image must be a digest reference (name@sha256:...)")
     ep = m["entrypoint"]
@@ -141,6 +155,67 @@ def copy_bundle(src: str, manifest: dict, dest: str) -> dict:
         if h != want:
             raise Refused(f"sha256 mismatch for {rel}")
     return {rel: files[rel] for rel in sorted(files)}
+
+
+OBSERVER_MODULES = ("relay_phase_a_observer.py", "relay_phase_a_collectors.py", "relay_phase_a_host.py",
+                    "relay-observer-gate.py")
+
+
+def verify_observer(manifest: dict, repo_root: str, predecessor_report: str | None) -> dict:
+    """The observer's host code, remote scripts, SQL and config must be byte-identical to the manifest's reviewed
+    hashes BEFORE anything is imported or executed; remote scripts and SQL run from these verified bytes only."""
+    o = manifest["observer"]
+    files = {}
+    for rel, want in o["files"].items():
+        path = Path(repo_root) / rel
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode):
+            raise Refused(f"observer file is not regular: {rel}")
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != want:
+            raise Refused(f"observer sha256 mismatch for {rel}")
+        files[rel] = data
+    for mod in OBSERVER_MODULES:
+        if "scripts/" + mod not in files:
+            raise Refused(f"the observer manifest does not pin scripts/{mod}")
+    if not predecessor_report:
+        raise Refused("--predecessor-report is required for an observer manifest")
+    st = os.lstat(predecessor_report)
+    if not stat.S_ISREG(st.st_mode) or st.st_size <= 0 or st.st_size > 1024 * 1024:
+        raise Refused("--predecessor-report must be a regular file of at most 1 MiB")
+    pred = Path(predecessor_report).read_bytes()
+    if hashlib.sha256(pred).hexdigest() != o["predecessorSha256"]:
+        raise Refused("the predecessor report does not match the manifest's predecessorSha256")
+    return {"files": files, "config": o["config"], "predecessor": pred, "predecessorSha256": o["predecessorSha256"]}
+
+
+def _import_observer(tool_dir: str):
+    """Import the observer modules FROM THE VERIFIED COPY, never from the working tree (any already-imported copy
+    is dropped first)."""
+    import importlib
+    import sys
+    for m in ("relay_phase_a_observer", "relay_phase_a_collectors", "relay_phase_a_host"):
+        sys.modules.pop(m, None)
+    sys.path.insert(0, tool_dir)
+    try:
+        O = importlib.import_module("relay_phase_a_observer")
+        C = importlib.import_module("relay_phase_a_collectors")
+        H = importlib.import_module("relay_phase_a_host")
+    finally:
+        sys.path.remove(tool_dir)
+    for mod in (O, C, H):
+        if not str(Path(mod.__file__).resolve()).startswith(str(Path(tool_dir).resolve())):
+            raise Refused("an observer module was not loaded from the verified copy")
+    return O, C, H
+
+
+def lease_held(ops: "Ops", holder: str) -> bool:
+    """Read-only: this run still holds an unexpired Lease (checked before every observer mutation)."""
+    try:
+        cur = _lease_get(ops)
+    except BaseException:  # noqa: BLE001 - unknown is not held
+        return False
+    return bool(cur) and _lease_holder(cur) == holder and ops.now() < _lease_exp(cur)
 
 
 # ---------------------------------------------------------------- the fenced Lease
@@ -230,12 +305,16 @@ class Run:
     bundle: str
     runner_minutes: int
     evidence_dir: str
+    predecessor_report: str | None = None
     run_id: str = field(default_factory=lambda: "session-" + uuid.uuid4().hex[:12])
     rc: int = 0
     notes: list = field(default_factory=list)
 
     def __post_init__(self):
         self.evidence_failed = threading.Event()
+        self.observer_fault = threading.Event()
+        self.observer_lease_lost = False
+        self.observer_plan = None
         self.deferred_signals = []
         self.in_cleanup = False
 
@@ -297,6 +376,9 @@ class Run:
         try:
             commit, manifest = load_manifest(ops, self.manifest_ref)
             files = copy_bundle(self.bundle, manifest, bundle_copy)
+            if "observer" in manifest:
+                self.observer_plan = verify_observer(manifest, str(Path(ops.tool_dir).parent),
+                                                     self.predecessor_report)
         except Refused as e:
             self.fail(2, reason=str(e))
             shutil.rmtree(work, ignore_errors=True)
@@ -328,9 +410,11 @@ class Run:
         for s in prev:
             signal.signal(s, on_signal)
         names = {"proxy": f"relay-proxy-{self.run_id}", "runner": f"relay-runner-{self.run_id}",
-                 "volume": f"relay-session-{self.run_id}", "state": f"relay-state-{self.run_id}"}
+                 "volume": f"relay-session-{self.run_id}", "state": f"relay-state-{self.run_id}",
+                 "gate": f"relay-observer-gate-{self.run_id}", "pred": f"relay-predecessor-{self.run_id}"}
         ctx = {"proxy": None, "runner": None, "threads": [], "granted": False, "subject": None, "uid": None,
-               "leased": False}
+               "leased": False, "gate": None, "host": None, "pred": False, "ledger": None, "observer_dir": None,
+               "observer_tool_dir": None}
         try:
             self._run(ev, names, ctx, manifest, bundle_copy, sinks, runner_deadline, cleanup_deadline)
         except Interrupted:
@@ -341,7 +425,7 @@ class Run:
             self.fail(8, stage="error", error=type(e).__name__, detail=str(e)[:200])
         finally:
             self.in_cleanup = True
-            self._cleanup(names, ctx, sinks)
+            self._cleanup(names, ctx, sinks, cleanup_deadline)
             for s, h in prev.items():
                 signal.signal(s, h)
             shutil.rmtree(work, ignore_errors=True)
@@ -359,6 +443,16 @@ class Run:
         lease_acquire(ops, self.run_id, cleanup_deadline + LEASE_GRACE_S)
         ctx["leased"] = True
         self.note(stage="lease", holder=self.run_id)
+        ops.docker(["volume", "create", "--driver", "local", "--opt", "type=tmpfs", "--opt", "device=tmpfs",
+                    "--opt", "o=size=1m,uid=10001,gid=10001,mode=0700", names["volume"]], timeout=30)
+        ops.docker(["volume", "create", names["state"]], timeout=30)  # the library's durable store, KEPT
+        ops.docker(["run", "--rm", "--network", "none", "--mount", f"type=volume,src={names['state']},dst=/state",
+                    PROXY_IMAGE, "sh", "-c", "chown 10001:10001 /state && chmod 0700 /state && mkdir -p /state/run "
+                    "&& chown 10001:10001 /state/run && chmod 0700 /state/run"], timeout=120)
+        self.note(stage="state-volume", volume=names["state"])
+        if self.observer_plan is not None:
+            if not self._observer_prepare(ev, names, ctx, runner_deadline, cleanup_deadline):
+                return
         c = ops.creds()
         ctx["subject"], ctx["uid"] = c["subject"], c["keycloak_user_id"]
         username, password = c["username"], c["password"]
@@ -370,12 +464,6 @@ class Run:
         ctx["granted"] = True  # inside the cleanup scope from here: a grant may commit and still report an error
         ops.grant(ctx["subject"])
         self.note(stage="granted")
-        ops.docker(["volume", "create", "--driver", "local", "--opt", "type=tmpfs", "--opt", "device=tmpfs",
-                    "--opt", "o=size=1m,uid=10001,gid=10001,mode=0700", names["volume"]], timeout=30)
-        ops.docker(["volume", "create", names["state"]], timeout=30)  # the library's durable store, KEPT
-        ops.docker(["run", "--rm", "--network", "none", "--mount", f"type=volume,src={names['state']},dst=/state",
-                    PROXY_IMAGE, "sh", "-c", "chown 10001:10001 /state && chmod 0700 /state"], timeout=120)
-        self.note(stage="state-volume", volume=names["state"])
         proxy = ctx["proxy"] = ops.popen(
             ["docker", "run", "-i", "--name", names["proxy"], "--read-only", "--cap-drop", "ALL",
              "--security-opt", "no-new-privileges", "--user", UID, "--pids-limit", "128", "--memory", "256m",
@@ -400,6 +488,12 @@ class Run:
         if self.evidence_failed.is_set():  # never start authorized work without its audit trail
             self.fail(6, stage="evidence", reason="the proxy's evidence stream failed before the Runner started")
             return
+        extra = []
+        if self.observer_plan is not None:
+            if not self._observer_start(names, ctx, sinks):
+                return
+            extra = ["--mount", f"type=volume,src={names['pred']},dst=/predecessor,readonly",
+                     "-e", f"RELAY_OBSERVER_SOCKET={SOCKET_DIR}/observer.sock"]
         runner = ctx["runner"] = ops.popen(
             ["docker", "run", "--name", names["runner"], "--network", "none", "--read-only",
              "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", UID, "--pids-limit", "256",
@@ -409,7 +503,7 @@ class Run:
              "--mount", f"type=volume,src={names['volume']},dst={SOCKET_DIR}",
              "-e", f"RELAY_SESSION_SOCKET={SOCKET_DIR}/proxy.sock",
              "-e", f"RELAY_SESSION_CONTROL_SOCKET={SOCKET_DIR}/control.sock", "-e", f"RUNNER_DEADLINE={runner_deadline}",
-             "-e", f"CLEANUP_DEADLINE={cleanup_deadline}", "-e", "AUTOMATION_DIR=/state/run",
+             "-e", f"CLEANUP_DEADLINE={cleanup_deadline}", "-e", "AUTOMATION_DIR=/state/run", *extra,
              "--entrypoint", manifest["entrypoint"][0], manifest["image"], *manifest["entrypoint"][1:]],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         for args in ((runner.stdout, sinks["runner.jsonl"]), (runner.stderr, sinks["runner.err"])):
@@ -418,9 +512,22 @@ class Run:
             ctx["threads"].append(t)
         self.note(stage="runner-started")
         # the run: stop on the Runner's exit, the runner deadline, or an evidence failure
-        self._until(lambda: runner.poll() is not None or self.evidence_failed.is_set(), runner_deadline)
+        def observer_down():
+            if ctx["host"] is not None and not ctx["host"].alive() and not self.observer_fault.is_set():
+                self._on_observer_fault("observer threads not alive (seen by the orchestrator)")
+            return self.observer_fault.is_set()
+
+        self._until(lambda: runner.poll() is not None or self.evidence_failed.is_set() or observer_down(),
+                    runner_deadline)
+        if self.observer_fault.is_set():
+            reason = ctx["host"].fault_reason if ctx["host"] else None
+            if self.observer_lease_lost:
+                self.fail(7, stage="observer", reason=reason)
+            elif not self.evidence_failed.is_set():
+                self.fail(9, stage="observer", reason=reason)
         if runner.poll() is None:
-            why = "evidence" if self.evidence_failed.is_set() else "deadline"
+            why = ("evidence" if self.evidence_failed.is_set() else
+                   "observer" if self.observer_fault.is_set() else "deadline")
             self.note(stage="runner-stop", reason=why, action="SIGTERM")
             ops.docker(["kill", "-s", "TERM", names["runner"]], timeout=20, check=False)
             if not self._until(lambda: runner.poll() is not None, cleanup_deadline - 180):
@@ -435,6 +542,97 @@ class Run:
         if rrc not in (0, None):
             self.fail(8, stage="runner", exit=rrc)
         self.note(stage="runner-exited", exit=rrc)
+
+    # ---------------- the phase A observer (plans/2026-11-27-relay-phase-a-observer-plan.md, section 9)
+    def _observer_prepare(self, ev, names, ctx, runner_deadline, cleanup_deadline) -> bool:
+        """Stage the VERIFIED observer copy and the read-only predecessor volume, build the host from that copy, and
+        run the pre-run holder step under the Lease, before any Relay authority. Every failure here is an observer
+        fault (9), except an interrupt or a Lease loss, which keep their own codes."""
+        plan, ops = self.observer_plan, self.ops
+        try:
+            stage_dir = Path(tempfile.mkdtemp(prefix="relay-observer-"))
+            ctx["observer_dir"] = str(stage_dir)
+            for rel, data in plan["files"].items():  # the bytes verify_observer() hashed: nothing else is executed
+                out = stage_dir / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(data)
+                if hashlib.sha256(out.read_bytes()).hexdigest() != hashlib.sha256(data).hexdigest():
+                    raise Refused("the staged observer copy does not match")
+            ctx["observer_tool_dir"] = str(stage_dir / "scripts")
+            O, C, H = _import_observer(ctx["observer_tool_dir"])
+            ops.docker(["volume", "create", names["pred"]], timeout=30)
+            ctx["pred"] = True
+            ops.docker(["run", "-i", "--rm", "--network", "none", "--mount", f"type=volume,src={names['pred']},dst=/p",
+                        PROXY_IMAGE, "sh", "-c", "umask 077 && cat > /p/report.json && chown 10001:10001 /p "
+                        "/p/report.json && chmod 0400 /p/report.json && chmod 0500 /p"], stdin=plan["predecessor"],
+                       timeout=60)
+            cfg = C.Config.load(plan["files"][plan["config"]],
+                                {k[len("scripts/"):]: v for k, v in plan["files"].items() if k.startswith("scripts/")})
+            kh = Path(self.evidence_dir) / "observer-known_hosts"
+            kh.write_bytes(plan["files"]["scripts/" + cfg.raw["devWorker"]["knownHosts"]])
+            cfg.raw["devWorker"]["knownHosts"] = str(kh)
+            evidence = O.Evidence(str(Path(self.evidence_dir) / "observer.jsonl"))
+            ledger = H.Ledger(os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/state"),
+                                           "relay-operator", "handoff-ledger"), cfg.raw["holder"]["preparationId"])
+            ctx["ledger"] = ledger
+            host = ctx["host"] = H.ObserverHost(
+                gate=None, cfg=cfg, evidence=evidence, on_fault=self._on_observer_fault,
+                run_start_ms=int(ops.now() * 1000), runner_cutoff_ms=int((runner_deadline - 120) * 1000),
+                lease_ok=lambda: lease_held(ops, self.run_id), predecessor_bytes=plan["predecessor"],
+                predecessor_sha256=plan["predecessorSha256"], ledger=ledger)
+            H.prerun(host, O.Budget(min(180_000, int((cleanup_deadline - ops.now()) * 1000)), host.cancelled))
+        except (Interrupted, LeaseLost):
+            raise
+        except Refused as e:
+            self.fail(2, stage="observer-prerun", reason=str(e)[:200])
+            return False
+        except BaseException as e:  # noqa: BLE001 - classified by the observer's own exception type
+            kind = type(e).__name__
+            if kind == "Refuse":  # an existing ledger: refused before any authority
+                self.fail(2, stage="observer-prerun", reason=str(e)[:200])
+            elif kind == "LeaseLostError":
+                raise LeaseLost(str(e)) from e
+            elif kind == "EvidenceFailure":
+                self.evidence_failed.set()
+                self.fail(6, stage="observer-prerun", reason=str(e)[:200])
+            else:
+                self.fail(9, stage="observer-prerun", error=kind, detail=str(e)[:200])
+            return False
+        self.note(stage="observer-prerun", holder=host.state.holder)
+        return True
+
+    def _on_observer_fault(self, reason: str, evidence: bool = False, lease: bool = False) -> None:
+        if evidence:  # the observer's evidence could not be made durable: the broker's evidence path (6)
+            self.evidence_failed.set()
+        if lease:  # the observer found the Lease gone: the broker's Lease path (7)
+            self.observer_lease_lost = True
+        self.observer_fault.set()
+        self.note(stage="observer-fault", reason=str(reason)[:200], evidence=evidence, lease=lease)
+
+    def _observer_start(self, names, ctx, sinks) -> bool:
+        """Start the gate FROM THE VERIFIED COPY, wait for its ready line, start the host threads."""
+        ops, host = self.ops, ctx["host"]
+        try:
+            sinks["observer-gate.err"] = open(Path(self.evidence_dir) / "observer-gate.err", "ab", buffering=0)
+            gate = ctx["gate"] = ops.popen(
+                ["docker", "run", "-i", "--name", names["gate"], "--network", "none", "--read-only", "--cap-drop",
+                 "ALL", "--security-opt", "no-new-privileges", "--log-driver", "none", "--user", UID, "--pids-limit",
+                 "32", "--memory", "64m", "--mount", f"type=bind,src={ctx['observer_tool_dir']},dst=/tool,readonly",
+                 "--mount", f"type=volume,src={names['volume']},dst={SOCKET_DIR}",
+                 PROXY_IMAGE, "python3", "-I", "/tool/relay-observer-gate.py"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            t = threading.Thread(target=self._stream, args=(gate.stderr, sinks["observer-gate.err"]), daemon=True)
+            t.start()
+            ctx["threads"].append(t)
+            host.gate = gate  # its STDOUT frames are parsed in memory only: never streamed or logged raw
+            host.start(ready_timeout=15.0)
+        except (Interrupted, LeaseLost):
+            raise
+        except BaseException as e:  # noqa: BLE001
+            self.fail(9, stage="observer-gate", error=type(e).__name__)
+            return False
+        self.note(stage="observer-ready")
+        return True
 
     def _until(self, cond, deadline: float) -> bool:
         while not cond():
@@ -461,11 +659,31 @@ class Run:
         parts = out.decode(errors="replace").split() if out else []
         return int(parts[1]) if len(parts) == 2 and parts[0] == "false" and parts[1].lstrip("-").isdigit() else None
 
-    def _cleanup(self, names, ctx, sinks):
+    def _cleanup(self, names, ctx, sinks, cleanup_deadline=None):
         ops, proxy, runner = self.ops, ctx["proxy"], ctx["runner"]
+        host = ctx.get("host")
+        if host is not None:
+            host.stop()  # cancel at once: no collector dispatches after this point
         if runner is not None and runner.poll() is None:
             self._stage("runner-kill", lambda: ops.docker(["kill", names["runner"]], timeout=20, check=False))
             self._stage("runner-wait", lambda: self._until(lambda: runner.poll() is not None, ops.now() + 20))
+        gate = ctx.get("gate")
+        idle = True
+        if host is not None:  # bounded by the remaining cleanup time, keeping 300 s for revoke and logout
+            reserve = (cleanup_deadline - 300 - ops.now()) if cleanup_deadline else 10.0
+            idle = self._stage("observer-drain", lambda: host.drain(max(0.0, min(10.0, reserve)))) is True
+            if not idle:  # the worker may still be mid-mutation: say so durably, and keep its ledger and
+                # evidence OPEN so its own receipt can still land; revocation proceeds independently
+                self.fail(9, stage="observer-drain", reason="a collector was still running; ledger and evidence "
+                                                            "stay open for its receipt")
+                if ctx.get("ledger") is not None:
+                    self._stage("observer-ledger-unresolved", lambda: ctx["ledger"].append(
+                        op="cleanup", phase="receipt", outcome="unresolved-worker-still-running"))
+            if host.state.handoff_outcome is not None:
+                self.note(stage="observer-handoff", outcome=host.state.handoff_outcome)
+        if gate is not None and gate.poll() is None:
+            self._stage("observer-gate-stop", lambda: ops.docker(["stop", "-t", "3", names["gate"]], timeout=15,
+                                                                  check=False))
         if proxy is not None and proxy.poll() is None:  # SIGTERM -> drain 5 s + logout 20 s, inside a 45 s grace
             self._stage("proxy-stop", lambda: ops.docker(["stop", "-t", "45", names["proxy"]], timeout=70,
                                                           check=False))
@@ -479,6 +697,7 @@ class Run:
         for t in ctx["threads"]:  # drain the evidence before anything is removed
             self._stage("evidence-join", lambda t=t: t.join(timeout=JOIN_TIMEOUT_S))
             incomplete = incomplete or t.is_alive()
+        self._authority_cleanup(ctx)  # BEFORE every optional stage: nothing below can eat the revoke's time
         if incomplete or self.evidence_failed.is_set():
             self.fail(6, stage="evidence", reason="a log stream failed or did not finish draining")
             for key in ("proxy", "runner"):  # recover what Docker kept, before the containers are removed
@@ -490,10 +709,13 @@ class Run:
                     self._stage(f"{key}-logs-recover", recover)
         for s in sinks.values():
             self._stage("evidence-close", s.close)
-        for key in ("runner", "proxy"):
-            if ctx[key] is not None:
+        for key in ("runner", "proxy", "gate"):
+            if ctx.get(key) is not None:
                 self._stage(f"{key}-remove", lambda k=key: ops.docker(["rm", "-f", names[k]], timeout=30,
                                                                       check=False))
+        if ctx.get("pred"):
+            self._stage("predecessor-volume-remove", lambda: ops.docker(["volume", "rm", "-f", names["pred"]],
+                                                                         timeout=30, check=False))
         self._stage("volume-remove", lambda: ops.docker(["volume", "rm", "-f", names["volume"]], timeout=30,
                                                         check=False))
         if runner is not None:  # export the library's durable store; the volume itself is KEPT
@@ -505,6 +727,20 @@ class Run:
                 return True
             if self._stage("state-export", export) is None:
                 self.fail(6, stage="state-export", volume=names["state"])
+        if host is not None and idle:  # closing under a running worker could lose its last line
+            self._stage("observer-evidence-close", host.ev.close)
+            if ctx.get("ledger") is not None:
+                self._stage("observer-ledger-close", ctx["ledger"].close)
+        if ctx.get("observer_dir") and idle:
+            shutil.rmtree(ctx["observer_dir"], ignore_errors=True)
+        if ctx["leased"]:
+            released = self._stage("lease-release", lambda: lease_release(ops, self.run_id))
+            if released is None:
+                self.fail(7, stage="lease-release", reason="release failed; the Lease expires on its own")
+
+    def _authority_cleanup(self, ctx):
+        """Revoke and the Keycloak logout, right after the work has stopped (only on positive Lease ownership)."""
+        ops = self.ops
         if ctx["granted"] and ctx["subject"]:
             owned = self._stage("lease-secure", lambda: lease_secure(ops, self.run_id, CLEANUP_LEASE_S))
             if owned is True:
@@ -519,11 +755,8 @@ class Run:
             else:
                 self.fail(7, stage="lease", reason="Lease ownership unconfirmed; NOT revoked: the reaper or "
                                                    "`relay-operator.py revoke` must clear it")
-        if ctx["leased"]:
-            released = self._stage("lease-release", lambda: lease_release(ops, self.run_id))
-            if released is None:
-                self.fail(7, stage="lease-release", reason="release failed; the Lease expires on its own")
 
 
-def run_session(ops: Ops, manifest_ref: str, bundle: str, runner_minutes: int, evidence_dir: str) -> int:
-    return Run(ops, manifest_ref, bundle, runner_minutes, evidence_dir).main()
+def run_session(ops: Ops, manifest_ref: str, bundle: str, runner_minutes: int, evidence_dir: str,
+                predecessor_report: str | None = None) -> int:
+    return Run(ops, manifest_ref, bundle, runner_minutes, evidence_dir, predecessor_report).main()

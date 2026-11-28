@@ -945,3 +945,58 @@ no network from the Runner), then rc 0 and `status` 0/0.
 - the observer (`collectCheckpoint`) is merged;
 - the predecessor command-receipt export is accepted by the inference session;
 - the original browser report has been recovered byte-exact.
+
+#### The phase A observer (automated phase A)
+
+Plan: `plans/2026-11-27-relay-phase-a-observer-plan.md`. A `session` whose manifest has an `observer` block
+(`{files, config, predecessorSha256}`) also needs `--predecessor-report FILE`, the preserved original report. Before
+any import, the broker checks every observer file and the report against the manifest's hashes.
+
+**How it works:**
+- **Host collectors.** The observer's collectors run in the broker process, with the operator's own host credentials:
+  `kubectl --context admin@ai` (Router pod reads, read-only `psql`) and `ssh c4@192.168.0.8` (pinned host key). Remote
+  scripts and SQL are piped over stdin from the verified bytes.
+- **Runner side.** The Runner holds no credentials. It reaches the observer only through
+  `relay-observer-gate-<run>`, a `--network none --log-driver none` sidecar serving
+  `/run/relay-session/observer.sock`. The gate frames one request per connection on its stdout. A cancel is
+  terminal.
+- **Files** (`scripts/`):
+  - `relay_phase_a_observer.py`: protocol, threads, transition table, evidence;
+  - `relay_phase_a_collectors.py`: the collectors and the C8 policy;
+  - `relay_phase_a_host.py`: ledger, pre-run, C4 and the probe;
+  - `relay-observer-gate.py`;
+  - `relay-phase-a/`: the client, the entry, `remote/`, `sql/`, `observer-config.json` and `known_hosts`.
+
+**What it changes on dev-worker-1.** These are the observer's only mutations:
+1. **Pre-run** (after the Lease, before any Relay authority): verify the pinned handoff receipt, the units and a
+   journal that ends paused, then start **only** `relay-holder.service`. If the holder comes up unpaused, it is stopped
+   at once.
+2. **C4:** resume admission, then enable both units and start reconciliation. Each step is inside the C3 window and
+   re-checks the Lease first.
+
+Revoking the JIT session does **not** undo the resume. Afterwards the holder and reconciliation stay running and
+enabled, and the renewed credentials stay live.
+
+**The handoff ledger.** It lives at `%LOCALAPPDATA%\relay-operator\handoff-ledger\<preparationId>.jsonl`, outside any
+run directory. Every mutation writes an intent record first and a receipt record after. Each record carries a
+checksum.
+- **Any existing record makes the next observer run refuse (rc 2). There is no automatic re-entry.**
+- **Recovery:** classify the previous attempt read-only, using its receipts, `observer-probe` and the holder journal
+  (`journal.jsonl` names the operationId of every admission change). Then move the ledger aside, by hand, with the
+  classification recorded beside it.
+
+**Exit code 9** means an observer internal fault: gate or thread death, a protocol violation, or a pre-run failure.
+Its cause is in `result.json` and `observer.jsonl`. A failed evidence check is a phase A outcome, not code 9: the
+Runner stops, and the broker returns 8.
+
+**Read-only probe:** `python scripts/relay-operator.py observer-probe`. It needs no session, no Lease and no holder
+start. It checks every source with its latency: hub deployment, the Router pod and capture config, the trajectory
+envelopes, the marker baselines, the routes, the clock bounds, every SQL shape, the pre-run facts, the native
+transcript format and the predecessor staging. The 2026-11-27 run: 22/22 checks passed, each call 0.2–1.3 s. A check passes only when its result establishes the fact.
+
+**Open gates** (the collectors answer `unsupported`, and the run stops there):
+- **C10 (`reconcile-choice`):** the inference session must name the authoritative reconstruction-required field.
+- **C11 (`retire-branch`):** the settings-applied receipt and the probe's refusal must be established from
+  authoritative, correlated records.
+- **The predecessor projection:** it needs the driver change to the pinned-hash contract.
+- **The phase A bundle manifest:** it needs #2060 on main.
