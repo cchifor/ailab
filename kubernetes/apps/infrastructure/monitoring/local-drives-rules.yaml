@@ -2,7 +2,8 @@
 # protection) holding the host's root and swap and the local-lvm thin pool, with every local guest disk on it
 # (etcd's included). Dashboard: Local Drives (uid ailab-local-drives, scripts/gen-local-drives-dashboard.py).
 #
-# Already alerted elsewhere, so not here: rated wear >= 95% (AiNodeNvmeWearHigh, ci-runners-rules.yaml), the
+# Already alerted elsewhere, so not here: rated wear >= 95% (AiNodeNvmeWearHigh, ci-runners-rules.yaml; info only
+# since 2026-11-28: the drives run to failure, so these failure signals are the actionable ones), the
 # controller temperature (ProxmoxNvmeTemperatureHigh, control-plane-storage-rules.yaml), the thin pool's fill
 # (thin-pool-rules.yaml), the etcd members' fsync and commit latency (the kube-prometheus-stack etcd rules).
 #
@@ -17,7 +18,7 @@
 # - ProxmoxNvmeMediaErrors (warning): the drive reported new unrecovered data-integrity errors in the last 24 h.
 #   It fires for 24 h after each new error and then resolves, so a past error does not page forever.
 # - ProxmoxNvmeSmartMetricsStale (warning): nvme.prom is older than 1 h (four missed runs) or missing while the
-#   host's node_exporter is up. Without it, AiNodeNvmeWearHigh (the ADR 0042 trigger) and the two rules above
+#   host's node_exporter is up. Without it, AiNodeNvmeWearHigh (the ADR 0042 wear marker) and the two rules above
 #   judge stale numbers or nothing at all.
 # Fixtures: local-drives-rules.test.yaml.
 apiVersion: monitoring.coreos.com/v1

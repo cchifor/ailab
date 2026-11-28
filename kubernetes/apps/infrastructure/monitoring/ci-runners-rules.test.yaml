@@ -408,7 +408,7 @@ tests:
               description: 'gitea_runner_fstrim_in_flight has been 1 on 192.168.0.14:9100 for longer than any run can take (the longest window plus the kill allowance and the stuck grace): a fstrim was never reaped, so it may still be discarding outside its window. Check `pgrep -a fstrim` and `journalctl -u gitea-runner-fstrim.service`; with CIRunnerFstrimStuck, see that alert.'
 
   - interval: 1m
-    name: an ai-node drive at 95% rated wear for 1h fires AiNodeNvmeWearHigh; 94% and a cloud drive do not
+    name: an ai-node drive at 95% rated wear for 1h fires AiNodeNvmeWearHigh at info (run to failure); 94% and a cloud drive do not
     input_series:
       - series: 'nvme_percentage_used_ratio{job="proxmox-node", device="nvme0n1", instance="192.168.0.2:9100"}'
         values: '0.95x80'
@@ -424,10 +424,10 @@ tests:
         alertname: AiNodeNvmeWearHigh
         exp_alerts:
           - exp_labels:
-              severity: warning
+              severity: info
               job: proxmox-node
               device: nvme0n1
               instance: 192.168.0.2:9100
             exp_annotations:
               summary: "ai-node NVMe on 192.168.0.2:9100 has used 95% of its rated endurance"
-              description: "The shared NVMe on 192.168.0.2:9100 (etcd, CI runners, dev workers) has passed 95% of its rated write endurance. Per ADR 0042, pause this node's CI runners in Gitea and tell the owner. Passing 100% is not failure, but the risk of the drive going read-only rises."
+              description: "The shared NVMe on 192.168.0.2:9100 (etcd, CI runners, dev workers) has passed 95% of its rated write endurance. Informational: per ADR 0042 (amended 2026-11-28) the drives run to failure, so wear alone needs no action. Act on ProxmoxNvmeCriticalWarning, ProxmoxNvmeMediaErrors or ProxmoxNvmeSmartMetricsStale."

@@ -135,6 +135,12 @@ class ObserverHost(Host):
     def runner_cutoff_ms(self) -> int:
         return self._cutoff
 
+    def extend_inflight(self, seconds: float) -> None:
+        """A bounded post-failure readback may outlive the request budget: move the supervisor's stall line."""
+        with self.lock:
+            if self.inflight is not None:
+                self.inflight = (self.inflight[0], max(self.inflight[1], __import__("time").monotonic() + seconds))
+
     def predecessor_ok(self) -> bool:
         return sha256_bytes(self.predecessor_bytes) == self.predecessor_sha256
 
@@ -234,8 +240,9 @@ def prerun(host: ObserverHost, budget) -> dict:
         host.ledger.append(op="pre-run-start", phase="receipt", outcome="not-started-lease-lost")
         raise LeaseLostError("the Lease was lost before the start")
     try:
-        # the remote run gets 120 s, of which dw.py always keeps STOP_RESERVE_S for a verified stop
-        started = host.remote.dw(["mutate-start-holder", h["stateDir"], "120"], budget, obs, "mutate-start-holder",
+        # dw.py's own deadline (110 s, of which it always keeps STOP_RESERVE_S for a verified stop) ends well inside
+        # the ssh-side `timeout` (cap 130 - 4 = 126 s), so the remote bound never cuts containment short
+        started = host.remote.dw(["mutate-start-holder", h["stateDir"], "110"], budget, obs, "mutate-start-holder",
                                  cap=130)
     except BaseException as e:  # noqa: BLE001 - a lost response: classify on the host, contain if unpaused
         outcome = _classify_start(host, obs)
@@ -245,9 +252,11 @@ def prerun(host: ObserverHost, budget) -> dict:
             host.ev.write(event="pre-run", outcome=outcome, observations=obs)
         except EvidenceFailure:
             pass
-        if not isinstance(e, Exception):  # an interrupt keeps its own classification, after the receipt
-            raise
-        raise Fault("the holder start response was lost (" + outcome + ")") from e
+        # Only the observer's own failure types become an observer Fault; anything else (the broker's Interrupted, a
+        # KeyboardInterrupt, a Lease loss) keeps its own classification, after the receipt above.
+        if isinstance(e, (Deadline, Failed, Fault, OSError, ValueError)) and not isinstance(e, LeaseLostError):
+            raise Fault("the holder start response was lost (" + outcome + ")") from e
+        raise
     hrec = started.get("holder") or {}
     status, hello = hrec.get("status"), hrec.get("hello")
     if started.get("paused") is not True:
@@ -278,7 +287,8 @@ def _classify_start(host, obs) -> str:
     rec, active = None, None
     for _ in range(6):
         try:
-            rec = host.remote.dw(["holder", host.cfg.raw["holder"]["stateDir"]], b, obs, "classify-holder", cap=50)
+            rec = host.remote.dw(["holder", host.cfg.raw["holder"]["stateDir"]], b, obs, "classify-holder", cap=50,
+                                 deadline_arg=True)
         except BaseException:  # noqa: BLE001
             return "unknown-unreadable"
         active = rec["units"]["relay-holder.service"]["active"]
@@ -317,20 +327,24 @@ def c_preserving_holder(host: ObserverHost, req, ctx, budget, gate_now, obs):
     op = str(uuid.uuid4())
     stage = None
     try:
-        cap = host.mutation_cap(budget, 40)
+        cap = host.mutation_cap(budget, 45)
+        need(cap >= 40, "too little time for a bounded resume", Failed)
         stage = "resume"
         host.ledger.append(op="resume", phase="intent", operationId=op, revision=rev)
-        res = host.remote.dw(["mutate-resume", h["stateDir"], str(rev), op], budget, obs, "mutate-resume", cap=cap)
+        # the mode's own deadline is inside the ssh-side bound (cap - 4): its steps never outlive the remote timeout
+        res = host.remote.dw(["mutate-resume", h["stateDir"], str(rev), op, str(int(cap - 8))], budget, obs,
+                             "mutate-resume", cap=cap)
         jr = (res.get("journal") or {}).get("admission") or {}
         ok = res.get("resumed") is True and (res.get("status") or {}).get("admissionPaused") is False \
             and jr.get("paused") is False and jr.get("operationId") == op
         host.ledger.append(op="resume", phase="receipt", outcome="ok" if ok else "failed", operationId=op)
         stage = None
         need(ok, "the resume was not confirmed by status and journal", Failed)
-        cap = host.mutation_cap(budget, 30)
+        cap = host.mutation_cap(budget, 40)
+        need(cap >= 32, "too little time for a bounded enable-start", Failed)
         stage = "enable-start"
         host.ledger.append(op="enable-start", phase="intent")
-        es = host.remote.dw(["mutate-enable-start"], budget, obs, "mutate-enable-start", cap=cap)
+        es = host.remote.dw(["mutate-enable-start"], budget, obs, "mutate-enable-start", cap=cap, deadline_arg=True)
         ru = (es.get("units") or {}).get("relay-holder-control-plane.service") or {}
         hu = (es.get("units") or {}).get("relay-holder.service") or {}
         ok = es.get("enabled") is True and es.get("started") is True and ru.get("active") == "active" \
@@ -385,7 +399,9 @@ def _classify_handoff(host, obs, op: str) -> dict:
     from relay_phase_a_observer import Budget
     b = Budget(45_000, threading.Event())
     try:
-        rec = host.remote.dw(["holder", host.cfg.raw["holder"]["stateDir"]], b, obs, "classify-handoff", cap=40)
+        host.extend_inflight(50)  # the supervisor must not mistake this bounded readback for a hung collector
+        rec = host.remote.dw(["holder", host.cfg.raw["holder"]["stateDir"]], b, obs, "classify-handoff", cap=40,
+                             deadline_arg=True)
         st = rec.get("status") or {}
         adm = (rec.get("journal") or {}).get("admission") or {}
         return {"holder": rec["units"]["relay-holder.service"]["active"],

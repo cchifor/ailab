@@ -419,11 +419,12 @@ class ActualReaderRemote(T.FakeRemote):
             'branch-identity':{'captureLevel':'metadata','captureSha256':'c'*64,'storeSha256':self.branch['storeSha256']}})
         fixture.h.state.router_pod = {'uid':T.POD['uid'],'restarts':0,'capture':'c'*64,'store':self.branch['storeSha256']}
 
-    def dw(self,args,budget,obs,what,cap=60.0):
+    def dw(self,args,budget,obs,what,cap=60.0,deadline_arg=False):
         if args[0]=='native-checkpoint':
+            assert deadline_arg is False  # this reader's typed CLI takes only the bound identities
             self.calls.append(what)
             return D.native_checkpoint(*args[1:])
-        return super().dw(args,budget,obs,what,cap)
+        return super().dw(args,budget,obs,what,cap,deadline_arg=deadline_arg)
 
     def router(self,args,budget,obs,what,cap=60.0,pod=None):
         if args[0]=='branch':
