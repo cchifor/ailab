@@ -101,7 +101,8 @@ function completedBFences(previous) {
   need(
     proof?.phases?.length === 2 &&
       Array.isArray(proof.operations) &&
-      proof.operations.length === 12 &&
+      proof.operations.length ===
+        bFence.ROWS.lifecycle.length + bFence.ROWS.effort.length + 2 &&
       proof.operations.every(
         (op) => op.status === "committed" && op.cleanup === false && op.receipt,
       ),
@@ -119,7 +120,8 @@ function completedBFences(previous) {
   );
   let prior = null,
     attempts = proof.initial.attempts,
-    unknown = proof.initial.tokenUsageUnknown;
+    unknown = proof.initial.tokenUsageUnknown,
+    operationOffset = 0;
   for (const [i, phase] of proof.phases.entries()) {
     const run = previous.runs[i],
       name = i ? "effort" : "lifecycle";
@@ -172,6 +174,11 @@ function completedBFences(previous) {
             plan.fenceId !== prior.plan.fenceId
           : plan.predecessorFenceId === undefined),
       "B closed phase/receipt/plan differs",
+    );
+    need(
+      Array.isArray(fence.completed) &&
+        fence.completed.length === rows.length - 1,
+      "B completed row count differs",
     );
     const closes = proof.operations.filter(
       (op) => op.receipt.operationId === receipt.operationId,
@@ -243,6 +250,16 @@ function completedBFences(previous) {
         },
         terminal.observedAt,
       );
+      if (index < rows.length - 1) {
+        const completed = fence.completed[index];
+        need(
+          completed?.rowId === row.id &&
+            completed.used === row.attempts &&
+            completed.retiredUnused === rows[index].limit - row.attempts &&
+            completed.terminalEvidenceSha256 === digest(terminal),
+          "B completed row counters/terminal digest differ",
+        );
+      }
       used += row.attempts;
       rowUnknown = row.tokenUsageUnknown;
     }
@@ -255,6 +272,95 @@ function completedBFences(previous) {
         receipt.committedAt - phase.rows.at(-1).terminal.observedAt < 120000,
       "B raw/admitted final counters or close terminal differ",
     );
+    // Bind the retained arm and every advance to the same ordered history.
+    // A self-consistent final close cannot authenticate a changed earlier row.
+    const phaseOperations = proof.operations.slice(
+      operationOffset,
+      operationOffset + rows.length + 1,
+    );
+    need(
+      eq(phaseOperations.at(-1), operation),
+      "B phase operation order differs",
+    );
+    let revision = prior?.revision ?? 0;
+    for (let index = 0; index < rows.length; index++) {
+      const op = phaseOperations[index],
+        committed = op.receipt,
+        state = committed.fence,
+        raw = JSON.parse(op.raw),
+        row = phase.rows[index],
+        previousRow = phase.rows[index - 1],
+        expectedUnknown = previousRow?.tokenUsageUnknown ?? unknown;
+      const action = index ? "attempt-fence-advance" : "attempt-fence-arm";
+      const bodyHash = createHash("sha256").update(op.raw).digest("hex");
+      need(
+        raw.version === 1 &&
+          raw.action === action &&
+          uuid(raw.operationId) &&
+          raw.operationId === committed.operationId &&
+          raw.keyId === credential.key &&
+          raw.fenceId === plan.fenceId &&
+          raw.expectedFenceRevision === revision &&
+          raw.expectedAttempts === row.before &&
+          raw.expectedUnknownUsage === expectedUnknown &&
+          op.bodySha256 === bodyHash &&
+          committed.requestDigest === bodyHash &&
+          op.requestDigest === bFence.binding(op.raw) &&
+          committed.version === 1 &&
+          committed.action === action &&
+          committed.attempts === row.before &&
+          committed.tokenUsageUnknown === expectedUnknown &&
+          committed.coveredFrom === proof.initial.keyCreatedAt &&
+          committed.openRequests === 0 &&
+          committed.staleOpenRequests === 0 &&
+          committed.unattributed === 0 &&
+          integer(committed.committedAt) &&
+          committed.committedAt > 0 &&
+          committed.committedAt <= row.terminal.observedAt &&
+          state?.v === 1 &&
+          state.keyId === fence.keyId &&
+          state.tenant === fence.tenant &&
+          state.issuer === fence.issuer &&
+          eq(state.plan, plan) &&
+          state.revision === revision + 1 &&
+          state.activeRow === index &&
+          state.closedAt === undefined &&
+          state.baselineAttempts === attempts &&
+          state.baselineTokenUsageUnknown === unknown &&
+          state.rowStartAttempts === row.before &&
+          state.rowStartTokenUsageUnknown === expectedUnknown &&
+          state.createdAt === fence.createdAt &&
+          eq(state.completed, fence.completed.slice(0, index)),
+        "B arm/advance bytes/receipt/counters differ",
+      );
+      if (index) {
+        need(
+          raw.completedRowId === previousRow.id &&
+            raw.nextRowId === row.id &&
+            raw.terminalEvidenceSha256 === digest(previousRow.terminal) &&
+            committed.committedAt >= previousRow.terminal.observedAt,
+          "B advance row/terminal differs",
+        );
+      } else {
+        const {
+          version,
+          action,
+          operationId,
+          keyId,
+          expectedAttempts,
+          expectedUnknownUsage,
+          expectedFenceRevision,
+          ...armedPlan
+        } = raw;
+        need(
+          eq(armedPlan, plan) && state.createdAt === committed.committedAt,
+          "B arm plan differs",
+        );
+      }
+      revision = state.revision;
+    }
+    need(body.expectedFenceRevision === revision, "B close revision differs");
+    operationOffset += phaseOperations.length;
     attempts = receipt.attempts;
     unknown = receipt.tokenUsageUnknown;
     prior = fence;

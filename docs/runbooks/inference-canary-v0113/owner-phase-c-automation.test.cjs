@@ -9,6 +9,7 @@ const { EventEmitter } = require("node:events");
 const { createHash } = require("node:crypto");
 const {
   host,
+  assertIsolated,
   runPhaseCCli,
   report,
   reportRaw,
@@ -203,3 +204,5 @@ test("actual C CLI reads private inputs but retains the source qualification ref
     report,
   );
 });
+
+test.after(() => assertIsolated());

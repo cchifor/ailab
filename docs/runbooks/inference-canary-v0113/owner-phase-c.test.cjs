@@ -2,9 +2,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { webcrypto, createHash } = require("node:crypto");
-const a = require("./owner-phase-a.js");
-const b = require("./owner-phase-b.js");
 const {
+  a,
+  b,
+  fence,
+  historicalGraph,
+  assertIsolated,
   c,
   report,
   reportRaw,
@@ -1497,102 +1500,118 @@ test("actual emitted fenced B report enters C unchanged under the explicit histo
   assert.equal(c.inputs(value, NOW).phaseBReportSha256, proof.reportSha256);
 });
 
-for (const [name, edit] of [
+for (const [name, edit, reason] of [
   [
     "legacy unfenced status",
     (r) => {
       r.runs[0].status = "passed-with-live-wire-unobserved";
     },
+    "B lifecycle/effort prerequisite incomplete",
   ],
   [
     "missing fence proof",
     (r) => {
       delete r.attemptFence;
     },
+    "B fence operations incomplete or unresolved",
   ],
   [
     "unclosed phase",
     (r) => {
       r.attemptFence.phases[0].closed = false;
     },
+    "B closed phase/receipt/plan differs",
   ],
   [
     "missing close receipt",
     (r) => {
       delete r.attemptFence.phases[0].closeReceipt;
     },
+    "B closed phase/receipt/plan differs",
   ],
   [
     "wrong phase run",
     (r) => {
       r.attemptFence.phases[1].runId = r.runs[0].runId;
     },
+    "B closed phase/receipt/plan differs",
   ],
   [
     "unfinished fence operation",
     (r) => {
       r.attemptFence.operations[0].status = "uncertain";
     },
+    "B fence operations incomplete or unresolved",
   ],
   [
     "cleanup close substituted",
     (r) => {
       r.attemptFence.operations.at(-1).cleanup = true;
     },
+    "B fence operations incomplete or unresolved",
   ],
   [
     "missing settled row",
     (r) => {
       r.attemptFence.phases[0].rows.pop();
     },
+    "B closed phase/receipt/plan differs",
   ],
   [
     "unsettled row",
     (r) => {
       r.attemptFence.phases[0].rows[0].settled = false;
     },
+    "B row accounting/terminal proof incomplete",
   ],
   [
     "raw counter mismatch",
     (r) => {
       r.runs[1].lastSnapshot.totalAttempts++;
     },
+    "B raw/admitted final counters or close terminal differ",
   ],
   [
     "pending native work",
     (r) => {
       r.attemptFence.phases[0].rows[0].terminal.nativeRequests.push("pending");
     },
+    "Attempt fence: native/client work remains or is unknown",
   ],
   [
     "open close receipt",
     (r) => {
       r.attemptFence.phases[0].closeReceipt.openRequests = 1;
     },
+    "B closed phase/receipt/plan differs",
   ],
   [
     "mismatched committed receipt",
     (r) => {
       r.attemptFence.operations.at(-1).receipt.attempts++;
     },
+    "B close receipt is not its committed operation",
   ],
   [
     "changed close raw bytes",
     (r) => {
       r.attemptFence.operations.at(-1).raw += " ";
     },
+    "B close bytes/receipt digest differ",
   ],
   [
     "foreign final fence",
     (r) => {
       r.attemptFence.current.plan.fenceId = ID(90);
     },
+    "B final fence changed after phase close",
   ],
   [
     "phase ID reuse",
     (r) => {
       r.runs[1].runId = r.runs[0].runId;
     },
+    "B phase run IDs collide",
   ],
 ])
   test("C rejects fenced B report with " + name, () => {
@@ -1600,5 +1619,178 @@ for (const [name, edit] of [
       changed = JSON.parse(reportRaw);
     edit(changed);
     value.phaseBReportRaw = JSON.stringify(changed);
-    assert.throws(() => c.inputs(value, NOW));
+    assert.throws(() => c.inputs(value, NOW), { message: reason });
+  });
+
+for (const [name, edit, reason] of [
+  [
+    "changed intermediate terminal",
+    (r) => {
+      const row = r.attemptFence.phases[0].rows[0];
+      row.terminal.completedOperationIds = [];
+      row.terminal.terminalPrompts = [];
+    },
+    /B completed row counters\/terminal digest differ/,
+  ],
+  [
+    "redistributed intermediate attempts",
+    (r) => {
+      const rows = r.attemptFence.phases[0].rows;
+      rows[0].attempts = 0;
+      rows[1].attempts = 2;
+      rows[1].before--;
+      rows[1].rawBefore--;
+    },
+    /B completed row counters\/terminal digest differ/,
+  ],
+  [
+    "changed advance terminal",
+    (r) => {
+      const op = r.attemptFence.operations[1],
+        body = JSON.parse(op.raw);
+      body.terminalEvidenceSha256 = SHA;
+      op.raw = JSON.stringify(body);
+      op.bodySha256 = createHash("sha256").update(op.raw).digest("hex");
+      op.receipt.requestDigest = op.bodySha256;
+      op.requestDigest = fence.binding(op.raw);
+    },
+    /B advance row\/terminal differs/,
+  ],
+])
+  test("C binds B row evidence: " + name, () => {
+    const value = input(),
+      changed = JSON.parse(reportRaw);
+    edit(changed);
+    value.phaseBReportRaw = JSON.stringify(changed);
+    assert.throws(() => c.inputs(value, NOW), reason);
+  });
+
+test("historical B graph remains isolated across a legitimate current Router repin", () => {
+  const fs = require("node:fs"),
+    path = require("node:path");
+  const original = fs.readFileSync(
+    path.join(__dirname, "owner-phase-b.js"),
+    "utf8",
+  );
+  const repinned = original.replace(
+    proof.substitution.before,
+    '  router: "' + "9".repeat(40) + '",',
+  );
+  assert.notEqual(repinned, original);
+  const graph = historicalGraph(repinned);
+  assert.equal(graph.b.PINS.router, report.router);
+  assert.equal(
+    graph.c.inputs(input(), NOW).phaseBReportSha256,
+    proof.reportSha256,
+  );
+  assert.equal(
+    graph.proof.substitution.before,
+    '  router: "' + "9".repeat(40) + '",',
+  );
+  assert.equal(
+    graph.proof.bSourceSha256,
+    createHash("sha256").update(repinned).digest("hex"),
+  );
+  assert.equal(graph.proof.liveQualified, false);
+  assert.deepEqual(graph.assertIsolated(), assertIsolated());
+  assert.notEqual(graph.b, b);
+  assert.notEqual(graph.a, a);
+  assert.notEqual(
+    graph.host,
+    require("./owner-phase-c-b-report-fixture.cjs").host,
+  );
+});
+
+test.after(() => assertIsolated());
+
+function changeClosedHistory(value, edit) {
+  const phase = value.attemptFence.phases[0];
+  edit(phase.closeReceipt.fence);
+  const close = value.attemptFence.operations.find(
+    (op) => op.receipt.operationId === phase.closeReceipt.operationId,
+  );
+  close.receipt = clone(phase.closeReceipt);
+}
+for (const [name, edit, reason] of [
+  [
+    "missing completion",
+    (f) => f.completed.pop(),
+    "B completed row count differs",
+  ],
+  [
+    "extra completion",
+    (f) => f.completed.push(clone(f.completed[0])),
+    "B completed row count differs",
+  ],
+  [
+    "reordered completion",
+    (f) => f.completed.reverse(),
+    "B completed row counters/terminal digest differ",
+  ],
+  [
+    "different used counter",
+    (f) => f.completed[0].used++,
+    "B completed row counters/terminal digest differ",
+  ],
+  [
+    "different retired allowance",
+    (f) => f.completed[0].retiredUnused++,
+    "B completed row counters/terminal digest differ",
+  ],
+  [
+    "different terminal digest",
+    (f) => (f.completed[0].terminalEvidenceSha256 = SHA),
+    "B completed row counters/terminal digest differ",
+  ],
+])
+  test("C rejects committed B history with " + name, () => {
+    const changed = JSON.parse(reportRaw);
+    changeClosedHistory(changed, edit);
+    assert.throws(
+      () =>
+        c.inputs({ ...input(), phaseBReportRaw: JSON.stringify(changed) }, NOW),
+      { message: reason },
+    );
+  });
+
+for (const [name, index, edit, reason] of [
+  [
+    "wrong completed row",
+    1,
+    (body) => (body.completedRowId = "denied"),
+    "B advance row/terminal differs",
+  ],
+  [
+    "wrong next row",
+    1,
+    (body) => (body.nextRowId = "approved"),
+    "B advance row/terminal differs",
+  ],
+  [
+    "wrong original arm plan",
+    0,
+    (body) => (body.selection.model = "foreign"),
+    "B arm plan differs",
+  ],
+  [
+    "wrong advance counter",
+    1,
+    (body) => body.expectedAttempts++,
+    "B arm/advance bytes/receipt/counters differ",
+  ],
+])
+  test("C rejects rehashed B operation with " + name, () => {
+    const changed = JSON.parse(reportRaw),
+      op = changed.attemptFence.operations[index],
+      body = JSON.parse(op.raw);
+    edit(body);
+    op.raw = JSON.stringify(body);
+    op.bodySha256 = createHash("sha256").update(op.raw).digest("hex");
+    op.receipt.requestDigest = op.bodySha256;
+    op.requestDigest = fence.binding(op.raw);
+    assert.throws(
+      () =>
+        c.inputs({ ...input(), phaseBReportRaw: JSON.stringify(changed) }, NOW),
+      { message: reason },
+    );
   });
