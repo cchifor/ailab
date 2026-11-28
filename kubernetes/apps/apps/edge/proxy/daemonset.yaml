@@ -136,7 +136,7 @@ spec:
         - name: cert-probe
           # Reads the certificate this pod's Caddy SERVES (TLS to localhost), which no other signal can
           # see when a node's Secret projection goes stale. cert-probe.sh has the details.
-          image: alpine/openssl:3.5.9@sha256:9698e7956c08e713265da24c4587205beba3eaa6af2b319d73575d30a6ff033e
+          image: alpine/openssl:3.5.9@sha256:b5d60ce9b9a318fa4efda9b0cd2111fa1e536342072885e8e2ce37c40f653ed9
           imagePullPolicy: IfNotPresent
           command: [sh, /etc/caddy/cert-probe.sh]
           env:
