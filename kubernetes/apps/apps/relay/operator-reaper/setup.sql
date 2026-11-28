@@ -1,7 +1,7 @@
 -- The relay-operator-reaper's database objects (idempotent). Run as the postgres superuser by the Job
 -- relay-operator-reaper-setup, with psql variable :pw (the reaper role's password from its SOPS Secret).
 --
--- ops.relay_operator_reap() deletes ONLY the JIT automation identity's Relay sessions and memberships (the subject is
+-- ops.relay_operator_reap(bigint) deletes ONLY the JIT automation identity's Relay sessions and memberships (the subject is
 -- a literal here, not a parameter), runs as relay_owner (SECURITY DEFINER, fixed search_path, bounded locks), and
 -- returns the counts. The login role relay_operator_reaper may execute that one function and nothing else.
 \set ON_ERROR_STOP on
@@ -12,7 +12,7 @@ REVOKE ALL ON SCHEMA ops FROM PUBLIC;
 
 -- Retire the old entry point: it has no deadline and must not remain callable.
 DROP FUNCTION IF EXISTS ops.relay_operator_reap();
-CREATE OR REPLACE FUNCTION ops.relay_operator_reap(lease_expires bigint)
+CREATE OR REPLACE FUNCTION ops.relay_operator_reap(fence bigint)
   RETURNS TABLE (sessions_deleted bigint, memberships_deleted bigint)
   LANGUAGE plpgsql
   SECURITY DEFINER
@@ -26,10 +26,10 @@ DECLARE
 BEGIN
   -- Check on the database clock after connection/dispatch, not at container startup.
   -- 45s permit margin covers connect10s + transaction25s with margin.
-  IF lease_expires IS NULL OR lease_expires < extract(epoch FROM clock_timestamp()) + 30
+  IF fence IS NULL OR fence < extract(epoch FROM clock_timestamp()) + 30
      -- This upper limit is only a sanity bound. The guard pins the original node expiry;
      -- allow modest node/DB sampling skew here without extending that expiry or the lower bound.
-     OR lease_expires > extract(epoch FROM clock_timestamp()) + 180 + 30 THEN
+     OR fence > extract(epoch FROM clock_timestamp()) + 180 + 30 THEN
     RAISE EXCEPTION 'reaper Lease deadline refused';
   END IF;
   DELETE FROM public.sessions
@@ -40,7 +40,7 @@ BEGIN
    WHERE user_id IN (SELECT id FROM public.users
                       WHERE subject = 'https://id.chifor.me/realms/relay|72e99c0a-fce0-42f1-8e2a-af1363b5aa4f');
   GET DIAGNOSTICS m = ROW_COUNT;
-  IF extract(epoch FROM clock_timestamp()) >= lease_expires THEN
+  IF extract(epoch FROM clock_timestamp()) >= fence THEN
     RAISE EXCEPTION 'reaper Lease expired; rolling back';
   END IF;
   RETURN QUERY SELECT s, m;

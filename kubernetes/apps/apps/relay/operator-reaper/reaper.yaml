@@ -2,7 +2,7 @@
 # (plans/2026-11-27-relay-operator-session-plan.md, section 3; docs/runbooks/relay.md, "Operator automation identity").
 # `relay-operator.py session|call` grants admin under the fenced Lease `relay-operator-jit` and revokes it in a finally;
 # if the orchestrator dies (SIGKILL, workstation loss), the membership would stand. Every 5 minutes this CronJob takes
-# the same Lease ONLY when no live holder has it, and calls ops.relay_operator_reap() (a fixed-subject SECURITY DEFINER
+# the same Lease ONLY when no live holder has it, and calls ops.relay_operator_reap(expiry) (a fixed-subject SECURITY DEFINER
 # function: it can delete that identity's sessions and memberships and nothing else), then releases the Lease.
 # Best-effort: bounded by the scheduler, the API server and the database; RelayOperatorReaper* alerts say when it is not.
 apiVersion: v1

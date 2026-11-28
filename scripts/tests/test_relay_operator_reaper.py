@@ -17,10 +17,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 RELAY = ROOT / "kubernetes" / "apps" / "apps" / "relay"
+REAPER = RELAY / "operator-reaper"
 
 
 def load_lease(go_file):
-    spec = importlib.util.spec_from_file_location("lease", RELAY / "operator-reaper" / "lease.py")
+    spec = importlib.util.spec_from_file_location("lease", REAPER / "lease.py")
     m = importlib.util.module_from_spec(spec)
     with patch.dict(os.environ, {"REAPER_GO_FILE": go_file}):
         spec.loader.exec_module(m)
@@ -63,11 +64,14 @@ class LeaseScript(unittest.TestCase):
         self.m.api = api
         return self.m.take()
 
-    def test_absent_lease_is_taken(self):
+    def test_absent_lease_is_taken_and_the_fence_is_its_expiry(self):
         api = FakeAPI()
         self.assertEqual(self.run_take(api), 0)
         self.assertTrue(os.path.exists(self.go))
         self.assertEqual(api.lease["spec"]["holderIdentity"], self.m.HOLDER)
+        record = json.loads(Path(self.go).read_text())
+        self.assertEqual((record["holder"], record["expiresAt"]),
+                         (self.m.HOLDER, int(self.m.expires(api.lease))))
 
     def test_live_lease_is_never_touched(self):
         api = FakeAPI(lease_of("session-abc", time.time() + 600))
@@ -165,7 +169,7 @@ class LeaseScript(unittest.TestCase):
         executable = root / "psql"
         executable.write_text("#!/bin/sh\ncat > \"$CAPTURE\"\nprintf '1 1\\n'\n")
         executable.chmod(0o755)
-        docs = list(yaml.safe_load_all((RELAY / "operator-reaper.yaml").read_text()))
+        docs = list(yaml.safe_load_all((REAPER / "reaper.yaml").read_text()))
         pod = next(d for d in docs if d["kind"] == "CronJob")["spec"]["jobTemplate"]["spec"]["template"]["spec"]
         command = next(c for c in pod["containers"] if c["name"] == "reap")["command"][-1]
         command = command.replace("/work/", str(root) + "/")
@@ -190,7 +194,7 @@ class LeaseScript(unittest.TestCase):
         executable = root / "psql"
         executable.write_text("#!/bin/sh\nexit 1\n")
         executable.chmod(0o755)
-        docs = list(yaml.safe_load_all((RELAY / "operator-reaper.yaml").read_text()))
+        docs = list(yaml.safe_load_all((REAPER / "reaper.yaml").read_text()))
         pod = next(d for d in docs if d["kind"] == "CronJob")["spec"]["jobTemplate"]["spec"]["template"]["spec"]
         command = next(c for c in pod["containers"] if c["name"] == "reap")["command"][-1]
         child = subprocess.run(["sh", "-c", command.replace("/work/", str(root) + "/")],
@@ -223,7 +227,9 @@ class LeaseScript(unittest.TestCase):
 
 class Manifest(unittest.TestCase):
     def setUp(self):
-        self.docs = [d for d in yaml.safe_load_all((RELAY / "operator-reaper.yaml").read_text()) if d]
+        self.docs = [d for d in yaml.safe_load_all((REAPER / "reaper.yaml").read_text()) if d]
+        self.cron = self.kind("CronJob")[0]
+        self.pod = self.cron["spec"]["jobTemplate"]["spec"]["template"]["spec"]
 
     def kind(self, k):
         return [d for d in self.docs if d["kind"] == k]
@@ -235,7 +241,7 @@ class Manifest(unittest.TestCase):
     def test_password_is_not_a_psql_argument(self):
         command = self.kind("Job")[0]["spec"]["template"]["spec"]["containers"][0]["command"]
         self.assertNotIn('pw="$REAPER_PASSWORD"', " ".join(command))
-        self.assertIn("\\getenv pw REAPER_PASSWORD", (RELAY / "operator-reaper" / "setup.sql").read_text())
+        self.assertIn("\\getenv pw REAPER_PASSWORD", (REAPER / "setup.sql").read_text())
 
     def test_database_container_has_no_service_account_token(self):
         pod = self.kind("CronJob")[0]["spec"]["jobTemplate"]["spec"]["template"]["spec"]
@@ -268,7 +274,7 @@ class Manifest(unittest.TestCase):
         self.assertEqual(named[0]["resourceNames"], ["relay-operator-jit"])
 
     def test_setup_sql_pins_the_subject(self):
-        sql = (RELAY / "operator-reaper" / "setup.sql").read_text()
+        sql = (REAPER / "setup.sql").read_text()
         self.assertEqual(sql.count("subject = 'https://id.chifor.me/realms/relay|72e99c0a-fce0-42f1-8e2a-af1363b5aa4f'"),
                          2)
         self.assertIn("SECURITY DEFINER", sql)
@@ -277,11 +283,48 @@ class Manifest(unittest.TestCase):
 
     def test_generator_has_a_namespace(self):
         parent = yaml.safe_load((RELAY / "kustomization.yaml").read_text())
-        self.assertIn("operator-reaper/", parent["resources"])
+        self.assertIn("operator-reaper", parent["resources"])
+        self.assertEqual(set(parent) - {"apiVersion", "kind", "resources", "components"}, set())
         self.assertNotIn("configMapGenerator", parent)
-        k = yaml.safe_load((RELAY / "operator-reaper" / "kustomization.yaml").read_text())
+        k = yaml.safe_load((REAPER / "kustomization.yaml").read_text())
         gen = [g for g in k.get("configMapGenerator", []) if g["name"] == "relay-operator-reaper-scripts"][0]
-        self.assertEqual(gen["namespace"], "relay")
+        self.assertEqual(k["namespace"], "relay")
+        self.assertEqual([g["name"] for g in k["configMapGenerator"]], ["relay-operator-reaper-scripts"])
+
+
+    def test_the_reap_is_fenced_by_the_reapers_own_lease_expiry(self):
+        sql = (REAPER / "setup.sql").read_text()
+        self.assertIn("fence < extract(epoch FROM clock_timestamp()) + 30", sql)
+        self.assertIn("extract(epoch FROM clock_timestamp()) >= fence", sql)
+        reap = next(c for c in self.pod["containers"] if c["name"] == "reap")
+        self.assertIn("/work/permit", reap["command"][-1])
+        self.assertIn("ops.relay_operator_reap(%s)", reap["command"][-1])
+        self.assertIn('"$lease_expires"', reap["command"][-1])
+
+    def test_the_hold_outlives_any_execution_of_the_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = load_lease(os.path.join(tmp, "go"))
+        job = self.cron["spec"]["jobTemplate"]["spec"]
+        self.assertGreaterEqual(m.HOLD_S, job["activeDeadlineSeconds"] + self.pod["terminationGracePeriodSeconds"] + 30)
+
+    def test_the_api_token_reaches_only_the_lease_containers(self):
+        self.assertFalse(self.pod["automountServiceAccountToken"])
+        mounts = {c["name"]: [v["name"] for v in c.get("volumeMounts", [])]
+                  for c in self.pod["initContainers"] + self.pod["containers"]}
+        self.assertIn("lease-api", mounts["lease-take"])
+        self.assertIn("lease-api", mounts["lease-guard"])
+        self.assertNotIn("lease-api", mounts["reap"])
+
+    def test_the_setup_password_never_reaches_argv(self):
+        job = self.kind("Job")[0]["spec"]["template"]["spec"]["containers"][0]
+        self.assertNotIn("pw=", " ".join(job["command"]))
+        self.assertIn("\\getenv pw REAPER_PASSWORD", (REAPER / "setup.sql").read_text())
+
+    def test_the_stale_alert_also_fires_for_a_reaper_that_never_succeeded(self):
+        rule = yaml.safe_load((REAPER / "alerts.yaml").read_text())
+        alerts = {r["alert"]: r for g in rule["spec"]["groups"] for r in g["rules"]}
+        self.assertIn("kube_cronjob_created", alerts["RelayOperatorReaperStale"]["expr"])
+        self.assertIn("absent(kube_cronjob_status_last_successful_time", alerts["RelayOperatorReaperUnobserved"]["expr"])
 
 
 if __name__ == "__main__":

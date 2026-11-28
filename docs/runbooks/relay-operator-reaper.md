@@ -68,7 +68,7 @@ changed revisions, malformed expiry, one-shot permits, failed SQL replies and cr
 `python scripts/tests/integration/test_relay_operator_reaper_postgres.py` requires the cached deployment image and
 Docker; it creates a private network-disabled PostgreSQL 17 instance, tests setup twice, retired-entry refusal,
 late dispatch, exact-subject deletion, restricted privileges and timeout rollback. Missing Docker/image fails.
-`scripts/rules-lint.sh` discovers the single-document `operator-reaper-rules.yaml` and its real PromQL fixtures.
+`scripts/rules-lint.sh` discovers the single-document `operator-reaper/alerts.yaml` and its real PromQL fixtures.
 The child `operator-reaper/kustomization.yaml` keeps its generator independent of optional Relay components.
 These tests use synthetic data and prove no deployment, real Lease ownership, or live cleanup.
 
@@ -86,7 +86,7 @@ These tests use synthetic data and prove no deployment, real Lease ownership, or
 
 ## Roll back
 
-Remove `operator-reaper.yaml`, `operator-reaper-rules.yaml`, `relay-operator-reaper.sops.yaml` and `operator-reaper/` from
+Remove the `operator-reaper` child (manifests, Secret and generator) from
 `kubernetes/apps/apps/relay/kustomization.yaml`. Then, as the postgres superuser:
 
 ```sql

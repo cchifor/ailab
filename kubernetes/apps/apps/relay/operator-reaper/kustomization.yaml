@@ -1,9 +1,13 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-# Keep the reaper's generator local; the Relay overlay remains composable by its existing fixtures.
+# The relay-operator reaper (docs/runbooks/relay-operator-reaper.md). Everything here lives in namespace relay.
+namespace: relay
+resources:
+- relay-operator-reaper.sops.yaml
+- reaper.yaml
+- alerts.yaml
 configMapGenerator:
 - name: relay-operator-reaper-scripts
-  namespace: relay
   files:
   - lease.py
   - setup.sql

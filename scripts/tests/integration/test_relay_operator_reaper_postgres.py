@@ -55,6 +55,15 @@ class PostgresDeadline(unittest.TestCase):
           INSERT INTO sessions VALUES(1,1),(2,2);
           INSERT INTO memberships VALUES(1,1),(2,2);
         """)
+        # PR2063's predecessor already exposes a bigint argument named fence. PostgreSQL rejects
+        # renaming it in CREATE OR REPLACE; setup must safely replace that existing signature.
+        self.sql("""
+          CREATE SCHEMA ops AUTHORIZATION relay_owner;
+          CREATE FUNCTION ops.relay_operator_reap(fence bigint)
+            RETURNS TABLE(sessions_deleted bigint, memberships_deleted bigint)
+            LANGUAGE sql AS 'SELECT 0::bigint, 0::bigint';
+          ALTER FUNCTION ops.relay_operator_reap(bigint) OWNER TO relay_owner;
+        """)
         for _ in range(2):
             self.docker("exec", self.name, "psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "relay",
                         "-f", "/repo/kubernetes/apps/apps/relay/operator-reaper/setup.sql")
