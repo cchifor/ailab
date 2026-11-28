@@ -348,13 +348,26 @@ class PveNfsGuestAutostartTests(unittest.TestCase):
         # in the first pass, not after the container's whole budget.
         missing = self.nfs_src('never', create=False)
         self.ct(5002, 'onboot: 1', f'mp0: {missing.as_posix()},mp=/models')
-        self.vm_images(4001)
+        images = self.vm_images(4001)
         self.vm(4001, 'onboot: 1', self.CP_DISK)
+        probe = self.tmp / 'record-probe'
+        probe.write_text('''#!/usr/bin/env bash
+printf '%s|%s\\n' "$1" "$(cat "$STATE_DIR/started" 2>/dev/null)" >> "$STATE_DIR/probes"
+test -d "$1"
+''', newline='\n')
+        probe.chmod(0o755)
+        self.env['PROBE_CMD'] = probe.as_posix()
         start = time.monotonic()
         run = self.run_script(wait_s=6)
         self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
         self.assertEqual(self.started(), ['4001'])
-        self.assertIn('VM 4001: started (its NFS storage was ready after 0s)', run.stdout)
+        # Inspect the first pass directly: elapsed SECONDS may cross a second
+        # boundary even when no candidate has waited out its budget.
+        probes = (self.state / 'probes').read_text().splitlines()
+        self.assertEqual(probes[:3], [f'{missing.as_posix()}|',
+                                     f'{images.as_posix()}|',
+                                     f'{missing.as_posix()}|4001'])
+        self.assertIn('VM 4001: started', run.stdout)
         self.assertIn('CT 5002:', run.stdout)
         self.assertIn('NOT starting it', run.stdout)
         self.assertGreaterEqual(time.monotonic() - start, 5, 'the container still gets its whole budget')
