@@ -6,6 +6,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
 import os
 import tempfile
 import time
@@ -211,6 +212,26 @@ class Manifest(unittest.TestCase):
         with contextlib.redirect_stderr(err):
             self.assertEqual(m.main(failing), 1)
         self.assertNotIn(pw, err.getvalue())  # redacted from a failing statement's echo
+
+        def truncated(argv, input=None, capture_output=True, timeout=None):  # psql's LINE display cuts the value
+            if "secret" in argv:
+                return run(argv, input)
+            return P(b"", 3, ("ERROR:  syntax error\nLINE 1: ...lay_operator_reaper PASSWORD '" + pw[:40] + "...\n"
+                              "        ^").encode())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(m.main(truncated), 1)
+        self.assertNotIn(pw[:20], err.getvalue())  # no fragment survives
+        self.assertIn("ERROR:  syntax error", err.getvalue())
+
+        def hung(argv, input=None, capture_output=True, timeout=None):
+            if "secret" in argv:
+                return run(argv, input)
+            raise subprocess.TimeoutExpired(argv, timeout)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(m.main(hung), 1)  # one line, no traceback
+        self.assertIn("TimeoutExpired", err.getvalue())
 
     def test_the_stale_alert_also_fires_for_a_reaper_that_never_succeeded(self):
         rule = yaml.safe_load((REAPER / "alerts.yaml").read_text())

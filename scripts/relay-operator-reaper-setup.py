@@ -36,7 +36,9 @@ def secret_password(run=subprocess.run) -> str:
         sys.exit("relay-operator-reaper-setup: cannot read the Secret relay-operator-reaper")
     pw = base64.b64decode(json.loads(p.stdout)["data"]["password"]).decode()
     if not PASSWORD.fullmatch(pw):
-        sys.exit("relay-operator-reaper-setup: the Secret's password is not a token_urlsafe value; refusing")
+        sys.exit("relay-operator-reaper-setup: the Secret's password is not a secrets.token_urlsafe value (32-128 of "
+                 "[A-Za-z0-9_-]); refusing. Regenerate it (docs/runbooks/relay-operator-reaper.md, 'Rotate the role "
+                 "password'), let Flux apply the Secret, then run this again.")
     return pw
 
 
@@ -50,15 +52,33 @@ def script(pw: str, sql: str) -> bytes:
             "\\set pw '" + pw + "'\n" + body + "\n").encode()
 
 
+TOKENISH = re.compile(r"[A-Za-z0-9_-]{16,}")
+
+
+def safe_errors(stderr: bytes, pw: str) -> str:
+    """psql can echo the failing statement (with :'pw' interpolated), and its `LINE n:` display may TRUNCATE it, so an
+    exact replace is not enough: drop every LINE/context line, redact the password and any token-like run of 16+
+    characters from what is left."""
+    keep = []
+    for line in stderr.decode(errors="replace").replace(pw, "<redacted>").splitlines():
+        if line.lstrip().startswith(("LINE ", "^", "QUERY:", "CONTEXT:", "STATEMENT:")):
+            continue
+        keep.append(TOKENISH.sub("<redacted>", line.strip()))
+    return " | ".join(keep[-3:])
+
+
 def main(run=subprocess.run) -> int:
     sql = SETUP.read_text(encoding="utf-8")
-    pw = secret_password(run)
-    p = run(CTX + PSQL, input=script(pw, sql), capture_output=True, timeout=120)
+    try:
+        pw = secret_password(run)
+        p = run(CTX + PSQL, input=script(pw, sql), capture_output=True, timeout=120)
+    except (subprocess.TimeoutExpired, OSError) as e:  # a hung exec, a missing kubectl: one line, no traceback
+        print(f"relay-operator-reaper-setup: FAILED: {type(e).__name__} (kubectl unreachable or timed out)",
+              file=sys.stderr)
+        return 1
     out = [line for line in p.stdout.decode(errors="replace").splitlines() if line.startswith("reaper objects ready")]
     if p.returncode != 0 or out != ["reaper objects ready: 1"]:
-        # psql's error context can quote the failing statement with :'pw' already interpolated: redact it
-        err = p.stderr.decode(errors="replace").replace(pw, "<redacted>").strip().splitlines()[-3:]
-        print("relay-operator-reaper-setup: FAILED: " + " | ".join(err), file=sys.stderr)
+        print("relay-operator-reaper-setup: FAILED: " + safe_errors(p.stderr, pw), file=sys.stderr)
         return 1
     print("relay-operator-reaper-setup: " + out[0])
     return 0

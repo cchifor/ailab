@@ -68,6 +68,15 @@ by hand: `python scripts/relay-operator.py status` must report `0 memberships, 0
    4. Remove the leftover containers and volumes `relay-proxy-<run>`, `relay-runner-<run>` and
       `relay-session-<run>`.
 
+## Rotate the role password
+
+1. Rewrite the SOPS Secret `relay-operator-reaper` with a fresh `secrets.token_urlsafe(36)` value. Use `sops edit` with
+   an editor shim that writes the value itself, so it never enters a transcript or argv.
+2. Merge, so Flux applies the Secret.
+3. Run `python scripts/relay-operator-reaper-setup.py`, which sets the role's new password.
+
+The setup refuses anything that is not a token_urlsafe value (32 to 128 of `[A-Za-z0-9_-]`).
+
 ## Roll back
 
 Remove the `operator-reaper` entry from `kubernetes/apps/apps/relay/kustomization.yaml` (everything lives in
