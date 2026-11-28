@@ -20,6 +20,7 @@ Collaborators are injected (`Ops`) so tests drive every failure path with fakes.
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import os
 import re
@@ -52,6 +53,14 @@ SHA256 = re.compile(r"^[0-9a-f]{64}$")
 REL_PATH = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
 REVOKED = "0 memberships, 0 sessions"
 PRECEDENCE = [3, 4, 5, 6, 7, 9, 8, 2]
+FINALIZATION_PURPOSE = "canary-finalization"
+FINALIZATION_ENTRY = "docs/runbooks/inference-canary-v0113/owner-finalization-entry.cjs"
+FINALIZATION_BINDINGS = {
+    "a0f57684-747f-4c3e-8d90-e684b7262590": "1d9a7d6e-4b26-49fd-9053-7b0a22e1baae",
+    "d2871eec-8f5a-4afe-a917-014f0ae8e14d": "f25c187b-1e50-4c7c-860e-52947bfdf39e",
+    "a8f6211c-d7e2-4ffd-824d-b158e349a8d4": "fdb56ca5-908b-40ee-94b3-aac735dd8622",
+}
+UUID = re.compile(r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
 
 
 class Refused(Exception):
@@ -91,10 +100,24 @@ def load_manifest(ops: Ops, ref: str) -> tuple[str, dict]:
     if not ops.git_is_reviewed(commit):
         raise Refused("the manifest commit is not on reviewed main (gitea/main)")
     try:
-        m = json.loads(ops.git_show(commit, path))
+        manifest_raw = ops.git_show(commit, path)
+        m = json.loads(manifest_raw)
     except BaseException as e:  # noqa: BLE001 - SystemExit from the real wrapper, ValueError, timeouts
         raise Refused(f"manifest unreadable at {ref}: {type(e).__name__}")
-    if not isinstance(m, dict) or m.get("version") != 1 or \
+    if isinstance(m, dict) and m.get("version") == 2:
+        m = _strict_json(manifest_raw)
+        if set(m) != {"version", "purpose", "image", "entrypoint", "files", "finalizationObserver"} or \
+                m["purpose"] != FINALIZATION_PURPOSE or m["entrypoint"] != ["node", "/bundle/" + FINALIZATION_ENTRY]:
+            raise Refused("version 2 is only the fixed canary-finalization bundle")
+        o = m["finalizationObserver"]
+        if not isinstance(o, dict) or set(o) != {"files", "config"} or not isinstance(o["files"], dict) or \
+                not 1 <= len(o["files"]) <= 40 or o.get("config") not in o["files"]:
+            raise Refused("fixed finalization observer manifest required")
+        for rel, digest in o["files"].items():
+            if not isinstance(rel, str) or not REL_PATH.fullmatch(rel) or ".." in rel.split("/") or \
+                    not isinstance(digest, str) or not SHA256.fullmatch(digest):
+                raise Refused("invalid finalization observer file pin")
+    elif not isinstance(m, dict) or m.get("version") != 1 or \
             set(m) - {"observer"} != {"version", "image", "entrypoint", "files"}:
         raise Refused("manifest must be {version: 1, image, entrypoint, files[, observer]}")
     if "observer" in m:
@@ -120,7 +143,239 @@ def load_manifest(ops: Ops, ref: str) -> tuple[str, dict]:
         if not isinstance(rel, str) or not REL_PATH.match(rel) or ".." in rel.split("/") or \
                 not isinstance(digest, str) or not SHA256.match(digest):
             raise Refused(f"bad manifest entry {rel!r}")
+    if m.get("purpose") == FINALIZATION_PURPOSE and FINALIZATION_ENTRY not in files:
+        raise Refused("finalization entry is not pinned")
     return commit, m
+
+
+def _strict_json(raw: bytes):
+    def pairs(items):
+        out = {}
+        for key, value in items:
+            if key in out:
+                raise Refused("duplicate input JSON key")
+            out[key] = value
+        return out
+    def constant(_):
+        raise Refused("non-finite input JSON")
+    try:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_constant=constant)
+    except (ValueError, UnicodeError, RecursionError) as e:
+        raise Refused("invalid private input JSON") from e
+
+
+def _private_input(path: Path) -> bytes:
+    """Read one bounded regular owned file; preserve raw bytes, reject aliases and metadata changes."""
+    if not path.is_absolute() or path.resolve() != path:
+        raise Refused("private input path must be absolute and canonical")
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= 1024 * 1024:
+        raise Refused("private input must be a single-link regular file of at most 1 MiB")
+    if os.name != "nt" and (before.st_uid != os.getuid() or before.st_mode & 0o077):
+        raise Refused("private input owner or mode differs")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (before.st_dev, before.st_ino, before.st_size):
+            raise Refused("private input identity changed")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(1024 * 1024 + 1)
+        after = os.fstat(fd)
+        if (after.st_size, after.st_mtime_ns) != (opened.st_size, opened.st_mtime_ns) or len(raw) != opened.st_size:
+            raise Refused("private input changed during read")
+    finally:
+        os.close(fd)
+    raw.decode("utf-8", errors="strict")
+    return raw
+
+
+def _digest(raw: bytes) -> str:
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _canonical_digest(value) -> str:
+    return _digest(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode())
+
+
+def _validate_cleanup_scope(projection: dict, plan: dict) -> dict:
+    expected = {"version", "purpose", "scope", "reportPins", "decisionSha256", "cleanupDeadline", "launches",
+                "markers", "originalIdle", "sources"}
+    if not isinstance(projection, dict) or set(projection) != expected or projection["version"] != 1 or \
+            projection["purpose"] != FINALIZATION_PURPOSE:
+        raise Refused("finalization validator output shape differs")
+    for key in ("reportPins", "decisionSha256", "cleanupDeadline"):
+        if projection[key] != plan[key]:
+            raise Refused("finalization validator/authorized plan mismatch")
+    if _canonical_digest(projection["sources"]) != plan["qualificationSha256"]:
+        raise Refused("finalization qualification differs from retained operator plan")
+    scope = projection["scope"]
+    if not isinstance(scope, dict) or set(scope) != {"tenantId", "hostId", "connectionId", "executionIdentity",
+                                                    "bindingIds", "profileIds"} or \
+            scope["tenantId"] != "00000000-0000-4000-8000-000000000001" or \
+            scope["hostId"] != "b3b1be1a-275c-4a2e-b515-428b39c43171" or \
+            scope["connectionId"] != "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8" or scope["executionIdentity"] != "c4":
+        raise Refused("finalization fixed scope differs")
+    for key, values in (("bindingIds", FINALIZATION_BINDINGS), ("profileIds", FINALIZATION_BINDINGS.values())):
+        rows = scope[key]
+        if not isinstance(rows, list) or len(rows) != 3 or any(not isinstance(v, str) for v in rows) \
+                or set(rows) != set(values):
+            raise Refused("finalization binding/profile scope differs")
+    launches = projection["launches"]
+    if not isinstance(launches, list) or not 1 <= len(launches) <= 64:
+        raise Refused("finalization launch scope differs")
+    sessions, ids = set(), set()
+    for row in launches:
+        if not isinstance(row, dict) or any(not isinstance(row.get(k), str) or not UUID.fullmatch(row[k])
+                                          for k in ("launchId", "sessionId", "profileId", "bindingId")) or \
+                FINALIZATION_BINDINGS.get(row["bindingId"]) != row["profileId"] or \
+                row["launchId"] in ids or row["sessionId"] in sessions:
+            raise Refused("finalization historical launch linkage differs")
+        sessions.add(row["sessionId"])
+        ids.add(row["launchId"])
+    if "45724087-335a-4c55-ad0f-cb278afe608a" not in sessions:
+        raise Refused("preserved predecessor session missing")
+    return {**scope, "sessionIds": sorted(sessions)}
+
+
+def prepare_finalization(ops: Ops, manifest: dict, bundle: str, inputs: str, plan_file: str,
+                         expected_plan_sha: str, evidence: Path) -> dict:
+    """Validate pinned bytes with the actual pure finalizer, with no network or JIT authority."""
+    if not isinstance(expected_plan_sha, str) or not SHA256.fullmatch(expected_plan_sha):
+        raise Refused("independent finalization plan sha256 required")
+    plan_raw = _private_input(Path(plan_file))
+    if _digest(plan_raw) != expected_plan_sha:
+        raise Refused("retained operator plan sha256 differs")
+    plan = _strict_json(plan_raw)
+    if not isinstance(plan, dict) or set(plan) != {"version", "purpose", "runId", "reportPins", "decisionSha256",
+                                                "cleanupDeadline", "qualificationSha256"} or \
+            plan["version"] != 1 or plan["purpose"] != FINALIZATION_PURPOSE or \
+            not isinstance(plan["runId"], str) or not UUID.fullmatch(plan["runId"]):
+        raise Refused("fixed finalization authorization plan required")
+    deadline = plan["cleanupDeadline"]
+    if isinstance(deadline, bool) or not isinstance(deadline, int) or not ops.now() * 1000 < deadline <= (ops.now()+900)*1000:
+        raise Refused("finalization deadline must be fresh and at most 15 minutes")
+    pins = plan["reportPins"]
+    if not isinstance(pins, dict) or set(pins) not in ({"a", "b", "bInputs", "c"}, {"a", "b", "bInputs", "c", "d"}) or \
+            any(not isinstance(v, str) or not SHA256.fullmatch(v) for v in (*pins.values(), plan["decisionSha256"], plan["qualificationSha256"])):
+        raise Refused("exact retained report/decision/source pins required")
+    root = Path(inputs)
+    if not root.is_absolute() or root.resolve() != root or not root.is_dir():
+        raise Refused("canonical finalization input directory required")
+    wanted = {n + ".json" for n in pins} | {"manifest.json", "decision.json"}
+    if {p.name for p in root.iterdir()} != wanted:
+        raise Refused("fixed finalization input file set differs")
+    raw = {n: _private_input(root/n) for n in sorted(wanted)}
+    for name, sha in pins.items():
+        if _digest(raw[name+".json"]) != sha:
+            raise Refused("raw report differs from retained operator pin")
+    if _digest(raw["decision.json"]) != plan["decisionSha256"]:
+        raise Refused("authorized decision hash differs")
+    final_manifest = _strict_json(raw["manifest.json"])
+    expected_manifest = {"version": 1, "pins": pins, "cleanupDeadline": deadline, "decisionSha256": plan["decisionSha256"]}
+    if "d" in pins:
+        expected_manifest["activeDrain"] = True
+    if final_manifest != expected_manifest:
+        raise Refused("finalizer manifest differs from independent plan")
+    decision = _strict_json(raw["decision.json"])
+    if decision != {"version": 1, "purpose": FINALIZATION_PURPOSE, "runId": plan["runId"], "reportPins": pins,
+                    "bindingIds": sorted(FINALIZATION_BINDINGS), "cleanupDeadline": deadline,
+                    "qualificationSha256": plan["qualificationSha256"], "noFurtherUse": True}:
+        raise Refused("authorized no-further-use decision scope differs")
+    saved = evidence/"finalization-inputs"
+    saved.mkdir(mode=0o700)
+    for name, data in {**raw, "operator-plan.json": plan_raw}.items():
+        with open(saved/name, "xb") as out:
+            os.chmod(saved/name, 0o600)
+            out.write(data); out.flush(); os.fsync(out.fileno())
+    # A private Linux volume supplies the ownership/mode contract even from a Windows controller.
+    volume = "relay-finalization-inputs-" + uuid.uuid4().hex
+    ops.docker(["volume", "create", volume], timeout=30)
+    try:
+        writer = ("import sys,json,base64,os\nd=json.load(sys.stdin)\n"
+                  "for n,v in d.items():\n"
+                  " with open('/inputs/'+n,'xb') as f:\n"
+                  "  f.write(base64.b64decode(v)); f.flush(); os.fsync(f.fileno())\n"
+                  " os.chmod('/inputs/'+n,0o400); os.chown('/inputs/'+n,10001,10001)\n"
+                  "os.chmod('/inputs',0o500); os.chown('/inputs',10001,10001)\n")
+        ops.docker(["run", "-i", "--rm", "--network", "none", "--read-only", "--mount",
+                    f"type=volume,src={volume},dst=/inputs", PROXY_IMAGE, "python3", "-I", "-c", writer],
+                   stdin=json.dumps({n: base64.b64encode(v).decode() for n, v in raw.items()}).encode(), timeout=30)
+        response = ops.docker(["run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                               "--security-opt", "no-new-privileges", "--user", UID, "--pids-limit", "64", "--memory", "256m",
+                               "--mount", f"type=bind,src={bundle},dst=/bundle,readonly", "--mount",
+                               f"type=volume,src={volume},dst=/inputs,readonly", "--entrypoint", "node", manifest["image"],
+                               "/bundle/"+FINALIZATION_ENTRY, "--validate-inputs", "/inputs"], timeout=30)
+        if len(response) > 256*1024:
+            raise Refused("finalization validator output exceeds bound")
+        projection = _strict_json(response)
+        scope = _validate_cleanup_scope(projection, plan)
+        if ops.now()*1000 >= deadline:
+            raise Refused("finalization deadline elapsed during validation")
+        return {"plan": plan, "planSha256": expected_plan_sha, "projection": projection, "scope": scope,
+                "volume": volume, "raw": raw}
+    except BaseException:
+        ops.docker(["volume", "rm", "-f", volume], timeout=30, check=False)
+        raise
+
+
+def claim_finalization(prepared: dict) -> None:
+    """Retain a one-use authorization claim even if a later step fails; no automatic restart/reset."""
+    root = Path(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/state"))/"relay-operator"/"finalization-ledger"
+    missing, current = [], root
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700)
+        if os.name != "nt":
+            fd = os.open(directory.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)  # persist every newly created ledger ancestor before authority
+            finally:
+                os.close(fd)
+    if root.resolve() != root.absolute():
+        raise Refused("finalization ledger must be canonical")
+    info = root.stat()
+    if not stat.S_ISDIR(info.st_mode) or os.name != "nt" and \
+            (info.st_uid != os.getuid() or info.st_mode & 0o077):
+        raise Refused("finalization ledger ownership or mode differs")
+    target = root/(prepared["plan"]["runId"]+".json")
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "wb") as out:
+            out.write(json.dumps({"planSha256": prepared["planSha256"], "decisionSha256": prepared["plan"]["decisionSha256"],
+                                  "cleanupDeadline": prepared["plan"]["cleanupDeadline"]}).encode())
+            out.flush(); os.fsync(out.fileno())
+        if os.name != "nt":
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    except FileExistsError as e:
+        raise Refused("finalization authorization already consumed; reconcile retained evidence") from e
+
+
+def verify_finalization_observer(manifest: dict, repo_root: str) -> dict:
+    spec, files = manifest["finalizationObserver"], {}
+    for rel, expected in spec["files"].items():
+        path = Path(repo_root)/rel
+        if path.resolve() != path.absolute() or not stat.S_ISREG(path.lstat().st_mode):
+            raise Refused("finalization reader source must be a canonical regular file")
+        raw = path.read_bytes()
+        if _digest(raw) != expected:
+            raise Refused("finalization reader source hash differs")
+        files[rel] = raw
+    for rel in ("scripts/relay_finalization_observer.py", "scripts/relay_phase_a_observer.py",
+                "scripts/relay-observer-gate.py", "scripts/relay-finalization/hub.sql",
+                "scripts/relay-finalization/router.cjs", "scripts/relay-finalization/host.py",
+                "scripts/relay-finalization/client.cjs"):
+        if rel not in files:
+            raise Refused("finalization reader/gate source is not pinned")
+    client = "scripts/relay-finalization/client.cjs"
+    if manifest["files"].get(client) != spec["files"][client]:
+        raise Refused("finalization client differs between reader and Runner bundle")
+    return {"files": files, "config": _strict_json(files[spec["config"]])}
 
 
 def copy_bundle(src: str, manifest: dict, dest: str) -> dict:
@@ -306,6 +561,9 @@ class Run:
     runner_minutes: int
     evidence_dir: str
     predecessor_report: str | None = None
+    finalization_inputs: str | None = None
+    finalization_plan_file: str | None = None
+    finalization_plan_sha256: str | None = None
     run_id: str = field(default_factory=lambda: "session-" + uuid.uuid4().hex[:12])
     rc: int = 0
     notes: list = field(default_factory=list)
@@ -315,6 +573,8 @@ class Run:
         self.observer_fault = threading.Event()
         self.observer_lease_lost = False
         self.observer_plan = None
+        self.finalization = None
+        self.finalization_reader = None
         self.deferred_signals = []
         self.in_cleanup = False
 
@@ -379,8 +639,21 @@ class Run:
             if "observer" in manifest:
                 self.observer_plan = verify_observer(manifest, str(Path(ops.tool_dir).parent),
                                                      self.predecessor_report)
-        except Refused as e:
+            if manifest.get("purpose") == FINALIZATION_PURPOSE:
+                if self.predecessor_report:
+                    raise Refused("finalization cannot use Phase A preparation")
+                if not all((self.finalization_inputs, self.finalization_plan_file, self.finalization_plan_sha256)):
+                    raise Refused("finalization inputs and independent plan/hash are required")
+                self.finalization_reader = verify_finalization_observer(manifest, str(Path(ops.tool_dir).parent))
+                self.finalization = prepare_finalization(ops, manifest, bundle_copy, self.finalization_inputs,
+                                                       self.finalization_plan_file, self.finalization_plan_sha256, ev)
+                claim_finalization(self.finalization)
+            elif any((self.finalization_inputs, self.finalization_plan_file, self.finalization_plan_sha256)):
+                raise Refused("finalization inputs require reviewed cleanup-only purpose")
+        except (Refused, OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError, SystemExit) as e:
             self.fail(2, reason=str(e))
+            if self.finalization is not None:
+                ops.docker(["volume", "rm", "-f", self.finalization["volume"]], timeout=30, check=False)
             shutil.rmtree(work, ignore_errors=True)
             return self.rc
         # evidence sinks are opened BEFORE any authority exists
@@ -389,15 +662,21 @@ class Run:
                      ("proxy.out", "proxy.jsonl", "runner.jsonl", "runner.err")}
         except OSError as e:
             self.fail(2, reason=f"evidence files not writable ({type(e).__name__})")
+            if self.finalization is not None:
+                ops.docker(["volume", "rm", "-f", self.finalization["volume"]], timeout=30, check=False)
             shutil.rmtree(work, ignore_errors=True)
             return self.rc
         start = ops.now()
         runner_deadline = start + 60 * self.runner_minutes
+        if self.finalization is not None:
+            runner_deadline = self.finalization["plan"]["cleanupDeadline"] / 1000
         cleanup_deadline = runner_deadline + 60 * CLEANUP_MINUTES
         (ev / "run.json").write_text(json.dumps({
             "runId": self.run_id, "manifestCommit": commit, "manifestRef": self.manifest_ref,
             "image": manifest["image"], "entrypoint": manifest["entrypoint"], "files": files,
-            "runnerDeadline": runner_deadline, "cleanupDeadline": cleanup_deadline}, indent=1))
+            "runnerDeadline": runner_deadline, "cleanupDeadline": cleanup_deadline,
+            "purpose": manifest.get("purpose", "phase-a"),
+            "finalizationPlanSha256": self.finalization["planSha256"] if self.finalization else None}, indent=1))
 
         prev = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
 
@@ -453,6 +732,10 @@ class Run:
         if self.observer_plan is not None:
             if not self._observer_prepare(ev, names, ctx, runner_deadline, cleanup_deadline):
                 return
+        if self.finalization is not None:
+            self._finalization_prepare(ctx)
+            if ops.now() >= runner_deadline:
+                raise Refused("cleanup-only deadline elapsed before authority")
         c = ops.creds()
         ctx["subject"], ctx["uid"] = c["subject"], c["keycloak_user_id"]
         username, password = c["username"], c["password"]
@@ -461,6 +744,8 @@ class Run:
         if orphan != REVOKED:
             self.fail(3, stage="orphan-clear", readback=orphan)
             return
+        if self.finalization is not None and ops.now() >= runner_deadline:
+            raise Refused("cleanup-only deadline elapsed before grant")
         ctx["granted"] = True  # inside the cleanup scope from here: a grant may commit and still report an error
         ops.grant(ctx["subject"])
         self.note(stage="granted")
@@ -477,6 +762,8 @@ class Run:
             t.start()
             ctx["threads"].append(t)
         cfg = {"username": username, "runner_deadline": runner_deadline, "cleanup_deadline": cleanup_deadline}
+        if self.finalization is not None:
+            cfg.update(purpose=FINALIZATION_PURPOSE, cleanup_scope=self.finalization["scope"])
         proxy.stdin.write((password + "\n" + json.dumps(cfg) + "\n").encode())
         proxy.stdin.close()
         password = None
@@ -494,6 +781,15 @@ class Run:
                 return
             extra = ["--mount", f"type=volume,src={names['pred']},dst=/predecessor,readonly",
                      "-e", f"RELAY_OBSERVER_SOCKET={SOCKET_DIR}/observer.sock"]
+        entry_args = manifest["entrypoint"][1:]
+        if self.finalization is not None:
+            if ops.now() >= runner_deadline:
+                raise Refused("cleanup-only deadline elapsed before Runner")
+            if not self._observer_start(names, ctx, sinks):
+                return
+            extra = ["--mount", f"type=volume,src={self.finalization['volume']},dst=/inputs,readonly",
+                     "-e", f"RELAY_OBSERVER_SOCKET={SOCKET_DIR}/observer.sock"]
+            entry_args = [*entry_args, "--run", "/inputs", "/state/run/finalization"]
         runner = ctx["runner"] = ops.popen(
             ["docker", "run", "--name", names["runner"], "--network", "none", "--read-only",
              "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--user", UID, "--pids-limit", "256",
@@ -504,7 +800,7 @@ class Run:
              "-e", f"RELAY_SESSION_SOCKET={SOCKET_DIR}/proxy.sock",
              "-e", f"RELAY_SESSION_CONTROL_SOCKET={SOCKET_DIR}/control.sock", "-e", f"RUNNER_DEADLINE={runner_deadline}",
              "-e", f"CLEANUP_DEADLINE={cleanup_deadline}", "-e", "AUTOMATION_DIR=/state/run", *extra,
-             "--entrypoint", manifest["entrypoint"][0], manifest["image"], *manifest["entrypoint"][1:]],
+             "--entrypoint", manifest["entrypoint"][0], manifest["image"], *entry_args],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         for args in ((runner.stdout, sinks["runner.jsonl"]), (runner.stderr, sinks["runner.err"])):
             t = threading.Thread(target=self._stream, args=args, daemon=True)
@@ -542,6 +838,42 @@ class Run:
         if rrc not in (0, None):
             self.fail(8, stage="runner", exit=rrc)
         self.note(stage="runner-exited", exit=rrc)
+
+    def _finalization_prepare(self, ctx) -> None:
+        """Build only the reviewed read-only host; never import or call the Phase A prerun path."""
+        import importlib.util
+        import sys
+        stage = Path(tempfile.mkdtemp(prefix="relay-finalization-reader-"))
+        ctx["observer_dir"], ctx["observer_tool_dir"] = str(stage), str(stage/"scripts")
+        for rel, raw in self.finalization_reader["files"].items():
+            dest = stage/rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(raw)
+            if _digest(dest.read_bytes()) != _digest(raw):
+                raise Refused("staged finalization reader differs")
+        name = "relay_finalization_observer"
+        # The host imports only the verified framing module. An earlier Phase A
+        # import must not substitute a cached module from another checkout.
+        for dependency in (name, "relay_phase_a_observer"):
+            sys.modules.pop(dependency, None)
+        spec = importlib.util.spec_from_file_location(name, stage/"scripts"/(name+".py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        sys.path.insert(0, str(stage/"scripts"))
+        try:
+            spec.loader.exec_module(module)
+            for dependency in (name, "relay_phase_a_observer"):
+                loaded = sys.modules.get(dependency)
+                if loaded is None or Path(loaded.__file__).resolve() != (stage/"scripts"/(dependency+".py")).resolve():
+                    raise Refused("finalization reader imported an unpinned module")
+            host = module.create_finalization_host(
+                gate=None, plan=self.finalization["projection"], decision_raw=self.finalization["raw"]["decision.json"],
+                authorization_sha256=self.finalization["plan"]["decisionSha256"],
+                config=self.finalization_reader["config"], evidence=str(Path(self.evidence_dir)/"finalization-observer.jsonl"),
+                on_fault=self._on_observer_fault, lease_ok=lambda: lease_held(self.ops, self.run_id))
+        finally:
+            sys.path.remove(str(stage/"scripts"))
+        ctx["host"] = host
 
     # ---------------- the phase A observer (plans/2026-11-27-relay-phase-a-observer-plan.md, section 9)
     def _observer_prepare(self, ev, names, ctx, runner_deadline, cleanup_deadline) -> bool:
@@ -679,7 +1011,7 @@ class Run:
                 if ctx.get("ledger") is not None:
                     self._stage("observer-ledger-unresolved", lambda: ctx["ledger"].append(
                         op="cleanup", phase="receipt", outcome="unresolved-worker-still-running"))
-            if host.state.handoff_outcome is not None:
+            if self.finalization is None and host.state.handoff_outcome is not None:
                 self.note(stage="observer-handoff", outcome=host.state.handoff_outcome)
         if gate is not None and gate.poll() is None:
             self._stage("observer-gate-stop", lambda: ops.docker(["stop", "-t", "3", names["gate"]], timeout=15,
@@ -716,6 +1048,9 @@ class Run:
         if ctx.get("pred"):
             self._stage("predecessor-volume-remove", lambda: ops.docker(["volume", "rm", "-f", names["pred"]],
                                                                          timeout=30, check=False))
+        if self.finalization is not None:
+            self._stage("finalization-input-volume-remove", lambda: ops.docker(
+                ["volume", "rm", "-f", self.finalization["volume"]], timeout=30, check=False))
         self._stage("volume-remove", lambda: ops.docker(["volume", "rm", "-f", names["volume"]], timeout=30,
                                                         check=False))
         if runner is not None:  # export the library's durable store; the volume itself is KEPT
@@ -758,5 +1093,7 @@ class Run:
 
 
 def run_session(ops: Ops, manifest_ref: str, bundle: str, runner_minutes: int, evidence_dir: str,
-                predecessor_report: str | None = None) -> int:
-    return Run(ops, manifest_ref, bundle, runner_minutes, evidence_dir, predecessor_report).main()
+                predecessor_report: str | None = None, finalization_inputs: str | None = None,
+                finalization_plan_file: str | None = None, finalization_plan_sha256: str | None = None) -> int:
+    return Run(ops, manifest_ref, bundle, runner_minutes, evidence_dir, predecessor_report,
+               finalization_inputs, finalization_plan_file, finalization_plan_sha256).main()

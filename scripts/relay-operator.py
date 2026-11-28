@@ -338,7 +338,8 @@ def call(op_args: list[str]) -> int:
 def session(a) -> int:
     ros, o = ops()
     subprocess.run(["git", "-C", str(REPO), "fetch", "-q", "gitea", "main"], timeout=60, check=False)
-    return ros.run_session(o, a.manifest_ref, a.bundle, a.runner_minutes, a.evidence_dir, a.predecessor_report)
+    return ros.run_session(o, a.manifest_ref, a.bundle, a.runner_minutes, a.evidence_dir, a.predecessor_report,
+                           a.finalization_inputs, a.finalization_plan, a.finalization_plan_sha256)
 
 
 def observer_probe() -> int:
@@ -363,6 +364,9 @@ def main() -> int:
     se.add_argument("--runner-minutes", type=int, required=True)
     se.add_argument("--evidence-dir", required=True)
     se.add_argument("--predecessor-report", help="the preserved original phase A report (observer manifests only)")
+    se.add_argument("--finalization-inputs", help="private fixed report/decision/manifest directory (cleanup purpose only)")
+    se.add_argument("--finalization-plan", help="independently retained authorized cleanup plan")
+    se.add_argument("--finalization-plan-sha256", help="expected plan hash from the operator's retained ledger")
     sub.add_parser("observer-probe")
     a = p.parse_args()
     if a.cmd == "provision":

@@ -27,6 +27,7 @@ the whole response run under one absolute deadline, and nothing is sent once it 
 from __future__ import annotations
 
 import http.client
+import hashlib
 import importlib.util
 import json
 import os
@@ -59,6 +60,9 @@ PROFILES = {  # profile id -> (revision, cwd, binding)
 }
 PREDECESSOR_SESSION = "45724087-335a-4c55-ad0f-cb278afe608a"  # GET-only
 PREDECESSOR_PERMISSION = "70fb1b8e-f7cc-4cc3-b98f-66f83e46d1ab"  # GET-only
+FINALIZATION_PURPOSE = "canary-finalization"
+FINALIZATION_BINDINGS = frozenset((*BINDINGS, "a8f6211c-d7e2-4ffd-824d-b158e349a8d4"))
+FINALIZATION_PROFILES = frozenset((*PROFILES, "fdb56ca5-908b-40ee-94b3-aac735dd8622"))
 THOUGHT_LEVELS = {"low", "high"}
 EXPECTED_NAME = "relay-operator (automation)"
 UA = "relay-session-proxy/1 (ailab operator automation)"
@@ -254,6 +258,9 @@ class State:
         self.decided: set[str] = set()
         self.credentials: dict[str, str] = {}  # learned credential id -> binding id
         self.rotated: set[str] = set()
+        self.purpose = "phase-a"
+        self.historical_sessions: frozenset[str] = frozenset()  # cleanup GET-only, never learned control ownership
+        self.revoked: set[str] = set()
         self.runner_deadline = float("inf")  # monotonic
         self.cleanup_deadline = float("inf")
         self.closed = False
@@ -266,7 +273,8 @@ STATE = State()
 
 def phase() -> str:
     now = time.monotonic()
-    if STATE.closed or now >= STATE.cleanup_deadline:
+    cutoff = STATE.runner_deadline if STATE.purpose == FINALIZATION_PURPOSE else STATE.cleanup_deadline
+    if STATE.closed or now >= cutoff:
         return "closed"
     return "cleanup" if now >= STATE.runner_deadline else "run"
 
@@ -278,7 +286,7 @@ def reserve(op: str, record: dict, once: tuple[str, str] | None = None) -> None:
         if op in STATE.ops or op in STATE.startup_ops:
             raise Refuse("operation-id-reused")
         if once is not None:
-            bucket = STATE.rotated if once[0] == "rotated" else STATE.decided
+            bucket = {"rotated": STATE.rotated, "decided": STATE.decided, "revoked": STATE.revoked}[once[0]]
             if once[1] in bucket:
                 raise Refuse("already-used-in-this-run")
             bucket.add(once[1])
@@ -365,7 +373,8 @@ def learn_credentials(inv) -> None:
         return
     with STATE.lock:
         for r in rows:
-            if isinstance(r, dict) and r.get("binding_id") in BINDINGS and isinstance(r.get("id"), str) \
+            allowed = FINALIZATION_BINDINGS if STATE.purpose == FINALIZATION_PURPOSE else BINDINGS
+            if isinstance(r, dict) and r.get("binding_id") in allowed and isinstance(r.get("id"), str) \
                     and UUID_RE.match(r["id"]):
                 STATE.credentials[r["id"]] = r["binding_id"]
 
@@ -416,6 +425,78 @@ def _cursor(v):
 SESSION_READS = {"", "/router", "/communication", "/control", "/settings", "/permissions"}
 
 
+def configure_finalization(scope: dict) -> None:
+    """Only the trusted launcher supplies this prevalidated scope on stdin, never a Runner request."""
+    if not isinstance(scope, dict):
+        raise Refuse("finalization-scope")
+    keys(scope, {"tenantId", "hostId", "connectionId", "executionIdentity", "bindingIds", "profileIds", "sessionIds"})
+    if (scope["tenantId"] != "00000000-0000-4000-8000-000000000001" or
+            scope["hostId"] != "b3b1be1a-275c-4a2e-b515-428b39c43171" or
+            scope["connectionId"] != "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8" or scope["executionIdentity"] != "c4"):
+        raise Refuse("finalization-scope")
+    for field, expected in (("bindingIds", FINALIZATION_BINDINGS), ("profileIds", FINALIZATION_PROFILES)):
+        rows = scope[field]
+        if not isinstance(rows, list) or len(rows) != len(expected) or any(not isinstance(v, str) for v in rows) \
+                or frozenset(rows) != expected:
+            raise Refuse("finalization-scope")
+    sessions = scope["sessionIds"]
+    if not isinstance(sessions, list) or not 1 <= len(sessions) <= 64:
+        raise Refuse("finalization-scope")
+    for sid in sessions:
+        uuid_of(sid, "historical session")
+    if len(set(sessions)) != len(sessions) or PREDECESSOR_SESSION not in sessions:
+        raise Refuse("finalization-scope")
+    STATE.purpose = FINALIZATION_PURPOSE
+    STATE.historical_sessions = frozenset(sessions)
+
+
+def learn_finalization_key(credential: str, value) -> None:
+    """Remember original operation IDs without manufacturing an operation endpoint or response."""
+    if not isinstance(value, dict) or not isinstance(value.get("credential"), dict):
+        return
+    row, ops = value["credential"], value.get("operations")
+    with STATE.lock:
+        if row.get("id") != credential or row.get("bindingId") != STATE.credentials.get(credential):
+            return
+        if isinstance(ops, list):
+            STATE.startup_ops.update(o["id"] for o in ops if isinstance(o, dict)
+                                     and isinstance(o.get("id"), str) and UUID_RE.fullmatch(o["id"]))
+
+
+def plan_finalization(method: str, path: str, query: list, body) -> Plan:
+    """A separate closed allowlist: no inference/rotation/control route can fall through to phase A."""
+    q = _q(query, {})
+    if method == "GET" and path == "/api/router-credentials":
+        return Plan("credentials", method, path, q, learn=learn_credentials)
+    m = re.fullmatch(r"/api/router-credentials/keys/(" + UUID + ")", path)
+    if method == "GET" and m:
+        credential = m.group(1)
+        with STATE.lock:
+            if credential not in STATE.credentials:
+                raise Refuse("credential-not-learned")
+        return Plan("credential-key", method, path, q, ids={"cred": credential},
+                    learn=lambda value: learn_finalization_key(credential, value))
+    m = re.fullmatch(r"/api/agent-sessions/(" + UUID + r")(/control)?", path)
+    if method == "GET" and m:
+        if m.group(1) not in STATE.historical_sessions:
+            raise Refuse("historical-session-out-of-scope")
+        return Plan("session" + (m.group(2) or ""), method, path, q, ids={"session": m.group(1)})
+    m = re.fullmatch(r"/api/router-credentials/(" + UUID + ")/revoke", path)
+    if method == "POST" and m:
+        binding = m.group(1)
+        if binding not in FINALIZATION_BINDINGS:
+            raise Refuse("binding-out-of-scope")
+        if not isinstance(body, dict):
+            raise Refuse("body-not-object", 400)
+        keys(body, {"operationId", "revision"})
+        op, rev = uuid_of(body["operationId"], "operationId"), int_of(body["revision"], "revision", 1, SAFE_MAX)
+        rebuilt = {"operationId": op, "revision": rev}
+        digest = hashlib.sha256(json.dumps(rebuilt, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        reserve(op, {"route": "revoke", "binding": binding, "bodySha256": digest}, once=("revoked", binding))
+        return Plan("revoke", method, path, q, rebuilt, mutation=True, op=op, ids={"binding": binding})
+    raise Refuse("finalization-route-not-allowed")
+
+
 def plan_request(method: str, path: str, query: list, body: dict | None) -> Plan:
     ph = phase()
     if ph == "closed":
@@ -423,6 +504,8 @@ def plan_request(method: str, path: str, query: list, body: dict | None) -> Plan
     cleanup = ph == "cleanup"
     if method == "GET" and body is not None:
         raise Refuse("get-with-body", 400)
+    if STATE.purpose == FINALIZATION_PURPOSE:
+        return plan_finalization(method, path, query, body)
 
     # ---- credentials
     if path == "/api/router-credentials" and method == "GET":
@@ -899,7 +982,9 @@ class Handler(BaseHTTPRequestHandler):
         ph = phase()  # rechecked immediately before dispatch: the phase may have changed since planning
         if ph == "closed" or (ph == "cleanup" and not plan.cleanup_ok):
             raise Refuse("session-closed" if ph == "closed" else "cleanup-phase")
-        budget = (STATE.cleanup_deadline if plan.cleanup_ok else STATE.runner_deadline) - start
+        cutoff = (STATE.runner_deadline if STATE.purpose == FINALIZATION_PURPOSE else
+                  STATE.cleanup_deadline if plan.cleanup_ok else STATE.runner_deadline)
+        budget = cutoff - start
         if budget <= 0:
             raise Refuse("cleanup-phase")
         with STATE.lock:
@@ -979,6 +1064,17 @@ def logout() -> bool:
 
 
 def startup_inventory() -> None:
+    if STATE.purpose == FINALIZATION_PURPOSE:
+        budget = min(STARTUP_INVENTORY_BUDGET, STATE.runner_deadline - time.monotonic())
+        if budget <= 0:
+            raise RuntimeError("finalization cutoff reached")
+        st, _, data, _ = UPSTREAM.call("GET", "/api/router-credentials", [], None, budget)
+        value = json.loads(data) if st == 200 else None
+        if not isinstance(value, dict) or not isinstance(value.get("credentials"), list):
+            raise RuntimeError("startup credential inventory unavailable")
+        learn_credentials(value)
+        log(event="startup", purpose=FINALIZATION_PURPOSE, historical_sessions=len(STATE.historical_sessions))
+        return
     st, _, data, _ = UPSTREAM.call("GET", "/api/agent-launches", [], None, STARTUP_INVENTORY_BUDGET)
     rows = json.loads(data) if st == 200 else None
     if not isinstance(rows, list):
@@ -1059,6 +1155,16 @@ def main() -> int:
     STATE.cleanup_deadline = now_mono + (float(cfg["cleanup_deadline"]) - now_wall)
     if not (now_mono < STATE.runner_deadline < STATE.cleanup_deadline):
         log(event="startup-failed", reason="deadlines")
+        return 2
+    try:
+        if cfg.get("purpose", "phase-a") == FINALIZATION_PURPOSE:
+            configure_finalization(cfg.get("cleanup_scope"))
+            if STATE.runner_deadline - now_mono > 900:
+                raise Refuse("finalization-deadline")
+        elif cfg.get("purpose", "phase-a") != "phase-a" or "cleanup_scope" in cfg:
+            raise Refuse("purpose-not-allowed")
+    except Refuse:
+        log(event="startup-failed", reason="purpose-or-scope")
         return 2
     try:
         RESOLVER.start()

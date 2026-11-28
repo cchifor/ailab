@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "purpose": "canary-finalization",
+  "image": null,
+  "entrypoint": ["node", "/bundle/docs/runbooks/inference-canary-v0113/owner-finalization-entry.cjs"],
+  "files": {
+    "docs/runbooks/inference-canary-v0113/owner-finalization-entry.cjs": null,
+    "scripts/relay-finalization/client.cjs": null
+  },
+  "finalizationObserver": {
+    "config": "scripts/relay-finalization/config.json",
+    "files": {
+      "scripts/relay_finalization_observer.py": null,
+      "scripts/relay_phase_a_observer.py": null,
+      "scripts/relay-observer-gate.py": null,
+      "scripts/relay-finalization/hub.sql": null,
+      "scripts/relay-finalization/router.cjs": null,
+      "scripts/relay-finalization/host.py": null,
+      "scripts/relay-finalization/client.cjs": null,
+      "scripts/relay-finalization/config.json": null
+    }
+  }
+}

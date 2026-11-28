@@ -9,6 +9,7 @@ import os
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -543,6 +544,217 @@ class CallLifecycle(unittest.TestCase):
         self.assertEqual(self.m.call(["me"]), 0)
         self.assertIn("sso", self.events)
         self.assertEqual(self.w.lease["spec"]["holderIdentity"], "")
+
+
+class FinalizationPreparation(unittest.TestCase):
+    """Broker boundary tests. The validator process result is synthetic; actual CLI/Hub integration is separate."""
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil_cleanup, self.tmp)
+        self.dir, files = bundle(self.tmp, {ros.FINALIZATION_ENTRY: b"synthetic pinned validator entry"})
+        self.w = World(files)
+        self.w.manifest = {"version": 2, "purpose": ros.FINALIZATION_PURPOSE, "image": IMAGE,
+                           "entrypoint": ["node", "/bundle/"+ros.FINALIZATION_ENTRY], "files": files,
+                           "finalizationObserver": {"files": {"scripts/config.json": "a"*64}, "config": "scripts/config.json"}}
+        self.root = Path(self.tmp)/"inputs"
+        self.root.mkdir(mode=0o700)
+        self.raws = {name: ('{"synthetic":"'+name+'"}').encode() for name in ("a", "b", "bInputs", "c")}
+        pins = {name: ros._digest(raw) for name, raw in self.raws.items()}
+        sources = {"hubSource": "1"*40, "routerSource": "2"*40, "observerQualificationSha256": "3"*64}
+        self.plan = {"version": 1, "purpose": ros.FINALIZATION_PURPOSE, "runId": str(uuid.uuid4()), "reportPins": pins,
+                     "cleanupDeadline": int((self.w.clock.now()+300)*1000), "qualificationSha256": ros._canonical_digest(sources)}
+        self.decision = {**self.plan, "bindingIds": sorted(ros.FINALIZATION_BINDINGS), "noFurtherUse": True}
+        self.plan["decisionSha256"] = ros._digest(json.dumps(self.decision).encode())
+        self.manifest = {"version": 1, "pins": pins, "cleanupDeadline": self.plan["cleanupDeadline"],
+                         "decisionSha256": self.plan["decisionSha256"]}
+        self.planpath = Path(self.tmp)/"operator-plan.json"
+        self.write(self.planpath, self.plan)
+        for name, raw in self.raws.items(): self.write(self.root/(name+".json"), raw)
+        self.write(self.root/"manifest.json", self.manifest)
+        self.write(self.root/"decision.json", self.decision)
+        self.expected = ros._digest(self.planpath.read_bytes())
+        scope = {"tenantId": "00000000-0000-4000-8000-000000000001", "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+                 "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8", "executionIdentity": "c4",
+                 "bindingIds": sorted(ros.FINALIZATION_BINDINGS), "profileIds": sorted(ros.FINALIZATION_BINDINGS.values())}
+        binding, profile = next(iter(ros.FINALIZATION_BINDINGS.items()))
+        self.projection = {"version": 1, "purpose": ros.FINALIZATION_PURPOSE, "scope": scope, "reportPins": pins,
+                           "decisionSha256": self.plan["decisionSha256"], "cleanupDeadline": self.plan["cleanupDeadline"],
+                           "launches": [{"launchId": str(uuid.uuid4()), "sessionId": "45724087-335a-4c55-ad0f-cb278afe608a",
+                                         "bindingId": binding, "profileId": profile}], "markers": [], "originalIdle": 60000,
+                           "sources": sources}
+        original = self.w.ops.docker
+        def docker(args, **kwargs):
+            result = original(args, **kwargs)
+            if "--validate-inputs" in args:
+                self.assertFalse(self.w.granted)
+                self.assertEqual(self.w.lease_gets, 0)
+                return json.dumps(self.projection).encode()
+            return result
+        self.w.ops.docker = docker
+
+    @staticmethod
+    def write(path, value):
+        path.write_bytes(value if isinstance(value, bytes) else json.dumps(value).encode())
+        path.chmod(0o600)
+
+    def prepare(self):
+        evidence = Path(tempfile.mkdtemp(dir=self.tmp))
+        return ros.prepare_finalization(self.w.ops, self.w.manifest, self.dir, str(self.root), str(self.planpath),
+                                        self.expected, evidence)
+
+    def test_actual_preparation_calls_fixed_validator_without_network_or_authority(self):
+        prepared = self.prepare()
+        self.assertEqual(prepared["scope"]["sessionIds"], ["45724087-335a-4c55-ad0f-cb278afe608a"])
+        self.assertEqual(prepared["raw"]["a.json"], self.raws["a"])
+        self.assertEqual(self.w.granted, [])
+        self.assertEqual(self.w.lease_gets, 0)
+        calls = [c[1] for c in self.w.calls if c[0] == "docker" and "--validate-inputs" in c[1]]
+        self.assertEqual(len(calls), 1)
+        for value in ("none", "--read-only", "--cap-drop", "ALL", ros.UID, IMAGE):
+            self.assertIn(value, calls[0])
+
+    def test_plan_hash_mismatch_and_report_tampering_stop_before_validator(self):
+        self.expected = "f"*64
+        with self.assertRaises(ros.Refused): self.prepare()
+        self.expected = ros._digest(self.planpath.read_bytes())
+        self.write(self.root/"a.json", b'{"tampered":true}')
+        with self.assertRaises(ros.Refused): self.prepare()
+        self.assertEqual(self.w.calls, [])
+
+    def test_independent_plan_not_matching_runner_manifest_refuses(self):
+        self.manifest["cleanupDeadline"] += 1
+        self.write(self.root/"manifest.json", self.manifest)
+        with self.assertRaises(ros.Refused): self.prepare()
+        self.assertEqual(self.w.calls, [])
+
+    def test_unapproved_source_scope_or_session_projection_refuses_and_removes_owned_volume(self):
+        for mutate in ("source", "scope", "session", "purpose"):
+            with self.subTest(mutate=mutate):
+                saved = json.loads(json.dumps(self.projection))
+                if mutate == "source": self.projection["sources"]["hubSource"] = "f"*40
+                if mutate == "scope": self.projection["scope"]["hostId"] = str(uuid.uuid4())
+                if mutate == "session": self.projection["launches"][0]["profileId"] = str(uuid.uuid4())
+                if mutate == "purpose": self.projection["purpose"] = "phase-a"
+                with self.assertRaises(ros.Refused): self.prepare()
+                self.assertEqual(self.w.calls[-1][1][:3], ("volume", "rm", "-f"))
+                self.projection = saved
+        self.assertEqual(self.w.granted, [])
+
+    def test_single_use_claim_is_retained_and_prevents_replay(self):
+        prepared = self.prepare()
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp}):
+            ros.claim_finalization(prepared)
+            with self.assertRaises(ros.Refused): ros.claim_finalization(prepared)
+            claims = list((Path(self.tmp)/"relay-operator/finalization-ledger").glob("*.json"))
+            self.assertEqual(len(claims), 1)
+            self.assertEqual(json.loads(claims[0].read_text())["planSha256"], self.expected)
+
+    def test_claim_directory_sync_failure_refuses_before_claim_or_authority(self):
+        prepared = self.prepare()
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp}), \
+                mock.patch.object(ros.os, "fsync", side_effect=OSError("synthetic directory sync failure")):
+            with self.assertRaises(OSError): ros.claim_finalization(prepared)
+        self.assertEqual(self.w.granted, [])
+        self.assertFalse((Path(self.tmp)/"relay-operator/finalization-ledger"/(self.plan["runId"]+".json")).exists())
+
+    def test_reader_requires_complete_pinned_closure_and_same_client(self):
+        paths = ("relay_finalization_observer.py", "relay_phase_a_observer.py", "relay-observer-gate.py",
+                 "relay-finalization/hub.sql", "relay-finalization/router.cjs", "relay-finalization/host.py",
+                 "relay-finalization/client.cjs", "config.json")
+        root = Path(self.tmp)/"reader-source"
+        pins = {}
+        for rel in paths:
+            path = root/"scripts"/rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"{}" if rel == "config.json" else b"synthetic pinned source")
+            pins["scripts/"+rel] = ros._digest(path.read_bytes())
+        manifest = {"finalizationObserver": {"files": pins, "config": "scripts/config.json"},
+                    "files": {"scripts/relay-finalization/client.cjs": pins["scripts/relay-finalization/client.cjs"]}}
+        self.assertEqual(len(ros.verify_finalization_observer(manifest, str(root))["files"]), len(paths))
+        saved = pins.pop("scripts/relay_phase_a_observer.py")
+        with self.assertRaises(ros.Refused): ros.verify_finalization_observer(manifest, str(root))
+        pins["scripts/relay_phase_a_observer.py"] = saved
+        manifest["files"]["scripts/relay-finalization/client.cjs"] = "f"*64
+        with self.assertRaises(ros.Refused): ros.verify_finalization_observer(manifest, str(root))
+
+    def test_reader_uses_verified_framing_module_instead_of_cached_phase_a(self):
+        from types import ModuleType
+        old = ModuleType("relay_phase_a_observer")
+        old.MARKER = "unverified cache"
+        source = (b"import relay_phase_a_observer as framing\n"
+                  b"def create_finalization_host(**kwargs):\n"
+                  b" assert framing.MARKER == 'verified'\n"
+                  b" return framing.MARKER\n")
+        run = ros.Run(self.w.ops, COMMIT+":manifest.json", self.dir, 45, self.tmp)
+        run.finalization = {"projection": self.projection, "plan": self.plan,
+                            "raw": {"decision.json": json.dumps(self.decision).encode()}}
+        run.finalization_reader = {"files": {"scripts/relay_finalization_observer.py": source,
+                                             "scripts/relay_phase_a_observer.py": b"MARKER = 'verified'\n"},
+                                   "config": {}}
+        context = {}
+        try:
+            with mock.patch.dict(sys.modules, {"relay_phase_a_observer": old}):
+                run._finalization_prepare(context)
+                self.assertEqual(context["host"], "verified")
+        finally:
+            if context.get("observer_dir"): shutil_cleanup(context["observer_dir"])
+
+    def test_deadline_elapsed_during_validation_refuses_before_authority(self):
+        original = self.w.ops.docker
+        def docker(args, **kwargs):
+            result = original(args, **kwargs)
+            if "--validate-inputs" in args: self.w.clock.t = self.plan["cleanupDeadline"]/1000
+            return result
+        self.w.ops.docker = docker
+        with self.assertRaises(ros.Refused): self.prepare()
+        self.assertEqual(self.w.granted, [])
+
+    def test_unapproved_purpose_or_phase_a_observer_manifest_refused(self):
+        for change in ({"purpose": "generic-cleanup"}, {"observer": {}}):
+            saved = dict(self.w.manifest)
+            self.w.manifest.update(change)
+            with self.assertRaises(ros.Refused): ros.load_manifest(self.w.ops, COMMIT+":manifest.json")
+            self.w.manifest = saved
+
+    def test_version_two_manifest_duplicate_fields_refuse(self):
+        raw = json.dumps(self.w.manifest)
+        self.w.ops.git_show = lambda *_: (raw[:-1]+',"purpose":"canary-finalization"}').encode()
+        with self.assertRaises(ros.Refused): ros.load_manifest(self.w.ops, COMMIT+":manifest.json")
+
+    def test_lifecycle_uses_exact_cleanup_deadline_and_never_phase_a_prepare(self):
+        from types import SimpleNamespace
+        calls = []
+        def prepare_host(run, ctx):
+            calls.append("read-only-host")
+            self.assertFalse(self.w.granted)
+            ctx["host"] = SimpleNamespace(stop=lambda: calls.append("stop"), drain=lambda _: True,
+                                         alive=lambda: True, ev=SimpleNamespace(close=lambda: None), fault_reason=None)
+        ev = str(Path(self.tmp)/"lifecycle-evidence")
+        with mock.patch.dict(os.environ, {"LOCALAPPDATA": self.tmp}), \
+                mock.patch.object(ros, "verify_finalization_observer", return_value={"files": {}, "config": {}}), \
+                mock.patch.object(ros.Run, "_finalization_prepare", prepare_host), \
+                mock.patch.object(ros.Run, "_observer_prepare", side_effect=AssertionError("Phase A preparation called")), \
+                mock.patch.object(ros.Run, "_observer_start", return_value=True):
+            run = ros.Run(self.w.ops, COMMIT+":manifest.json", self.dir, 45, ev,
+                          finalization_inputs=str(self.root), finalization_plan_file=str(self.planpath),
+                          finalization_plan_sha256=self.expected, run_id="session-test")
+            self.assertEqual(run.main(), 0)
+        config = json.loads(self.w.proxy.stdin.data.splitlines()[1])
+        self.assertEqual(config["purpose"], ros.FINALIZATION_PURPOSE)
+        self.assertEqual(config["runner_deadline"]*1000, self.plan["cleanupDeadline"])
+        self.assertEqual(config["cleanup_deadline"]-config["runner_deadline"], 600)
+        self.assertEqual(config["cleanup_scope"]["sessionIds"], ["45724087-335a-4c55-ad0f-cb278afe608a"])
+        self.assertEqual(self.w.revokes, 2)
+        self.assertEqual(self.w.sso, ["kc"])
+        self.assertEqual(calls, ["read-only-host", "stop"])
+        runner = next(c[1] for c in self.w.calls if c[0] == "popen" and "--run" in c[1])
+        self.assertIn("/state/run/finalization", runner)
+        self.assertNotIn("/predecessor", " ".join(runner))
+
+
+def shutil_cleanup(path):
+    import shutil
+    shutil.rmtree(path)
 
 
 if __name__ == "__main__":

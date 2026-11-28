@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 import uuid
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -59,6 +60,13 @@ def fresh_state(runner_in=600, cleanup_in=900):
     P.STATE.actor_id, P.STATE.run_start = ACTOR, START
     now = time.monotonic()
     P.STATE.runner_deadline, P.STATE.cleanup_deadline = now + runner_in, now + cleanup_in
+
+
+def finalization_scope(sid=None):
+    return {"tenantId": "00000000-0000-4000-8000-000000000001", "hostId": "b3b1be1a-275c-4a2e-b515-428b39c43171",
+            "connectionId": "babbf5ca-38ab-42b2-b7c7-f7d50a7d99e8", "executionIdentity": "c4",
+            "bindingIds": sorted(P.FINALIZATION_BINDINGS), "profileIds": sorted(P.FINALIZATION_PROFILES),
+            "sessionIds": [P.PREDECESSOR_SESSION, sid or u()]}
 
 
 def launch_body(op=None, **over):
@@ -364,6 +372,101 @@ class SocketServer(unittest.TestCase):
         resp = self.raw(head.encode() + payload)
         status = int(resp.split(b" ", 2)[1])
         return status, resp
+
+    def test_finalization_only_fixed_reads_and_three_revokes(self):
+        sid, foreign = u(), u()
+        P.configure_finalization(finalization_scope(sid))
+        creds = {binding: u() for binding in P.FINALIZATION_BINDINGS}
+        self.fake.handlers[("GET", "/api/router-credentials")] = lambda p, b: (200, {
+            "credentials": [{"id": cid, "binding_id": binding} for binding, cid in creds.items()] +
+                           [{"id": foreign, "binding_id": u()}]})
+        self.assertEqual(self.req("GET", "/api/router-credentials")[0], 200)
+        for path in (f"/api/agent-sessions/{sid}", f"/api/agent-sessions/{sid}/control",
+                     f"/api/agent-sessions/{P.PREDECESSOR_SESSION}"):
+            self.assertEqual(self.req("GET", path)[0], 200)
+        for binding, cid in creds.items():
+            self.assertEqual(self.req("GET", f"/api/router-credentials/keys/{cid}")[0], 200)
+            self.assertEqual(self.req("POST", f"/api/router-credentials/{binding}/revoke",
+                                      {"operationId": u(), "revision": 1})[0], 200)
+        calls = len(self.fake.calls)
+        denied = [("GET", f"/api/router-credentials/keys/{foreign}", None),
+                  ("GET", f"/api/agent-sessions/{u()}", None),
+                  ("GET", f"/api/agent-sessions/{sid}/permissions", None),
+                  ("GET", f"/api/agent-sessions/{sid}/native-recovery", None),
+                  ("GET", "/api/agent-profiles", None), ("GET", "/api/agent-launches", None),
+                  ("POST", "/api/agent-launches", launch_body()),
+                  ("POST", f"/api/router-credentials/{CODEX_B}/rotate", {"operationId": u(), "revision": 1}),
+                  ("POST", f"/api/agent-sessions/{sid}/control", {"generation": 1}),
+                  ("DELETE", f"/api/agent-sessions/{sid}/control/{u()}", None),
+                  ("POST", f"/api/agent-sessions/{sid}/resume", {"operationId": u(), "generation": 1}),
+                  ("POST", f"/api/agent-sessions/{sid}/commands", {"operationId": u(), "kind": "prompt"}),
+                  ("POST", f"/api/agent-permissions/{u()}/decision", {"operationId": u()}),
+                  ("POST", f"/api/router-credentials/{u()}/revoke", {"operationId": u(), "revision": 1})]
+        for method, path, body in denied:
+            self.assertEqual(self.req(method, path, body)[0], 403, path)
+        self.assertEqual(len(self.fake.calls), calls)
+        self.assertEqual(P.STATE.sessions, {})
+        self.assertEqual(P.STATE.leases, {})
+
+    def test_finalization_uncertain_revoke_stays_used_and_original_operation_is_read_only(self):
+        P.configure_finalization(finalization_scope())
+        cid, op = u(), u()
+        P.learn_credentials({"credentials": [{"id": cid, "binding_id": CODEX_B}]})
+        self.fake.handlers[("GET", "/api/router-credentials/keys/")] = lambda p, b: (200, {
+            "credential": {"id": cid, "bindingId": CODEX_B}, "operations": [{"id": op, "state": "unknown"}]})
+        def lost(*_):
+            raise TimeoutError("synthetic lost reply")
+        self.fake.handlers[("POST", f"/api/router-credentials/{CODEX_B}/revoke")] = lost
+        self.assertEqual(self.req("POST", f"/api/router-credentials/{CODEX_B}/revoke",
+                                  {"operationId": op, "revision": 3})[0], 504)
+        self.assertEqual(self.req("GET", f"/api/router-credentials/keys/{cid}")[0], 200)
+        self.assertIn(op, P.STATE.startup_ops)
+        self.assertEqual(self.req("POST", f"/api/router-credentials/{CODEX_B}/revoke",
+                                  {"operationId": u(), "revision": 3})[0], 403)
+        self.assertEqual(len([c for c in self.fake.calls if c[0] == "POST"]), 1)
+        self.assertEqual(P.STATE.ops[op]["binding"], CODEX_B)
+        self.assertRegex(P.STATE.ops[op]["bodySha256"], r"^[a-f0-9]{64}$")
+
+    def test_finalization_parallel_revoke_reserves_once_and_non2xx_does_not_refund(self):
+        P.configure_finalization(finalization_scope())
+        self.fake.handlers[("POST", f"/api/router-credentials/{CODEX_B}/revoke")] = lambda p, b: (409, {})
+        barrier, results = threading.Barrier(3), []
+        def send():
+            barrier.wait()
+            results.append(self.req("POST", f"/api/router-credentials/{CODEX_B}/revoke",
+                                    {"operationId": u(), "revision": 1})[0])
+        workers = [threading.Thread(target=send) for _ in range(2)]
+        for worker in workers: worker.start()
+        barrier.wait()
+        for worker in workers: worker.join(3)
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(sorted(results), [403, 409])
+        self.assertEqual(len(self.fake.calls), 1)
+
+    def test_finalization_cutoff_refuses_planned_dispatch_and_reads_despite_teardown_grace(self):
+        P.configure_finalization(finalization_scope())
+        plan = P.plan_request("POST", f"/api/router-credentials/{CODEX_B}/revoke", [],
+                              {"operationId": u(), "revision": 1})
+        P.STATE.runner_deadline = time.monotonic()-1
+        self.assertGreater(P.STATE.cleanup_deadline, time.monotonic())
+        handler = object.__new__(P.Handler)
+        with self.assertRaises(P.Refuse):
+            handler._dispatch(plan)
+        self.assertEqual(self.req("GET", "/api/router-credentials")[0], 403)
+        self.assertEqual(self.fake.calls, [])
+
+    def test_finalization_revoke_schema_and_unlearned_old_operation_refuse(self):
+        P.configure_finalization(finalization_scope())
+        path = f"/api/router-credentials/{CODEX_B}/revoke"
+        for body in ({"operationId": u(), "revision": True}, {"operationId": u(), "revision": 0},
+                     {"operationId": u(), "revision": 1, "extra": True}):
+            self.assertEqual(self.req("POST", path, body)[0], 400)
+        old, cid = u(), u()
+        P.learn_credentials({"credentials": [{"id": cid, "binding_id": CODEX_B}]})
+        P.learn_finalization_key(cid, {"credential": {"id": cid, "bindingId": CODEX_B}, "operations": [{"id": old}]})
+        self.assertEqual(self.req("POST", path, {"operationId": old, "revision": 1})[0], 403)
+        self.assertEqual(P.STATE.revoked, set())
+        self.assertEqual(self.fake.calls, [])
 
     def test_allowed_get_reaches_upstream_without_client_headers(self):
         self.fake.handlers[("GET", "/api/agent-profiles")] = lambda p, b: (200, [{"id": "x"}])
