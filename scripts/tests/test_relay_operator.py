@@ -25,13 +25,21 @@ class CallCleanup(unittest.TestCase):
         self.end_sso = mock.patch.object(ro, "end_sso").start()
         mock.patch.object(ro, "creds", return_value=dict(CREDS)).start()
         mock.patch.object(sys, "stderr", io.StringIO()).start()
+        # `call` holds the fenced Lease (relay_operator_session.py); these tests are about the grant/revoke
+        # cleanup, so the Lease is faked as always ours (its own behaviour is tested in test_relay_operator_session)
+        ros = ro._session_module()
+        mock.patch.object(ros, "lease_acquire").start()
+        mock.patch.object(ros, "lease_secure", return_value=True).start()
+        mock.patch.object(ros, "lease_release").start()
+        mock.patch.object(ro, "run", return_value=b"").start()  # the named-container removal: no real docker
         self.addCleanup(mock.patch.stopall)
 
     def test_grant_failure_still_revokes(self):
         # member.js may commit the membership and still report a transport error
         mock.patch.object(ro, "grant", side_effect=SystemExit("kubectl exec failed")).start()
         self.assertEqual(ro.call(["me"]), 1)
-        self.revoke.assert_called_once_with(SUBJECT)
+        # the orphan clear before the grant, then the cleanup's revoke (relay-operator.py `call`)
+        self.assertEqual(self.revoke.call_args_list, [mock.call(SUBJECT), mock.call(SUBJECT)])
         self.end_sso.assert_called_once_with(UID)
 
     def test_grant_failure_with_unconfirmed_revoke_exits_3(self):
@@ -44,7 +52,8 @@ class CallCleanup(unittest.TestCase):
         mock.patch.object(ro, "grant").start()
         mock.patch.object(ro, "counts", side_effect=SystemExit("psql failed")).start()
         self.assertEqual(ro.call(["me"]), 1)
-        self.revoke.assert_called_once_with(SUBJECT)
+        # the orphan clear before the grant, then the cleanup's revoke (relay-operator.py `call`)
+        self.assertEqual(self.revoke.call_args_list, [mock.call(SUBJECT), mock.call(SUBJECT)])
         self.end_sso.assert_called_once_with(UID)
 
     def test_normal_call_revokes_and_ends_sso(self):
@@ -55,7 +64,8 @@ class CallCleanup(unittest.TestCase):
         out = io.BytesIO()
         with mock.patch.object(sys, "stdout", mock.Mock(buffer=out)):
             self.assertEqual(ro.call(["me"]), 0)
-        self.revoke.assert_called_once_with(SUBJECT)
+        # the orphan clear before the grant, then the cleanup's revoke (relay-operator.py `call`)
+        self.assertEqual(self.revoke.call_args_list, [mock.call(SUBJECT), mock.call(SUBJECT)])
         self.end_sso.assert_called_once_with(UID)
         self.assertNotIn("SENTINEL_PW", " ".join(run.call_args.args[0]))  # the password is never in argv
         self.assertEqual(run.call_args.kwargs["input"], b"SENTINEL_PW_do_not_leak\n")

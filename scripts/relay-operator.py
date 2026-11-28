@@ -5,6 +5,11 @@
     python scripts/relay-operator.py provision --rotate   # new password (Keycloak + OpenBao)
     python scripts/relay-operator.py call OP [ARGS]       # grant admin -> one allowlisted call -> revoke
     python scripts/relay-operator.py revoke               # delete its membership + sessions (idempotent)
+    python scripts/relay-operator.py session --manifest-ref COMMIT:PATH --bundle DIR --runner-minutes N
+                                     --evidence-dir NEW_DIR [--predecessor-report FILE]
+                                     # ONE bounded automated run (relay_operator_session.py); an observer manifest
+                                     # (automated phase A) also needs the preserved predecessor report
+    python scripts/relay-operator.py observer-probe       # READ-ONLY phase A observer checks + latencies (no authority)
     python scripts/relay-operator.py status               # membership/session counts, Keycloak user state
 
 `call` OPs are relay-admin-call.py's allowlist (me, list-installations, get-installation ID,
@@ -25,8 +30,10 @@ import hashlib
 import json
 import re
 import secrets
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 CTX = ["kubectl", "--context", "admin@ai"]
@@ -46,8 +53,12 @@ KCADM = (
 BAO = 'read -r t; export BAO_TOKEN="$t" BAO_TLS_SERVER_NAME=openbao.openbao.svc; '
 
 
-def run(args, stdin: bytes | None = None, check=True) -> bytes:
-    p = subprocess.run(args, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def run(args, stdin: bytes | None = None, check=True, timeout: float = 120) -> bytes:
+    """Every subprocess is bounded; a timeout becomes the same SystemExit as a failure, which cleanup() handles."""
+    try:
+        p = subprocess.run(args, input=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"relay-operator: {' '.join(args[:6])} ... timed out after {timeout:.0f}s")
     if check and p.returncode != 0:
         raise SystemExit(f"relay-operator: {' '.join(args[:6])} ... failed ({p.returncode}): "
                          f"{p.stderr.decode('utf-8', 'replace').strip()[-300:]}")
@@ -174,29 +185,170 @@ def cleanup(subject: str, uid: str, rc: int) -> int:
     return rc
 
 
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _session_module():
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import relay_operator_session as ros  # noqa: E402 - the orchestrator lives beside this script
+    return ros
+
+
+def ops():
+    ros = _session_module()
+    return ros, ros.Ops(
+        creds=creds, grant=grant, revoke=revoke, end_sso=end_sso,
+        kubectl=lambda args, stdin=None, timeout=60, check=True: run(CTX + list(args), stdin, check, timeout),
+        docker=lambda args, stdin=None, timeout=60, check=True: run(["docker", *args], stdin, check, timeout),
+        git_show=lambda commit, path: run(["git", "-C", str(REPO), "show", f"{commit}:{path}"], timeout=30),
+        git_is_reviewed=lambda commit: subprocess.run(
+            ["git", "-C", str(REPO), "merge-base", "--is-ancestor", commit, "gitea/main"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30).returncode == 0)
+
+
+CALL_DOCKER_TIMEOUT_S = 300
+# Worst case of everything a call may spend while holding authority: creds, orphan revoke, grant and counts
+# (4 x 120 s), the admin container (300 s) plus its stop/remove (75 s), then cleanup (revoke, readback, SSO:
+# 3 x 120 s). The Lease must outlive all of it.
+CALL_LEASE_S = 1800
+CLEANUP_SECURE_S = 600  # the validity re-secured before destructive cleanup (cleanup's worst case is ~360 s)
+
+
+class _Interrupted(BaseException):
+    pass
+
+
+class _SafeStream:
+    """Wraps stderr/stdout during a call: a write or flush failure (a closed pipe) is swallowed, so reporting can
+    never abort the cleanup that revokes the temporary admin."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    def write(self, s):
+        try:
+            return self.inner.write(s)
+        except (OSError, ValueError):
+            return len(s)
+
+    def flush(self):
+        try:
+            self.inner.flush()
+        except (OSError, ValueError):
+            pass
+
+    @property
+    def buffer(self):
+        return _SafeStream(self.inner.buffer) if hasattr(self.inner, "buffer") else self
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
 def call(op_args: list[str]) -> int:
-    c = creds()
-    subject, username, pw, uid = c["subject"], c["username"], c["password"], c["keycloak_user_id"]
-    c = None
-    tool = str(Path(__file__).resolve().parent)
+    ros, o = ops()
+    holder = "call-" + secrets.token_hex(6)
+    container = "relay-admin-" + holder
+    state = {"cleanup": False, "deferred": 0}
+
+    def on_signal(*_):  # the same lifecycle as `session`: interrupt the work, never the cleanup
+        if state["cleanup"]:
+            state["deferred"] += 1
+            return
+        raise _Interrupted()
+
+    prev = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+    for s in prev:
+        signal.signal(s, on_signal)
+    saved_streams = (sys.stdout, sys.stderr)
+    sys.stdout, sys.stderr = _SafeStream(sys.stdout), _SafeStream(sys.stderr)
     rc = 1
-    try:  # the grant is INSIDE the cleanup scope: whatever fails after it starts, the finally revokes
-        grant(subject)
-        print(f"relay-operator: granted admin ({counts(subject)})", file=sys.stderr)
-        p = subprocess.run(["docker", "run", "--rm", "-i", "--network", "bridge", "-v", f"{tool}:/tool:ro", IMAGE,
-                            "python3", "-I", "/tool/relay-admin-call.py", "--username", username, *op_args],
-                           input=(pw + "\n").encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        pw = None
-        sys.stderr.write(p.stderr.decode("utf-8", "replace"))
-        sys.stdout.buffer.write(p.stdout)
-        sys.stdout.flush()
-        rc = p.returncode
-    except SystemExit as e:  # grant/count/docker failed: report it, but let cleanup's verdict decide the rc
-        print(f"relay-operator: {e}", file=sys.stderr)
-        rc = 1
+    try:
+        try:  # the same fenced Lease as `session`: a call never overlaps a run, and the reaper waits for it
+            ros.lease_acquire(o, holder, time.time() + CALL_LEASE_S)
+        except (ros.LeaseLost, SystemExit) as e:
+            print(f"relay-operator: {e}; refusing (a session or reaper holds the identity)", file=sys.stderr)
+            return 7
+        subject = uid = None
+        try:  # credentials, the grant and the call are all INSIDE the cleanup + Lease-release scope
+            c = creds()
+            subject, username, pw, uid = c["subject"], c["username"], c["password"], c["keycloak_user_id"]
+            c = None
+            tool = str(Path(__file__).resolve().parent)
+            orphan = revoke(subject)
+            if orphan != REVOKED:
+                raise SystemExit(f"orphan authority not cleared ({orphan})")
+            grant(subject)
+            print(f"relay-operator: granted admin ({counts(subject)})", file=sys.stderr)
+            try:
+                p = subprocess.run(["docker", "run", "--rm", "-i", "--name", container, "--network", "bridge",
+                                    "-v", f"{tool}:/tool:ro", IMAGE, "python3", "-I", "/tool/relay-admin-call.py",
+                                    "--username", username, *op_args],
+                                   input=(pw + "\n").encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   timeout=CALL_DOCKER_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                raise SystemExit(f"the admin call exceeded {CALL_DOCKER_TIMEOUT_S}s")
+            pw = None
+            sys.stderr.write(p.stderr.decode("utf-8", "replace"))
+            sys.stdout.buffer.write(p.stdout)
+            sys.stdout.flush()
+            rc = p.returncode
+        except BaseException as e:  # noqa: BLE001 - grant/count/docker/signal: report it; cleanup's verdict decides
+            print(f"relay-operator: {type(e).__name__}: {e}", file=sys.stderr)
+            rc = 1
+        finally:
+            state["cleanup"] = True
+            # 1. the admin container: gone before anything else (a timed-out docker client leaves it running)
+            try:
+                run(["docker", "rm", "-f", container], check=False, timeout=75)
+            except BaseException as e:  # noqa: BLE001
+                print(f"relay-operator: could not remove {container} ({type(e).__name__})", file=sys.stderr)
+                rc = rc or 1
+            # 2. destructive cleanup only while this call still owns the Lease, with enough validity for it
+            if subject is not None:
+                owned = ros.lease_secure(o, holder, CLEANUP_SECURE_S)
+                if owned is True:
+                    try:
+                        rc = cleanup(subject, uid, rc)
+                    except BaseException as e:  # noqa: BLE001 - cleanup() never raises by contract; be sure
+                        print(f"relay-operator: cleanup raised {type(e).__name__}; REVOKE NOT CONFIRMED",
+                              file=sys.stderr)
+                        rc = 3
+                else:
+                    print("relay-operator: Lease ownership NOT confirmed (" + ("a successor holds it"
+                          if owned is False else "unknown") + "); not revoking: run `relay-operator.py revoke` "
+                          "once the Lease is free (the reaper also clears it)", file=sys.stderr)
+                    rc = rc if rc == 3 else 7
+            # 3. the Lease
+            try:
+                ros.lease_release(o, holder)
+            except BaseException as e:  # noqa: BLE001 - the Lease expires on its own; report it
+                print(f"relay-operator: Lease release failed ({type(e).__name__}); it expires on its own",
+                      file=sys.stderr)
+                rc = rc or 7
+            if state["deferred"]:
+                print(f"relay-operator: {state['deferred']} signal(s) deferred until cleanup finished", file=sys.stderr)
     finally:
-        rc = cleanup(subject, uid, rc)
+        for s, h in prev.items():
+            signal.signal(s, h)
+        sys.stdout, sys.stderr = saved_streams
     return rc
+
+
+def session(a) -> int:
+    ros, o = ops()
+    subprocess.run(["git", "-C", str(REPO), "fetch", "-q", "gitea", "main"], timeout=60, check=False)
+    return ros.run_session(o, a.manifest_ref, a.bundle, a.runner_minutes, a.evidence_dir, a.predecessor_report)
+
+
+def observer_probe() -> int:
+    """Read-only: the phase A observer's sources against the live estate, with per-call latency. No Relay session, no
+    Lease, no holder start (plans/2026-11-27-relay-phase-a-observer-plan.md, Verification 3)."""
+    _session_module()
+    import relay_phase_a_host as H  # noqa: E402
+    report = H.probe(REPO)
+    print(json.dumps(report, indent=1, sort_keys=True))
+    return 0 if report["ok"] else 1
 
 
 def main() -> int:
@@ -205,10 +357,21 @@ def main() -> int:
     pr = sub.add_parser("provision"); pr.add_argument("--rotate", action="store_true")
     ca = sub.add_parser("call"); ca.add_argument("op", nargs=argparse.REMAINDER)
     sub.add_parser("revoke"); sub.add_parser("status")
+    se = sub.add_parser("session")
+    se.add_argument("--manifest-ref", required=True, help="FULL_COMMIT:path of the reviewed bundle manifest")
+    se.add_argument("--bundle", required=True)
+    se.add_argument("--runner-minutes", type=int, required=True)
+    se.add_argument("--evidence-dir", required=True)
+    se.add_argument("--predecessor-report", help="the preserved original phase A report (observer manifests only)")
+    sub.add_parser("observer-probe")
     a = p.parse_args()
     if a.cmd == "provision":
         provision(a.rotate)
         return 0
+    if a.cmd == "session":
+        return session(a)
+    if a.cmd == "observer-probe":
+        return observer_probe()
     if a.cmd == "call":
         if not a.op:
             p.error("call needs an OP")
