@@ -160,6 +160,66 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.client(self.req())["code"], "busy")
         s.close()
 
+    def delayed_refusal(self, terminal=None, terminal_during_read=None):
+        # Synchronize on the first server action, not a sleep or a lucky write/close race.
+        reached, first = threading.Event(), []
+        read, answer = self.gate.read_request, self.gate.answer
+        owner = object()
+        with self.gate.cond:
+            self.gate.busy = owner
+            self.gate.terminal = terminal
+
+        def observed_read(conn):
+            if not first:
+                first.append("read")
+                reached.set()
+            return read(conn)
+
+        def observed_answer(conn, obj):
+            if not first:
+                first.append("answer")
+                reached.set()
+            return answer(conn, obj)
+
+        self.gate.read_request, self.gate.answer = observed_read, observed_answer
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(5)
+            client.connect(self.sock)
+            self.assertTrue(reached.wait(5), "gate did not handle the connection")
+            self.assertEqual(first, ["read"], "refusal answered before consuming the bounded request")
+            if terminal_during_read:
+                with self.gate.cond:
+                    self.gate.terminal = terminal_during_read
+            client.sendall(self.req())
+            with client.makefile("rb") as reply:
+                result = json.loads(reply.readline())
+            self.assertEqual(result["code"], terminal_during_read or terminal or "busy")
+        self.assertEqual(self.gate.seq, 0)  # a refused connection never reaches the host
+        self.assertIsNone(self.gate.waiting)
+        self.assertIs(self.gate.busy, owner)  # it never releases the admitted handler's token
+
+    def test_busy_waits_for_a_delayed_client_request(self):
+        self.delayed_refusal()
+
+    def test_cancelled_waits_for_a_delayed_client_request(self):
+        self.delayed_refusal("cancelled")
+
+    def test_observer_down_waits_for_a_delayed_client_request(self):
+        self.delayed_refusal("observer-down")
+
+    def test_terminal_state_wins_if_it_arrives_while_a_busy_client_is_writing(self):
+        self.delayed_refusal(terminal_during_read="cancelled")
+
+    def test_busy_malformed_or_extra_frame_is_never_forwarded_or_admitted(self):
+        owner = object()
+        with self.gate.cond:
+            self.gate.busy = owner
+        for raw in (b"not json\n", self.req() + self.req()):
+            self.assertEqual(self.client(raw)["code"], "busy")
+            self.assertIs(self.gate.busy, owner)
+            self.assertEqual(self.gate.seq, 0)
+            self.assertIsNone(self.gate.waiting)
+
 
 # ------------------------------------------------------------------------------------------ the host protocol
 class FakeGate:

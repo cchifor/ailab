@@ -191,6 +191,19 @@ class Gate:
             if self.busy == token:
                 self.busy = None
 
+    def refuse_connection(self, conn, code) -> None:
+        """Consume one bounded request before closing, so a delayed writer can receive the refusal."""
+        try:
+            try:
+                self.read_request(conn)
+            except (Bad, OSError) as e:
+                diag(e.args[0] if isinstance(e, Bad) else "request-io")
+            with self.cond:
+                code = self.terminal or code  # cancellation still takes priority if it arrived during the read
+            self.answer(conn, {"v": 1, "ok": False, "code": code})
+        finally:
+            conn.close()
+
     def handle(self, conn, token) -> None:
         try:
             try:
@@ -300,12 +313,10 @@ class Gate:
                 if terminal is None and not busy:
                     self.busy = token
             if terminal is not None:
-                self.answer(conn, {"v": 1, "ok": False, "code": terminal})
-                conn.close()
+                self.refuse_connection(conn, terminal)
                 continue
             if busy:
-                self.answer(conn, {"v": 1, "ok": False, "code": "busy"})
-                conn.close()
+                self.refuse_connection(conn, "busy")
                 continue
             threading.Thread(target=self.guarded, args=(self.handle, conn, token), daemon=True).start()
 
