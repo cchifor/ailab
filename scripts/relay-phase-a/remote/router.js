@@ -22,6 +22,8 @@ const canonical = (v) => (Array.isArray(v) ? "[" + v.map(canonical).join(",") + 
   : v && typeof v === "object" ? "{" + Object.keys(v).sort().map((k) => JSON.stringify(k) + ":" + canonical(v[k])).join(",") + "}"
   : JSON.stringify(v));
 const sha = (s) => crypto.createHash("sha256").update(s).digest("hex");
+// Both file readers use bigint stats, preserving the complete device/inode values.
+const fileStoreSha = (path, st) => sha("file:" + path + ":" + st.dev + ":" + st.ino);
 const int = (s) => { if (!/^[0-9]{1,16}$/.test(s)) fail("bad integer", 2); return Number(s); };
 
 async function config() {
@@ -38,9 +40,9 @@ async function identity() {
   let store;
   try {
     if (db.startsWith("/")) {
-      const st = require("node:fs").statSync(db);
+      const st = require("node:fs").statSync(db, { bigint: true });
       if (!st.isFile()) throw new Error("not a file");
-      store = sha("file:" + db + ":" + st.dev + ":" + st.ino);
+      store = fileStoreSha(db, st);
     } else {
       const u = new URL(db);
       if (!u.hostname || !u.pathname || u.pathname === "/") throw new Error("incomplete");
@@ -137,7 +139,7 @@ function branchRecord(database, namespace, principal, conversation, branch) {
   return { version: 1, requestedAt, observedAt, namespace, principal, conversation, branch,
     kvNamespace: "inference-session-v1", key, record, querySha256: sha(sql),
     rawRecordSha256,
-    storeSha256: sha("file:" + database + ":" + before.dev + ":" + before.ino) };
+    storeSha256: fileStoreSha(database, before) };
 }
 
 // Remote.router pipes this exact file to `node -`; stdin has no require.main.

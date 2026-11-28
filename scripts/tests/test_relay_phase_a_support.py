@@ -6,6 +6,7 @@ host discovery, SSH, kubectl, credential files or live providers are used here.
 """
 import copy
 import hashlib
+import http.server
 import importlib.util
 import json
 import os
@@ -13,6 +14,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -263,6 +265,48 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(actual['record'],expected['record'])
         self.assertEqual(actual['rawRecordSha256'],expected['rawRecordSha256'])
         self.assertEqual(actual['storeSha256'],expected['storeSha256'])
+
+    def test_actual_identity_and_branch_modes_share_the_sqlite_store_identity(self):
+        path = self.f.root/'same-store.db'
+        expected = sqlite_read(path, NATIVE, {'epoch':'e','operation':'turn-pending',
+                                            'state':'complete','updatedAt':C.now_ms()})
+        original, requests = path.read_bytes(), []
+        class Config(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_): pass
+            def do_GET(self):
+                requests.append((self.path, self.headers.get('Authorization')))
+                body = encode({'capture': {'level': 'full', 'retentionDays': 7}})
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        server = http.server.HTTPServer(('127.0.0.1', 8787), Config)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            source = (SCRIPTS/'relay-phase-a/remote/router.js').read_bytes()
+            env = {'PATH':os.environ['PATH'], 'ROUTER_DATABASE':str(path),
+                   'ROUTER_ADMIN_TOKEN':'synthetic-config-reader'}
+            def invoke(*args):
+                p = subprocess.run(['node','-',str(C.now_ms()+3000),*args], input=source,
+                                   capture_output=True, timeout=5, env=env)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                return json.loads(p.stdout)
+            identity = invoke('identity')
+            branch = invoke('branch', 'default', 'key:'+KEY, NATIVE['conversation'], NATIVE['branch'])
+            self.assertEqual(identity['captureLevel'], 'full')
+            self.assertEqual(identity['retentionDays'], 7)
+            self.assertEqual(identity['storeSha256'], branch['storeSha256'])
+            self.assertEqual(branch['storeSha256'], expected['storeSha256'])
+            self.assertEqual(branch['record'], expected['record'])
+            self.assertEqual(requests, [('/admin/v1/config', 'Bearer synthetic-config-reader')])
+            self.assertEqual(path.read_bytes(), original)
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
 
     def test_missing_runtime_manifest_in_both_descriptors_refused(self):
         self.f.imported()
