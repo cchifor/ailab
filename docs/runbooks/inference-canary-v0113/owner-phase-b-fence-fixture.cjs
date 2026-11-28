@@ -151,6 +151,9 @@ function transport({
     assert.equal(body.expectedAttempts, counts.attempts);
     assert.equal(body.expectedUnknownUsage, counts.tokenUsageUnknown);
     assert.equal(body.expectedFenceRevision, current?.revision || 0);
+    // The actual Router captures one timestamp for the fence and its atomic
+    // operation receipt. Separate reads can straddle a millisecond boundary.
+    const committedAt = now();
     if (method === "arm") {
       const {
         version,
@@ -179,7 +182,7 @@ function transport({
         baselineTokenUsageUnknown: counts.tokenUsageUnknown,
         rowStartTokenUsageUnknown: counts.tokenUsageUnknown,
         completed: [],
-        createdAt: now(),
+        createdAt: committedAt,
       };
     } else if (method === "advance") {
       assert.equal(body.fenceId, current.plan.fenceId);
@@ -199,7 +202,7 @@ function transport({
       current.revision++;
     } else {
       assert.equal(method, "close");
-      current.closedAt = now();
+      current.closedAt = committedAt;
       current.closedAttempts = counts.attempts;
       current.closedTokenUsageUnknown = counts.tokenUsageUnknown;
       current.terminalEvidenceSha256 = body.terminalEvidenceSha256;
@@ -212,7 +215,7 @@ function transport({
       // The HTTP route passes digest(raw) to RelayKeyService.execute. JWT
       // binding(raw) authenticates the request separately; it is not this field.
       requestDigest: request.bodySha256,
-      committedAt: now(),
+      committedAt,
       fence: clone(current),
       ...counts,
     };
