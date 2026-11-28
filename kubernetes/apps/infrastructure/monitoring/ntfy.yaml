@@ -90,7 +90,7 @@ spec:
     spec:
       containers:
         - name: ntfy
-          image: binwiederhier/ntfy:v2.38.2
+          image: binwiederhier/ntfy:v2.38.3
           args: ["serve"]
           ports:
             - { name: http, containerPort: 80 }

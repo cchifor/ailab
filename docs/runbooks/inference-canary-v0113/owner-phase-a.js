@@ -11,8 +11,9 @@
   "use strict";
   const SOURCE = "e843921b7cff76406b7da0b5b35cf653c7e458c5";
   // SOURCE/PROFILES/EXPIRES describe the immutable stopped predecessor.
+  // The v0.14.1 API source bridge preserves the captured 74d1 fixture provenance.
   // The target release still requires fresh operator deployment verification.
-  const RUN_SOURCE = "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613";
+  const RUN_SOURCE = "5f90d03a6ed291e6c62dfde75938ba07c20d8902";
   const ROUTER = "4e4bb34e2f968f9450aabe9cf228d3e70c8bab71";
   const ORIGIN = "https://relay.chifor.me";
   const EXPIRES = Date.parse("2026-11-26T21:27:37Z");
@@ -278,9 +279,9 @@
       (b) => b.toString(16).padStart(2, "0"),
     ).join("");
   }
-  function markerCommand(provider, run, kind) {
+  function markerCommand(provider, run, kind, profiles = PROFILES) {
     need(
-      PROFILES[provider] && uuid(run) && ["denied", "effects"].includes(kind),
+      profiles[provider] && uuid(run) && ["denied", "effects"].includes(kind),
       "Invalid marker selection",
     );
     return (
@@ -289,7 +290,7 @@
       "-" +
       run +
       "' >> '/home/c4/.local/state/relay-holder/workspaces/" +
-      PROFILES[provider].id +
+      profiles[provider].id +
       "/acceptance-" +
       run +
       "." +
@@ -297,11 +298,11 @@
       "'"
     );
   }
-  function marker(report, provider, run, phase, now) {
+  function marker(report, provider, run, phase, now, profiles = PROFILES) {
     need(
       report?.version === 1 &&
         report.provider === provider &&
-        report.profileId === PROFILES[provider].id &&
+        report.profileId === profiles[provider]?.id &&
         report.runId === run &&
         report.phase === phase &&
         report.state === "observed" &&
@@ -316,7 +317,7 @@
     );
     for (const k of ["denied", "effects"])
       need(
-        report.commands?.[k] === markerCommand(provider, run, k),
+        report.commands?.[k] === markerCommand(provider, run, k, profiles),
         "Marker command changed",
       );
     need(report.files?.denied?.state === "absent", "Denied marker exists");
@@ -348,7 +349,7 @@
       version: 1,
       observedUtc: report.observedUtc,
       provider,
-      profileId: PROFILES[provider].id,
+      profileId: profiles[provider].id,
       runId: run,
       phase,
       state: "observed",
@@ -501,6 +502,202 @@
     }
     need(row.receipt?.status === "completed", "Missing native receipt");
     return true;
+  }
+  function settledPredecessorCommand(row, op) {
+    need(
+      completed(row, { ...op.body, sessionId: STOPPED_SESSION }) &&
+        (op.body.kind === "prompt"
+          ? ["cancelled", "end_turn"].includes(row.receipt?.result?.stopReason)
+          : row.receipt?.result?.cancelSent === true),
+      "Prior command has no settled native outcome",
+    );
+  }
+  function exactProjectionKeys(value, keys) {
+    return (
+      value !== null &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Object.keys(value).length === keys.length &&
+      keys.every((key) => Object.prototype.hasOwnProperty.call(value, key))
+    );
+  }
+  async function predecessorProjection(
+    raw,
+    pin,
+    prior,
+    reportHash,
+    crypto,
+    now,
+  ) {
+    const sha = (value) =>
+      typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+    // Only an independently supplied discriminator selects the new mode.
+    // An untagged pin retains the original exact-byte contract, with no fallback.
+    const contentMode = pin?.mode === "canonical-content-v1";
+    const contentDomain = "relay-predecessor-command-projection/content-v1\n";
+    need(
+      exactProjectionKeys(pin, [
+        ...(contentMode ? ["mode"] : []),
+        "sha256",
+        "tenantId",
+        "databaseIdentity",
+        "querySha256",
+        "commands",
+      ]) &&
+        sha(pin.sha256) &&
+        uuid(pin.tenantId) &&
+        sha(pin.querySha256) &&
+        typeof pin.databaseIdentity === "string" &&
+        /^[A-Za-z0-9._-]{1,128}$/.test(pin.databaseIdentity) &&
+        Array.isArray(pin.commands) &&
+        pin.commands.length === 3 &&
+        pin.commands.every(
+          (row) =>
+            exactProjectionKeys(row, ["operationId", "commandId", "kind"]) &&
+            uuid(row.operationId) &&
+            uuid(row.commandId) &&
+            ["prompt", "cancel", "close"].includes(row.kind),
+        ) &&
+        new Set(pin.commands.map((row) => row.operationId)).size === 3 &&
+        new Set(pin.commands.map((row) => row.commandId)).size === 3 &&
+        new Set(pin.commands.map((row) => row.kind)).size === 3 &&
+        prior.commands.every((op) =>
+          pin.commands.some(
+            (row) =>
+              row.operationId === op.body.operationId &&
+              row.kind === op.body.kind,
+          ),
+        ),
+      "Invalid independently pinned predecessor projection scope",
+    );
+    need(typeof raw === "string", "Raw predecessor projection required");
+    const bytes = new TextEncoder().encode(raw);
+    need(
+      bytes.length > 0 &&
+        bytes.length <= 65536 &&
+        new TextDecoder().decode(bytes) === raw,
+      "Invalid or oversized predecessor projection",
+    );
+    const rawHash = Array.from(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)),
+      (byte) => byte.toString(16).padStart(2, "0"),
+    ).join("");
+    if (!contentMode)
+      need(rawHash === pin.sha256, "Predecessor projection hash changed");
+    let value;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      throw new Error("Invalid predecessor projection JSON");
+    }
+    need(
+      exactProjectionKeys(value, [
+        "kind",
+        "version",
+        "source",
+        "schemaVersion",
+        "observedUtc",
+        "tenantId",
+        "databaseIdentity",
+        "querySha256",
+        "sessionId",
+        "generation",
+        "priorReportCanonicalSha256",
+        "commands",
+      ]) &&
+        value.kind === "relay-predecessor-command-projection" &&
+        value.version === 1 &&
+        value.source === RUN_SOURCE &&
+        value.schemaVersion === 93 &&
+        value.tenantId === pin.tenantId &&
+        value.databaseIdentity === pin.databaseIdentity &&
+        value.querySha256 === pin.querySha256 &&
+        value.sessionId === STOPPED_SESSION &&
+        value.generation === 1 &&
+        sha(reportHash) &&
+        value.priorReportCanonicalSha256 === reportHash &&
+        typeof value.observedUtc === "string" &&
+        Number.isFinite(Date.parse(value.observedUtc)) &&
+        now - Date.parse(value.observedUtc) >= -CLOCK_SKEW_MS &&
+        now - Date.parse(value.observedUtc) < 120000 &&
+        Array.isArray(value.commands) &&
+        value.commands.length === 3,
+      "Predecessor projection provenance, scope or freshness changed",
+    );
+    const rows = prior.commands.map((op) => {
+      const expected = pin.commands.find(
+        (row) => row.operationId === op.body.operationId,
+      );
+      const matches = value.commands.filter(
+        (row) => row?.operation_id === op.body.operationId,
+      );
+      need(matches.length === 1, "Predecessor projection command set changed");
+      const row = matches[0];
+      need(
+        exactProjectionKeys(row, [
+          "id",
+          "operation_id",
+          "session_id",
+          "generation",
+          "kind",
+          "state",
+          "receipt",
+        ]) &&
+          row.id === expected.commandId &&
+          exactProjectionKeys(row.receipt, ["status", "result"]) &&
+          exactProjectionKeys(row.receipt.result, [
+            op.body.kind === "prompt" ? "stopReason" : "cancelSent",
+          ]),
+        "Predecessor projection command identity or receipt shape changed",
+      );
+      settledPredecessorCommand(row, op);
+      return row;
+    });
+    if (contentMode) {
+      // Validate the entire bounded schema before canonicalizing it. Only this
+      // top-level observation time is excluded; command order and every receipt
+      // field remain pinned. Freshness above still applies to every new read.
+      const content = { ...value };
+      delete content.observedUtc;
+      const contentHash = Array.from(
+        new Uint8Array(
+          await crypto.subtle.digest(
+            "SHA-256",
+            new TextEncoder().encode(contentDomain + canonical(content)),
+          ),
+        ),
+        (byte) => byte.toString(16).padStart(2, "0"),
+      ).join("");
+      need(
+        contentHash === pin.sha256,
+        "Predecessor projection content hash changed",
+      );
+    }
+    return {
+      rows,
+      provenance: {
+        source:
+          "operator-attested predecessor command projection; not independent database authentication",
+        sha256: rawHash,
+        ...(contentMode
+          ? {
+              pinMode: pin.mode,
+              pinSha256: pin.sha256,
+              hashDomain: contentDomain,
+            }
+          : {}),
+        hubSource: value.source,
+        schemaVersion: value.schemaVersion,
+        observedUtc: value.observedUtc,
+        tenantId: value.tenantId,
+        databaseIdentity: value.databaseIdentity,
+        querySha256: value.querySha256,
+        sessionId: value.sessionId,
+        generation: value.generation,
+        priorReportCanonicalSha256: value.priorReportCanonicalSha256,
+        commands: pin.commands.map((row) => ({ ...row })),
+      },
+    };
   }
   function stoppedPredecessor(raw) {
     need(
@@ -924,9 +1121,27 @@
       classifications,
     };
   }
+  function checkpointContext(value) {
+    if (value === undefined) return undefined;
+    const freeze = (item) => {
+      if (item && typeof item === "object") {
+        Object.values(item).forEach(freeze);
+        Object.freeze(item);
+      }
+      return item;
+    };
+    return freeze(structuredClone({ version: 1, ...value }));
+  }
   class Runner {
     constructor(env) {
       this.env = env;
+      // Capture a distinct operator trust input, never a hash supplied by the
+      // projection itself. Ordinary browser callers supply neither option.
+      this.readPredecessorEvidence = env.readPredecessorEvidence;
+      this.predecessorEvidencePin =
+        env.predecessorEvidencePin === undefined
+          ? undefined
+          : structuredClone(env.predecessorEvidencePin);
       this.crypto = env.crypto;
       this.now = env.now || Date.now;
       this.sleep = env.sleep || ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -953,6 +1168,22 @@
     save() {
       this.env.save(this.state);
     }
+    // Named phase-B entry shares execution guards while these defaults retain
+    // the original phase-A plan and credential-review semantics.
+    phaseText(_name, original) {
+      return original;
+    }
+    effortRunId() {
+      return EFFORT_RUN;
+    }
+    credentialScopeReviewed() {
+      return Boolean(this.state.successorCredentials);
+    }
+    async refreshBeforeLaunch() {
+      if (this.state.successorCredentials)
+        await this.refreshRenewedCredentials();
+    }
+    async afterReconciliation() {}
     record(kind, value) {
       this.state.evidence.push({
         at: new Date(this.now()).toISOString(),
@@ -1006,6 +1237,7 @@
         return v;
       },
       timeout = 120000,
+      context,
     ) {
       this.check();
       return this.env.ask(
@@ -1017,6 +1249,7 @@
           this.effectiveExpiry - this.now(),
           this.run ? this.run.deadline - this.now() : timeout,
         ),
+        checkpointContext(context),
       );
     }
     async api(path, method = "GET", body, timeout = 15000) {
@@ -1120,6 +1353,12 @@
           };
         },
         remaining(),
+        checkpointContext({
+          kind: "renewal-deployment",
+          source: RUN_SOURCE,
+          notBefore: startedAt,
+          deadline,
+        }),
       );
       remaining();
       const first = await this.readRenewedCredentials(deadline);
@@ -1142,6 +1381,12 @@
           return true;
         },
         remaining(),
+        checkpointContext({
+          kind: "renewed-credentials",
+          profiles: first.profiles,
+          expiresAt: first.expiresAt,
+          deadline,
+        }),
       );
       remaining();
       const current = await this.readRenewedCredentials(deadline);
@@ -1427,7 +1672,7 @@
           c.credential.namespace === "default" &&
           c.credential.state === "ready" &&
           c.binding?.currentCredentialId === p.credential &&
-          (!this.state.successorCredentials ||
+          (!this.credentialScopeReviewed() ||
             (r.connection.id === CONNECTION &&
               r.binding.revision === p.revision &&
               r.binding.generation === p.generation &&
@@ -1469,7 +1714,7 @@
         credentialId: p.credential,
         namespace: "default",
         principal: "key:" + p.key,
-        ...(this.state.successorCredentials
+        ...(this.credentialScopeReviewed()
           ? { credentialGeneration: p.generation, expiresAt: p.expiresAt }
           : {}),
       });
@@ -1479,8 +1724,7 @@
       // releases the holder consumer in the same transaction before closing
       // the source session; native recovery rejects an open source. Keep the
       // no-active-consumer rule for recovery too, including unrelated consumers.
-      if (this.state.successorCredentials)
-        await this.refreshRenewedCredentials();
+      await this.refreshBeforeLaunch();
       const p = this.profiles[this.run.provider],
         operationId = this.crypto.randomUUID(),
         previous = recovery ? this.launchRow : null;
@@ -1656,6 +1900,29 @@
           optionId,
         undefined,
         Math.min(30000, Date.parse(d.expires_at) - this.now()),
+        {
+          kind: "permission",
+          purpose: read ? "relay-message-read" : "marker",
+          decisionKind: kind,
+          optionId,
+          sessionId: this.session.id,
+          generation: this.session.generation,
+          permission: {
+            id: d.id,
+            expiresAt: d.expires_at,
+            context: {
+              toolCallId: d.context.toolCallId,
+              title: d.context.title,
+              description: d.context.description,
+              options: d.context.options.map((option) => ({
+                optionId: option.optionId,
+                kind: option.kind,
+                name: option.name,
+              })),
+            },
+          },
+          expectedCommand: read ? null : expected,
+        },
       );
       const fresh = await this.api("/api/agent-permissions/" + d.id);
       need(
@@ -1938,11 +2205,23 @@
                     this.run.runId,
                     phase,
                     this.now(),
+                    this.profiles,
                   ),
                 }
               : {}),
             added,
           };
+        },
+        undefined,
+        {
+          kind: "observation",
+          provider: this.run.provider,
+          runId: this.run.runId,
+          phase: phase ?? null,
+          source: ROUTER,
+          scope: this.run.lastSnapshot.scope,
+          notBefore: boundary.notBefore,
+          zeroAttempts: zero,
         },
       );
       this.run.lastSnapshot = value.trajectory;
@@ -2027,7 +2306,7 @@
     }
     async phase(provider, effort = false) {
       const p = this.profiles[provider],
-        runId = effort ? EFFORT_RUN : p.run;
+        runId = effort ? this.effortRunId() : p.run;
       const replacement =
         provider === "codex" && !effort ? this.state.replacement : null;
       if (replacement) {
@@ -2070,7 +2349,12 @@
           ": operator pre-launch handoff",
         "Paste {trajectory: fresh scoped snapshot, marker: baseline observe.py report, coverageConfirmed:true, holderReadyConfirmed:true, routeConfirmed:true, clocksWithin5s:true}. Operator must verify browser/collector/observer clocks differ by at most 5 s, and freshly confirm holder " +
           this.holderId +
-          ", zero unrelated work, published pins, one attempt/no fallback; Codex route alias canary-pi-codex, model gpt-6-astra. Verify the target account against the current owner-approved route readback. Run UUID " +
+          ", zero unrelated work, published pins, one attempt/no fallback; " +
+          this.phaseText(
+            "routeHandoff",
+            "Codex route alias canary-pi-codex, model gpt-6-astra.",
+          ) +
+          " Verify the target account against the current owner-approved route readback. Run UUID " +
           runId +
           ". This starts the first actual launch; no probe.",
         (v) => {
@@ -2087,9 +2371,35 @@
             "Stale trajectory baseline",
           );
           return {
-            marker: marker(v.marker, provider, runId, "baseline", this.now()),
+            marker: marker(
+              v.marker,
+              provider,
+              runId,
+              "baseline",
+              this.now(),
+              this.profiles,
+            ),
             trajectory: snapshot(v.trajectory, provider, ROUTER, this.profiles),
           };
+        },
+        undefined,
+        {
+          kind: "pre-launch",
+          provider,
+          runId,
+          effort,
+          phase: "baseline",
+          source: ROUTER,
+          scope: {
+            namespace: "default",
+            principal: "key:" + p.key,
+            route: "canary-pi-" + provider,
+          },
+          sinceAfter: replacement
+            ? replacement.priorObservation.observedAt
+            : null,
+          holderId: this.holderId,
+          journalId: this.journalId,
         },
       );
       if (replacement) {
@@ -2117,10 +2427,27 @@
           ".",
         (v) => {
           need(v?.deliveryConfirmed === true, "Delivery handoff missing");
-          const m = marker(v.marker, provider, runId, "baseline", this.now());
+          const m = marker(
+            v.marker,
+            provider,
+            runId,
+            "baseline",
+            this.now(),
+            this.profiles,
+          );
           this.collectedAfter(openBoundary, null, m);
           unchangedBaseline(pre.marker, m);
           return { marker: m };
+        },
+        undefined,
+        {
+          kind: "post-open",
+          provider,
+          runId,
+          phase: "baseline",
+          sessionId: this.session.id,
+          generation: this.session.generation,
+          notBefore: openBoundary.notBefore,
         },
       );
       this.record("post-open", {
@@ -2148,7 +2475,10 @@
     }
     async lifecycle() {
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly READY. Do not use other tools or modify files.",
+        this.phaseText(
+          "ready",
+          "After any required scoped Relay message read, reply exactly READY. Do not use other tools or modify files.",
+        ),
         { expectedText: "READY" },
       );
       const known = await this.evidence(
@@ -2156,10 +2486,22 @@
         "baseline",
       );
       need(known.added >= 1, "Recorder coverage not exercised");
-      const prefix =
-        "After any required scoped Relay message read, request permission to run exactly the following shell command once. Do not run any other command, change the command, retry after denial, or modify any other file. After the decision, report the outcome and stop. COMMAND: ";
-      const denied = markerCommand(this.run.provider, this.run.runId, "denied"),
-        effects = markerCommand(this.run.provider, this.run.runId, "effects");
+      const prefix = this.phaseText(
+        "markerPrefix",
+        "After any required scoped Relay message read, request permission to run exactly the following shell command once. Do not run any other command, change the command, retry after denial, or modify any other file. After the decision, report the outcome and stop. COMMAND: ",
+      );
+      const denied = markerCommand(
+          this.run.provider,
+          this.run.runId,
+          "denied",
+          this.profiles,
+        ),
+        effects = markerCommand(
+          this.run.provider,
+          this.run.runId,
+          "effects",
+          this.profiles,
+        );
       await this.prompt(prefix + denied, {
         tool: denied,
         decision: "reject_once",
@@ -2192,19 +2534,28 @@
         true,
       );
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly BRANCH_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        this.phaseText(
+          "branch",
+          "After any required scoped Relay message read, reply exactly BRANCH_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        ),
         { expectedText: "BRANCH_OK" },
       );
       await this.evidence("Independent branch completion", "approved");
       await this.prompt("/relay-compact", { notice: "History compacted." });
       await this.evidence("Compaction settled", "approved");
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly COMPACT_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        this.phaseText(
+          "compact",
+          "After any required scoped Relay message read, reply exactly COMPACT_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        ),
         { expectedText: "COMPACT_OK" },
       );
       await this.evidence("Compacted history continuation", "approved");
       await this.prompt(
-        "After any required scoped Relay message read, count upward from 1, one integer per line, until 500. Do not use other tools or modify files.",
+        this.phaseText(
+          "cancel",
+          "After any required scoped Relay message read, count upward from 1, one integer per line, until 500. Do not use other tools or modify files.",
+        ),
         { cancel: true },
       );
       await this.evidence("Cancellation settled; no tool effect", "approved");
@@ -2223,6 +2574,17 @@
           " / " +
           this.journalId +
           ", preserved marker and no unknown tool effects. Recover into a new Relay session with the original native UUID. Unknown-effect acknowledgement is NOT submitted.",
+        undefined,
+        undefined,
+        {
+          kind: "recover-history",
+          sessionId: this.session.id,
+          generation: this.session.generation,
+          provider: this.run.provider,
+          runId: this.run.runId,
+          holderId: this.holderId,
+          journalId: this.journalId,
+        },
       );
       await this.launch(true);
       await this.evidence(
@@ -2240,11 +2602,22 @@
           );
           return v.reconcile;
         },
+        undefined,
+        {
+          kind: "reconcile-choice",
+          sessionId: this.session.id,
+          generation: this.session.generation,
+          provider: this.run.provider,
+          runId: this.run.runId,
+          holderId: this.holderId,
+          journalId: this.journalId,
+        },
       );
       if (choice) {
         await this.prompt("/relay-reconcile confirmed", {
           notice: "Previous branch retired.",
         });
+        await this.afterReconciliation();
         await this.evidence(
           "Explicit reconstruction made no recorded attempts",
           "recovered",
@@ -2252,7 +2625,10 @@
         );
       }
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly RECOVERED_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        this.phaseText(
+          "recovered",
+          "After any required scoped Relay message read, reply exactly RECOVERED_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        ),
         { expectedText: "RECOVERED_OK" },
       );
       await this.evidence(
@@ -2263,7 +2639,10 @@
     async effort() {
       await this.setEffort("low");
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly EFFORT_LOW_OK. Do not use other tools, access files or modify anything.",
+        this.phaseText(
+          "low",
+          "After any required scoped Relay message read, reply exactly EFFORT_LOW_OK. Do not use other tools, access files or modify anything.",
+        ),
         { expectedText: "EFFORT_LOW_OK" },
       );
       const low = await this.evidence(
@@ -2273,7 +2652,10 @@
       need(low.added >= 1, "Effort recorder coverage missing");
       await this.setEffort("high");
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly EFFORT_HIGH_PROBE. Do not use other tools, access files or modify anything.",
+        this.phaseText(
+          "highProbe",
+          "After any required scoped Relay message read, reply exactly EFFORT_HIGH_PROBE. Do not use other tools, access files or modify anything.",
+        ),
         { backendRefusal: true },
       );
       await this.evidence(
@@ -2284,17 +2666,32 @@
       await this.ask(
         "Explicitly retire the settled prior branch",
         "Review the refusal, applied high setting and zero-attempt evidence. Confirm explicit /relay-reconcile confirmed; no tool effect acknowledgement is sent.",
+        undefined,
+        undefined,
+        {
+          kind: "retire-branch",
+          sessionId: this.session.id,
+          generation: this.session.generation,
+          provider: this.run.provider,
+          runId: this.run.runId,
+          holderId: this.holderId,
+          journalId: this.journalId,
+        },
       );
       await this.prompt("/relay-reconcile confirmed", {
         notice: "Previous branch retired.",
       });
+      await this.afterReconciliation();
       await this.evidence(
         "Explicit reconstruction made no recorded attempts",
         null,
         true,
       );
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly EFFORT_HIGH_OK. Do not use other tools, access files or modify anything.",
+        this.phaseText(
+          "high",
+          "After any required scoped Relay message read, reply exactly EFFORT_HIGH_OK. Do not use other tools, access files or modify anything.",
+        ),
         { expectedText: "EFFORT_HIGH_OK" },
       );
       await this.evidence("High effort completed on successor branch", null);
@@ -2947,21 +3344,65 @@
           control.lease === null,
         "Prior session is not independently closed and released",
       );
+      let projection;
+      if (
+        this.readPredecessorEvidence !== undefined ||
+        this.predecessorEvidencePin !== undefined
+      ) {
+        need(
+          typeof this.readPredecessorEvidence === "function" &&
+            this.predecessorEvidencePin,
+          "Predecessor projection reader and independent pin required together",
+        );
+        this.check();
+        const deadline = this.now() + 15000;
+        const signal = AbortSignal.timeout(15000);
+        const context = Object.freeze({
+          source: RUN_SOURCE,
+          schemaVersion: 93,
+          sessionId: STOPPED_SESSION,
+          generation: 1,
+          priorReportCanonicalSha256: this.state.predecessor.canonicalSha256,
+          commands: Object.freeze(
+            prior.commands.map((op) =>
+              Object.freeze({
+                operationId: op.body.operationId,
+                kind: op.body.kind,
+              }),
+            ),
+          ),
+          deadline,
+          signal,
+        });
+        const raw = await this.readPredecessorEvidence(context);
+        signal.throwIfAborted();
+        this.check();
+        need(
+          this.now() <= deadline,
+          "Predecessor projection read deadline reached",
+        );
+        projection = await predecessorProjection(
+          raw,
+          this.predecessorEvidencePin,
+          prior,
+          this.state.predecessor.canonicalSha256,
+          this.crypto,
+          this.now(),
+        );
+        this.check();
+        this.record("operator-predecessor-projection", projection.provenance);
+      }
       const commands = [];
       for (const op of prior.commands) {
-        const row = await this.operation({ ...op, sessionId: STOPPED_SESSION });
+        const row = projection
+          ? projection.rows.find(
+              (row) => row.operation_id === op.body.operationId,
+            )
+          : await this.operation({ ...op, sessionId: STOPPED_SESSION });
         // Published holder 2604 runtime.rs:1846-1860 emits cancelSent for both
         // Cancel and Close; deployed e843 control.ts:731-742 requires it. The
         // separate closed-session/no-lease read above establishes settlement.
-        need(
-          row.state === "completed" &&
-            (op.body.kind === "prompt"
-              ? ["cancelled", "end_turn"].includes(
-                  row.receipt?.result?.stopReason,
-                )
-              : row.receipt?.result?.cancelSent === true),
-          "Prior command has no settled native outcome",
-        );
+        settledPredecessorCommand(row, op);
         commands.push({
           operationId: row.operation_id,
           commandId: row.id,
@@ -3061,6 +3502,19 @@
             operatorVerified: true,
           };
         },
+        undefined,
+        {
+          kind: "stopped-replacement",
+          canonicalReportSha256: this.state.predecessor.canonicalSha256,
+          oldScope: prior.first.scope,
+          source: ROUTER,
+          provider: "codex",
+          runId: PROFILES.codex.run,
+          notBefore: boundary.notBefore,
+          originalDeadline: prior.run.deadline,
+          carriedPrompts: 1,
+          carriedAttempts: 2,
+        },
       );
       this.state.replacement = approved;
       this.record("replacement-authorization", {
@@ -3124,6 +3578,14 @@
               handoffStarted,
               this.now(),
             ),
+          undefined,
+          {
+            kind: "preserving-holder",
+            startedAt: handoffStarted,
+            oldHolderId: prior.launch.holderId,
+            oldJournalId: prior.launch.journalId,
+            qualifiedHolder: QUALIFIED_HOLDER,
+          },
         );
         this.holderId = handoff.holderId;
         this.journalId = handoff.journalId;

@@ -2,7 +2,7 @@
 // No real fetch, timers, browser state, credentials, provider or host operations.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { webcrypto } = require("node:crypto");
+const { createHash, webcrypto } = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
@@ -21,7 +21,7 @@ const PUBLISHED_HOLDER_TEST_PINS = Object.freeze({
   binarySha256:
     "d406b1f363f590b386ab3eaea4a8cb350c5ac9c49a3dcb26acc34034dfcf6926",
 });
-assert.equal(a.RUN_SOURCE, "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613");
+assert.equal(a.RUN_SOURCE, "5f90d03a6ed291e6c62dfde75938ba07c20d8902");
 assert.equal(a.HOLDER_CONTROLS_QUALIFIED, true);
 assert.match(PUBLISHED_HOLDER_TEST_PINS.binarySha256, /^[a-f0-9]{64}$/);
 const holderDisabledModule = { exports: {} };
@@ -419,12 +419,17 @@ function renewedFixture(state = "installing", now = POST_EXPIRY) {
   return { inventory, details };
 }
 
-// Captured normal HTTP responses from the pinned hub with a private PostgreSQL
+// Captured normal HTTP responses from the 74d1 hub with a private PostgreSQL
 // fixture. The generation recipe and source provenance live beside the payloads;
 // unlike renewedFixture(), these response shapes were not authored by the driver.
-const hubProjection = JSON.parse(
+const hubProjectionSource = fs.readFileSync(
+  path.join(__dirname, "owner-phase-a.hub-74d1.fixture.json"),
+  "utf8",
+);
+const hubProjection = JSON.parse(hubProjectionSource);
+const hubSourceBridge = JSON.parse(
   fs.readFileSync(
-    path.join(__dirname, "owner-phase-a.hub-74d1.fixture.json"),
+    path.join(__dirname, "owner-phase-a.hub-5f90.source-bridge.json"),
     "utf8",
   ),
 );
@@ -432,7 +437,33 @@ const hubObservation = Date.parse(hubProjection.observedAt);
 
 test("renewed credentials accept the exact 74d1 HTTP inventory and detail projections", () => {
   assert.equal(hubProjection.version, 1);
-  assert.equal(hubProjection.sourceCommit, a.RUN_SOURCE);
+  assert.equal(
+    hubProjection.sourceCommit,
+    "74d1d9f4ab2250fe6a6abe5a2e0bebce2ccc4613",
+  );
+  assert.equal(hubSourceBridge.version, 1);
+  assert.equal(hubSourceBridge.capturedSource, hubProjection.sourceCommit);
+  assert.equal(hubSourceBridge.targetSource, a.RUN_SOURCE);
+  // Git may convert LF to CRLF in a Windows checkout. Bind the original Git
+  // bytes, allowing only that checkout conversion; never relabel the capture.
+  assert.equal(
+    createHash("sha256")
+      .update(hubProjectionSource.replace(/\r\n/g, "\n"))
+      .digest("hex"),
+    hubSourceBridge.fixture.gitBytesSha256,
+  );
+  assert.equal(hubSourceBridge.files.length, 10);
+  assert.deepEqual(
+    hubSourceBridge.files.map((f) => f.path).sort(),
+    Object.keys(hubProjection.provenance.sourceBlobs).sort(),
+  );
+  for (const file of hubSourceBridge.files) {
+    const captured = hubProjection.provenance.sourceBlobs[file.path];
+    assert.equal(file.capturedGitBlob, captured.gitBlob);
+    assert.equal(file.targetGitBlob, captured.gitBlob);
+    assert.equal(file.capturedSha256, captured.sha256);
+    assert.equal(file.targetSha256, captured.sha256);
+  }
   assert.equal(
     hubProjection.provenance.sourceBlobs["server/router-credentials/service.ts"]
       .gitBlob,
@@ -2911,6 +2942,7 @@ function phaseServer({
   preloadRenewal = true,
   holderId = a.HOLDER,
   journalId = a.HOLDER,
+  predecessorEvidence = {},
 } = {}) {
   const projection =
     renewal &&
@@ -3071,6 +3103,7 @@ function phaseServer({
     return session({ id: s.id, state: s.state, control_epoch: s.epoch });
   }
   const runner = new a.Runner({
+    ...predecessorEvidence,
     origin: a.ORIGIN,
     crypto: webcrypto,
     now: () => clock,
@@ -3079,7 +3112,7 @@ function phaseServer({
     },
     load: () => null,
     save: (state) => saves.push(clone(state)),
-    ask: async (title, instructions, validate) => {
+    ask: async (title, instructions, validate, _timeout, context) => {
       checkpoints.push(title);
       clock += 20;
       const boundary = runner.state.evidence
@@ -3089,42 +3122,29 @@ function phaseServer({
       if (runner.lease && Date.parse(runner.lease.expires_at) - clock < 30000)
         await runner.renew();
       let value = true;
-      if (title === "Inspect retained branch before continuation")
-        value = { reconcile: true };
-      else if (title.includes("pre-launch handoff"))
+      if (context?.kind === "reconcile-choice") value = { reconcile: true };
+      else if (context?.kind === "pre-launch")
         value = {
-          trajectory: observeTrajectory(runner.run.provider),
-          marker: observeMarker(
-            runner.run.provider,
-            runner.run.runId,
-            "baseline",
-          ),
+          trajectory: observeTrajectory(context.provider),
+          marker: observeMarker(context.provider, context.runId, context.phase),
           coverageConfirmed: true,
           holderReadyConfirmed: true,
           routeConfirmed: true,
           clocksWithin5s,
         };
-      else if (title.startsWith("Open complete:"))
+      else if (context?.kind === "post-open")
         value = {
-          marker: observeMarker(
-            runner.run.provider,
-            runner.run.runId,
-            "baseline",
-          ),
+          marker: observeMarker(context.provider, context.runId, context.phase),
           deliveryConfirmed: true,
         };
-      else if (instructions.startsWith("Paste operator JSON:")) {
-        const phase = /Marker phase=(\w+)/.exec(instructions)?.[1];
+      else if (context?.kind === "observation") {
+        const phase = context.phase;
         value = {
-          trajectory: observeTrajectory(runner.run.provider),
+          trajectory: observeTrajectory(context.provider),
           coverageConfirmed: true,
           ...(phase
             ? {
-                marker: observeMarker(
-                  runner.run.provider,
-                  runner.run.runId,
-                  phase,
-                ),
+                marker: observeMarker(context.provider, context.runId, phase),
               }
             : {}),
         };
@@ -3561,6 +3581,8 @@ function publicReplacementHarness({
   mutateHandoff,
   expireDuringHandoff = false,
   refuseDelivery = false,
+  predecessorEvidence = {},
+  driftPredecessor,
 } = {}) {
   const renewal = renewedFixture("ready");
   const f = phaseServer({
@@ -3570,6 +3592,7 @@ function publicReplacementHarness({
     // A new root can legitimately have equal incarnation and journal UUIDs.
     holderId: SID,
     journalId: SID,
+    predecessorEvidence,
   });
   const raw = JSON.stringify(stoppedReport(), null, 2);
   const prior = a.stoppedPredecessor(raw);
@@ -3592,6 +3615,7 @@ function publicReplacementHarness({
       f.calls.push(c);
       f.advance(5);
       const result = predecessorResponse(prior, c);
+      if (driftPredecessor) driftPredecessor(result, c);
       return {
         ok: true,
         status: 200,
@@ -3601,14 +3625,20 @@ function publicReplacementHarness({
     }
     return fetch(url, init);
   };
-  f.runner.env.ask = async (title, instructions, validate, timeout) => {
+  f.runner.env.ask = async (
+    title,
+    instructions,
+    validate,
+    timeout,
+    context,
+  ) => {
     const accept = (value) => {
       const result = validate(value);
       trace.push({ kind: "checkpoint-accepted", title });
       return result;
     };
     let value;
-    if (title === "Review already-renewed phase-A credentials") {
+    if (context?.kind === "renewal-deployment") {
       assert.equal(f.runner.state.successorCredentials, undefined);
       assert(timeout <= 120000);
       value = {
@@ -3619,9 +3649,7 @@ function publicReplacementHarness({
         observedUtc: date(f.runner.now()),
         hubSource: a.RUN_SOURCE,
       };
-    } else if (
-      title === "Confirm exact renewed credentials for all three phases"
-    ) {
+    } else if (context?.kind === "renewed-credentials") {
       value = {
         confirmRenewedCredentials: true,
         ...a.renewedCredentials(
@@ -3630,9 +3658,7 @@ function publicReplacementHarness({
           f.runner.now(),
         ),
       };
-    } else if (
-      title === "Assign one bounded replacement for the stopped Codex run"
-    ) {
+    } else if (context?.kind === "stopped-replacement") {
       f.advance(6000);
       const rows = ["338869f5-complete", "811cab9f-cancelled"].map((id, i) => ({
         ...trajectoryRow(),
@@ -3655,7 +3681,7 @@ function publicReplacementHarness({
         start: Date.parse(value.windowStartUtc),
         deadline: Date.parse(value.windowEndUtc),
       };
-    } else if (title === "Fresh preserving-holder handoff") {
+    } else if (context?.kind === "preserving-holder") {
       f.advance(expireDuringHandoff ? 900001 : 20);
       value = {
         holderId: SID,
@@ -3699,6 +3725,7 @@ function publicReplacementHarness({
               : result,
           ),
         timeout,
+        context,
       );
     }
     f.checkpoints.push(title);
@@ -3718,6 +3745,19 @@ test("actual public replacement uses published holder pins through all phases wi
   assert.equal(f.runner.state.phaseACompleted, true);
   assert.equal(f.runner.state.completed, false);
   assert.equal(f.runner.state.predecessor.raw, f.raw);
+  assert.equal(
+    f.calls.filter((c) =>
+      c.path.startsWith(
+        "/api/agent-sessions/" + a.STOPPED_SESSION + "/operations/",
+      ),
+    ).length,
+    3,
+  );
+  assert(
+    !f.runner.state.evidence.some(
+      (e) => e.kind === "operator-predecessor-projection",
+    ),
+  );
   assert.equal(
     f.runner.state.predecessor.canonicalSha256,
     await a.digest(webcrypto, JSON.parse(f.raw)),
@@ -3825,6 +3865,897 @@ test("actual public replacement uses published holder pins through all phases wi
       launchAt < deliveryAt &&
       deliveryAt < promptAt,
   );
+});
+
+test("actual public replacement supplies immutable checkpoint context without parsing names or instructions", async () => {
+  const f = publicReplacementHarness(),
+    ask = f.runner.env.ask,
+    contexts = [];
+  const frozen = (v) => {
+    if (v && typeof v === "object") {
+      assert(Object.isFrozen(v));
+      Object.values(v).forEach(frozen);
+    }
+  };
+  f.runner.env.ask = async (
+    _title,
+    _instructions,
+    validate,
+    timeout,
+    context,
+  ) => {
+    assert.equal(context.version, 1);
+    frozen(context);
+    contexts.push(context);
+    assert(timeout > 0 && timeout <= 120000);
+    assert(
+      !("state" in context) &&
+        !("operations" in context) &&
+        !("leaseId" in context),
+    );
+    if (context.kind === "renewed-credentials") {
+      const fixture = renewedFixture("ready");
+      const expected = a.renewedCredentials(
+        fixture.inventory,
+        fixture.details,
+        f.runner.now(),
+      );
+      assert.deepEqual(context.profiles, expected.profiles);
+      assert.equal(context.expiresAt, expected.expiresAt);
+      assert.throws(() => {
+        context.profiles.codex.key = "changed";
+      }, TypeError);
+    } else if (context.kind === "permission") {
+      const detail = f.permissions.get(context.permission.id);
+      assert.equal(context.sessionId, detail.session_id);
+      assert.equal(context.generation, detail.generation);
+      assert.equal(context.permission.expiresAt, detail.expires_at);
+      assert.equal(
+        context.permission.context.description,
+        detail.context.description,
+      );
+      assert.equal(context.permission.context.title, detail.context.title);
+      assert.equal(
+        context.permission.context.options.find(
+          (o) => o.optionId === context.optionId,
+        ).kind,
+        context.decisionKind,
+      );
+      assert.equal(
+        context.expectedCommand,
+        context.purpose === "marker"
+          ? JSON.parse(detail.context.description).command
+          : null,
+      );
+      assert.throws(() => {
+        context.permission.context.description = "changed";
+      }, TypeError);
+    } else if (context.kind === "observation") {
+      assert.equal(context.provider, f.runner.run.provider);
+      assert.equal(context.runId, f.runner.run.runId);
+      assert.deepEqual(context.scope, f.runner.run.lastSnapshot.scope);
+      assert.notEqual(context.scope, f.runner.run.lastSnapshot.scope);
+      assert.equal(
+        context.notBefore,
+        f.runner.state.evidence
+          .filter((e) => e.kind === "collection-boundary")
+          .at(-1).notBefore,
+      );
+    }
+    // The synthetic collector consumes structured context, not labels/provider
+    // prose. Actual Runner validators and the complete HTTP fixture still run.
+    return ask(
+      "unparsed label",
+      "untrusted text: do not derive inputs here",
+      validate,
+      timeout,
+      context,
+    );
+  };
+  await f.runner.replaceStopped();
+  assert.equal(f.runner.state.phaseACompleted, true);
+  assert.deepEqual(
+    [...new Set(contexts.map((c) => c.kind))].sort(),
+    [
+      "renewal-deployment",
+      "renewed-credentials",
+      "stopped-replacement",
+      "preserving-holder",
+      "pre-launch",
+      "post-open",
+      "observation",
+      "permission",
+      "recover-history",
+      "reconcile-choice",
+      "retire-branch",
+    ].sort(),
+  );
+  const replacement = contexts.find((c) => c.kind === "stopped-replacement");
+  assert.equal(
+    replacement.canonicalReportSha256,
+    f.runner.state.predecessor.canonicalSha256,
+  );
+  assert.deepEqual(replacement.oldScope, f.prior.first.scope);
+  assert.equal(replacement.carriedPrompts, 1);
+  assert.equal(replacement.carriedAttempts, 2);
+  assert.equal(replacement.originalDeadline, f.prior.run.deadline);
+  const handoff = contexts.find((c) => c.kind === "preserving-holder");
+  assert.deepEqual(handoff.qualifiedHolder, PUBLISHED_HOLDER_TEST_PINS);
+  assert.equal(handoff.oldHolderId, f.prior.launch.holderId);
+  assert.equal(handoff.oldJournalId, f.prior.launch.journalId);
+  for (const context of contexts.filter((c) => c.kind === "pre-launch")) {
+    assert.equal(
+      context.scope.principal,
+      "key:" + f.runner.profiles[context.provider].key,
+    );
+    assert.equal(context.phase, "baseline");
+    assert(!("notBefore" in context));
+  }
+  for (const context of contexts.filter((c) =>
+    ["recover-history", "reconcile-choice", "retire-branch"].includes(c.kind),
+  )) {
+    assert(f.sessions.has(context.sessionId));
+    assert.equal(context.generation, 1);
+    assert.equal(context.holderId, SID);
+    assert.equal(context.journalId, SID);
+    assert(!("notBefore" in context));
+  }
+});
+
+function predecessorProjectionFixture({
+  mutate,
+  mutatePin,
+  rawSuffix = "",
+} = {}) {
+  const prior = a.stoppedPredecessor(JSON.stringify(stoppedReport()));
+  const value = {
+    kind: "relay-predecessor-command-projection",
+    version: 1,
+    source: a.RUN_SOURCE,
+    schemaVersion: 93,
+    observedUtc: date(POST_EXPIRY),
+    tenantId: OTHER,
+    databaseIdentity: "synthetic-relay",
+    querySha256: "b".repeat(64),
+    sessionId: a.STOPPED_SESSION,
+    generation: 1,
+    priorReportCanonicalSha256: createHash("sha256")
+      .update(a.canonical(prior.report))
+      .digest("hex"),
+    commands: prior.commands.map((op, i) => ({
+      ...predecessorResponse(prior, {
+        method: "GET",
+        path:
+          "/api/agent-sessions/" +
+          a.STOPPED_SESSION +
+          "/operations/" +
+          op.body.operationId,
+      }).command,
+      id: [OP, REQUEST, HOST][i],
+    })),
+  };
+  // This trusted fixture pin is separate from the returned document. Mutations
+  // below retain its original scope, and rehash only to reach semantic guards.
+  const pin = {
+    sha256: "",
+    tenantId: value.tenantId,
+    databaseIdentity: value.databaseIdentity,
+    querySha256: value.querySha256,
+    commands: value.commands.map((row) => ({
+      operationId: row.operation_id,
+      commandId: row.id,
+      kind: row.kind,
+    })),
+  };
+  if (mutate) mutate(value);
+  const raw = JSON.stringify(value, null, 2);
+  pin.sha256 = createHash("sha256").update(raw).digest("hex");
+  if (mutatePin) mutatePin(pin);
+  const contexts = [];
+  return {
+    value,
+    pin,
+    raw,
+    contexts,
+    env: {
+      predecessorEvidencePin: pin,
+      readPredecessorEvidence: async (context) => {
+        contexts.push(context);
+        return raw + rawSuffix;
+      },
+    },
+  };
+}
+
+test("actual public replacement uses only pinned predecessor command projection and retains live GETs and all phases", async () => {
+  const projection = predecessorProjectionFixture();
+  const expectedPin = clone(projection.pin);
+  const f = publicReplacementHarness({ predecessorEvidence: projection.env });
+  // Pin and reader are captured once, not replaced by later environment edits.
+  projection.pin.sha256 = "f".repeat(64);
+  projection.pin.commands[0].commandId = LEASE;
+  f.runner.env.readPredecessorEvidence = () => {
+    throw Error("Changed reader must not be used");
+  };
+  await f.runner.replaceStopped();
+  assert.equal(f.runner.state.status, "phase-a-passed");
+  assert.equal(projection.contexts.length, 1);
+  const context = projection.contexts[0];
+  assert(Object.isFrozen(context));
+  assert(Object.isFrozen(context.commands));
+  assert(context.commands.every(Object.isFrozen));
+  assert(context.signal instanceof AbortSignal);
+  assert.equal(context.source, a.RUN_SOURCE);
+  assert.equal(context.schemaVersion, 93);
+  assert.equal(context.sessionId, a.STOPPED_SESSION);
+  assert.equal(context.generation, 1);
+  assert(
+    context.deadline > POST_EXPIRY && context.deadline <= POST_EXPIRY + 30000,
+  );
+  assert.equal(
+    context.priorReportCanonicalSha256,
+    f.runner.state.predecessor.canonicalSha256,
+  );
+  assert.deepEqual(
+    context.commands,
+    f.prior.commands.map((op) => ({
+      operationId: op.body.operationId,
+      kind: op.body.kind,
+    })),
+  );
+  const oldReads = f.calls.filter(
+    (c) =>
+      c.path.includes(a.STOPPED_SESSION) ||
+      c.path.includes(a.STOPPED_PERMISSION),
+  );
+  assert.deepEqual(
+    oldReads.map((c) => c.path),
+    [
+      "/api/agent-sessions/" + a.STOPPED_SESSION,
+      "/api/agent-sessions/" + a.STOPPED_SESSION + "/control",
+      "/api/agent-permissions/" + a.STOPPED_PERMISSION,
+    ],
+  );
+  assert(oldReads.every((c) => c.method === "GET"));
+  const evidence = f.runner.state.evidence.filter(
+    (e) => e.kind === "operator-predecessor-projection",
+  );
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].sha256, expectedPin.sha256);
+  assert.equal(evidence[0].querySha256, expectedPin.querySha256);
+  assert.equal(evidence[0].databaseIdentity, expectedPin.databaseIdentity);
+  assert.equal(evidence[0].tenantId, expectedPin.tenantId);
+  assert.equal(evidence[0].hubSource, a.RUN_SOURCE);
+  assert.deepEqual(evidence[0].commands, expectedPin.commands);
+  assert.match(evidence[0].source, /operator-attested.*not independent/);
+  const authorization = f.runner.state.evidence.find(
+    (e) => e.kind === "replacement-authorization",
+  );
+  assert.deepEqual(
+    authorization.commands.map((c) => c.commandId),
+    expectedPin.commands.map((c) => c.commandId),
+  );
+  assert.equal(f.runner.state.predecessor.raw, f.raw);
+  assert(f.saves.every((s) => s.predecessor.raw === f.raw));
+  assert.equal(f.runner.state.replacement.carriedPrompts, 1);
+  assert.equal(f.runner.state.replacement.carriedAttempts, 2);
+  assert.equal(f.runner.state.runs[0].carriedAttempts, 2);
+  assert.equal(f.launches.length, 5);
+  assert.equal(f.runner.state.phaseACompleted, true);
+  assert.equal(f.runner.state.completed, false);
+});
+
+function contentProjectionFixture({ mutateValue, mutatePin } = {}) {
+  const projection = predecessorProjectionFixture();
+  const content = clone(projection.value);
+  delete content.observedUtc;
+  // Independent operator input is fixed BEFORE the simulated observer runs.
+  // This is the documented hash recipe, not a digest returned by the reader.
+  projection.pin.mode = "canonical-content-v1";
+  projection.pin.sha256 = createHash("sha256")
+    .update("relay-predecessor-command-projection/content-v1\n")
+    .update(a.canonical(content))
+    .digest("hex");
+  if (mutatePin) mutatePin(projection.pin);
+  if (mutateValue) mutateValue(projection.value);
+  projection.raw = JSON.stringify(projection.value);
+  projection.env.readPredecessorEvidence = async (context) => {
+    projection.contexts.push(context);
+    return projection.raw;
+  };
+  return projection;
+}
+
+test("content-pinned public replacement accepts fresh same-content re-observation and retains raw provenance", async () => {
+  const projection = contentProjectionFixture();
+  const expectedPin = clone(projection.pin);
+  const initiallyPinnedRaw = projection.raw;
+  // A newly observed timestamp, whitespace and object key order may differ.
+  // Arrays (including command order) are deliberately left unchanged.
+  projection.value.observedUtc = date(POST_EXPIRY + 1000);
+  projection.raw = JSON.stringify(
+    Object.fromEntries(Object.entries(projection.value).reverse()),
+    null,
+    2,
+  );
+  assert.notEqual(projection.raw, initiallyPinnedRaw);
+  const f = publicReplacementHarness({ predecessorEvidence: projection.env });
+  await f.runner.replaceStopped();
+  assert.equal(f.runner.state.status, "phase-a-passed");
+  const evidence = f.runner.state.evidence.filter(
+    (e) => e.kind === "operator-predecessor-projection",
+  );
+  assert.equal(evidence.length, 1);
+  assert.equal(evidence[0].pinMode, "canonical-content-v1");
+  assert.equal(evidence[0].pinSha256, expectedPin.sha256);
+  assert.equal(
+    evidence[0].hashDomain,
+    "relay-predecessor-command-projection/content-v1\n",
+  );
+  assert.equal(
+    evidence[0].sha256,
+    createHash("sha256").update(projection.raw).digest("hex"),
+  );
+  assert.notEqual(evidence[0].sha256, expectedPin.sha256);
+  assert.equal(evidence[0].observedUtc, projection.value.observedUtc);
+  assert.equal(projection.contexts.length, 1);
+  assert.equal(f.runner.state.predecessor.raw, f.raw);
+  assert(f.saves.every((s) => s.predecessor.raw === f.raw));
+  assert.equal(f.runner.state.replacement.carriedPrompts, 1);
+  assert.equal(f.runner.state.replacement.carriedAttempts, 2);
+  assert.equal(f.launches.length, 5);
+  assert.equal(f.runner.state.phaseACompleted, true);
+  const oldReads = f.calls.filter(
+    (c) =>
+      c.path.includes(a.STOPPED_SESSION) ||
+      c.path.includes(a.STOPPED_PERMISSION),
+  );
+  assert.equal(oldReads.length, 3);
+  assert(
+    oldReads.every(
+      (c) => c.method === "GET" && !c.path.includes("/operations/"),
+    ),
+  );
+});
+
+test("content-pinned public replacement refuses changed content, invalid mode and stale or future observations before POST", async () => {
+  const cases = [
+    [
+      "different otherwise valid settled receipt",
+      (v) => {
+        assert.equal(v.commands[0].receipt.result.stopReason, "end_turn");
+        v.commands[0].receipt.result.stopReason = "cancelled";
+      },
+      null,
+      /content hash changed/,
+    ],
+    [
+      "different command order",
+      (v) => {
+        v.commands.reverse();
+      },
+      null,
+      /content hash changed/,
+    ],
+    [
+      "source",
+      (v) => {
+        v.source = a.SOURCE;
+      },
+      null,
+      /provenance/,
+    ],
+    [
+      "schema",
+      (v) => {
+        v.schemaVersion = 92;
+      },
+      null,
+      /provenance/,
+    ],
+    [
+      "tenant",
+      (v) => {
+        v.tenantId = SID;
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "database",
+      (v) => {
+        v.databaseIdentity = "different-relay";
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "query",
+      (v) => {
+        v.querySha256 = "c".repeat(64);
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "report",
+      (v) => {
+        v.priorReportCanonicalSha256 = "d".repeat(64);
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "session",
+      (v) => {
+        v.sessionId = SID;
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "generation",
+      (v) => {
+        v.generation = 2;
+      },
+      null,
+      /scope/,
+    ],
+    [
+      "changed command ID",
+      (v) => {
+        v.commands[0].id = LEASE;
+      },
+      null,
+      /command identity/,
+    ],
+    [
+      "unsettled receipt",
+      (v) => {
+        v.commands[1].receipt.result.cancelSent = false;
+      },
+      null,
+      /settled native/,
+    ],
+    [
+      "nested timestamp not excluded",
+      (v) => {
+        v.commands[0].receipt.result.observedUtc = date(POST_EXPIRY);
+      },
+      null,
+      /receipt shape/,
+    ],
+    [
+      "exact stale boundary",
+      (v) => {
+        v.observedUtc = date(POST_EXPIRY - 120000);
+      },
+      null,
+      /freshness/,
+    ],
+    [
+      "future",
+      (v) => {
+        v.observedUtc = date(POST_EXPIRY + 60000);
+      },
+      null,
+      /freshness/,
+    ],
+    [
+      "invalid timestamp",
+      (v) => {
+        v.observedUtc = "invalid";
+      },
+      null,
+      /freshness/,
+    ],
+    [
+      "unknown mode",
+      null,
+      (p) => {
+        p.mode = "canonical-content-v2";
+      },
+      /pinned.*scope/,
+    ],
+    [
+      "no mode cannot infer content hash",
+      null,
+      (p) => {
+        delete p.mode;
+      },
+      /hash changed/,
+    ],
+    [
+      "extra mode parameter",
+      null,
+      (p) => {
+        p.exclude = ["observedUtc", "commands"];
+      },
+      /pinned.*scope/,
+    ],
+    [
+      "missing domain",
+      null,
+      (p) => {
+        const value = clone(predecessorProjectionFixture().value);
+        delete value.observedUtc;
+        p.sha256 = createHash("sha256")
+          .update(a.canonical(value))
+          .digest("hex");
+      },
+      /content hash changed/,
+    ],
+    [
+      "raw hash cannot infer raw mode",
+      null,
+      (p) => {
+        p.sha256 = createHash("sha256")
+          .update(JSON.stringify(predecessorProjectionFixture().value))
+          .digest("hex");
+      },
+      /content hash changed/,
+    ],
+  ];
+  for (const [name, mutateValue, mutatePin, expected] of cases) {
+    const projection = contentProjectionFixture({ mutateValue, mutatePin });
+    const f = publicReplacementHarness({ predecessorEvidence: projection.env });
+    await assert.rejects(f.runner.replaceStopped(), expected, name);
+    assert.equal(f.calls.filter((c) => c.method === "POST").length, 0, name);
+    assert(!f.calls.some((c) => c.path.includes("/operations/")), name);
+    assert.equal(f.runner.state.status, "stopped", name);
+    assert.equal(f.runner.state.predecessor.raw, f.raw, name);
+    assert.equal(f.runner.state.replacement, undefined, name);
+    assert(
+      !f.runner.state.evidence.some(
+        (e) => e.kind === "operator-predecessor-projection",
+      ),
+      name,
+    );
+  }
+});
+
+test("actual public replacement refuses untrusted, stale or unsettled predecessor projections before any POST", async () => {
+  const cases = [
+    ["raw bytes changed", { rawSuffix: "\n" }, /hash changed/],
+    [
+      "wrong pin hash",
+      {
+        mutatePin: (v) => {
+          v.sha256 = "c".repeat(64);
+        },
+      },
+      /hash changed/,
+    ],
+    [
+      "wrong source",
+      {
+        mutate: (v) => {
+          v.source = a.SOURCE;
+        },
+      },
+      /provenance/,
+    ],
+    [
+      "wrong schema",
+      {
+        mutate: (v) => {
+          v.schemaVersion = 92;
+        },
+      },
+      /provenance/,
+    ],
+    [
+      "stale",
+      {
+        mutate: (v) => {
+          v.observedUtc = date(POST_EXPIRY - 120000);
+        },
+      },
+      /freshness/,
+    ],
+    [
+      "future",
+      {
+        mutate: (v) => {
+          v.observedUtc = date(POST_EXPIRY + 60000);
+        },
+      },
+      /freshness/,
+    ],
+    [
+      "wrong tenant",
+      {
+        mutate: (v) => {
+          v.tenantId = SID;
+        },
+      },
+      /provenance/,
+    ],
+    [
+      "wrong database",
+      {
+        mutate: (v) => {
+          v.databaseIdentity = "other-relay";
+        },
+      },
+      /provenance/,
+    ],
+    [
+      "wrong query",
+      {
+        mutate: (v) => {
+          v.querySha256 = "e".repeat(64);
+        },
+      },
+      /provenance/,
+    ],
+    [
+      "wrong report",
+      {
+        mutate: (v) => {
+          v.priorReportCanonicalSha256 = "e".repeat(64);
+        },
+      },
+      /scope/,
+    ],
+    [
+      "wrong session",
+      {
+        mutate: (v) => {
+          v.sessionId = SID;
+        },
+      },
+      /scope/,
+    ],
+    [
+      "wrong generation",
+      {
+        mutate: (v) => {
+          v.generation = 2;
+        },
+      },
+      /scope/,
+    ],
+    [
+      "extra field",
+      {
+        mutate: (v) => {
+          v.httpResponse = {};
+        },
+      },
+      /provenance/,
+    ],
+    [
+      "missing command",
+      {
+        mutate: (v) => {
+          v.commands.pop();
+        },
+      },
+      /scope/,
+    ],
+    [
+      "extra command",
+      {
+        mutate: (v) => {
+          v.commands.push(clone(v.commands[0]));
+        },
+      },
+      /scope/,
+    ],
+    [
+      "duplicate operation",
+      {
+        mutate: (v) => {
+          v.commands[1] = clone(v.commands[0]);
+        },
+      },
+      /command set/,
+    ],
+    [
+      "wrong command ID",
+      {
+        mutate: (v) => {
+          v.commands[0].id = LEASE;
+        },
+      },
+      /command identity/,
+    ],
+    [
+      "duplicate pin command",
+      {
+        mutatePin: (v) => {
+          v.commands[1].commandId = v.commands[0].commandId;
+        },
+      },
+      /pinned.*scope/,
+    ],
+    [
+      "wrong pin operation",
+      {
+        mutatePin: (v) => {
+          v.commands[0].operationId = OP;
+        },
+      },
+      /pinned.*scope/,
+    ],
+    [
+      "wrong row session",
+      {
+        mutate: (v) => {
+          v.commands[0].session_id = SID;
+        },
+      },
+      /Operation identity/,
+    ],
+    [
+      "wrong row generation",
+      {
+        mutate: (v) => {
+          v.commands[0].generation = 2;
+        },
+      },
+      /Operation identity/,
+    ],
+    [
+      "wrong kind",
+      {
+        mutate: (v) => {
+          v.commands[0].kind = "cancel";
+        },
+      },
+      /Operation identity/,
+    ],
+    [
+      "unknown command",
+      {
+        mutate: (v) => {
+          v.commands[0].state = "unknown";
+        },
+      },
+      /Operation unknown/,
+    ],
+    [
+      "pending command",
+      {
+        mutate: (v) => {
+          v.commands[0].state = "pending";
+        },
+      },
+      /settled native/,
+    ],
+    [
+      "missing receipt",
+      {
+        mutate: (v) => {
+          v.commands[0].receipt = null;
+        },
+      },
+      /receipt shape/,
+    ],
+    [
+      "unsettled receipt",
+      {
+        mutate: (v) => {
+          v.commands[0].receipt.status = "accepted";
+        },
+      },
+      /Missing native receipt/,
+    ],
+    [
+      "unknown prompt result",
+      {
+        mutate: (v) => {
+          v.commands[0].receipt.result.stopReason = "unknown";
+        },
+      },
+      /settled native/,
+    ],
+    [
+      "unsent cancel",
+      {
+        mutate: (v) => {
+          v.commands[1].receipt.result.cancelSent = false;
+        },
+      },
+      /settled native/,
+    ],
+    [
+      "unsent close",
+      {
+        mutate: (v) => {
+          v.commands[2].receipt.result.cancelSent = false;
+        },
+      },
+      /settled native/,
+    ],
+    [
+      "raw result payload",
+      {
+        mutate: (v) => {
+          v.commands[0].receipt.result.text = "not permitted";
+        },
+      },
+      /receipt shape/,
+    ],
+  ];
+  for (const [name, options, expected] of cases) {
+    const projection = predecessorProjectionFixture(options);
+    const f = publicReplacementHarness({ predecessorEvidence: projection.env });
+    await assert.rejects(f.runner.replaceStopped(), expected, name);
+    assert.equal(f.calls.filter((c) => c.method === "POST").length, 0, name);
+    assert(!f.calls.some((c) => c.path.includes("/operations/")), name);
+    assert.equal(f.runner.state.status, "stopped", name);
+    assert.equal(f.runner.state.predecessor.raw, f.raw, name);
+    assert.equal(f.runner.state.replacement, undefined, name);
+    assert(
+      !f.runner.state.evidence.some(
+        (e) => e.kind === "operator-predecessor-projection",
+      ),
+      name,
+    );
+  }
+});
+
+test("projection configuration and live predecessor settlement are independently required", async () => {
+  for (const missing of ["predecessorEvidencePin", "readPredecessorEvidence"]) {
+    const projection = predecessorProjectionFixture();
+    delete projection.env[missing];
+    const f = publicReplacementHarness({ predecessorEvidence: projection.env });
+    await assert.rejects(f.runner.replaceStopped(), /required together/);
+    assert.equal(projection.contexts.length, 0);
+    assert.equal(f.calls.filter((c) => c.method === "POST").length, 0);
+  }
+  for (const field of ["session", "control", "permission"]) {
+    const projection = predecessorProjectionFixture();
+    const f = publicReplacementHarness({
+      predecessorEvidence: projection.env,
+      driftPredecessor: (row, c) => {
+        if (field === "session" && c.path.endsWith(a.STOPPED_SESSION))
+          row.state = "open";
+        if (field === "control" && c.path.endsWith("/control"))
+          row.lease = { id: LEASE };
+        if (field === "permission" && c.path.endsWith(a.STOPPED_PERMISSION))
+          row.state = "pending";
+      },
+    });
+    await assert.rejects(
+      f.runner.replaceStopped(),
+      /Prior session|Prior permission/,
+    );
+    assert.equal(f.calls.filter((c) => c.method === "POST").length, 0);
+    assert.equal(f.runner.state.replacement, undefined);
+  }
+});
+
+test("projection never bypasses missing original report, Stop or its read deadline", async () => {
+  for (const mode of [
+    "missing-report",
+    "stopped",
+    "deadline",
+    "invalid-json",
+  ]) {
+    const projection = predecessorProjectionFixture();
+    let f;
+    const read = projection.env.readPredecessorEvidence;
+    if (mode === "invalid-json") {
+      projection.env.readPredecessorEvidence = async () => "{";
+      projection.pin.sha256 = createHash("sha256").update("{").digest("hex");
+    } else
+      projection.env.readPredecessorEvidence = async (context) => {
+        if (mode === "stopped") f.runner.stopped = true;
+        if (mode === "deadline") f.advance(15001);
+        return read(context);
+      };
+    f = publicReplacementHarness({ predecessorEvidence: projection.env });
+    if (mode === "missing-report") f.runner.env.load = () => null;
+    await assert.rejects(
+      f.runner.replaceStopped(),
+      /Original stopped report|Stopped|deadline reached|Invalid predecessor projection JSON/,
+    );
+    assert.equal(f.calls.filter((c) => c.method === "POST").length, 0, mode);
+    assert.equal(f.runner.state.replacement, undefined, mode);
+  }
 });
 
 test("actual public replacement refuses changed handoff pins, identity, provenance and expired window before dispatch", async () => {
