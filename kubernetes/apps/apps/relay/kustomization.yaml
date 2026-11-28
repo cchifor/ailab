@@ -12,6 +12,10 @@ resources:
 - network-policy.yaml
 - postgres-bootstrap.yaml
 - backup.yaml
+# The relay-operator reaper: the independent backstop for the JIT automation identity's temporary admin
+# (operator-reaper/; docs/runbooks/relay-operator-reaper.md). Its own kustomization keeps this overlay to
+# resources + components only (the overlay-stripping test helpers require that).
+- operator-reaper
 components:
 # Default agent communication; it contains no router/OpenBao Secret or trust bridge.
 - ../../../components/relay-default-communication

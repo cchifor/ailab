@@ -106,7 +106,8 @@ pve_base_writeback_sysctl:
 #     no guest on these hosts has a startup order, so a CP start stuck on a hung share takes one slot.
 #   * A skip has no clean mechanism: it needs an override of the stock ExecStart (startall --vms) or a boot
 #     script writing onboot or a lock into /etc/pve, which is cluster-wide and owned by tofu.
-#   A CP that PVE refused stays stopped: `qm start <vmid>` once the share is back (the WARNING says so).
+#   A CP that PVE refused is started late by pve-nfs-guest-autostart (role pve_nfs_guest_autostart) once the
+#   share is mounted, for up to an hour; past that, `qm start <vmid>` (the WARNING says so).
 # Off = the script and the drop-in are removed. Either way it takes effect at the next boot.
 pve_nfs_disk_gate_enabled: true
 pve_nfs_disk_gate_storages: [qnap-nfs]

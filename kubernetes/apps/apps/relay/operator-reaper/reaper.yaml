@@ -1,0 +1,182 @@
+# The relay-operator reaper: the INDEPENDENT backstop for the JIT automation identity's temporary admin
+# (plans/2026-11-27-relay-operator-session-plan.md, section 3; docs/runbooks/relay.md, "Operator automation identity").
+# `relay-operator.py session|call` grants admin under the fenced Lease `relay-operator-jit` and revokes it in a finally;
+# if the orchestrator dies (SIGKILL, workstation loss), the membership would stand. Every 5 minutes this CronJob takes
+# the same Lease ONLY when no live holder has it, and calls ops.relay_operator_reap(fence) (a fixed-subject SECURITY DEFINER
+# function: it can delete that identity's sessions and memberships and nothing else), then releases the Lease.
+# Best-effort: bounded by the scheduler, the API server and the database; RelayOperatorReaper* alerts say when it is not.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: relay-operator-reaper
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: relay-operator-reaper
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+rules:
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  resourceNames: ["relay-operator-jit"]
+  verbs: ["get", "update"]
+- apiGroups: ["coordination.k8s.io"]
+  resources: ["leases"]
+  verbs: ["create"]  # create cannot be restricted by name; the script only ever creates relay-operator-jit
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: relay-operator-reaper
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: relay-operator-reaper
+subjects:
+- kind: ServiceAccount
+  name: relay-operator-reaper
+  namespace: relay
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: relay-operator-reaper
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 120
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 120
+      ttlSecondsAfterFinished: 3600
+      template:
+        metadata:
+          labels:
+            app: relay-operator-reaper
+        spec:
+          restartPolicy: Never
+          serviceAccountName: relay-operator-reaper
+          # No pod-wide token: the reap container holds the database password and must not also reach the Lease
+          # API. lease-take and lease-release mount the projected token (kube-api) themselves.
+          automountServiceAccountToken: false
+          terminationGracePeriodSeconds: 30  # lease.py HOLD_S >= activeDeadlineSeconds + this (+ margin)
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            seccompProfile:
+              type: RuntimeDefault
+          initContainers:
+          - name: lease-take  # writes /work/go only if it took a free Lease
+            image: mirror.gcr.io/library/python:3.15-slim@sha256:63bb298d2b7b88f176f51b5189f54ce6535c997682ea70885d2132f5d473a8a5
+            command: ["python3", "-I", "/scripts/lease.py", "take"]
+            securityContext: &hardened
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities:
+                drop: ["ALL"]
+            resources: &small
+              requests: {cpu: 10m, memory: 32Mi}
+              limits: {memory: 64Mi}
+            volumeMounts: &leasemounts
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: kube-api
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+          - name: reap  # only with /work/go; the role can execute ops.relay_operator_reap(fence) and nothing else
+            image: docker.io/library/postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
+            command:
+            - sh
+            - -c
+            - >-
+              if [ ! -f /work/go ]; then echo '{"event":"reap","skipped":true}'; exit 0; fi;
+              fence=$(cut -d' ' -f2 /work/go);
+              case "$fence" in ''|*[!0-9]*) echo '{"event":"reap","error":"bad fence"}'; exit 1;; esac;
+              out=$(echo 'SELECT sessions_deleted, memberships_deleted FROM ops.relay_operator_reap(:fence)' |
+              psql "host=relay-postgres port=5432 dbname=relay user=relay_operator_reaper sslmode=disable
+              connect_timeout=10" --no-psqlrc -tA -F ' ' -v ON_ERROR_STOP=1 -v fence="$fence") || exit 1;
+              set -- $out; echo "{\"event\":\"reap\",\"sessions_deleted\":$1,\"memberships_deleted\":$2}"
+            env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: relay-operator-reaper
+                  key: password
+            securityContext: *hardened
+            resources: *small
+            volumeMounts:  # no API token here
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: work
+              mountPath: /work
+          containers:
+          - name: lease-release
+            image: mirror.gcr.io/library/python:3.15-slim@sha256:63bb298d2b7b88f176f51b5189f54ce6535c997682ea70885d2132f5d473a8a5
+            command: ["python3", "-I", "/scripts/lease.py", "release"]
+            securityContext: *hardened
+            resources: *small
+            volumeMounts: *leasemounts
+          volumes:
+          - name: scripts
+            configMap:
+              name: relay-operator-reaper-scripts
+          - name: work
+            emptyDir:
+              medium: Memory
+              sizeLimit: 1Mi
+          - name: kube-api  # the Lease API credentials, mounted ONLY in lease-take and lease-release
+            projected:
+              sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                  - key: ca.crt
+                    path: ca.crt
+---
+# Additive: relay-postgres' own policy stays unchanged; this one only admits the reaper's pods on 5432. The
+# database objects are created by scripts/relay-operator-reaper-setup.py over the pod's LOCAL socket (the postgres
+# superuser is rejected over the network by pg_hba, deliberately), so no setup Job exists.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: relay-postgres-operator-reaper
+  namespace: relay
+  labels:
+    app.kubernetes.io/part-of: relay
+spec:
+  podSelector:
+    matchLabels:
+      app: relay-postgres
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: relay-operator-reaper
+    ports:
+    - protocol: TCP
+      port: 5432
