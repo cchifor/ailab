@@ -994,10 +994,9 @@ start. It checks every source with its latency: hub deployment, the Router pod a
 envelopes, the marker baselines, the routes, the clock bounds, every SQL shape, the pre-run facts, the native
 transcript format and the predecessor staging. The 2026-11-27 run: 22/22 checks passed, each call 0.2–1.3 s. A check passes only when its result establishes the fact.
 
-The predecessor/C9 source readers are implemented in [bounded observer support](relay-phase-a-observer-support.md). Their source tuple, independent pins and deployment qualification remain required; this does not activate a live run.
+The predecessor/C9/C10 source readers are implemented in [bounded observer support](relay-phase-a-observer-support.md). Their source tuple, independent pins and deployment qualification remain required; this does not activate a live run.
 
 **Open gates** (the collectors answer `unsupported`, and the run stops there):
-- **C10 (`reconcile-choice`):** the inference session must name the authoritative reconstruction-required field.
 - **C11 (`retire-branch`):** the settings-applied receipt and the probe's refusal must be established from
   authoritative, correlated records.
 - **The phase A bundle manifest:** it needs #2060 on main.

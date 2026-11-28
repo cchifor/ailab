@@ -12,8 +12,8 @@ reviewed readers; they do not authenticate a deployment or independently attest
 the Pi artifact. Unknown configured Hub/Router/holder revisions are unsupported.
 There is no 0.14.2 bridge, new live activation pin or execution-window grant here.
 
-Implemented here: predecessor, C9 retained native evidence.
-Remaining gates: C10, C11. C10/C11 remain unsupported until their own collector changes arrive.
+Implemented here: predecessor, C9 retained native evidence, C10 reconstruction join.
+Remaining gates: C11. C10/C11 remain unsupported until their own collector changes arrive.
 
 ## Predecessor projection
 
@@ -82,7 +82,20 @@ namespace enumeration, secret-table query or write is used in this mode. Unknown
 database types are unsupported. Pod UID/restart and store identity must match the
 existing observer continuity record.
 
-C9 stores the original join in `RunState.retained_branch`. Reader support for resumed histories is qualified here; C10 remains unsupported until its decision collector is integrated.
+## C10 decision
+
+| Native receipt | Router record | C10 |
+| --- | --- | --- |
+| `pending` present | matching pending operation, complete or uncertain | `true` |
+| `pending` present | matching parent operation, complete | `true` |
+| no `pending`, parent present | matching parent operation, complete | `false` |
+| Any other combination | missing, running, successor, mismatch or unknown | Refuse |
+
+C10 additionally requires the same C9 branch, epoch, operation and state, and
+nondecreasing updatedAt. An epoch-only change refuses. Idle holder, session,
+control and permission evidence is also required. A true result authorizes only
+the driver's explicit reconstruction step; it does not prove that reconstruction
+succeeded. A has no B-style post-reconciliation receipt checkpoint in this patch.
 
 ## Offline verification
 

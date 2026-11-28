@@ -355,6 +355,27 @@ class ReaderTests(unittest.TestCase):
                     private(path, original)
 
 
+def retirement(stop='end_turn'):
+    high, probe = u(30), u(31)
+    events = [
+        {'sequence': 10, 'kind': 'command-accepted', 'commandId': high},
+        {'sequence': 11, 'kind': 'session-settings', 'generation': 1,
+         'settings': {'revision': 2, 'configOptions': [{'id': 'thought_level', 'currentValue': 'high'}]}},
+        {'sequence': 12, 'kind': 'command-result', 'commandId': high, 'status': 'completed'},
+        {'sequence': 13, 'kind': 'command-accepted', 'commandId': probe},
+        {'sequence': 14, 'kind': 'update', 'notice': True, 'truncated': False},
+        {'sequence': 15, 'kind': 'command-result', 'commandId': probe, 'status': 'completed'}]
+    return {'schemaVersions': list(range(1,94)), 'observedMs': C.now_ms(),
+            'session': {'id': u(10), 'generation': 1, 'state': 'open', 'rebinding': False,
+                        'holder_id': u(7), 'control_epoch': 2},
+            'pendingPermissions': 0, 'journalRange': {'first': 10, 'last': 15, 'count': 6},
+            'commands': [{'id': high, 'kind': 'set-config', 'configId': 'thought_level', 'value': 'high',
+                          'settingsApplied': True, 'settingsRevision': 1, 'controlEpoch': 2,
+                          'state': 'completed', 'receiptStatus': 'completed'},
+                         {'id': probe, 'kind': 'prompt', 'probe': True, 'controlEpoch': 2,
+                          'stopReason': stop, 'state': 'completed', 'receiptStatus': 'completed'}], 'events': events}
+
+
 class JoinTests(unittest.TestCase):
     def test_all_authoritative_join_rows_and_refusals(self):
         r = {'epoch': 'e', 'operation': 'turn-pending', 'state': 'uncertain', 'updatedAt': 1}
@@ -400,6 +421,17 @@ class ActualReaderRemote(T.FakeRemote):
             return sqlite_read(self.db,self.fixture.native)
         return super().router(args,budget,obs,what,cap,pod)
 
+    def resume(self):
+        f=self.fixture
+        f.imported(); f.run.session_id=u(12)
+        self.answers['sql:session-resume.sql']=[{'id':u(13),'session_id':u(12),'actor_id':f.h.cfg.raw['jitUserId'],
+            'created_ms':C.now_ms(),'profile_id':T.CODEX['id'],'profile_revision':1,'cwd':str(f.workspace),
+            'holder_id':u(7),'holder_journal_id':u(7),'resume_from':u(10),'resume_generation':1,
+            'resume_native_id':u(11),'resume_acknowledge_unknown_tool_effects':False}]
+        self.answers['sql:session-state.sql']=[{**T.sess()[0],'id':u(12),'native_session_id':u(11)}]
+        self.answers['sql:retirement-evidence.sql']=[{**retirement(),'session':{
+            **retirement()['session'],'id':u(12)},'commands':[]}]
+
 
 class CollectorIntegration(unittest.TestCase):
     def setUp(self):
@@ -412,6 +444,35 @@ class CollectorIntegration(unittest.TestCase):
         return {'provider':'codex','runId':r.run_id,'sessionId':r.session_id,'generation':1,
                 'holderId':u(7),'journalId':u(7)}
 
+    def retain(self):
+        self.assertTrue(C.c_recover_history(self.f.h,{},self.context(),T.budget(),C.now_ms(),{}))
+        self.assertEqual(self.f.run.retained_branch['native']['currentSha256'],sha(self.f.source))
+        self.remote.resume()
+
+    def test_actual_c9_and_c10_reader_path(self):
+        self.retain()
+        self.assertEqual(C.c_reconcile_choice(self.f.h,{},self.context(),T.budget(),C.now_ms(),{}),{'reconcile':True})
+        self.assertEqual(self.remote.calls.count('native-checkpoint'),2)
+        self.assertEqual(self.remote.calls.count('branch-record'),2)
+
+    def test_epoch_only_change_on_second_actual_read_refuses(self):
+        self.retain()
+        sqlite_read(self.remote.db,self.f.native,{**self.remote.branch['record'],'epoch':'changed'})
+        with self.assertRaisesRegex(O.Failed,'retained Router branch changed'):
+            C.c_reconcile_choice(self.f.h,{},self.context(),T.budget(),C.now_ms(),{})
+
+    def test_nonpending_complete_parent_false_and_missing_source_refused(self):
+        del self.f.native['pending']
+        self.f.entries[0]['data']=self.f.native; self.f.persist()
+        self.remote.branch=sqlite_read(self.remote.db,self.f.native,{**self.remote.branch['record'],
+                                           'operation':'turn-parent','state':'complete'})
+        self.retain()
+        self.assertEqual(C.c_reconcile_choice(self.f.h,{},self.context(),T.budget(),C.now_ms(),{}),{'reconcile':False})
+        self.f.h.cfg.raw['hub']['runSource']='0'*40
+        count=len(self.remote.calls)
+        with self.assertRaises(O.Unsupported): C.c_reconcile_choice(self.f.h,{},self.context(),T.budget(),0,{})
+        self.assertEqual(len(self.remote.calls),count)
+
     def test_actual_c9_retains_original_reader_provenance(self):
         self.assertTrue(C.c_recover_history(self.f.h,{},self.context(),T.budget(),C.now_ms(),{}))
         saved=self.f.run.retained_branch
@@ -423,14 +484,33 @@ class CollectorIntegration(unittest.TestCase):
 
 
 def sql_fixture():
-    """Predecessor-only actual PG projection schema; synthetic metadata."""
-    statements=['CREATE TABLE schema_migrations(version integer PRIMARY KEY); INSERT INTO schema_migrations SELECT generate_series(1,93);',
-      'CREATE TABLE agent_control_commands(tenant_id uuid,id uuid,session_id uuid,operation_id uuid,generation integer,kind text,state text,receipt jsonb);']
+    """Minimal typed projection schema, from Hub5f90 migrations 011/012/015/035.
+    This tests real SQL types/joins; it does not claim full Hub migration/startup.
+    """
+    v=retirement()
+    q=lambda x: "'" + json.dumps(x).replace("'", "''") + "'::jsonb"
+    statements=[
+      'CREATE TABLE schema_migrations(version integer PRIMARY KEY); INSERT INTO schema_migrations SELECT generate_series(1,93);',
+      'CREATE TABLE agent_sessions(tenant_id uuid,id uuid,generation integer,state text,rebinding boolean,control_epoch bigint,holder_id uuid,connector_id uuid);',
+      'CREATE TABLE agent_control_commands(tenant_id uuid,id uuid,session_id uuid,operation_id uuid,generation integer,kind text,state text,control_epoch bigint,payload jsonb,receipt jsonb,created_at timestamptz DEFAULT now());',
+      'CREATE TABLE agent_holder_events(tenant_id uuid,connector_id uuid,journal_id uuid,sequence bigint,incarnation uuid,session_id uuid,command_id uuid,payload jsonb);',
+      'CREATE TABLE permission_requests(tenant_id uuid,session_id uuid,state text);',
+      f"INSERT INTO agent_sessions VALUES('{u(1)}','{u(10)}',1,'open',false,2,'{u(7)}','{u(8)}');"]
+    for c in v['commands']:
+        payload={'configId':'thought_level','value':'high','settingsRevision':1} if c['kind']=='set-config' else {'text':PROBE}
+        receipt={'status':'completed','result':{'settingsApplied':True} if c['kind']=='set-config' else {'stopReason':'end_turn'}}
+        statements.append(f"INSERT INTO agent_control_commands VALUES('{u(1)}','{c['id']}','{u(10)}','{c['id']}',1,'{c['kind']}','completed',2,{q(payload)},{q(receipt)},now());")
+    for e in v['events']:
+        payload={k:x for k,x in e.items() if k not in ('sequence','notice','truncated','settings','generation')}
+        if e['kind']=='session-settings': payload['value']={'generation':1,'snapshot':e['settings']}
+        if e['kind']=='update': payload['value']={'type':'agent_message_chunk','text':NOTICE}
+        command="'"+e['commandId']+"'" if 'commandId' in e else 'NULL'
+        statements.append(f"INSERT INTO agent_holder_events VALUES('{u(1)}','{u(8)}','{u(7)}',{e['sequence']},'{u(7)}','{u(10)}',{command},{q(payload)});")
     for i,kind in enumerate(('prompt','cancel','close')):
         receipt={'status':'completed','result':{'stopReason':'cancelled'} if kind=='prompt' else {'cancelSent':True}}
-        q="'"+json.dumps(receipt).replace("'","''")+"'::jsonb"
-        statements.append(f"INSERT INTO agent_control_commands VALUES('{u(1)}','{u(40+i)}','45724087-335a-4c55-ad0f-cb278afe608a','{u(50+i)}',1,'{kind}','completed',{q});")
+        statements.append(f"INSERT INTO agent_control_commands VALUES('{u(1)}','{u(40+i)}','45724087-335a-4c55-ad0f-cb278afe608a','{u(50+i)}',1,'{kind}','completed',1,'{{}}',{q(receipt)},now());")
     return '\n'.join(statements)
+
 
 def predecessor_adapter(request):
     """Synthetic deployment transport plus unmodified PostgreSQL readback.
@@ -471,12 +551,14 @@ if __name__ == '__main__':
         print(sql_fixture())
     elif len(sys.argv)==3 and sys.argv[1]=='--sql-readbacks':
         root=Path(sys.argv[2])
+        r=json.loads((root/'retirement.json').read_text())
+        C.supported_schema(r); assert r['session']['state']=='open' and r['pendingPermissions']==0
         p=json.loads((root/'predecessor.json').read_text())
         C.supported_schema(p)
         assert [c['kind'] for c in p['commands']]==['prompt','cancel','close']
         assert [c['receipt']['result'] for c in p['commands']]==[{'stopReason':'cancelled'},{'cancelSent':True},{'cancelSent':True}]
         wrong=json.loads((root/'foreign.json').read_text())
         assert wrong['commands']==[]
-        print('actual PostgreSQL17 predecessor readbacks PASS')
+        print('actual PostgreSQL17 idle and predecessor readbacks PASS')
     else:
         unittest.main()

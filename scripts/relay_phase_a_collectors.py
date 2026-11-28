@@ -470,7 +470,8 @@ def c_pre_launch(host, req, ctx, budget, gate_now, obs):
             "routeConfirmed": True, "clocksWithin5s": True}
 
 
-def bind_session(host, run, session_id: str, budget, obs, *, resume_from=None, after_ms=None) -> dict:
+def bind_session(host, run, session_id: str, budget, obs, *, resume_from=None, after_ms=None,
+                 resume_generation=None) -> dict:
     """A session belongs to this execution only through its launch row (plan section 3)."""
     if resume_from is None:
         rows = host.remote.sql("session-launch.sql", {"session_id": session_id, "tenant": host.cfg.raw["tenant"]},
@@ -490,7 +491,8 @@ def bind_session(host, run, session_id: str, budget, obs, *, resume_from=None, a
          "the launch holder is not the handed-off holder", Failed)
     need(is_uuid(r.get("session_id")), "the launch has no session", Failed)
     if resume_from is not None:
-        need(r["resume_from"] == resume_from and r["resume_generation"] == run.generation
+        need(r["resume_from"] == resume_from and r["resume_generation"] ==
+             (run.generation if resume_generation is None else resume_generation)
              and r["resume_native_id"] == run.native_id and r["resume_acknowledge_unknown_tool_effects"] is False,
              "the resume is not bound to the closed session", Failed)
     s = session_state(host, r["session_id"], budget, obs)
@@ -696,7 +698,27 @@ def c_recover_history(host, req, ctx, budget, gate_now, obs):
 
 
 def c_reconcile_choice(host, req, ctx, budget, gate_now, obs):
-    raise Unsupported("no authoritative reconstruction-required field is pinned (plan section 7, gate)")
+    support_sources(host)
+    run = checkpoint_run(host, ctx)
+    old = run.retained_branch
+    need(old is not None and run.session_id != old['sessionId'], 'C9 retained branch unavailable', Unsupported)
+    launch = bind_session(host, run, None, budget, obs, resume_from=old['sessionId'], after_ms=run.recover_ms,
+                          resume_generation=old['generation'])
+    need(launch['session_id'] == run.session_id and launch['resume_generation'] == old['generation'],
+         'C10 resume binding changed', Failed)
+    idle_evidence(host, run, budget, obs)
+    t = read_native_checkpoint(host, run, budget, obs)
+    need(t['sourceSessionId'] == old['sessionId'] and t['native'] == old['native']['native']
+         and t['sourceSha256'] == old['native']['currentSha256']
+         and t['retainedReceiptSha256'] == old['native']['retainedReceiptSha256']
+         and SHA.fullmatch(str(t.get('importedSha256', ''))) and t['unsettled'] == [],
+         'C10 imported native receipt changed', Failed)
+    branch = read_router_branch(host, run, t, budget, obs)
+    previous, current = old['router'], branch
+    need(all(current[k] == previous[k] for k in ('namespace', 'principal', 'conversation', 'branch', 'key', 'storeSha256'))
+         and all(current['record'][k] == previous['record'][k] for k in ('epoch', 'operation', 'state'))
+         and current['record']['updatedAt'] >= previous['record']['updatedAt'], 'C10 retained Router branch changed', Failed)
+    return {'reconcile': branch_decision(t['native'], branch['record'])}
 
 
 def c_retire_branch(host, req, ctx, budget, gate_now, obs):
@@ -776,6 +798,14 @@ def fresh_ms(value):
     return value
 
 
+def checkpoint_run(host, ctx):
+    run = run_for(host.state, ctx)
+    need(ctx.get('sessionId') == run.session_id and ctx.get('generation') == run.generation
+         and ctx.get('holderId') == host.state.holder['incarnation']
+         and ctx.get('journalId') == host.state.holder['journal'], 'checkpoint ownership differs', Failed)
+    return run
+
+
 def read_native_checkpoint(host, run, budget, obs):
     need(is_uuid(run.native_id), 'native UUID unavailable', Unsupported)
     pin, h = host.cfg.profile(run.provider), host.state.holder
@@ -839,6 +869,29 @@ def branch_decision(native, router):
     need(parent is not None and router['operation'] == parent and router['state'] == 'complete',
          'native parent does not join Router', Failed)
     return False
+
+
+def idle_evidence(host, run, budget, obs):
+    rows = host.remote.sql('retirement-evidence.sql', {'tenant': host.cfg.raw['tenant'],
+        'session_id': run.session_id, 'generation': run.generation,
+        'holder_id': host.state.holder['incarnation'], 'journal_id': host.state.holder['journal']}, budget, obs)
+    need(len(rows) == 1, 'current native work unavailable', Unsupported)
+    value = rows[0]
+    supported_schema(value)
+    fresh_ms(value.get('observedMs'))
+    session = value.get('session') or {}
+    need(session.get('id') == run.session_id and session.get('generation') == run.generation
+         and session.get('state') == 'open' and session.get('rebinding') is False
+         and session.get('holder_id') == host.state.holder['incarnation']
+         and value.get('pendingPermissions') == 0 and isinstance(value.get('commands'), list)
+         and len(value['commands']) <= 200
+         and all(c.get('state') == 'completed' and c.get('receiptStatus') == 'completed'
+             for c in value['commands']), 'native work is pending or unknown', Failed)
+    h = holder_record(host, budget, obs)
+    need(h.get('incarnation') == host.state.holder['incarnation']
+         and h.get('journalId') == host.state.holder['journal'] and h.get('pendingCommands') == 0,
+         'holder native work is pending', Failed)
+    return value
 
 
 COLLECTORS = {
