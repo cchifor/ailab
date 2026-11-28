@@ -34,6 +34,7 @@ const REASONS = Object.freeze({
     "Finalization callback cleanup unresolved; preserve evidence",
   "host-stopped": "Finalization host stopped; preserve evidence",
   "cli-input-invalid": "Finalization CLI input invalid",
+  "output-failed": "Finalization diagnostic output failed",
 });
 class KnownFailure extends Error {
   constructor(code, message) {

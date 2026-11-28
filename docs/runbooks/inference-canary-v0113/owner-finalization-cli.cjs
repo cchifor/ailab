@@ -13,8 +13,13 @@ function need(v, m) {
 function output(fd, line) {
   const raw = Buffer.from(line);
   for (let n = 0; n < raw.length;) {
-    const count = fs.writeSync(fd, raw, n, raw.length - n);
-    need(count > 0, "Output failed");
+    let count;
+    try {
+      count = fs.writeSync(fd, raw, n, raw.length - n);
+    } catch {
+      throw failure("output-failed");
+    }
+    if (!(count > 0)) throw failure("output-failed");
     n += count;
   }
 }

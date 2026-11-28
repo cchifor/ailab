@@ -1278,6 +1278,50 @@ test(
   },
 );
 
+for (const fd of [1, 2])
+  for (const mode of ["zero-progress", "exception"])
+    test(`actual CLI output failure is typed for fd${fd} ${mode}`, async () => {
+      const f = fixture(),
+        writes = [];
+      const pipeCli = load("owner-finalization-cli.cjs", {
+        "./owner-finalization.cjs": candidate,
+        "./owner-finalization-automation.cjs": host,
+        "node:fs": {
+          ...fs,
+          writeSync(target, raw, offset, length) {
+            writes.push({
+              target,
+              text: raw.subarray(offset, offset + length).toString(),
+            });
+            if (target === fd) {
+              if (mode === "exception") throw Error("SENSITIVE_PIPE_FAILURE");
+              return 0;
+            }
+            return length;
+          },
+        },
+      });
+      // Exercise the CLI's actual default writers after an input refusal. A
+      // failed pipe must supersede that diagnosis without retry or secret text.
+      await assert.rejects(
+        pipeCli.runFinalizationCli({
+          argv: [],
+          observer: {
+            qualificationSha256: q.observerQualificationSha256,
+            observe: f.observe,
+          },
+        }),
+        {
+          code: "output-failed",
+          message: "Finalization diagnostic output failed",
+        },
+      );
+      assert.equal(writes.filter((w) => w.target === fd).length, 1);
+      assert.ok(writes.length <= 2);
+      assert.ok(!JSON.stringify(writes).includes("SENSITIVE_PIPE_FAILURE"));
+      assert.equal(f.requests.length, 0);
+    });
+
 test(
   "actual CLI distinguishes preparation refusal from an unresolved dispatched operation without leaking errors",
   { skip: process.platform !== "linux", timeout: 10000 },
