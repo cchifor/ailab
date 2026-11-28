@@ -8,6 +8,80 @@ const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const { runCli } = require("./owner-phase-a-cli.cjs");
 const { createFixture } = require("./owner-phase-a-proxy-fixture.cjs");
+const {
+  createFixture: createCheckpointFixture,
+} = require("./owner-phase-a-automation-fixture.cjs");
+
+test(
+  "replacement collector waits beyond the prior observation at a same-millisecond handoff",
+  { timeout: 15000 },
+  async (t) => {
+    const { createSessionFetch } = require("./owner-phase-a-socket.cjs");
+    const { createRenewalPrelude } = require("./owner-phase-a-renewal.cjs");
+    const a = require("./owner-phase-a.js");
+    const directory = fs.mkdtempSync(
+      path.join(os.tmpdir(), "relay-window-boundary-"),
+    );
+    const output = path.join(directory, "durable");
+    fs.mkdirSync(output, { mode: 0o700 });
+    const f = await createCheckpointFixture(directory, output);
+    const controller = new AbortController();
+    let serial = 0,
+      advance;
+    try {
+      // Initialize the actual fixture via its normal synthetic issuance protocol.
+      // No launch or inference is needed to test the collector's time boundary.
+      await createRenewalPrelude({
+        authenticatedFetch: createSessionFetch(f.socketPath),
+        observeDeployment: f.observeDeployment,
+        deadline: Date.now() + 12000,
+        signal: controller.signal,
+        persist: (renewal) =>
+          fs.writeFileSync(
+            path.join(
+              output,
+              `state-${String(++serial).padStart(6, "0")}.json`,
+            ),
+            JSON.stringify({ renewal }),
+            { mode: 0o600 },
+          ),
+      }).run();
+      t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+      const collect = (kind, fields = {}) =>
+        f.collectCheckpoint({
+          context: Object.freeze({ version: 1, kind, ...fields }),
+          signal: controller.signal,
+        });
+      const previous = await collect("stopped-replacement");
+      await collect("preserving-holder");
+      assert.equal(Date.now(), previous.trajectory.observedAt - 1);
+      // The old collector returned immediately with a stale window. The fixed
+      // collector must remain pending until the observed wall clock advances.
+      advance = setTimeout(() => t.mock.timers.tick(2), 10);
+      const pre = await collect("pre-launch", {
+        provider: "codex",
+        runId: f.phase().profiles.codex.run,
+        sinceAfter: previous.trajectory.observedAt,
+      });
+      clearTimeout(advance);
+      a.snapshot(pre.trajectory, "codex", a.ROUTER, f.phase().profiles);
+      assert(
+        pre.trajectory.scope.since > previous.trajectory.observedAt,
+        "replacement window must follow the prior observation",
+      );
+      assert(pre.trajectory.scope.since <= pre.trajectory.requestedAt);
+      assert.equal(pre.trajectory.rows.length, 0);
+      assert.equal(f.phase().launches.length, 0);
+      assert.deepEqual(f.failures, []);
+    } finally {
+      clearTimeout(advance);
+      t.mock.timers.reset();
+      controller.abort();
+      await f.close();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "actual CLI and Runner complete phase A through pinned operator proxy with real heartbeat and logout",

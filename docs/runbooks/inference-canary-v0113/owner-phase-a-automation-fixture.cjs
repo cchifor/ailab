@@ -1069,10 +1069,18 @@ async function createFixture(directory, outputDirectory) {
     assert.equal(context.version, 1);
     assert(Object.isFrozen(context));
     contexts.push(clone(context));
+    const replacementBoundary =
+      context.kind === "pre-launch" && context.sinceAfter != null
+        ? context.sinceAfter
+        : null;
+    const notBefore = Math.max(
+      context.notBefore || 0,
+      replacementBoundary === null ? 0 : replacementBoundary + 1,
+    );
     // A duration timer does not prove a wall-clock boundary was reached.
     // Recheck after every wake; retain cancellation and real observed timestamps.
-    while (context.notBefore && Date.now() < context.notBefore)
-      await delay(Math.max(1, context.notBefore - Date.now() + 2), undefined, {
+    while (Date.now() < notBefore)
+      await delay(Math.max(1, notBefore - Date.now() + 2), undefined, {
         signal,
       });
     const now = Date.now();
@@ -1145,6 +1153,9 @@ async function createFixture(directory, outputDirectory) {
         };
       }
       case "pre-launch":
+        // The new scope starts at this observation, strictly after the prior
+        // collector finished; holder handoff can occur in the same millisecond.
+        if (replacementBoundary !== null) phase.setTrajectorySince(now);
         return {
           trajectory: phase.observeTrajectory(context.provider),
           marker: phase.observeMarker(
