@@ -104,6 +104,10 @@ The holder's `command-accepted` and `command-result` carry command IDs; update
 events do not. The collector therefore requires a unique accepted/completed
 interval for the exact high-setting command, followed by the exact probe's
 interval, with no overlapping accepted command and no retained journal gap.
+Every other command with an accepted/result event before the probe ends must
+have one unambiguous completed interval ending before high was accepted. An
+earlier acceptance with a missing, unknown, duplicate or overlapping result
+refuses; unrelated commands starting only after the probe ends are outside it.
 
 The high-setting completion must say `settingsApplied:true`; its interval must
 contain the latest generation-specific `session-settings` snapshot, an advanced

@@ -377,6 +377,36 @@ def retirement(stop='end_turn'):
 
 
 class JoinTests(unittest.TestCase):
+    def foreign_interval(self, start, end, *, omit=None, status='completed'):
+        value=retirement()
+        for event in value['events']:event['sequence']*=2
+        events=[]
+        if omit!='accepted':events.append({'sequence':start,'kind':'command-accepted','commandId':u(99)})
+        if omit!='result':events.append({'sequence':end,'kind':'command-result','commandId':u(99),'status':status})
+        value['events']=sorted(value['events']+events,key=lambda e:e['sequence'])
+        first,last=value['events'][0]['sequence'],value['events'][-1]['sequence']
+        value['journalRange']={'first':first,'last':last,'count':last-first+1}
+        return value
+
+    def test_earlier_accepted_command_finishing_inside_probe_refuses(self):
+        with self.assertRaises(O.Unsupported):C.validate_retirement(self.foreign_interval(10,29),1)
+
+    def test_earlier_accepted_command_without_result_refuses(self):
+        with self.assertRaises(O.Unsupported):C.validate_retirement(self.foreign_interval(10,29,omit='result'),1)
+
+    def test_unmatched_result_inside_probe_refuses(self):
+        with self.assertRaises(O.Unsupported):C.validate_retirement(self.foreign_interval(10,29,omit='accepted'),1)
+
+    def test_prior_completed_and_later_intervals_are_outside_probe(self):
+        C.validate_retirement(self.foreign_interval(10,19),1)
+        C.validate_retirement(self.foreign_interval(31,32),1)
+
+    def test_prior_unknown_completion_or_duplicate_endpoint_refuses(self):
+        with self.assertRaises(O.Unsupported):C.validate_retirement(self.foreign_interval(10,19,status='unknown'),1)
+        value=self.foreign_interval(10,19)
+        value['events'].insert(1,{'sequence':11,'kind':'command-accepted','commandId':u(99)})
+        with self.assertRaises(O.Unsupported):C.validate_retirement(value,1)
+
     def test_all_authoritative_join_rows_and_refusals(self):
         r = {'epoch': 'e', 'operation': 'turn-pending', 'state': 'uncertain', 'updatedAt': 1}
         self.assertTrue(C.branch_decision(NATIVE, r))

@@ -936,8 +936,19 @@ def validate_retirement(value, generation):
     hs, he = interval(high)
     ps, pe = interval(probe)
     need(he < ps, 'probe preceded applied high setting', Failed)
-    need(not any(e.get('kind') == 'command-accepted' and e.get('commandId') not in (high['id'], probe['id'])
-                 and hs < e['sequence'] < pe for e in events), 'ambiguous command interval', Unsupported)
+    # Updates carry no commandId. A command accepted BEFORE high can still be
+    # active during the probe, so establish both endpoints of every earlier
+    # foreign interval instead of checking only acceptances inside the window.
+    foreign = {e.get('commandId') for e in events
+               if e.get('kind') in ('command-accepted', 'command-result') and e['sequence'] <= pe
+               and e.get('commandId') not in (high['id'], probe['id'])}
+    for command_id in foreign:
+        need(is_uuid(command_id), 'foreign command identity unavailable', Unsupported)
+        accepted = [e for e in events if e.get('kind') == 'command-accepted' and e.get('commandId') == command_id]
+        ended = [e for e in events if e.get('kind') == 'command-result' and e.get('commandId') == command_id]
+        need(len(accepted) == len(ended) == 1 and ended[0].get('status') == 'completed'
+             and accepted[0]['sequence'] < ended[0]['sequence'] < hs,
+             'ambiguous or incomplete prior command interval', Unsupported)
     settings = [e for e in events if e.get('kind') == 'session-settings']
     need(settings and hs < settings[-1]['sequence'] < he and settings[-1].get('generation') == generation,
          'applied setting journal correlation unavailable', Unsupported)
