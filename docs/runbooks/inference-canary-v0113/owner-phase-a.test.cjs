@@ -2444,6 +2444,107 @@ function nativeReadEvents() {
   ];
 }
 
+test("omitted initial tool status preserves communication classification without changing evidence", () => {
+  const events = nativeReadEvents();
+  delete events[0].event.status;
+  const original = clone(events);
+  const approvals = [
+    { requestId: REQUEST, permissionToolCallId: "pi-ui-fixed" },
+  ];
+  const result = a.communicationToolEvents(events, approvals);
+  assert.deepEqual(result.nativeToolIds, ["native-read-1"]);
+  assert.equal(result.classifications[0].status, "completed");
+  assert.deepEqual(events, original);
+  for (const change of [
+    (rows) => {
+      rows[0].event.status = null;
+    },
+    (rows) => {
+      rows[0].event.status = "unknown";
+    },
+    (rows) => {
+      delete rows[1].event.status;
+    },
+    (rows) => {
+      delete rows[2].event.status;
+    },
+    (rows) => {
+      rows.pop();
+    },
+    (rows) => {
+      rows[2].event.status = "failed";
+    },
+  ]) {
+    const invalid = clone(events);
+    change(invalid);
+    assert.throws(() => a.communicationToolEvents(invalid, approvals));
+  }
+});
+
+test("omitted initial tool status still requires the exact denied marker and terminal update", () => {
+  // Published Pi and the Hub projection can omit status on tool_call. The
+  // subsequent native updates, rather than the start, establish its outcome.
+  const events = [
+    {
+      sequence: "25",
+      event: {
+        kind: "update",
+        type: "tool_call",
+        toolCallId: "native-pwd",
+        title: "pwd",
+      },
+    },
+    {
+      sequence: "26",
+      event: {
+        kind: "update",
+        type: "tool_call_update",
+        toolCallId: "native-pwd",
+        status: "in_progress",
+      },
+    },
+    {
+      sequence: "31",
+      event: {
+        kind: "update",
+        type: "tool_call_update",
+        toolCallId: "native-pwd",
+        status: "failed",
+      },
+    },
+  ];
+  const original = clone(events);
+  const expected = { command: "pwd", decision: "reject_once" };
+  const result = a.communicationToolEvents(events, [], expected);
+  assert.equal(result.classifications[0].category, "marker");
+  assert.equal(result.classifications[0].status, "failed");
+  assert.deepEqual(events, original);
+  for (const change of [
+    (rows) => {
+      rows[0].event.title = "bash";
+    },
+    (rows) => {
+      rows[0].event.title = "pwd; unexpected";
+    },
+    (rows) => {
+      rows[2].event.status = "completed";
+    },
+    (rows) => {
+      rows[1].event.toolCallId = "other";
+    },
+    (rows) => {
+      rows.splice(1, 0, clone(rows[0]));
+    },
+    (rows) => {
+      rows.pop();
+    },
+  ]) {
+    const invalid = clone(events);
+    change(invalid);
+    assert.throws(() => a.communicationToolEvents(invalid, [], expected));
+  }
+});
+
 test("native communication classification keeps permission UI identity separate and rejects ambiguous outcomes", () => {
   const approvals = [
     { requestId: REQUEST, permissionToolCallId: "pi-ui-fixed" },

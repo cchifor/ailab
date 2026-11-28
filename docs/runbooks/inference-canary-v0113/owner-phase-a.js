@@ -1020,10 +1020,17 @@
       );
       previousSequence = BigInt(row.sequence);
       const e = row.event;
+      // ACP permits an omitted initial status, and the Hub preserves that
+      // omission. Treat only that start as pending for classification; the
+      // unchanged native updates must still prove progress and the outcome.
+      const status =
+        e?.type === "tool_call" && e.status === undefined
+          ? "pending"
+          : e?.status;
       need(
         e?.kind === "update" &&
           ["tool_call", "tool_call_update"].includes(e.type) &&
-          ["pending", "in_progress", "completed", "failed"].includes(e.status),
+          ["pending", "in_progress", "completed", "failed"].includes(status),
         "Unexpected native tool activity",
       );
       const id = e.toolCallId === undefined ? null : e.toolCallId;
@@ -1037,7 +1044,7 @@
           !active &&
             typeof e.title === "string" &&
             e.title.length > 0 &&
-            ["pending", "in_progress"].includes(e.status) &&
+            ["pending", "in_progress"].includes(status) &&
             (id === null || !seenIds.has(id)),
           "Overlapping or repeated native tool start",
         );
@@ -1066,7 +1073,7 @@
         );
       }
       need(
-        !(active.status === "in_progress" && e.status === "pending"),
+        !(active.status === "in_progress" && status === "pending"),
         "Native tool status regressed",
       );
       if (active.category === "communication") {
@@ -1080,7 +1087,7 @@
           need(
             e.title === command ||
               (!active.fullCommandObserved &&
-                e.status === "pending" &&
+                status === "pending" &&
                 typeof e.title === "string" &&
                 e.title.length > 0 &&
                 (e.title === "bash" || command.startsWith(e.title))),
@@ -1089,18 +1096,18 @@
           if (e.title === command) active.fullCommandObserved = true;
         }
         need(
-          e.status === "pending" || active.fullCommandObserved,
+          status === "pending" || active.fullCommandObserved,
           "Exact marker command not projected",
         );
       }
-      active.status = e.status;
-      if (["completed", "failed"].includes(e.status)) {
+      active.status = status;
+      if (["completed", "failed"].includes(status)) {
         const expected =
           active.category === "marker" &&
           markerExpectation.decision === "reject_once"
             ? "failed"
             : "completed";
-        need(e.status === expected, "Unexpected native tool terminal outcome");
+        need(status === expected, "Unexpected native tool terminal outcome");
         classifications.push({ ...active, endSequence: row.sequence });
         active = null;
       }

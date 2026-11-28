@@ -178,3 +178,10 @@ or arbitrary HTTP response is exposed. A pre-launch scope does not invent a
 validation applies. `notBefore` appears only where the existing validation has
 that boundary. All windows, budgets, prompts, decisions and validation rules
 remain unchanged.
+
+An initial ACP `tool_call` may omit its status; the pinned Hub projection keeps
+that field absent. Native tool classification treats only an omitted initial
+status as pending without changing the observed event. Null or unknown initial
+statuses and missing update statuses still refuse. Exact tool IDs (when present),
+ordered updates, the marker command and the decision-specific terminal outcome
+remain required; the initial event alone never proves execution or completion.
