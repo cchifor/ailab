@@ -263,12 +263,17 @@ test("B earlier window deadline stops a pending collector", async (t) => {
   f.options.deadline = Date.now() + 10000;
   const host = createClaudePhaseBAutomation(f.options);
   const rejected = assert.rejects(host.run(), /Automation stopped/);
-  await waiting;
+  await Promise.race([
+    waiting,
+    rejected.then(() => {
+      throw Error("run settled before the readiness collector was entered");
+    }),
+  ]);
   t.mock.timers.tick(99);
   assert.equal(aborted, false, "collector stays active before the window ends");
   t.mock.timers.tick(1);
-  assert.equal(aborted, true, "the earlier window deadline cancels the collector");
   await rejected;
+  assert.equal(aborted, true, "the earlier window deadline cancels the collector");
   assert.equal(f.calls(), 0);
   assert.equal(snapshots(f.directory).at(-1).status, "stopped");
 });
