@@ -110,6 +110,7 @@ class Gate:
         self.waiting = None  # the seq currently awaited
         self.refusals = {}  # socket -> worker, capped independently of the admitted handler
         self.refusals_closed = False
+        self.refusal_overload_reported = False  # one fixed diagnostic per gate, never per declined socket
 
     # ------------------------------------------------------------------ host side
     def emit(self, obj) -> None:
@@ -203,6 +204,8 @@ class Gate:
                 diag(e.args[0] if isinstance(e, Bad) else "request-io")
             with self.cond:
                 code = self.terminal or code  # cancellation still takes priority if it arrived during the read
+            # answer owns the OSError boundary for BOTH settimeout and sendall,
+            # including sockets concurrently closed by close_refusals().
             self.answer(conn, {"v": 1, "ok": False, "code": code})
         finally:
             conn.close()
@@ -215,16 +218,22 @@ class Gate:
         with self.cond:
             if self.refusals_closed or len(self.refusals) >= MAX_REFUSALS:
                 conn.close()
+                report = not self.refusals_closed and not self.refusal_overload_reported
+                if report:
+                    self.refusal_overload_reported = True
+            else:
+                worker = threading.Thread(target=self.guarded, args=(self.refuse_connection, conn, code), daemon=True)
+                self.refusals[conn] = worker
+                try:
+                    worker.start()  # registered and started before shutdown can snapshot the workers
+                except BaseException:
+                    self.refusals.pop(conn)
+                    conn.close()
+                    raise
+                self.cond.notify_all()
                 return
-            worker = threading.Thread(target=self.guarded, args=(self.refuse_connection, conn, code), daemon=True)
-            self.refusals[conn] = worker
-            try:
-                worker.start()  # registered and started before shutdown can snapshot the workers
-            except BaseException:
-                self.refusals.pop(conn)
-                conn.close()
-                raise
-            self.cond.notify_all()
+        if report:
+            diag("refusal-overload")  # outside the owner lock; bounded to one record for the gate lifetime
 
     def close_refusals(self) -> None:
         """Wake and join every owned refusal reader within one existing I/O budget."""

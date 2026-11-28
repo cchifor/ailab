@@ -297,6 +297,14 @@ class Gate(unittest.TestCase):
 
     def test_refusal_capacity_is_bounded_and_shutdown_joins_pending_readers(self):
         owner, clients = object(), []
+        diagnostics, overloaded = [], threading.Event()
+        original_diag = self.G.diag
+        def capture(word):
+            diagnostics.append(word)
+            if word == "refusal-overload": overloaded.set()
+            original_diag(word)
+        self.G.diag = capture
+        self.addCleanup(setattr, self.G, 'diag', original_diag)
         with self.gate.cond:
             self.gate.busy = owner
         try:
@@ -306,10 +314,13 @@ class Gate(unittest.TestCase):
                 slow.connect(self.sock)
                 with self.gate.cond:
                     self.assertTrue(self.gate.cond.wait_for(lambda: len(self.gate.refusals) == count, 1))
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as excess:
-                excess.settimeout(1)
-                excess.connect(self.sock)
-                self.assertEqual(excess.recv(1), b"")  # overload: close, never wait for a worker or frame
+            for _ in range(2):
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as excess:
+                    excess.settimeout(1)
+                    excess.connect(self.sock)
+                    self.assertEqual(excess.recv(1), b"")  # overload: close, never wait for a worker or frame
+            self.assertTrue(overloaded.wait(1))
+            self.assertEqual(diagnostics.count('refusal-overload'), 1)
             with self.gate.cond:
                 workers = tuple(self.gate.refusals.values())
                 self.assertEqual(len(workers), self.G.MAX_REFUSALS)

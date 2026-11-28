@@ -10,6 +10,8 @@ writer therefore cannot prevent a completed request's successor from being
 accepted. When all eight refusal slots are occupied, additional declined sockets
 are closed immediately; an overload connection may observe EOF/reset instead of
 a JSON refusal. The admitted slot remains independent of that cap.
+The first saturation emits `refusal-overload` on stderr. Further declined
+connections do not repeat that diagnostic, so floods cannot grow a log per socket.
 
 When the accept loop exits, it closes all owned refusal sockets and joins their
 workers within one five-second budget. An unexpected worker failure retains the
