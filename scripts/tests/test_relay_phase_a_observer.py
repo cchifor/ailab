@@ -63,7 +63,12 @@ class Gate(unittest.TestCase):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(5)
         s.connect(self.sock)
-        s.sendall(line)
+        try:
+            s.sendall(line)
+        except (BrokenPipeError, ConnectionResetError):
+            # A terminal gate answers and closes on accept, before reading the request; its answer is already in
+            # this socket's receive buffer, so a send that races that close must not lose it.
+            pass
         if not read:
             return s
         buf = b""
