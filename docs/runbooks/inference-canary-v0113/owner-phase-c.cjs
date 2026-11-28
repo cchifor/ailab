@@ -130,11 +130,18 @@ function completedBFences(previous) {
       fence = receipt?.fence,
       plan = fence?.plan;
     need(
+      integer(phase.rawBaseline) &&
+        run.firstSnapshot?.totalAttempts === phase.rawBaseline &&
+        (!i ||
+          phase.rawBaseline ===
+            previous.runs[i - 1].lastSnapshot?.totalAttempts),
+      "B raw phase baseline/first snapshot differs",
+    );
+    need(
       phase.runId === run.runId &&
         phase.name === name &&
         phase.closed === true &&
         phase.admittedBaseline === attempts &&
-        integer(phase.rawBaseline) &&
         phase.rows?.length === rows.length &&
         receipt?.version === 1 &&
         receipt.action === "attempt-fence-close" &&

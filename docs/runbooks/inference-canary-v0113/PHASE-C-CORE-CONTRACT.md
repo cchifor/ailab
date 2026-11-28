@@ -28,7 +28,10 @@ selected account/model, with the producer's exact
 unfenced completion label is not a current B prerequisite. Both retained fence
 phases must be closed, with their settled 8/2 rows, fixed 20/6 phase caps,
 continuous raw/admitted counters, no open/stale/unattributed attempts and matching
-committed normal-close operations. C joins their raw-body digests, receipt IDs,
+committed normal-close operations. Each phase's raw baseline must equal its
+first snapshot; effort's baseline must also equal lifecycle's final snapshot.
+Raising all effort raw counters together cannot hide requests between phases.
+C joins their raw-body digests, receipt IDs,
 key/profile/source/selection, phase/run IDs and final current fence. Every
 non-final row must match its ordered completed entry, including used/retired
 allowance and terminal digest. The original arm and every advance are joined

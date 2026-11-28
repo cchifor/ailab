@@ -1665,6 +1665,30 @@ for (const [name, edit, reason] of [
     assert.throws(() => c.inputs(value, NOW), reason);
   });
 
+for (const [name, edit] of [
+  ["lifecycle first snapshot", (r) => r.runs[0].firstSnapshot.totalAttempts++],
+  ["effort first snapshot", (r) => r.runs[1].firstSnapshot.totalAttempts++],
+  [
+    "raw attempts between phases",
+    (r) => {
+      const phase = r.attemptFence.phases[1];
+      phase.rawBaseline++;
+      for (const row of phase.rows) row.rawBefore++;
+      r.runs[1].firstSnapshot.totalAttempts++;
+      r.runs[1].lastSnapshot.totalAttempts++;
+    },
+  ],
+])
+  test("C chains raw B boundaries: " + name, () => {
+    const value = input(),
+      changed = JSON.parse(reportRaw);
+    edit(changed);
+    value.phaseBReportRaw = JSON.stringify(changed);
+    assert.throws(() => c.inputs(value, NOW), {
+      message: "B raw phase baseline/first snapshot differs",
+    });
+  });
+
 test("historical B graph remains isolated across a legitimate current Router repin", () => {
   const fs = require("node:fs"),
     path = require("node:path");
