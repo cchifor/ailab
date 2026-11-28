@@ -472,15 +472,18 @@ class CallLifecycle(unittest.TestCase):
         m.run = lambda args, stdin=None, check=True, timeout=120: (self.events.append(" ".join(args[:3])), b"")[1]
 
     def fake_docker(self, behaviour):
+        import subprocess as sp
+
         class P:
             returncode, stdout, stderr = 0, b"ok", b""
 
         def runner(args, **kw):
             self.events.append("docker-run")
             return behaviour(args, **kw) or P()
-        # subprocess is a shared module: assigning sp.run back after replacement
-        # would restore the fake itself and poison later discovery modules.
-        self.enterContext(mock.patch.object(self.m.subprocess, "run", side_effect=runner))
+        # self.m.subprocess IS the global subprocess module: patch it reversibly, or every later suite inherits it
+        p = mock.patch.object(self.m.subprocess, "run", runner)
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_happy_call(self):
         self.fake_docker(lambda a, **k: None)
