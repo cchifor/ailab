@@ -392,9 +392,10 @@ def checkpoint_json(raw):
                       parse_constant=lambda _: native_need(False))
 
 
-def native_ancestry(raw, native_id, workspace):
+def native_ancestry(raw, native_id, workspace, *, imported_entries=False):
     native_need(len(raw) <= 16 * 1024 * 1024)
-    lines = raw.decode('utf-8-sig').strip('\ufeff \r\n\t').splitlines()
+    # JSONL uses LF. Unicode paragraph/line separators inside JSON strings are data.
+    lines = raw.decode('utf-8-sig').strip('\ufeff \r\n\t').split('\n')
     native_need(1 < len(lines) <= 100000 and all(len(x.encode()) <= 1024 * 1024 for x in lines))
     header, *entries = [checkpoint_json(x) for x in lines]
     native_need(isinstance(header, dict) and set(header) == {'type', 'version', 'id', 'timestamp', 'cwd'}
@@ -455,11 +456,41 @@ def native_ancestry(raw, native_id, workspace):
                             native_need(isinstance(args.get('command'), str))
                             shells.append({'id': key, 'sha256': hashlib.sha256(args['command'].encode()).hexdigest()})
     native_need(receipt is not None)
+    if imported_entries:
+        # Pi2604 packages/pi-launcher/history.ts importHistory/message: select the
+        # active branch, remove saved policy/config/display fields, rewrite parents.
+        # Compare the complete resulting records, not only the coordination receipt.
+        kept, parent = [header], None
+        for entry in branch:
+            if entry['type'] in ('model_change', 'thinking_level_change'):
+                continue
+            e = dict(entry)
+            if e['type'] == 'message':
+                if e['message']['role'] == 'system':
+                    continue
+                e['message'] = {k: v for k, v in e['message'].items() if k != 'details'}
+            elif e['type'] == 'compaction':
+                e = {k: v for k, v in e.items() if k not in ('details', 'systemMessage')}
+            e['parentId'] = parent
+            kept.append(e)
+            parent = e['id']
+        return kept
     return {'native': receipt, 'activeLeaf': entries[-1]['id'], 'entries': len(entries),
             'activeEntries': len(branch), 'toolCalls': len(calls), 'unsettled': sorted(set(calls) - set(results)),
             'duplicateResults': [], 'toolNames': sorted({v['name'] for v in calls.values()}),
             'shellCommands': [{'sha256': s['sha256'], 'results': [] if s['id'] not in results
                                else [results[s['id']]]} for s in shells]}
+
+
+def native_same_json(a, b):
+    """Structural JSON equality without Python's True == 1 coercion."""
+    if isinstance(a, dict):
+        return isinstance(b, dict) and a.keys() == b.keys() and all(native_same_json(v, b[k]) for k, v in a.items())
+    if isinstance(a, list):
+        return isinstance(b, list) and len(a) == len(b) and all(native_same_json(x, y) for x, y in zip(a, b))
+    if type(a) in (int, float):
+        return type(b) in (int, float) and a == b
+    return type(a) is type(b) and a == b
 
 
 def native_checkpoint(state_dir, session_id, native_id, profile_id, workspace, holder_id, journal_id):
@@ -546,7 +577,8 @@ def native_checkpoint(state_dir, session_id, native_id, profile_id, workspace, h
         raw = checkpoint_bytes(os.path.join(home, 'resumed-session.jsonl'), 16 * 1024 * 1024)
         # Pi can append after import. Prove the exact imported prefix; do not retag the current hash as imported.
         rolling, prefix_end, offset = hashlib.sha256(), None, 0
-        for line in raw.splitlines(keepends=True):
+        for part in raw.split(b'\n')[:-1]:
+            line = part + b'\n'
             offset += len(line)
             rolling.update(line)
             if rolling.hexdigest() == recovery.get('importedSha256'):
@@ -555,11 +587,21 @@ def native_checkpoint(state_dir, session_id, native_id, profile_id, workspace, h
         native_need(prefix_end is not None)
         original = native_ancestry(source_raw, native_id, workspace)
         initial = native_ancestry(raw[:prefix_end], native_id, workspace)
-        native_need(original['native'] == initial['native'])
-        for line in raw[prefix_end:].splitlines():
-            native_need(checkpoint_json(line).get('type') in ('custom', 'model_change', 'thinking_level_change'))
+        expected = native_ancestry(source_raw, native_id, workspace, imported_entries=True)
+        actual = [checkpoint_json(line) for line in raw[:prefix_end].decode('utf-8-sig').rstrip('\r\n').split('\n')]
+        native_need(native_same_json(expected, actual) and original['native'] == initial['native'])
+        parent = initial['activeLeaf']
+        suffix = raw[prefix_end:]
+        native_need(not suffix or suffix.endswith(b'\n'))
+        for line in suffix.split(b'\n')[:-1]:
+            entry = checkpoint_json(line)
+            native_need(entry.get('type') in ('custom', 'model_change', 'thinking_level_change')
+                        and entry.get('parentId') == parent)
+            parent = entry.get('id')
         imported = recovery['importedSha256']
     projection = native_ancestry(raw, native_id, workspace)
+    if imported is not None:
+        native_need(projection['native'] == original['native'])
     native_need(private_dir_identity(home) == identity and private_dir_identity(state_dir) == state)
     # Re-read the same bounded journal to refuse a concurrent mutation, not invent an idle snapshot.
     native_need(checkpoint_bytes(os.path.join(state_dir, 'journal.jsonl'), 64 * 1024 * 1024) == journal_raw)

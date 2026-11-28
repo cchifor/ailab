@@ -11,12 +11,14 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import uuid
 
 SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
@@ -168,6 +170,55 @@ class ReaderTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.f = NativeFixture(self.temp.name)
+
+    def replace_import(self, entries, suffix=None):
+        raw = b'\n'.join(encode(x) for x in [self.f.header, *entries]) + b'\n'
+        descriptor = self.f.resume / 'native-recovery.json'
+        data = json.loads(descriptor.read_bytes()); data['importedSha256'] = sha(raw)
+        private(descriptor, encode(data))
+        private(self.f.resume / 'resumed-session.jsonl', raw + (encode(suffix) + b'\n' if suffix else b''))
+
+    def test_jsonl_unicode_separators_are_message_data(self):
+        self.f.entries[1]['message']['content'].append({'type':'text','text':'first\u0085second\u2028third\u2029last'})
+        self.f.persist()
+        before = self.f.read()
+        self.f.imported()
+        after = self.f.read(u(12))
+        self.assertEqual(before['shellCommands'], after['shellCommands'])
+        self.assertEqual(after['native'], NATIVE)
+
+    def test_imported_prefix_cannot_change_retained_conversation_or_tool_effects(self):
+        self.f.imported()
+        changes = [lambda e:e[1]['message']['content'][0]['arguments'].update(command='changed'),
+                   lambda e:e[2]['message'].update(isError=False),
+                   lambda e:e[1]['message']['content'].append({'type':'text','text':'invented'}),
+                   lambda e:e[1]['message']['content'][0]['arguments'].update(extra=True)]
+        for change in changes:
+            entries=copy.deepcopy(self.f.entries);change(entries);self.replace_import(entries)
+            with self.subTest(change=change),self.assertRaises(ValueError):self.f.read(u(12))
+
+    def test_appended_receipt_cannot_change_retained_native_join_or_reparent_history(self):
+        self.f.imported()
+        suffix={'type':'custom','id':'00000009','parentId':self.f.entries[-1]['id'],
+                'timestamp':STAMP,'customType':'relay-inference-session-v1','data':{**NATIVE,'pending':'changed'}}
+        self.replace_import(self.f.entries,suffix)
+        with self.assertRaises(ValueError):self.f.read(u(12))
+        suffix['data']=NATIVE;suffix['parentId']=self.f.entries[0]['id']
+        self.replace_import(self.f.entries,suffix)
+        with self.assertRaises(ValueError):self.f.read(u(12))
+
+    def test_source_defined_import_removals_and_parent_rewrite_are_accepted(self):
+        self.f.entries[2]['message']['details']={'display':'omitted'}
+        self.f.add('model_change',provider='old',modelId='old')
+        self.f.add('thinking_level_change',thinkingLevel='high')
+        self.f.add('message',message={'role':'system','content':'old policy'})
+        self.f.add('custom',customType='relay-inference-session-v1',data=NATIVE)
+        self.f.persist();self.f.imported()
+        expected=copy.deepcopy(self.f.entries[:5]+self.f.entries[-1:])
+        del expected[2]['message']['details']
+        expected[-1]['parentId']=expected[-2]['id']
+        self.replace_import(expected)
+        self.assertEqual(self.f.read(u(12))['native'],NATIVE)
 
     def test_actual_private_retained_and_resumed_readers(self):
         before = self.f.read()
@@ -531,6 +582,40 @@ class PredecessorProjectionTests(unittest.TestCase):
             with self.subTest(field=field),self.assertRaises(O.Failed):predecessor_adapter(self.request)
         self.request=copy.deepcopy(original);self.request['report']['operations'].append({'body':{'kind':'close','operationId':u(99)}})
         with self.assertRaises(O.Failed):predecessor_adapter(self.request)
+
+
+def load_tests(loader, standard_tests, pattern):
+    # These are actual private-file readers with a fixed deployed UID, not a
+    # policy parameter. Never patch that guard to suit the CI runner account.
+    if sys.platform == 'linux' and os.getuid() == 1000:
+        return standard_tests
+
+    class IsolatedNativeReaders(unittest.TestCase):
+        def runTest(self):
+            docker = shutil.which('docker')
+            self.assertIsNotNone(docker, 'Docker is required for UID1000 native observer tests; no skip')
+            root = SCRIPTS.parent
+            name = 'pi-observer-readers-' + uuid.uuid4().hex
+            try:
+                result = subprocess.run([
+                    docker, 'run', '--rm', '--init', '--name', name,
+                    '--network', 'none', '--read-only', '--user', '1000:1000',
+                    '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                    '--tmpfs', '/tmp:rw,mode=1777',
+                    '--mount', f'type=bind,source={root},target=/repo,readonly',
+                    '--workdir', '/repo', '-e', 'PYTHONDONTWRITEBYTECODE=1',
+                    'node@sha256:8fa96264f302f58bbb13aa7339c541547b56975766ce956c875da149452a3e40',
+                    'timeout', '60s', 'python3', '-m', 'unittest', '-v',
+                    'scripts.tests.test_relay_phase_a_support'],
+                    cwd=root, capture_output=True, text=True, encoding='utf-8', timeout=180)
+                print(result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 0, 'isolated native observer suite failed')
+            finally:
+                cleanup = subprocess.run([docker, 'rm', '-f', name], capture_output=True,
+                                         text=True, encoding='utf-8', timeout=30)
+                self.assertTrue(cleanup.returncode == 0 or 'No such container' in cleanup.stderr,
+                                'could not confirm removal of the owned native observer container')
+    return unittest.TestSuite([IsolatedNativeReaders()])
 
 
 if __name__ == '__main__':
