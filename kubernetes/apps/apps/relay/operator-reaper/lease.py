@@ -4,7 +4,9 @@ The same protocol as scripts/relay_operator_session.py: annotation `chifor.me/ex
 spec.holderIdentity, every write conditioned on metadata.resourceVersion. The reaper NEVER touches a live Lease, so a
 running `session` or `call` excludes it, and while the reaper holds the Lease (for at most HOLD_S) a new run is refused.
 
-    take     acquire the Lease only if it is absent, released or expired; on success write /work/go
+    take     acquire the Lease only if it is absent, released or expired; on success write /work/go as
+             "<holder> <expires-at>": the reap passes that expires-at to ops.relay_operator_reap(fence), which
+             refuses to delete anything unless at least 30 s of the hold remain (the database's own clock)
     release  if /work/go exists and the reaper still holds the Lease, release it (holder "")
 
 Exit 0 in every expected case (including "skipped: a live holder"); non-zero only on an unexpected API failure.
@@ -23,7 +25,9 @@ API = "https://kubernetes.default.svc"
 SA = "/var/run/secrets/kubernetes.io/serviceaccount"
 LEASE_URL = API + "/apis/coordination.k8s.io/v1/namespaces/relay/leases"
 NAME = "relay-operator-jit"
-HOLD_S = 120
+# Strictly longer than anything the Job can still run: activeDeadlineSeconds (120) + terminationGracePeriodSeconds
+# (30) + margin. The reap's SQL additionally refuses unless >= 30 s of this hold remain (its fence).
+HOLD_S = 180
 GO = os.environ.get("REAPER_GO_FILE", "/work/go")
 HOLDER = "reaper-" + socket.gethostname()
 
@@ -89,8 +93,9 @@ def take():
     if st != 200 or holder(got) != HOLDER:
         log(event="skip", reason="not the holder after the write")
         return 0
-    open(GO, "w").write(HOLDER)
-    log(event="taken", holder=HOLDER, hold_s=HOLD_S)
+    fence = int(expires(got))  # the expires-at the API server now holds for US: the reap's SQL fence
+    open(GO, "w").write(f"{HOLDER} {fence}")
+    log(event="taken", holder=HOLDER, hold_s=HOLD_S, fence=fence)
     return 0
 
 

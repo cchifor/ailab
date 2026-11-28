@@ -12,18 +12,27 @@ stand, so this reaper removes it independently (plan: `plans/2026-11-27-relay-op
   1. `lease-take` (python, `operator-reaper/lease.py take`) takes the fenced Lease `relay-operator-jit`, but ONLY when
      it is absent, released or expired. Every write is conditioned on `resourceVersion`. A live holder (a running
      `session` or `call`) is never touched: the step logs `skip` and the Job does nothing.
-  2. `reap` (postgres) runs `SELECT * FROM ops.relay_operator_reap()` only if step 1 took the Lease, and logs the
-     deleted session and membership counts. It is normally `0 0`.
-  3. `lease-release` releases the Lease if the reaper still holds it. It holds the Lease for at most 120 s.
+  2. `reap` (postgres) runs `SELECT * FROM ops.relay_operator_reap(<fence>)` only if step 1 took the Lease. The
+     fence is the reaper's own Lease expires-at, and the function deletes nothing unless at least 30 s of the
+     hold remain on the database's clock. A reaper that stalled past its hold fails closed, instead of revoking
+     a successor's fresh grant. The step logs the deleted session and membership counts, normally `0 0`.
+  3. `lease-release` releases the Lease if the reaper still holds it.
+
+  The hold, `HOLD_S` = 180 s, outlasts anything the Job can still run: `activeDeadlineSeconds` 120 s, plus
+  `terminationGracePeriodSeconds` 30 s, plus the fence's 30 s. Only `lease-take` and `lease-release` mount the
+  API token, a projected volume; the pod has no automounted token. The `reap` container, which holds the
+  database password, cannot touch the Lease.
 - **The database objects** are created by the idempotent Job `relay-operator-reaper-setup`. Flux force-replaces it on a
   spec change (`kustomize.toolkit.fluxcd.io/force: "enabled"`). It creates:
   - schema `ops`, owned by `relay_owner`;
-  - `ops.relay_operator_reap()`: SECURITY DEFINER as `relay_owner`, a fixed `search_path`, lock and statement
-    timeouts, and the JIT subject as a literal. It deletes only that identity's `sessions` and `memberships` rows;
+  - `ops.relay_operator_reap(fence bigint)`: SECURITY DEFINER as `relay_owner`, a fixed `search_path`, lock and
+    statement timeouts, the Lease fence, and the JIT subject as a literal. It deletes only that identity's
+    `sessions` and `memberships` rows;
   - the login role `relay_operator_reaper`. It can only EXECUTE that function: it cannot read or write any table and
     cannot create objects. This was verified against a disposable Postgres 17.
 
-  The role's password is the SOPS Secret `relay-operator-reaper`.
+  The role's password is the SOPS Secret `relay-operator-reaper`. The setup reads it from the environment
+  (`\getenv`), never from psql's argv.
 - **RBAC.** The ServiceAccount `relay-operator-reaper` may get and update the Lease `relay-operator-jit`, and create
   leases (create cannot be restricted by name).
 - **Network.** `relay-postgres-operator-reaper` additively admits the reaper and its setup Job to relay-postgres:5432.
@@ -31,7 +40,8 @@ stand, so this reaper removes it independently (plan: `plans/2026-11-27-relay-op
 
 ## Alerts
 
-- `RelayOperatorReaperStale`: no successful run for more than 20 min.
+- `RelayOperatorReaperStale`: no successful run for more than 20 min, or no successful run ever (`absent`: a fresh
+  install that never ran, a deleted CronJob, a missing scrape).
 - `RelayOperatorReaperFailing`: a failed reaper Job.
 - `RelayOperatorReaperSetupFailed`: the database setup Job failed.
 
@@ -52,11 +62,11 @@ by hand: `python scripts/relay-operator.py status` must report `0 memberships, 0
 
 ## Roll back
 
-Remove `operator-reaper.yaml`, `relay-operator-reaper.sops.yaml` and the `configMapGenerator` entry from
-`kubernetes/apps/apps/relay/kustomization.yaml`. Then, as the postgres superuser:
+Remove the `operator-reaper` entry from `kubernetes/apps/apps/relay/kustomization.yaml` (everything lives in
+`kubernetes/apps/apps/relay/operator-reaper/`, its own kustomization). Then, as the postgres superuser:
 
 ```sql
-DROP FUNCTION ops.relay_operator_reap();
+DROP FUNCTION ops.relay_operator_reap(bigint);
 DROP SCHEMA ops;
 DROP ROLE relay_operator_reaper;
 ```
