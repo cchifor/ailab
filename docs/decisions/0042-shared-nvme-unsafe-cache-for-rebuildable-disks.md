@@ -79,9 +79,17 @@ The test Postgres dies when its fsyncs and writes are throttled. The throughput 
 - **Wear.** node1's drive has ~36 TB of rated endurance left, roughly 12 days at the 2026-11-19 node-wide rate.
   - Most of that rate is dev workers and the registry, not CI.
   - Passing 100% is not failure, but the risk rises.
-  - **Trigger:** alert `AiNodeNvmeWearHigh` (`kubernetes/apps/infrastructure/monitoring/ci-runners-rules.yaml`) fires
-    when an ai-node drive's `nvme_percentage_used_ratio` reaches 0.95 for 1 h. **Action:** pause that node's CI runners
-    in Gitea, and tell the owner. CI is the one load that can move to another node.
+  - **Trigger (amended 2026-11-28):** alert `AiNodeNvmeWearHigh` (`kubernetes/apps/infrastructure/monitoring/ci-runners-rules.yaml`)
+    fires when an ai-node drive's `nvme_percentage_used_ratio` reaches 0.95 for 1 h. It is **informational**
+    (`severity: info`) and calls for **no action**.
+  - **Owner ruling, 2026-11-27:** the drives run to failure. They are not replaced for wear, and CI runners are not
+    paused or drained for wear. Writes are cut in software only.
+  - **Replaced action:** the original action was "pause that node's CI runners in Gitea, and tell the owner". It is
+    withdrawn.
+  - **What stays actionable:** the drive's own failure signals in `local-drives-rules.yaml`.
+    - `ProxmoxNvmeCriticalWarning`: spare below threshold, reliability degraded, or media read-only.
+    - `ProxmoxNvmeMediaErrors`: new unrecovered data-integrity errors.
+    - `ProxmoxNvmeSmartMetricsStale`: no fresh SMART data to judge.
 - **Stall budget** (replaces the D1d "cp2 > 1 s -> back to 30" rule, which no longer points at CI once runner fsyncs
   stop reaching the drive). If a node's etcd member has **more than 30 minutes a day** with 1-min WAL fsync p99
   > 0.5 s **on two consecutive days**, that node's runners go back to 30 MiB/s, and the owner is told. The baseline,
