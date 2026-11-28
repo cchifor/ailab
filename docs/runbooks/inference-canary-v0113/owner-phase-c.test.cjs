@@ -4,7 +4,12 @@ const assert = require("node:assert/strict");
 const { webcrypto, createHash } = require("node:crypto");
 const a = require("./owner-phase-a.js");
 const b = require("./owner-phase-b.js");
-const c = require("./owner-phase-c.cjs");
+const {
+  c,
+  report,
+  reportRaw,
+  proof,
+} = require("./owner-phase-c-b-report-fixture.cjs");
 const NOW = Date.parse("2026-11-27T22:00:00Z");
 const ID = (n) => "11111111-1111-4111-8111-" + String(n).padStart(12, "0");
 const clone = (v) => JSON.parse(JSON.stringify(v));
@@ -17,28 +22,14 @@ function input() {
     version: 1,
     runId: ID(1),
     phaseId: ID(2),
-    account: "synthetic-claude",
-    model: "synthetic-sonnet",
+    account: report.inputs.account,
+    model: report.inputs.model,
     window: { startsAt: NOW, expiresAt: NOW + 900000 },
     phaseAReportSha256: SHA,
     coldReportSha256: SHA,
     pairedReportSha256: SHA,
     exclusiveWindowSha256: SHA,
-    phaseBReportRaw: JSON.stringify({
-      version: 1,
-      relay: b.PINS.hub,
-      router: b.PINS.router,
-      kind: "claude-phase-b",
-      status: "phase-b-passed",
-      phaseBCompleted: true,
-      inputs: { account: "synthetic-claude", model: "synthetic-sonnet" },
-      runs: [false, true].map((effort, i) => ({
-        runId: ID(30 + i),
-        provider: "claude",
-        effort,
-        status: "passed-with-live-wire-unobserved",
-      })),
-    }),
+    phaseBReportRaw: reportRaw,
   };
 }
 function scope() {
@@ -51,8 +42,8 @@ function scope() {
     runtimeInstanceId: ID(3),
     deploymentId: ID(4),
     targetDeploymentId: "target-fixture",
-    account: "synthetic-claude",
-    model: "synthetic-sonnet",
+    account: report.inputs.account,
+    model: report.inputs.model,
     providerGeneration: 2,
     namespace: "default",
     principalId: "key:key_123456789abc",
@@ -78,7 +69,7 @@ function processEvent(extra = {}) {
     reused: false,
     identity: { id: ID(9), pid: 200, ppid: 100, startTicks: "2000" },
     observedMonotonicNs: "1000000000",
-    accountId: "synthetic-claude",
+    accountId: report.inputs.account,
     providerGeneration: 2,
     ...extra,
   };
@@ -662,7 +653,8 @@ function fixture({
       },
       next: async ({ signal }) => {
         signal.throwIfAborted();
-        if (observerFailure) throw Error("Synthetic observer transport failure");
+        if (observerFailure)
+          throw Error("Synthetic observer transport failure");
         if (queued.length) return queued.shift();
         return new Promise((resolve, reject) => {
           const abort = () => {
@@ -1494,3 +1486,119 @@ for (const priorIndex of [0, 1])
         await f.runner.cleanup();
       }
     });
+
+test("actual emitted fenced B report enters C unchanged under the explicit historical source fixture", () => {
+  const value = input();
+  assert.equal(value.phaseBReportRaw, reportRaw);
+  assert.equal(
+    proof.reportSha256,
+    "d0532ad01ec6aea711d1aefae6b46329d88cb2170a8d6a1d4201c8cf5a848fd5",
+  );
+  assert.equal(c.inputs(value, NOW).phaseBReportSha256, proof.reportSha256);
+});
+
+for (const [name, edit] of [
+  [
+    "legacy unfenced status",
+    (r) => {
+      r.runs[0].status = "passed-with-live-wire-unobserved";
+    },
+  ],
+  [
+    "missing fence proof",
+    (r) => {
+      delete r.attemptFence;
+    },
+  ],
+  [
+    "unclosed phase",
+    (r) => {
+      r.attemptFence.phases[0].closed = false;
+    },
+  ],
+  [
+    "missing close receipt",
+    (r) => {
+      delete r.attemptFence.phases[0].closeReceipt;
+    },
+  ],
+  [
+    "wrong phase run",
+    (r) => {
+      r.attemptFence.phases[1].runId = r.runs[0].runId;
+    },
+  ],
+  [
+    "unfinished fence operation",
+    (r) => {
+      r.attemptFence.operations[0].status = "uncertain";
+    },
+  ],
+  [
+    "cleanup close substituted",
+    (r) => {
+      r.attemptFence.operations.at(-1).cleanup = true;
+    },
+  ],
+  [
+    "missing settled row",
+    (r) => {
+      r.attemptFence.phases[0].rows.pop();
+    },
+  ],
+  [
+    "unsettled row",
+    (r) => {
+      r.attemptFence.phases[0].rows[0].settled = false;
+    },
+  ],
+  [
+    "raw counter mismatch",
+    (r) => {
+      r.runs[1].lastSnapshot.totalAttempts++;
+    },
+  ],
+  [
+    "pending native work",
+    (r) => {
+      r.attemptFence.phases[0].rows[0].terminal.nativeRequests.push("pending");
+    },
+  ],
+  [
+    "open close receipt",
+    (r) => {
+      r.attemptFence.phases[0].closeReceipt.openRequests = 1;
+    },
+  ],
+  [
+    "mismatched committed receipt",
+    (r) => {
+      r.attemptFence.operations.at(-1).receipt.attempts++;
+    },
+  ],
+  [
+    "changed close raw bytes",
+    (r) => {
+      r.attemptFence.operations.at(-1).raw += " ";
+    },
+  ],
+  [
+    "foreign final fence",
+    (r) => {
+      r.attemptFence.current.plan.fenceId = ID(90);
+    },
+  ],
+  [
+    "phase ID reuse",
+    (r) => {
+      r.runs[1].runId = r.runs[0].runId;
+    },
+  ],
+])
+  test("C rejects fenced B report with " + name, () => {
+    const value = input(),
+      changed = JSON.parse(reportRaw);
+    edit(changed);
+    value.phaseBReportRaw = JSON.stringify(changed);
+    assert.throws(() => c.inputs(value, NOW));
+  });

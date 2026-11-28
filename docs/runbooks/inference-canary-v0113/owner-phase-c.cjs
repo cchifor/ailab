@@ -3,6 +3,7 @@
 // Fixed selected warm-C core. No network/authentication or arbitrary plan here.
 const a = require("./owner-phase-a.js");
 const b = require("./owner-phase-b.js");
+const bFence = require("./owner-phase-b-fence.cjs");
 const { createHash } = require("node:crypto");
 
 // Deliberately unavailable until timing + attempt-fence artifacts are published,
@@ -94,6 +95,172 @@ function release() {
   );
   return p;
 }
+function completedBFences(previous) {
+  const proof = previous.attemptFence,
+    credential = previous.claudeCredential;
+  need(
+    proof?.phases?.length === 2 &&
+      Array.isArray(proof.operations) &&
+      proof.operations.length === 12 &&
+      proof.operations.every(
+        (op) => op.status === "committed" && op.cleanup === false && op.receipt,
+      ),
+    "B fence operations incomplete or unresolved",
+  );
+  need(
+    credential?.id === b.PROFILE.id &&
+      credential.binding === b.PROFILE.binding &&
+      credential.definitionHash === b.PROFILE.definitionHash &&
+      integer(proof.initial?.keyCreatedAt) &&
+      proof.initial.keyCreatedAt > 0 &&
+      integer(proof.initial.attempts) &&
+      integer(proof.initial.tokenUsageUnknown),
+    "B fence credential/baseline missing",
+  );
+  let prior = null,
+    attempts = proof.initial.attempts,
+    unknown = proof.initial.tokenUsageUnknown;
+  for (const [i, phase] of proof.phases.entries()) {
+    const run = previous.runs[i],
+      name = i ? "effort" : "lifecycle";
+    const rows = bFence.ROWS[name].map(([id, limit]) => ({ id, limit }));
+    const receipt = phase.closeReceipt,
+      fence = receipt?.fence,
+      plan = fence?.plan;
+    need(
+      phase.runId === run.runId &&
+        phase.name === name &&
+        phase.closed === true &&
+        phase.admittedBaseline === attempts &&
+        integer(phase.rawBaseline) &&
+        phase.rows?.length === rows.length &&
+        receipt?.version === 1 &&
+        receipt.action === "attempt-fence-close" &&
+        uuid(receipt.operationId) &&
+        integer(receipt.committedAt) &&
+        receipt.committedAt > 0 &&
+        receipt.coveredFrom === proof.initial.keyCreatedAt &&
+        receipt.openRequests === 0 &&
+        receipt.staleOpenRequests === 0 &&
+        receipt.unattributed === 0 &&
+        integer(receipt.attempts) &&
+        integer(receipt.tokenUsageUnknown) &&
+        receipt.tokenUsageUnknown >= unknown &&
+        receipt.tokenUsageUnknown <= receipt.attempts &&
+        fence.closedAt === receipt.committedAt &&
+        fence.closedAttempts === receipt.attempts &&
+        fence.closedTokenUsageUnknown === receipt.tokenUsageUnknown &&
+        fence.baselineAttempts === attempts &&
+        fence.baselineTokenUsageUnknown === unknown &&
+        fence.activeRow === rows.length - 1 &&
+        fence.keyId === credential.key &&
+        plan.runId === run.runId &&
+        plan.phaseId === run.runId &&
+        uuid(plan.fenceId) &&
+        plan.keyCreatedAt === proof.initial.keyCreatedAt &&
+        plan.phaseLimit === (i ? 6 : 20) &&
+        plan.deploymentId === proof.initial.deploymentId &&
+        eq(plan.rows, rows) &&
+        plan.namespace === credential.namespace &&
+        plan.principalId === "key:" + credential.key &&
+        plan.selection?.accountId === previous.inputs.account &&
+        plan.selection.model === previous.inputs.model &&
+        plan.selection.provider === "claude" &&
+        plan.selection.route === "canary-pi-claude" &&
+        (prior
+          ? plan.predecessorFenceId === prior.plan.fenceId &&
+            plan.fenceId !== prior.plan.fenceId
+          : plan.predecessorFenceId === undefined),
+      "B closed phase/receipt/plan differs",
+    );
+    const closes = proof.operations.filter(
+      (op) => op.receipt.operationId === receipt.operationId,
+    );
+    need(
+      closes.length === 1 && eq(closes[0].receipt, receipt),
+      "B close receipt is not its committed operation",
+    );
+    const operation = closes[0],
+      body = JSON.parse(operation.raw);
+    const rawHash = createHash("sha256").update(operation.raw).digest("hex");
+    need(
+      body.version === 1 &&
+        body.action === receipt.action &&
+        body.operationId === receipt.operationId &&
+        body.keyId === credential.key &&
+        body.fenceId === plan.fenceId &&
+        body.expectedAttempts === receipt.attempts &&
+        body.expectedUnknownUsage === receipt.tokenUsageUnknown &&
+        integer(body.expectedFenceRevision) &&
+        fence.revision === body.expectedFenceRevision + 1 &&
+        body.terminalEvidenceSha256 === fence.terminalEvidenceSha256 &&
+        hash(body.terminalEvidenceSha256) &&
+        operation.bodySha256 === rawHash &&
+        receipt.requestDigest === rawHash &&
+        operation.requestDigest === bFence.binding(operation.raw),
+      "B close bytes/receipt digest differ",
+    );
+    let used = 0,
+      rowUnknown = unknown;
+    for (const [index, row] of phase.rows.entries()) {
+      const terminal = row.terminal;
+      need(
+        row.id === rows[index].id &&
+          row.settled === true &&
+          row.before === attempts + used &&
+          row.rawBefore === phase.rawBaseline + used &&
+          row.maximum === rows[index].limit &&
+          integer(row.attempts) &&
+          row.attempts <= row.maximum &&
+          integer(row.tokenUsageUnknown) &&
+          row.tokenUsageUnknown >= rowUnknown &&
+          row.tokenUsageUnknown <= row.before + row.attempts &&
+          integer(terminal?.observedAt) &&
+          terminal.observedAt <= receipt.committedAt,
+        "B row accounting/terminal proof incomplete",
+      );
+      // These are retained historical drain observations, not a fresh C
+      // observation. Reuse B's strict shape/empty-work/provenance validator.
+      bFence.drain(
+        terminal,
+        {
+          notBefore: terminal.observedAt,
+          scope: {
+            ...terminal.scope,
+            routerSource: previous.router,
+            routerDeploymentId: proof.initial.deploymentId,
+            keyId: credential.key,
+            principalId: "key:" + credential.key,
+            namespace: credential.namespace,
+            tenantId: fence.tenant,
+            profileId: b.PROFILE.id,
+            bindingId: b.PROFILE.binding,
+            runId: run.runId,
+            fenceId: plan.fenceId,
+          },
+          completedOperationIds: terminal.completedOperationIds,
+          terminalPrompts: terminal.terminalPrompts,
+        },
+        terminal.observedAt,
+      );
+      used += row.attempts;
+      rowUnknown = row.tokenUsageUnknown;
+    }
+    need(
+      used <= plan.phaseLimit &&
+        attempts + used === receipt.attempts &&
+        run.lastSnapshot?.totalAttempts === phase.rawBaseline + used &&
+        rowUnknown === receipt.tokenUsageUnknown &&
+        digest(phase.rows.at(-1).terminal) === fence.terminalEvidenceSha256 &&
+        receipt.committedAt - phase.rows.at(-1).terminal.observedAt < 120000,
+      "B raw/admitted final counters or close terminal differ",
+    );
+    attempts = receipt.attempts;
+    unknown = receipt.tokenUsageUnknown;
+    prior = fence;
+  }
+  need(eq(proof.current, prior), "B final fence changed after phase close");
+}
 function inputs(value, now) {
   privateKeys(value, [
     "version",
@@ -152,11 +319,17 @@ function inputs(value, now) {
       previous.runs.every(
         (r, i) =>
           r.provider === "claude" &&
+          uuid(r.runId) &&
           r.effort === Boolean(i) &&
-          r.status === "passed-with-live-wire-unobserved",
+          r.status === "passed-with-admission-fence-live-wire-unobserved",
       ),
     "B lifecycle/effort prerequisite incomplete",
   );
+  need(
+    previous.runs[0].runId !== previous.runs[1].runId,
+    "B phase run IDs collide",
+  );
+  completedBFences(previous);
   need(
     !previous.runs.some((r) => r.runId === value.runId),
     "C cannot replay a prior run",

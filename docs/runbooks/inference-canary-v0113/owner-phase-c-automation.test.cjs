@@ -7,11 +7,13 @@ const path = require("node:path");
 const net = require("node:net");
 const { EventEmitter } = require("node:events");
 const { createHash } = require("node:crypto");
-const b = require("./owner-phase-b.js");
 const {
-  createClaudePhaseCAutomation,
-} = require("./owner-phase-a-automation.cjs");
-const { runPhaseCCli } = require("./owner-phase-c-cli.cjs");
+  host,
+  runPhaseCCli,
+  report,
+  reportRaw,
+} = require("./owner-phase-c-b-report-fixture.cjs");
+const { createClaudePhaseCAutomation } = host;
 
 function inputs() {
   const now = Date.now();
@@ -19,27 +21,14 @@ function inputs() {
     version: 1,
     runId: "11111111-1111-4111-8111-111111111111",
     phaseId: "22222222-2222-4222-8222-222222222222",
-    account: "synthetic-claude",
-    model: "synthetic-sonnet",
+    account: report.inputs.account,
+    model: report.inputs.model,
     window: { startsAt: now - 1000, expiresAt: now + 60000 },
     phaseAReportSha256: "a".repeat(64),
     coldReportSha256: "b".repeat(64),
     pairedReportSha256: "c".repeat(64),
     exclusiveWindowSha256: "d".repeat(64),
-    phaseBReportRaw: JSON.stringify({
-      version: 1,
-      relay: b.PINS.hub,
-      router: b.PINS.router,
-      kind: "claude-phase-b",
-      status: "phase-b-passed",
-      phaseBCompleted: true,
-      inputs: { account: "synthetic-claude", model: "synthetic-sonnet" },
-      runs: [false, true].map((effort) => ({
-        provider: "claude",
-        effort,
-        status: "passed-with-live-wire-unobserved",
-      })),
-    }),
+    phaseBReportRaw: reportRaw,
   };
 }
 function fixture(t) {

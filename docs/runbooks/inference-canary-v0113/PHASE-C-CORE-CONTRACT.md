@@ -23,10 +23,30 @@ Inputs: version1; distinct runId/phaseId UUIDs; actual account/model; a currentl
 open window of at most fifteen minutes; SHA256 references for the actual A,
 cold, paired and exclusive-window records; bounded raw completed B report.
 The raw B report must show both Claude lifecycle and effort completed for the
-selected account/model. C retains its hash rather than importing its mutable
+selected account/model, with the producer's exact
+`passed-with-admission-fence-live-wire-unobserved` status for both runs. The old
+unfenced completion label is not a current B prerequisite. Both retained fence
+phases must be closed, with their settled 8/2 rows, fixed 20/6 phase caps,
+continuous raw/admitted counters, no open/stale/unattributed attempts and matching
+committed normal-close operations. C joins their raw-body digests, receipt IDs,
+key/profile/source/selection, phase/run IDs and final current fence. It reuses
+B's drain validator for the retained terminal shape and absence of pending work;
+those historical observations are not presented as fresh C readiness. Settled
+token-usage uncertainty is preserved and is not mistaken for an unknown attempt.
+C retains the raw report's hash rather than importing its mutable
 state. The trusted bundle must bind the report to its actual execution; schema
 validation alone does not prove origin. A's original one prompt/two attempts
 remain in A's preserved report and cannot fund C.
+
+The component and disabled-host tests use the unchanged output of the prior
+synthetic B host qualification (`pi-phase-b-fence-full-host-20261128-r2`, final
+snapshot337, SHA256 `d0532ad01ec6aea711d1aefae6b46329d88cb2170a8d6a1d4201c8cf5a848fd5`).
+`owner-phase-c-b-report-fixture.cjs` changes only the isolated B dependency's
+Router pin from 4e4 to that report's qualified historical 02d source. It retains
+before/after hashes and leaves C/host/CLI bytes and public NULL gates unchanged.
+The raw report is never relabelled. This is producer/consumer compatibility,
+not a new B run or a claim of live fence/Pi authority. Earlier C stack results
+using a synthetic unfenced B prerequisite remain historical evidence.
 
 | Row | Exact reviewed prompt                      | Admission ceiling |
 | --- | ------------------------------------------ | ----------------- |
