@@ -38,7 +38,9 @@ class PostgresDeadline(unittest.TestCase):
                     "-e", "POSTGRES_DB=relay", "-e", "REAPER_PASSWORD=synthetic-reaper-test-only",
                     "--mount", f"type=bind,source={ROOT},target=/repo,readonly", IMAGE)
         limit = time.monotonic() + 20
-        while self.docker("exec", self.name, "pg_isready", "-U", "postgres", "-d", "relay", check=False).returncode:
+        # initdb temporarily starts a server too. Wait for the entrypoint's final exec, not that socket.
+        ready = '[ "$(cat /proc/1/comm)" = postgres ] && pg_isready -U postgres -d relay'
+        while self.docker("exec", self.name, "sh", "-c", ready, check=False).returncode:
             self.assertLess(time.monotonic(), limit, "private PostgreSQL startup timed out")
             time.sleep(0.1)
         self.sql(f"""
@@ -66,7 +68,7 @@ class PostgresDeadline(unittest.TestCase):
         self.assertNotEqual(self.sql("SELECT * FROM ops.relay_operator_reap()", role, check=False).returncode, 0)
         for deadline in ("NULL", "floor(extract(epoch FROM clock_timestamp()))::bigint - 1",
                          "floor(extract(epoch FROM clock_timestamp()))::bigint + 29",
-                         "floor(extract(epoch FROM clock_timestamp()))::bigint + 181"):
+                         "floor(extract(epoch FROM clock_timestamp()))::bigint + 211"):
             with self.subTest(deadline=deadline):
                 result = self.sql(f"SELECT * FROM ops.relay_operator_reap({deadline});", role, check=False)
                 self.assertNotEqual(result.returncode, 0)
@@ -102,6 +104,14 @@ class PostgresDeadline(unittest.TestCase):
                          "2\n2")
         self.assertEqual(self.sql("SELECT * FROM ops.relay_operator_reap("
                                  "floor(extract(epoch FROM clock_timestamp()))::bigint + 60);", role).stdout.strip(), "0|0")
+
+    def test_original_expiry_with_database_clock_ten_seconds_behind(self):
+        # A node-created 180s expiry appears 190s away on a DB clock 10s behind at take.
+        # This exercises only the far-future sanity check, not a supported cross-system skew budget.
+        result = self.sql("SELECT * FROM ops.relay_operator_reap("
+                          "floor(extract(epoch FROM clock_timestamp()))::bigint + 190);", "relay_operator_reaper")
+        self.assertEqual(result.stdout.strip(), "1|1")
+        self.assertEqual(self.counts(), "1|1")
 
 
 if __name__ == "__main__":

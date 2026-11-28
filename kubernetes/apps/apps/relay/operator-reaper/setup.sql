@@ -27,7 +27,9 @@ BEGIN
   -- Check on the database clock after connection/dispatch, not at container startup.
   -- 45s permit margin covers connect10s + transaction25s with margin.
   IF lease_expires IS NULL OR lease_expires < extract(epoch FROM clock_timestamp()) + 30
-     OR lease_expires > extract(epoch FROM clock_timestamp()) + 180 THEN
+     -- This upper limit is only a sanity bound. The guard pins the original node expiry;
+     -- allow modest node/DB sampling skew here without extending that expiry or the lower bound.
+     OR lease_expires > extract(epoch FROM clock_timestamp()) + 180 + 30 THEN
     RAISE EXCEPTION 'reaper Lease deadline refused';
   END IF;
   DELETE FROM public.sessions

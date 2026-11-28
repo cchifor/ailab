@@ -52,4 +52,4 @@ spec:
         severity: warning
       annotations:
         summary: The relay-operator reaper's database setup Job failed
-        description: The function ops.relay_operator_reap() or the role relay_operator_reaper may be missing; check the Job's logs.
+        description: The function ops.relay_operator_reap(bigint) or the role relay_operator_reaper may be missing; check the Job's logs.

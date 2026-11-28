@@ -32,6 +32,9 @@ stand, so this reaper removes it independently (plan: `plans/2026-11-27-relay-op
 
   The role's password is the SOPS Secret `relay-operator-reaper`; setup reads it with psql `\getenv`, without
   putting it in psql arguments. Setup removes the former zero-argument function so it cannot bypass the deadline.
+  The **server must run PostgreSQL 17 or later** for `transaction_timeout`. The checked-in `postgres.yaml` pins
+  the server to the same 17.12 image used by the offline test; this source pin does not prove the deployed version.
+  A deployment on an older server must upgrade it before this setup can succeed.
 - **RBAC.** The ServiceAccount `relay-operator-reaper` may get and update the Lease `relay-operator-jit`, and create
   leases (create cannot be restricted by name). Pod token automount is disabled. A projected token and CA are
   mounted only in `lease-take` and `lease-guard`; neither has the database password. `reap` has no API token.
@@ -53,6 +56,9 @@ The Lease annotation is a client-interpreted epoch timestamp, not a Kubernetes s
 broker accepts the 180 s hold without a protocol change. Correct overlap exclusion still assumes synchronized broker,
 node and database clocks and no privileged early Lease replacement. The SQL checks close stale-start and bounded
 execution gaps; they do not create an atomic transaction spanning Kubernetes and PostgreSQL. Monitor clock health.
+The SQL far-future sanity limit allows 180 + 30 s so a modest database-clock lag at acquisition does not cause an
+immediate false refusal. This allowance neither extends the original Lease expiry nor changes the 30 s minimum
+remaining coverage or the timeouts. It is not a supported 30 s clock-skew budget for overlap exclusion.
 
 ## Offline qualification
 
