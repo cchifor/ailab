@@ -197,6 +197,9 @@ function activeDrainReport(d, c, manifest, q) {
       d.scope.principalId === "key:" + d.claudeCredential.key &&
       d.scope.account === d.inputs.account &&
       d.scope.model === d.inputs.model &&
+      d.scope.namespace === "default" &&
+      uuid(d.scope.deploymentId) &&
+      uuid(d.scope.phaseId) &&
       uuid(d.scope.runtimeInstanceId),
     "Active drain scope differs",
   );
@@ -365,8 +368,78 @@ function activeDrainReport(d, c, manifest, q) {
       ),
     "Active drain fence intents unresolved",
   );
-  const overlap = d.rows[0].overlap,
-    ns = (v) => typeof v === "string" && /^(?:0|[1-9][0-9]{0,24})$/.test(v);
+  activeDrainWitness(d);
+}
+function activeDrainWitness(d) {
+  const row = d.rows[0],
+    warm = d.processEpochs[1],
+    before = d.activeSettings.before,
+    after = d.activeSettings.after,
+    dispatch = row.final?.dispatch,
+    label = (v) => typeof v === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(v),
+    expectedScope = {
+      ...d.scope,
+      phaseId: row.phaseId,
+      providerGeneration: before.providerRuntime.providerGeneration,
+    };
+  need(
+    eq(warm.scope, expectedScope) &&
+      row.scopeDigest === sha(a.canonical(warm.scope)) &&
+      label(dispatch?.requestId) &&
+      label(dispatch.attemptId) &&
+      uuid(dispatch.identity?.id) &&
+      int(dispatch.identity.pid) &&
+      dispatch.identity.pid > 0 &&
+      dispatch.identity.pid <= 4194304 &&
+      int(dispatch.identity.ppid) &&
+      /^[1-9][0-9]{0,19}$/.test(dispatch.identity.startTicks) &&
+      int(dispatch.turn) &&
+      dispatch.turn > 0 &&
+      dispatch.reused === dispatch.turn > 1 &&
+      eq(d.activeAttempt?.dispatch, dispatch) &&
+      eq(d.activeAttempt?.fetch, row.final.fetch),
+    "Active drain selected attempt/scope differs",
+  );
+  const phases = [
+    ["dispatch", "dispatch"],
+    ["fetch", "fetch-invoked"],
+    ["native", "native-complete"],
+    ["terminal", "terminal"],
+  ];
+  let prior;
+  const ns = (v) => typeof v === "string" && /^(?:0|[1-9][0-9]{0,24})$/.test(v);
+  for (const [field, phase] of phases) {
+    const event = row.final[field];
+    need(
+      event?.phase === phase &&
+        event.requestId === dispatch.requestId &&
+        event.attemptId === dispatch.attemptId &&
+        event.mode === "warm" &&
+        event.accountId === warm.scope.account &&
+        event.providerGeneration === warm.scope.providerGeneration &&
+        eq(event.identity, dispatch.identity) &&
+        event.turn === dispatch.turn &&
+        event.reused === dispatch.reused &&
+        int(event.sequence) &&
+        ns(event.observedMonotonicNs) &&
+        (!prior ||
+          (event.sequence > prior.sequence &&
+            BigInt(event.observedMonotonicNs) >=
+              BigInt(prior.observedMonotonicNs))),
+      "Active drain warm event identity/order differs",
+    );
+    const recorded = exactly(
+      list(warm.process.events, 129, "Warm process events"),
+      (e) =>
+        e.phase === phase &&
+        e.requestId === dispatch.requestId &&
+        e.attemptId === dispatch.attemptId,
+      "Active drain warm witness",
+    );
+    need(eq(recorded, event), "Active drain recorded witness differs");
+    prior = event;
+  }
+  const overlap = row.overlap;
   need(
     overlap &&
       ["fetchNs", "beforeNs", "afterNs", "nativeCompleteNs"].every((k) =>
@@ -380,14 +453,8 @@ function activeDrainReport(d, c, manifest, q) {
       BigInt(overlap.afterNs) < BigInt(overlap.nativeCompleteNs),
     "Active drain overlap unobserved",
   );
-  const native = d.processEpochs[1].process.events?.find(
-    (e) =>
-      e.phase === "native-complete" &&
-      e.requestId === d.activeAttempt.dispatch?.requestId &&
-      e.attemptId === d.activeAttempt.dispatch?.attemptId,
-  );
   need(
-    native?.observedMonotonicNs === overlap.nativeCompleteNs,
+    row.final.native.observedMonotonicNs === overlap.nativeCompleteNs,
     "Active drain native witness differs",
   );
 }
@@ -1181,6 +1248,11 @@ function createFinalization(options) {
               reference.secretVersion > 0 &&
               uuid(reference.creationOperationId),
             "Renderer immutable reference differs",
+          );
+          need(
+            row.status !== "not-current" ||
+              target.generations.some((c) => c.generation > l.generation),
+            "Renderer not-current lacks a recorded successor generation",
           );
         }
         return {

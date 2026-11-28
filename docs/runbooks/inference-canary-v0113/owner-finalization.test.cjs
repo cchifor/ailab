@@ -510,6 +510,11 @@ function fixture({
         requestId: id(),
         attemptId: id(),
         mode: i ? "cold" : "warm",
+        turn: 1,
+        reused: false,
+        accountId: dr.scope.account,
+        providerGeneration: i + 2,
+        identity: { id: id(), pid: 100 + i, ppid: 50, startTicks: "1234" },
       };
       return {
         rowId: "D" + (i + 1),
@@ -523,18 +528,31 @@ function fixture({
         settledTokenUsageUnknown: i ? 3 : 2,
         terminalEvidenceSha256: "a".repeat(64),
         final: {
-          dispatch: { ...event, phase: "dispatch" },
-          terminal: { ...event, phase: "terminal" },
+          dispatch: {
+            ...event,
+            phase: "dispatch",
+            sequence: 1,
+            observedMonotonicNs: "5",
+          },
+          terminal: {
+            ...event,
+            phase: "terminal",
+            sequence: 4,
+            observedMonotonicNs: "50",
+            outcome: "reaped",
+          },
           ...(!i
             ? {
                 fetch: {
                   ...event,
                   phase: "fetch-invoked",
+                  sequence: 2,
                   observedMonotonicNs: "10",
                 },
                 native: {
                   ...event,
                   phase: "native-complete",
+                  sequence: 3,
                   observedMonotonicNs: "40",
                 },
               }
@@ -592,6 +610,7 @@ function fixture({
       },
       transition: i === 2 ? "final-drained-and-joined" : "drained-and-joined",
     }));
+    dr.rows[0].scopeDigest = hash(a.canonical(dr.processEpochs[1].scope));
   }
   let reports, manifest;
   const repin = () => {
@@ -1161,6 +1180,76 @@ for (const [name, change] of [
     },
   ],
   [
+    "unrelated active attempt",
+    (d) => {
+      const requestId = "11111111-1111-4111-8111-111111111111";
+      d.activeAttempt.dispatch.requestId = requestId;
+      d.processEpochs[1].process.events.find(
+        (e) => e.phase === "native-complete",
+      ).requestId = requestId;
+    },
+  ],
+  [
+    "fetch identity differs",
+    (d) => {
+      d.activeAttempt.fetch.attemptId = "other-attempt";
+    },
+  ],
+  [
+    "native child identity differs",
+    (d) => {
+      d.processEpochs[1].process.events.find(
+        (e) => e.phase === "native-complete",
+      ).identity.startTicks = "9999";
+    },
+  ],
+  [
+    "warm epoch generation differs",
+    (d) => {
+      d.processEpochs[1].scope.providerGeneration++;
+    },
+  ],
+  [
+    "warm epoch runtime differs",
+    (d) => {
+      d.processEpochs[1].scope.runtimeInstanceId =
+        "11111111-1111-4111-8111-111111111111";
+    },
+  ],
+  [
+    "warm epoch account differs despite repinned scope",
+    (d) => {
+      d.processEpochs[1].scope.account = "other-account";
+      d.rows[0].scopeDigest = hash(a.canonical(d.processEpochs[1].scope));
+    },
+  ],
+  [
+    "warm row scope digest differs",
+    (d) => {
+      d.rows[0].scopeDigest = "0".repeat(64);
+    },
+  ],
+  [
+    "duplicate native witness",
+    (d) => {
+      d.processEpochs[1].process.events.push(clone(d.rows[0].final.native));
+    },
+  ],
+  [
+    "missing D namespace",
+    (d) => {
+      delete d.scope.namespace;
+      d.fences.forEach((f) => delete f.namespace);
+    },
+  ],
+  [
+    "missing D deployment",
+    (d) => {
+      delete d.scope.deploymentId;
+      d.fences.forEach((f) => delete f.deploymentId);
+    },
+  ],
+  [
     "wrong native clock",
     (d) => {
       d.processEpochs[1].process.events.find(
@@ -1240,6 +1329,29 @@ test("historical not-current receipt remains distinct from fresh current-file ab
         l.status === "absent" && l.credentialId === f.profiles.codex.credential,
     ),
   );
+  assert.equal(posts(f).length, 3);
+});
+test("latest renderer not-current refuses even with exact reference and fresh file absence", async () => {
+  const f = fixture({ activeDrain: true });
+  f.onObserve = (v) => {
+    if (v.stage !== "renderer") return;
+    const last = v.launches.find(
+      (l) => l.credentialId === f.profiles.claude.credential,
+    );
+    last.status = "not-current";
+    last.reference = {
+      credentialId: last.credentialId,
+      generation: last.generation,
+      keyId: f.profiles.claude.key,
+      secretVersion: 1,
+      creationOperationId: "11111111-1111-4111-8111-111111111111",
+    };
+  };
+  await assert.rejects(
+    candidate.createFinalization(f.options()).run(),
+    /Renderer/,
+  );
+  assert.equal(f.saves.at(-1).status, "finalization-unresolved");
   assert.equal(posts(f).length, 3);
 });
 for (const [name, change] of [

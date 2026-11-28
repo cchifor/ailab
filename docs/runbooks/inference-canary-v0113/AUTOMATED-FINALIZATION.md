@@ -91,6 +91,11 @@ same-runtime active-CAS witnesses and joined empty process epochs. Final setting
 must restore C's original cold/idle values. No inferred success or extra report
 list is accepted. The selected inventories contain eleven launches and five
 marker baselines; ABC alone retains ten and four, including original stopped A.
+The selected dispatch and fetch must be the final D1 attempt. Its dispatch,
+fetch, native completion and terminal events must match the archived warm epoch
+by request/attempt IDs, child identity, account and provider generation. The warm
+scope hash and runtime must also match; independently repinning unrelated timing
+witnesses does not establish active overlap.
 The final state preserves C's `activeDrain` field and records selected D
 separately as `selectedActiveDrain:{reportSha256,hubSource,routerSource,status,
 activeDrain}`. This field is absent for the legacy ABC selection.
@@ -173,6 +178,8 @@ receipt requires the complete immutable `{credentialId,generation,secretVersion,
 keyId,creationOperationId}` reference, joined to the normal API credential/key
 inventory. The operator reader must also join it to the stored launch command
 and full local reference. The raw status/reference remain unchanged in evidence.
+The normal inventory must contain a later generation of the same binding;
+`not-current` for the newest generation refuses even when the file is now absent.
 All generations must already be revoked with cleanup complete, all sessions
 closed, consumers/requests absent and the scoped process census empty. The
 independent file read is for the current fixed binding path, never inferred from
