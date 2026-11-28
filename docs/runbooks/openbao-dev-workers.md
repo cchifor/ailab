@@ -311,7 +311,9 @@ Secret.
   router.chifor.me API key, which its Codex sends through `/usr/local/bin/codex-router-key` (`cred
   get <hostname> llm_router_codex_key`; `dev-workers.md` § "Codex through the router"). It is
   **SEEDED**: `dev-worker-N.json` in `devworker-seeds.sops.yaml` (seed-wins), unlike the two
-  sync-owned fields below.
+  sync-owned fields below. Since 2026-11-28, `dev-worker-4` also holds `relay_viewer_user` and `relay_viewer_password`,
+  also seeded: the read-only Relay viewer login for Playwright checks of production. See
+  `keycloak.md` § "The viewer automation account", and rotate it with `scripts/relay-viewer-provision.py`.
 
   The kubeconfig fields are **SYNC-OWNED, and that is a FOURTH precedence in this repo — not the seed-wins
   contract the rest of this page describes.** They are written by the `openbao-k8stoken-sync`

@@ -249,6 +249,22 @@ not a person and is not admitted by these steps. `scripts/relay-operator.py prov
 its password lives only in OpenBao `af/relay/operator-oidc`. It holds no Relay membership at rest.
 Never delete it as junk; see docs/runbooks/relay.md, "Operator automation identity".
 
+**The viewer automation account `relay-viewer@ailab.invalid`** (id `73562ef1-140f-4121-9192-d0590ee25ccf`,
+created 2026-11-28) is not a person either. It is the read-only login that dev-worker-4's agents use for
+Playwright checks of production Relay. `scripts/relay-viewer-provision.py` created it: first and last
+name set, no required actions, email verified, no realm roles beyond `default-roles-relay`. It holds a
+Relay membership with role `viewer` at rest. The dev worker reads the login with
+`cred get dev-worker-4 relay_viewer_user` and `cred get dev-worker-4 relay_viewer_password`, which
+are SEEDED from `dev-worker-4.json` in `devworker-seeds.sops.yaml` (seed-wins;
+docs/runbooks/openbao-dev-workers.md). Never delete it as junk.
+- **Rotate:** run `sops edit` on the seeds with the script as `$EDITOR` (the `shim` mode; see the
+  script's docstring). It sets a new password in Keycloak over stdin and writes it into the seed in
+  one step, so the two cannot diverge. Then merge, let Flux apply the Secret, run the
+  `openbao-devworker-provision` Job, and check with `python scripts/relay-viewer-provision.py verify`.
+  It prints field names and lengths, the user, the membership, and the result of one password login.
+- **Remove:** disable the Keycloak user AND delete its Relay membership. A Relay session lasts up to
+  8 h. Then drop the two fields from the seed.
+
 **Password reset.** There is no SMTP, so this is operator-only:
 
 1. Write `{"type":"password","value":"<temporary>","temporary":true}` to a private file.
