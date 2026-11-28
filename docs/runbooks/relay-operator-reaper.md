@@ -22,8 +22,17 @@ stand, so this reaper removes it independently (plan: `plans/2026-11-27-relay-op
   `terminationGracePeriodSeconds` 30 s, plus the fence's 30 s. Only `lease-take` and `lease-release` mount the
   API token, a projected volume; the pod has no automounted token. The `reap` container, which holds the
   database password, cannot touch the Lease.
-- **The database objects** are created by the idempotent Job `relay-operator-reaper-setup`. Flux force-replaces it on a
-  spec change (`kustomize.toolkit.fluxcd.io/force: "enabled"`). It creates:
+- **The database objects** are created by `python scripts/relay-operator-reaper-setup.py`, which is idempotent. It
+  applies the reviewed `operator-reaper/setup.sql` as the postgres superuser over relay-postgres' LOCAL socket
+  (`kubectl exec`). There is no setup Job: pg_hba rejects the superuser over the network, deliberately, and no runtime
+  role may hold CREATEROLE. The role password is read from the Secret in-process and goes only to psql's stdin,
+  never to argv or a log; statement logging is off for that session. Run the script:
+  - once after the reaper is deployed;
+  - whenever `setup.sql` changes;
+  - **after ANY relay-postgres restore or re-initialization** (roles are cluster globals and are easily lost).
+
+  Without the objects, the reaper's `reap` step fails ("password authentication failed" or "function ... does not
+  exist") and `RelayOperatorReaperFailing` fires. The script creates:
   - schema `ops`, owned by `relay_owner`;
   - `ops.relay_operator_reap(fence bigint)`: SECURITY DEFINER as `relay_owner`, a fixed `search_path`, lock and
     statement timeouts, the Lease fence, and the JIT subject as a literal. It deletes only that identity's
@@ -35,7 +44,7 @@ stand, so this reaper removes it independently (plan: `plans/2026-11-27-relay-op
   (`\getenv`), never from psql's argv.
 - **RBAC.** The ServiceAccount `relay-operator-reaper` may get and update the Lease `relay-operator-jit`, and create
   leases (create cannot be restricted by name).
-- **Network.** `relay-postgres-operator-reaper` additively admits the reaper and its setup Job to relay-postgres:5432.
+- **Network.** `relay-postgres-operator-reaper` additively admits the reaper's pods to relay-postgres:5432.
   The existing `relay-postgres` policy is unchanged.
 
 ## Alerts
@@ -43,14 +52,13 @@ stand, so this reaper removes it independently (plan: `plans/2026-11-27-relay-op
 - `RelayOperatorReaperStale`: no successful run for more than 20 min, or no successful run ever (`absent`: a fresh
   install that never ran, a deleted CronJob, a missing scrape).
 - `RelayOperatorReaperFailing`: a failed reaper Job.
-- `RelayOperatorReaperSetupFailed`: the database setup Job failed.
 
 The reaper is a best-effort backstop, bounded by the scheduler, the API server and the database. While it alerts, check
 by hand: `python scripts/relay-operator.py status` must report `0 memberships, 0 sessions`, and `revoke` clears it.
 
 ## Check it once (a gate before any automated phase A run)
 
-1. `kubectl --context admin@ai -n relay logs job/relay-operator-reaper-setup` shows `reaper objects ready: 1`.
+1. `python scripts/relay-operator-reaper-setup.py` prints `reaper objects ready: 1`.
 2. A normal tick logs `{"event":"reap","sessions_deleted":0,"memberships_deleted":0}`, or `skip` while a session holds
    the Lease.
 3. The crash drill:

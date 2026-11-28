@@ -46,72 +46,6 @@ subjects:
   name: relay-operator-reaper
   namespace: relay
 ---
-# The database objects (idempotent). Flux force-replaces this Job when its spec changes (a Job template is immutable;
-# without the per-object annotation a change would wedge the whole layer). Value lowercase "enabled".
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: relay-operator-reaper-setup
-  namespace: relay
-  labels:
-    app.kubernetes.io/part-of: relay
-  annotations:
-    kustomize.toolkit.fluxcd.io/force: "enabled"
-spec:
-  backoffLimit: 3
-  activeDeadlineSeconds: 600
-  ttlSecondsAfterFinished: 86400
-  template:
-    metadata:
-      labels:
-        app: relay-operator-reaper-setup
-    spec:
-      restartPolicy: OnFailure
-      automountServiceAccountToken: false
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 70
-        runAsGroup: 70
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-      - name: setup
-        image: docker.io/library/postgres:17.12-alpine@sha256:f9cf3e1f0066f0eb0c48707d864f0ac5941e9ff454a072077d97a4d278d07d73
-        command:
-        - sh
-        - -c
-        - >-
-          for i in $(seq 1 30); do pg_isready -h relay-postgres -p 5432 -q && break; sleep 5; done;
-          psql "host=relay-postgres port=5432 dbname=relay user=postgres sslmode=disable" --no-psqlrc
-          -v ON_ERROR_STOP=1 -f /scripts/setup.sql
-        env:
-        - name: PGPASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: relay-postgres
-              key: password
-        - name: REAPER_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: relay-operator-reaper
-              key: password
-        securityContext:
-          allowPrivilegeEscalation: false
-          readOnlyRootFilesystem: true
-          capabilities:
-            drop: ["ALL"]
-        resources:
-          requests: {cpu: 10m, memory: 32Mi}
-          limits: {memory: 64Mi}
-        volumeMounts:
-        - name: scripts
-          mountPath: /scripts
-          readOnly: true
-      volumes:
-      - name: scripts
-        configMap:
-          name: relay-operator-reaper-scripts
----
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -222,7 +156,9 @@ spec:
                   - key: ca.crt
                     path: ca.crt
 ---
-# Additive: relay-postgres' own policy stays unchanged; this one only admits the reaper and its setup Job on 5432.
+# Additive: relay-postgres' own policy stays unchanged; this one only admits the reaper's pods on 5432. The
+# database objects are created by scripts/relay-operator-reaper-setup.py over the pod's LOCAL socket (the postgres
+# superuser is rejected over the network by pg_hba, deliberately), so no setup Job exists.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -241,9 +177,6 @@ spec:
     - podSelector:
         matchLabels:
           app: relay-operator-reaper
-    - podSelector:
-        matchLabels:
-          app: relay-operator-reaper-setup
     ports:
     - protocol: TCP
       port: 5432
