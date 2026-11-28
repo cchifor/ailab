@@ -258,10 +258,23 @@ Relay membership with role `viewer` at rest. The dev worker reads the login with
 are SEEDED from `dev-worker-4.json` in `devworker-seeds.sops.yaml` (seed-wins;
 docs/runbooks/openbao-dev-workers.md). Never delete it as junk.
 - **Rotate:** run `sops edit` on the seeds with the script as `$EDITOR` (the `shim` mode; see the
-  script's docstring). It sets a new password in Keycloak over stdin and writes it into the seed in
-  one step, so the two cannot diverge. Then merge, let Flux apply the Secret, run the
-  `openbao-devworker-provision` Job, and check with `python scripts/relay-viewer-provision.py verify`.
-  It prints field names and lengths, the user, the membership, and the result of one password login.
+  script's docstring). The shim writes the new password into the seed first, then sets it in Keycloak
+  over stdin. If Keycloak refuses, the shim fails and sops discards the buffer, so nothing changes.
+  - **The one window left:** sops fails its own save after Keycloak accepted. Keycloak then holds a
+    password that no seed has. `verify` catches it (the login fails); recover by running the rotation
+    again, never by reverting.
+  - **The outage:** the old password stops working in Keycloak at once. dev-worker-4's checks get 401
+    until the PR merges, Flux applies the Secret and the `openbao-devworker-provision` Job runs. So
+    rotate when a failed production check is acceptable, and run the Job right after the merge.
+  - **The check:** `python scripts/relay-viewer-provision.py verify`. It exits 1 unless all of these
+    hold:
+    - the seeded username is `relay-viewer@ailab.invalid`, with a password of at least 12 characters;
+    - the user is enabled and verified, with no required actions;
+    - the only realm role is `default-roles-relay`;
+    - the Relay membership is exactly `viewer`;
+    - one password login answers 200.
+
+    It prints field names and lengths, never values.
 - **Remove:** disable the Keycloak user AND delete its Relay membership. A Relay session lasts up to
   8 h. Then drop the two fields from the seed.
 
