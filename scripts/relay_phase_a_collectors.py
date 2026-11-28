@@ -29,6 +29,14 @@ READ_TITLE = "Allow mcp__relay__relay_messages_read?"
 MARKER_TITLE = "Allow bash?"
 MAX_CURSOR = 9223372036854775807
 CLOCK_MS = 4000
+SUPPORT_HUB = '5f90d03a6ed291e6c62dfde75938ba07c20d8902'
+SUPPORT_ROUTER = '4e4bb34e2f968f9450aabe9cf228d3e70c8bab71'
+SUPPORT_HOLDER = '64dc50f47a4867a6d9a7afc2e7d5ae24068c59af'
+SUPPORT_PI = '2604c41b69c5d9c50a3324545a51f0bfa38435a0'
+SUPPORT_PREDECESSOR_SESSION = '45724087-335a-4c55-ad0f-cb278afe608a'  # pinned A STOPPED_SESSION
+CONTENT_DOMAIN = 'relay-predecessor-command-projection/content-v1\n'
+SHA = re.compile(r'^[a-f0-9]{64}$')
+LABEL = re.compile(r'^[A-Za-z0-9._:-]{1,200}$')
 PROFILE_KEYS = {"id", "run", "binding", "credential", "key", "protocol", "definitionHash", "namespace", "connection",
                 "generation", "revision", "expiresAt"}
 
@@ -689,7 +697,76 @@ def c_retire_branch(host, req, ctx, budget, gate_now, obs):
 
 
 def c_predecessor(host, req, ctx, budget, gate_now, obs):
-    raise Unsupported("the predecessor projection pin contract is unresolved (plan section 6, gate)")
+    support_sources(host)
+    need(host.predecessor_ok(), 'independent predecessor report changed', Failed)
+    report = json.loads(host.predecessor_bytes)
+    prior = report.get('operations')
+    need(isinstance(prior, list), 'predecessor commands unavailable', Unsupported)
+    wanted = [{'operationId': c.get('body', {}).get('operationId'), 'kind': c.get('body', {}).get('kind')}
+              for c in prior if c.get('body', {}).get('kind') in ('prompt', 'cancel', 'close')]
+    need(len(wanted) == 3 and {r['kind'] for r in wanted} == {'prompt', 'cancel', 'close'}
+         and all(is_uuid(r['operationId']) for r in wanted), 'predecessor report commands differ', Failed)
+    need(ctx.get('source') == SUPPORT_HUB and ctx.get('schemaVersion') == 93
+         and ctx.get('sessionId') == SUPPORT_PREDECESSOR_SESSION and ctx.get('generation') == 1
+         and ctx.get('priorReportCanonicalSha256') == host.predecessor_canonical()
+         and ctx.get('commands') == wanted, 'predecessor context differs from independent report', Failed)
+    deployment(host, budget, obs)
+    rows = host.remote.sql('predecessor-projection.sql', {'tenant': host.cfg.raw['tenant'],
+        'session_id': ctx['sessionId'], 'generation': 1,
+        **{r['kind'] + '_operation': r['operationId'] for r in wanted}}, budget, obs)
+    need(len(rows) == 1, 'predecessor projection unavailable', Failed)
+    row = rows[0]
+    supported_schema(row)
+    observed = fresh_ms(row.get('observedMs'))
+    need(row.get('databaseName') == host.cfg.raw['hubDb']['database'], 'predecessor database changed', Failed)
+    commands = row.get('commands')
+    need(isinstance(commands, list) and len(commands) == 3, 'predecessor command cardinality', Failed)
+    ids = set()
+    for expected, c in zip(wanted, commands):
+        need(set(c) == {'id', 'operation_id', 'session_id', 'generation', 'kind', 'state', 'receipt'}
+             and is_uuid(c['id']) and c['id'] not in ids and c['operation_id'] == expected['operationId']
+             and c['kind'] == expected['kind'] and c['session_id'] == ctx['sessionId'] and c['generation'] == 1
+             and c['state'] == 'completed', 'predecessor command differs', Failed)
+        ids.add(c['id'])
+        receipt = c['receipt']
+        need(isinstance(receipt, dict) and set(receipt) == {'status', 'result'} and receipt['status'] == 'completed',
+             'predecessor receipt not completed', Failed)
+        need((c['kind'] == 'prompt' and receipt['result'] in ({'stopReason': 'cancelled'}, {'stopReason': 'end_turn'}))
+             or (c['kind'] in ('cancel', 'close') and receipt['result'] == {'cancelSent': True}),
+             'predecessor native outcome unknown', Failed)
+    db = host.cfg.raw['hubDb']
+    label = '.'.join(db[k] for k in ('namespace', 'pod', 'database'))
+    need(re.fullmatch(r'[A-Za-z0-9._-]{1,128}', label), 'database label unavailable', Unsupported)
+    value = {'kind': 'relay-predecessor-command-projection', 'version': 1, 'source': SUPPORT_HUB,
+             'schemaVersion': 93, 'observedUtc': utc(observed), 'tenantId': host.cfg.raw['tenant'],
+             'databaseIdentity': label,
+             'querySha256': sha256_bytes(host.cfg.script('relay-phase-a/sql/predecessor-projection.sql')),
+             'sessionId': ctx['sessionId'], 'generation': 1,
+             'priorReportCanonicalSha256': ctx['priorReportCanonicalSha256'], 'commands': commands}
+    raw = canonical(value)
+    need(len(raw.encode()) <= 65536, 'predecessor projection too large', Failed)
+    content = {k: v for k, v in value.items() if k != 'observedUtc'}
+    obs['predecessor'] = {'rawSha256': sha256_bytes(raw.encode()),
+                          'contentSha256': sha256_bytes((CONTENT_DOMAIN + canonical(content)).encode()),
+                          'hashDomain': CONTENT_DOMAIN, 'observedMs': observed}
+    return raw
+
+
+def support_sources(host):
+    raw = getattr(getattr(host, 'cfg', None), 'raw', {})
+    need(raw.get('hub', {}).get('runSource') == SUPPORT_HUB and raw.get('router', {}).get('source') == SUPPORT_ROUTER
+         and raw.get('holder', {}).get('qualified', {}).get('source') == SUPPORT_HOLDER,
+         'unqualified observer support source tuple', Unsupported)
+
+
+def supported_schema(row):
+    need(row.get('schemaVersions') == list(range(1, 94)), 'unqualified hub schema', Unsupported)
+
+
+def fresh_ms(value):
+    now = now_ms()
+    need(is_int(value, 1) and now - value < 120000 and value - now <= 5000, 'stale source observation', Failed)
+    return value
 
 
 COLLECTORS = {
