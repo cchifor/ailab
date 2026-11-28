@@ -142,5 +142,9 @@ with the same fixed SQL and scoped variables; the second timestamp must be later
 and all other projected content identical. Start and finish the integration
 within the collector's strict two-minute freshness window. If the window expires,
 rerun the actual queries and use their new outputs. Never edit the timestamps in
-saved readbacks. `--sql-readbacks` checks both saved responses structurally; the
+saved readbacks. Also run the same fixed SQL with the same scoped variables except
+for a different synthetic tenant UUID, and save that response as `foreign.json`;
+its `commands` must be empty. This third read is a required tenant-isolation
+negative, not an optional input. `--sql-readbacks` checks both normal responses
+structurally and requires the foreign response's empty command list; the
 actual collector invoked by the Node entry separately enforces current freshness.
