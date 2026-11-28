@@ -403,7 +403,12 @@ class FinalizationHost(Host):
             self.fault('finalization-evidence-failed', evidence=True)
             self._reply(seq, dict(v=1, ok=False, code='failed'))
         except Exception:
-            self.ev.write(event='finalization-refused', seq=seq)
+            try:
+                self.ev.write(event='finalization-refused', seq=seq)
+            except EvidenceFailure:
+                self.fault('finalization-evidence-failed', evidence=True)
+                self._reply(seq, dict(v=1, ok=False, code='failed'))
+                return
             self._reply(seq, dict(v=1, ok=False, code='refused'))
             self.fault('finalization-observer-refused')
 

@@ -50,7 +50,9 @@ reply emits no cancel. A genuine cancel remains terminal even if its sequence
 has already left the Host's in-flight slot: the Gate refuses all later requests.
 The inherited Host starts framing work through its exception guard; malformed
 frames and acceptance exceptions fault the Host, and evidence failures also
-report failed durability. Replies are bounded to 512 KiB, requests
+report failed durability. If writing refusal evidence fails, the checkpoint
+still receives a failed reply and the Host reports the durability fault before
+replying. Replies are bounded to 512 KiB, requests
 to 64 KiB, and each stage to 120 seconds within the fixed cleanup deadline.
 
 `validated_plan` is the result of the actual finalizer's pure
@@ -173,6 +175,15 @@ python3 -m unittest -v scripts.tests.test_relay_finalization_observer
 node --test scripts/relay-finalization/reader.test.cjs
 python scripts/tests/test_relay_finalization_observer.py --postgres NEW_EVIDENCE_DIRECTORY
 ```
+
+The Python module's unittest discovery hook runs directly only on Linux with
+actual UID1000. On Windows or another UID it requires Docker and runs the entire
+module in the pinned Node24 image as UID1000, with read-only checkout/root,
+private `/tmp`, no network/capabilities and no-new-privileges. Missing Docker or
+failed container cleanup fails the test; there is no skip or UID-guard override.
+The child has a 60-second limit and the parent a 180-second limit. Invoke the
+whole module as shown: selecting an individual class bypasses `load_tests` and
+is suitable only inside the required Linux/UID1000 environment.
 
 Run the first two in pinned Node24 image
 `sha256:8fa96264f302f58bbb13aa7339c541547b56975766ce956c875da149452a3e40`,

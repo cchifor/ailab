@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -322,6 +323,39 @@ class GuardedHost(unittest.TestCase):
         for frame in (b'x'*524289+b'\n',b'\xff\n',b'{"seq":1,"seq":1}\n'):
             with self.subTest(size=len(frame)):self.run_bad_frame(frame)
 
+    def test_refusal_evidence_failure_reports_fault_and_replies(self):
+        read_fd,write_fd=os.pipe()
+        read=os.fdopen(read_fd,'rb');write=os.fdopen(write_fd,'wb',buffering=0)
+        replied=threading.Event();faulted=threading.Event();faults=[]
+        class Replies(io.BytesIO):
+            def flush(self):super().flush();replied.set()
+        replies=Replies();ev=Evidence()
+        def failed_write(**record):
+            if record['event']=='finalization-refused':raise F.EvidenceFailure('synthetic-refusal-evidence')
+        ev.write=failed_write
+        def refused(*args):raise F.Refused('synthetic-refusal')
+        def on_fault(reason,evidence,*_):faults.append((reason,evidence));faulted.set()
+        host=F.FinalizationHost(gate=SimpleNamespace(stdout=read,stdin=replies,poll=lambda:None),
+            reader=SimpleNamespace(observe=refused),evidence=ev,on_fault=on_fault,lease_ok=lambda:True)
+        host.heartbeat_s=.01;write.write(b'{"ready":true}\n')
+        try:
+            host.start(ready_timeout=2)
+            deadline=F.now_ms()+10000
+            frame=dict(seq=1,gateNow=F.now_ms(),request=dict(v=1,call='checkpoint',kind='finalization',
+                deadline=deadline,context=dict(deadline=deadline)))
+            write.write((json.dumps(frame)+'\n').encode())
+            self.assertTrue(faulted.wait(2),'durability fault not reported')
+            self.assertTrue(replied.wait(2),'refused checkpoint received no failure reply')
+            self.assertEqual(json.loads(replies.getvalue()),dict(seq=1,v=1,ok=False,code='failed'))
+            self.assertEqual(faults[0],('finalization-evidence-failed',True))
+            self.assertTrue(host.down.is_set() and host.cancelled.is_set())
+        finally:
+            host.stop();write.close()
+            for thread in host.threads:thread.join(2)
+            read.close();replies.close()
+            self.assertFalse(any(thread.is_alive() for thread in host.threads))
+            self.assertIsNone(host.inflight)
+
     def test_started_host_faults_on_accept_exception(self):
         self.run_bad_frame(b'{"seq":1}\n',accept_error=True)
 
@@ -501,6 +535,40 @@ def qualify_postgres(output):
     finally:
         if started:command(['docker','rm','-f',name],check=False)
         (out/'commands.json').write_text(json.dumps(log,indent=2),encoding='utf-8')
+
+
+def load_tests(loader, standard_tests, pattern):
+    # These are actual private-file readers with a fixed deployed UID, not a
+    # policy parameter. Never patch that guard to suit the CI runner account.
+    if sys.platform == 'linux' and os.getuid() == 1000:
+        return standard_tests
+
+    class IsolatedFinalizationReaders(unittest.TestCase):
+        def runTest(self):
+            docker = shutil.which('docker')
+            self.assertIsNotNone(docker, 'Docker is required for UID1000 finalization observer tests; no skip')
+            root = SCRIPTS.parent
+            name = 'pi-finalization-readers-' + uuid.uuid4().hex
+            try:
+                result = subprocess.run([
+                    docker, 'run', '--rm', '--init', '--name', name,
+                    '--network', 'none', '--read-only', '--user', '1000:1000',
+                    '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                    '--tmpfs', '/tmp:rw,mode=1777',
+                    '--mount', f'type=bind,source={root},target=/repo,readonly',
+                    '--workdir', '/repo', '-e', 'PYTHONDONTWRITEBYTECODE=1',
+                    'node@sha256:8fa96264f302f58bbb13aa7339c541547b56975766ce956c875da149452a3e40',
+                    'timeout', '60s', 'python3', '-m', 'unittest', '-v',
+                    'scripts.tests.test_relay_finalization_observer'],
+                    cwd=root, capture_output=True, text=True, encoding='utf-8', timeout=180)
+                print(result.stdout + result.stderr)
+                self.assertEqual(result.returncode, 0, 'isolated finalization observer suite failed')
+            finally:
+                cleanup = subprocess.run([docker, 'rm', '-f', name], capture_output=True,
+                                         text=True, encoding='utf-8', timeout=30)
+                self.assertTrue(cleanup.returncode == 0 or 'No such container' in cleanup.stderr,
+                                'could not confirm removal of the owned finalization observer container')
+    return unittest.TestSuite([IsolatedFinalizationReaders()])
 
 
 if __name__=='__main__':
