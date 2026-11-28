@@ -48,7 +48,10 @@ def script(pw: str, sql: str) -> bytes:
     body = "\n".join(line for line in sql.splitlines() if not line.strip().startswith("\\getenv pw"))
     if ":'pw'" not in body:
         sys.exit("relay-operator-reaper-setup: setup.sql no longer sets the password from :'pw'; refusing")
+    # pg_stat_statements is not preloaded on relay-postgres today; the SET is harmless then (a placeholder) and keeps
+    # the ALTER ROLE ... PASSWORD text out of its shared memory if it is ever loaded.
     return ("SET log_statement = 'none';\nSET log_min_error_statement = 'panic';\nSET log_min_duration_statement = -1;\n"
+            "SET pg_stat_statements.track_utility = off;\n"
             "\\set pw '" + pw + "'\n" + body + "\n").encode()
 
 
