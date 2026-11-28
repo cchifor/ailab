@@ -77,10 +77,14 @@ variable "data_datastore" {
 variable "data_gb" {
   type = number
   # 256 -> 384 for the 2026-09-13 registry-full incident (platform build 32171).
+  # 384 -> 480 for the 2026-11-28 registry-full incident: the strive retention hold
+  # (ansible/group_vars/registry.yml) keeps every tag, strive/** was 279 GiB of the 358 GiB used,
+  # and pushes failed with `blob upload unknown`. Grown live with `pct resize 5005 mp0 480G`
+  # (ai-node3); 480 keeps the node3 thin pool's allocations (1740 GiB) inside its 1754 GiB.
   # Grow mp0 online with the documented pct resize path; preserve all retained images.
   # Once actual size and effective data_gb agree, the later plan should not resize it.
   # Stop on a shrink plan and inspect existing state and variable overrides.
-  default = 384
+  default = 480
 }
 
 # ---- Debian 13 LXC template (matches ai-lxc). Distinct file_name so a destroy here never deletes
