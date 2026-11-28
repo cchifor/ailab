@@ -203,8 +203,8 @@ function createFinalizationAutomation(options) {
       runPromise = runner.run();
       try {
         const result = await abortable(runPromise, hard.signal);
-        need(!stopped, "Finalization was stopped");
-        need(pending.size === 0, "Finalization callbacks did not drain");
+        if (stopped) throw core.failure("host-stopped");
+        if (pending.size !== 0) throw core.failure("callbacks-unresolved");
         return result;
       } catch (error) {
         stop();

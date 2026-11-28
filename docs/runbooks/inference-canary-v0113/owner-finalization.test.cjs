@@ -1214,11 +1214,69 @@ for (const kind of ["response-body", "observer"])
               })
             : f.fetch,
       });
-      await assert.rejects(h.run(), /unresolved/);
+      await assert.rejects(h.run(), { code: "callbacks-unresolved" });
       assert.equal(posts(f).length, 0);
       assert.notEqual(h.snapshot()?.status, "canary-finalization-passed");
     },
   );
+
+test(
+  "host retains a typed stop after the actual Runner durably completes",
+  { timeout: 10000 },
+  async (t) => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "finalization-final-stop-"),
+    );
+    fs.chmodSync(root, 0o700);
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const f = fixture({ live: true });
+    let h,
+      stoppedAtCompletion = false;
+    // Observe an actual durable write and schedule the stop at the next microtask.
+    // The Runner, clock, store/fsync and all filesystem operations remain real.
+    const observedFs = {
+      ...fs,
+      writeFileSync(fd, raw, ...rest) {
+        const result = fs.writeFileSync(fd, raw, ...rest);
+        if (
+          typeof raw === "string" &&
+          raw.startsWith("{") &&
+          JSON.parse(raw).status === "canary-finalization-passed"
+        ) {
+          assert.equal(stoppedAtCompletion, false);
+          stoppedAtCompletion = true;
+          queueMicrotask(() => h.stop());
+        }
+        return result;
+      },
+    };
+    const boundaryHost = load("owner-finalization-automation.cjs", {
+      "./owner-finalization.cjs": candidate,
+      "node:fs": observedFs,
+    });
+    h = boundaryHost.createFinalizationAutomation({
+      directory: path.join(root, "evidence"),
+      reports: f.reports,
+      manifest: f.manifest,
+      observer: {
+        qualificationSha256: q.observerQualificationSha256,
+        observe: f.observe,
+      },
+      authenticatedFetch: f.fetch,
+    });
+    await assert.rejects(h.run(), {
+      code: "host-stopped",
+      message: "Finalization host stopped; preserve evidence",
+    });
+    assert.equal(stoppedAtCompletion, true);
+    assert.equal(posts(f).length, 3);
+    assert.equal(h.snapshot().status, "canary-finalization-passed");
+    assert.equal(
+      h.snapshot().intents.every((i) => i.status === "confirmed"),
+      true,
+    );
+  },
+);
 
 test(
   "actual CLI distinguishes preparation refusal from an unresolved dispatched operation without leaking errors",
