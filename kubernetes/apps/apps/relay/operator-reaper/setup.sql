@@ -1,6 +1,7 @@
--- The relay-operator-reaper's database objects (idempotent). Run as the postgres superuser by the Job
--- relay-operator-reaper-setup. The reaper role's password comes from the environment (REAPER_PASSWORD, its SOPS
--- Secret) through \getenv, so it never appears on psql's argv.
+-- The relay-operator-reaper's database objects (idempotent). Applied as the postgres superuser over relay-postgres'
+-- LOCAL socket by scripts/relay-operator-reaper-setup.py, which supplies the role password as psql variable :pw on
+-- stdin (never on argv). The \getenv line below lets the same file run where REAPER_PASSWORD is in the environment;
+-- the script drops it.
 --
 -- ops.relay_operator_reap(fence) deletes ONLY the JIT automation identity's Relay sessions and memberships (the subject is
 -- a literal here, not a parameter), runs as relay_owner (SECURITY DEFINER, fixed search_path, bounded locks), and

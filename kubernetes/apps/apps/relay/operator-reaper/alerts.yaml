@@ -33,13 +33,7 @@ spec:
       annotations:
         summary: relay-operator reaper Jobs are failing
         description: >-
-          A relay-operator-reaper Job failed (Lease API, database or image). The reaper cannot be trusted as a
-          backstop until fixed; run `python scripts/relay-operator.py status` and `revoke` by hand if a membership stands.
-    - alert: RelayOperatorReaperSetupFailed
-      expr: kube_job_status_failed{namespace="relay", job_name="relay-operator-reaper-setup"} > 0
-      for: 10m
-      labels:
-        severity: warning
-      annotations:
-        summary: The relay-operator reaper's database setup Job failed
-        description: The function ops.relay_operator_reap(fence) or the role relay_operator_reaper may be missing; check the Job's logs.
+          A relay-operator-reaper Job failed (Lease API, database or image). A "password authentication failed" or
+          "function ... does not exist" in its reap log means the database objects are missing (a restore or
+          re-initialization loses them): run `python scripts/relay-operator-reaper-setup.py`. Meanwhile run
+          `python scripts/relay-operator.py status` and `revoke` by hand if a membership stands.

@@ -2,8 +2,11 @@
 Kubernetes API with resourceVersion conflicts, and the manifest's safety properties. The database function was checked
 against a disposable Postgres 17 (setup idempotent; only the JIT subject's rows deleted; the role can do nothing else).
 """
+import contextlib
 import importlib.util
+import io
 import json
+import subprocess
 import os
 import tempfile
 import time
@@ -122,9 +125,11 @@ class Manifest(unittest.TestCase):
     def kind(self, k):
         return [d for d in self.docs if d["kind"] == k]
 
-    def test_setup_job_is_force_replaced(self):
-        job = self.kind("Job")[0]
-        self.assertEqual(job["metadata"]["annotations"]["kustomize.toolkit.fluxcd.io/force"], "enabled")
+    def test_no_setup_job_the_superuser_cannot_log_in_over_the_network(self):
+        self.assertEqual(self.kind("Job"), [])  # scripts/relay-operator-reaper-setup.py, over the local socket
+        np = self.kind("NetworkPolicy")[0]
+        labels = [f["podSelector"]["matchLabels"]["app"] for f in np["spec"]["ingress"][0]["from"]]
+        self.assertEqual(labels, ["relay-operator-reaper"])
 
     def test_reap_runs_only_after_the_lease_is_taken_and_images_are_pinned(self):
         spec = self.kind("CronJob")[0]["spec"]
@@ -132,7 +137,7 @@ class Manifest(unittest.TestCase):
         pod = spec["jobTemplate"]["spec"]["template"]["spec"]
         self.assertEqual([c["name"] for c in pod["initContainers"]], ["lease-take", "reap"])
         self.assertIn("/work/go", pod["initContainers"][1]["command"][-1])
-        for c in pod["initContainers"] + pod["containers"] + self.kind("Job")[0]["spec"]["template"]["spec"]["containers"]:
+        for c in pod["initContainers"] + pod["containers"]:
             self.assertRegex(c["image"], r"@sha256:[0-9a-f]{64}$")
             self.assertFalse(c["securityContext"]["allowPrivilegeEscalation"])
             self.assertTrue(c["securityContext"]["readOnlyRootFilesystem"])
@@ -173,10 +178,60 @@ class Manifest(unittest.TestCase):
         self.assertIn("kube-api", mounts["lease-release"])
         self.assertNotIn("kube-api", mounts["reap"])
 
-    def test_the_setup_password_never_reaches_argv(self):
-        job = self.kind("Job")[0]["spec"]["template"]["spec"]["containers"][0]
-        self.assertNotIn("pw=", " ".join(job["command"]))
-        self.assertIn("\\getenv pw REAPER_PASSWORD", (REAPER / "setup.sql").read_text())
+    def test_the_setup_script_sends_the_password_only_on_stdin(self):
+        import base64
+        spec = importlib.util.spec_from_file_location("setup", ROOT / "scripts" / "relay-operator-reaper-setup.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        pw = "Zq9_-abcdefghijklmnopqrstuvwxyz0123456789AB"
+        seen = []
+
+        class P:
+            def __init__(self, out=b"", rc=0, err=b""):
+                self.stdout, self.returncode, self.stderr = out, rc, err
+
+        def run(argv, input=None, capture_output=True, timeout=None):
+            seen.append((argv, input))
+            if "secret" in argv:
+                return P(json.dumps({"data": {"password": base64.b64encode(pw.encode()).decode()}}).encode())
+            return P(b"reaper objects ready: 1\n")
+        self.assertEqual(m.main(run), 0)
+        self.assertFalse(any(pw in " ".join(a) for a, _ in seen))  # never on argv
+        stdin = seen[-1][1].decode()
+        self.assertTrue(stdin.startswith("SET log_statement = 'none';"))  # logging off before the password
+        self.assertIn("\\set pw '" + pw + "'", stdin)
+        self.assertNotIn("\\getenv pw", stdin)
+        self.assertIn("-c", seen[-1][0])  # into the postgres container, over its local socket
+        self.assertNotIn("host=", " ".join(seen[-1][0]))
+
+        def failing(argv, input=None, capture_output=True, timeout=None):
+            if "secret" in argv:
+                return run(argv, input)
+            return P(b"", 3, ("ERROR: x\nLINE 1: ALTER ROLE relay_operator_reaper PASSWORD '" + pw + "'").encode())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(m.main(failing), 1)
+        self.assertNotIn(pw, err.getvalue())  # redacted from a failing statement's echo
+
+        def truncated(argv, input=None, capture_output=True, timeout=None):  # psql's LINE display cuts the value
+            if "secret" in argv:
+                return run(argv, input)
+            return P(b"", 3, ("ERROR:  syntax error\nLINE 1: ...lay_operator_reaper PASSWORD '" + pw[:40] + "...\n"
+                              "        ^").encode())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(m.main(truncated), 1)
+        self.assertNotIn(pw[:20], err.getvalue())  # no fragment survives
+        self.assertIn("ERROR:  syntax error", err.getvalue())
+
+        def hung(argv, input=None, capture_output=True, timeout=None):
+            if "secret" in argv:
+                return run(argv, input)
+            raise subprocess.TimeoutExpired(argv, timeout)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(m.main(hung), 1)  # one line, no traceback
+        self.assertIn("TimeoutExpired", err.getvalue())
 
     def test_the_stale_alert_also_fires_for_a_reaper_that_never_succeeded(self):
         rule = yaml.safe_load((REAPER / "alerts.yaml").read_text())
