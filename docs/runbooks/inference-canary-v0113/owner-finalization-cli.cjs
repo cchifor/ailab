@@ -6,14 +6,14 @@ const { parseRunnerDeadline } = require("./owner-phase-a-deadline.cjs");
 const {
   createFinalizationAutomation,
 } = require("./owner-finalization-automation.cjs");
-const { qualified } = require("./owner-finalization.cjs");
+const { qualified, diagnostic, failure } = require("./owner-finalization.cjs");
 function need(v, m) {
-  if (!v) throw Error(m);
+  if (!v) throw failure("cli-input-invalid");
 }
-function stdout(line) {
+function output(fd, line) {
   const raw = Buffer.from(line);
   for (let n = 0; n < raw.length;) {
-    const count = fs.writeSync(1, raw, n, raw.length - n);
+    const count = fs.writeSync(fd, raw, n, raw.length - n);
     need(count > 0, "Output failed");
     n += count;
   }
@@ -22,10 +22,12 @@ async function runFinalizationCli({
   argv = process.argv.slice(2),
   env = process.env,
   observer,
-  writeLine = stdout,
+  writeLine = (line) => output(1, line),
+  writeError = (line) => output(2, line),
   signals = process,
 } = {}) {
-  let host;
+  let host,
+    stage = "qualification";
   const controller = new AbortController();
   const stop = () => {
     controller.abort();
@@ -34,6 +36,7 @@ async function runFinalizationCli({
   try {
     need(process.platform === "linux", "Linux execution required");
     qualified(observer);
+    stage = "arguments";
     need(
       argv.length === 12 &&
         [
@@ -46,7 +49,9 @@ async function runFinalizationCli({
         ].every((v, i) => argv[i * 2] === v),
       "Expected fixed manifest/A/B/B-inputs/C/output paths",
     );
+    stage = "deadline";
     const deadline = parseRunnerDeadline(env.RUNNER_DEADLINE, 900000);
+    stage = "private-inputs";
     const manifest = JSON.parse(readPrivateUtf8(argv[1]));
     need(
       manifest.cleanupDeadline === deadline,
@@ -58,6 +63,7 @@ async function runFinalizationCli({
       bInputs: readPrivateUtf8(argv[7]),
       c: readPrivateUtf8(argv[9]),
     };
+    stage = "host-preparation";
     host = createFinalizationAutomation({
       directory: argv[11],
       reports,
@@ -71,6 +77,7 @@ async function runFinalizationCli({
     });
     signals.on("SIGTERM", stop);
     signals.on("SIGINT", stop);
+    stage = "finalization";
     const result = await host.run();
     writeLine(
       JSON.stringify({
@@ -82,12 +89,25 @@ async function runFinalizationCli({
       }) + "\n",
     );
     return 0;
-  } catch {
+  } catch (error) {
+    const snapshot = host?.snapshot(),
+      reason = diagnostic(error);
+    writeError(reason.reason + "\n");
     writeLine(
       JSON.stringify({
         type: "final",
         ok: false,
-        status: "finalization-unavailable-or-unresolved",
+        status: snapshot ? "finalization-unresolved" : "preparation-refused",
+        snapshotStatus: snapshot?.status ?? null,
+        stage: snapshot?.stage ?? stage,
+        reason,
+        intents: snapshot?.intents?.length ?? 0,
+        unconfirmedIntents:
+          snapshot?.intents?.filter((i) => i.status !== "confirmed").length ??
+          0,
+        potentiallyDispatchedIntents:
+          snapshot?.intents?.filter((i) => i.status !== "not-dispatched")
+            .length ?? 0,
         completed: false,
       }) + "\n",
     );

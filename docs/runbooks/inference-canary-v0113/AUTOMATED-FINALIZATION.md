@@ -146,6 +146,24 @@ Lost responses are inspected through the original oldest-generation operation;
 there is no resend. Confirmed readback retains sanitized per-generation terminal
 state. Already revoked bindings get read-only verification.
 
+Failure snapshots retain a fixed internal code/reason, stage, intent index and
+binding identity. Dispatch evidence records a received HTTP status and distinguishes
+a typed local refusal from an uncertain transport outcome. A server refusal is
+not proof that no work committed: one available original-operation readback is
+collected, then an unconfirmed operation stops without polling or resending.
+Bounded last-readback projections are saved before validation can refuse and on
+settlement timeout. They contain only identifiers, enumerated states, revisions,
+cleanup flags and failure presence; raw response bodies and external exception
+messages are never retained. A second evidence-write failure does not replace
+the original safe reason, and the reported diagnostic marks that failure.
+
+The CLI distinguishes preparation refusal from an unresolved execution using
+the last durable snapshot status, stage and intent counts. It emits only safe
+diagnostics to stderr. These fields do not grant permission to resend or reuse
+an existing evidence directory. Observer context and returned observations are
+copied, so callbacks cannot change the retained report pins, launch expectations
+or marker baseline used by later checks.
+
 Stop forbids another mutation and allows only bounded settlement of an already
 dispatched operation. Fetch bodies, observers and the whole action are tracked.
 An uncooperative callback remains unresolved; no late response can turn that

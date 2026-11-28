@@ -153,10 +153,8 @@ function createFinalizationAutomation(options) {
         track(
           Promise.resolve().then(() => {
             signal.throwIfAborted();
-            need(
-              init.method !== "POST" || !stopped,
-              "Stopped before revoke dispatch",
-            );
+            if (init.method === "POST" && stopped)
+              throw core.failure("dispatch-blocked");
             return originalFetch(target, { ...init, signal });
           }),
         ),
@@ -208,7 +206,7 @@ function createFinalizationAutomation(options) {
         need(!stopped, "Finalization was stopped");
         need(pending.size === 0, "Finalization callbacks did not drain");
         return result;
-      } catch {
+      } catch (error) {
         stop();
         let drained = true;
         try {
@@ -219,13 +217,9 @@ function createFinalizationAutomation(options) {
         } catch {
           drained = false;
         }
-        need(
-          drained && pending.size === 0,
-          "Finalization stopped; callback cleanup unresolved; preserve evidence",
-        );
-        throw Error(
-          "Finalization stopped; preserve original intents and evidence",
-        );
+        if (!drained || pending.size !== 0)
+          throw core.failure("callbacks-unresolved");
+        throw core.redact(error);
       } finally {
         clearTimeout(timer);
         clearTimeout(stopTimer);

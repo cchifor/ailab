@@ -777,6 +777,15 @@ test("uncommitted reply remains unresolved with original ID and no second bindin
   await assert.rejects(candidate.createFinalization(f.options()).run());
   assert.equal(posts(f).length, 1);
   assert.equal(f.saves.at(-1).intents[0].status, "dispatch-uncertain");
+  const saved = f.saves.at(-1);
+  assert.equal(saved.reason.code, "settlement-unresolved");
+  assert.equal(saved.stage, "revocation-readback");
+  assert.equal(saved.intentIndex, 0);
+  assert.equal(saved.intents[0].lastReadback.generations.length, 2);
+  assert.equal(
+    saved.intents[0].lastReadback.generations[0].operationMatches,
+    0,
+  );
 });
 test("durable intent save failure prevents POST", async () => {
   const f = fixture();
@@ -795,6 +804,7 @@ test("Stop at durable intent boundary prevents first POST", async () => {
   };
   await assert.rejects(runner.run());
   assert.equal(posts(f).length, 0);
+  assert.equal(f.saves.at(-1).intents[0].status, "not-dispatched");
 });
 test("wrong original operation cannot confirm revocation or advance to another binding", async () => {
   const f = fixture();
@@ -804,6 +814,167 @@ test("wrong original operation cannot confirm revocation or advance to another b
   };
   await assert.rejects(candidate.createFinalization(f.options()).run());
   assert.equal(posts(f).length, 1);
+  const saved = f.saves.at(-1);
+  assert.equal(
+    saved.intents[0].lastReadback.generations[0].operation.kind,
+    "rotate",
+  );
+  assert.equal(saved.reason.reason, "Revocation operation changed");
+});
+
+test("HTTP refusal retains status and one original-operation readback without polling or resend", async () => {
+  const f = fixture();
+  f.neverCommit = true;
+  await assert.rejects(
+    candidate
+      .createFinalization({
+        ...f.options(),
+        authenticatedFetch: async (url, init) => {
+          const response = await f.fetch(url, init);
+          return init.method === "POST"
+            ? {
+                ...response,
+                ok: false,
+                status: 409,
+                text: async () => {
+                  throw Error("SENSITIVE_HTTP_BODY_MUST_NOT_BE_READ");
+                },
+              }
+            : response;
+        },
+      })
+      .run(),
+  );
+  const saved = f.saves.at(-1),
+    intent = saved.intents[0];
+  assert.equal(posts(f).length, 1);
+  assert.equal(intent.httpStatus, 409);
+  assert.equal(intent.status, "http-refused");
+  assert.equal(intent.dispatchDisposition, "http-response");
+  assert.equal(intent.dispatchError.code, "http-refused");
+  assert.equal(intent.lastReadback.generations.length, 2);
+  assert.equal(
+    f.requests.slice(f.requests.findIndex((r) => r.method === "POST") + 1)
+      .length,
+    2,
+  );
+  assert.ok(!JSON.stringify(saved).includes("SENSITIVE_"));
+});
+
+test("typed adapter pre-dispatch refusal records no dispatch and never starts settlement", async () => {
+  const f = fixture();
+  await assert.rejects(
+    candidate
+      .createFinalization({
+        ...f.options(),
+        authenticatedFetch: async (url, init) => {
+          if (init.method === "POST")
+            throw candidate.failure("dispatch-blocked");
+          return f.fetch(url, init);
+        },
+      })
+      .run(),
+  );
+  assert.equal(posts(f).length, 0);
+  const intent = f.saves.at(-1).intents[0];
+  assert.equal(intent.status, "not-dispatched");
+  assert.equal(intent.dispatchDisposition, "not-dispatched");
+  assert.equal(intent.dispatchError.code, "dispatch-blocked");
+  assert.equal(intent.lastReadback, undefined);
+});
+
+test("failed validation saves bounded readback before refusal without raw server fields", async () => {
+  const f = fixture();
+  f.onDetail = (d) => {
+    if (posts(f).length) {
+      d.credential.bindingId = "22222222-2222-4222-8222-222222222222";
+      d.credential.state = "SENSITIVE_STATE";
+      d.credential.failureCode = "SENSITIVE_FAILURE";
+    }
+  };
+  await assert.rejects(candidate.createFinalization(f.options()).run());
+  const saved = f.saves.at(-1),
+    last = saved.intents[0].lastReadback.generations[0];
+  assert.equal(last.bindingId, "22222222-2222-4222-8222-222222222222");
+  assert.equal(last.state, "invalid");
+  assert.equal(last.failureCodePresent, true);
+  assert.equal(saved.reason.reason, "Revocation readback identity changed");
+  assert.ok(!JSON.stringify(f.saves).includes("SENSITIVE_"));
+});
+
+test("external callback secrets stay redacted and a second save failure preserves the primary reason", async () => {
+  const f = fixture();
+  f.onObserve = () => {
+    throw Error("SENSITIVE_CALLBACK");
+  };
+  f.onSave = (s) => {
+    if (s.status === "finalization-unresolved")
+      throw Error("SENSITIVE_STORAGE");
+  };
+  await assert.rejects(
+    candidate.createFinalization(f.options()).run(),
+    (error) => {
+      assert.deepEqual(candidate.diagnostic(error), {
+        code: "external-failure",
+        reason: "External callback or input failed",
+        failureEvidencePersisted: false,
+      });
+      assert.ok(!error.message.includes("SENSITIVE_"));
+      return true;
+    },
+  );
+  assert.equal(posts(f).length, 0);
+  assert.ok(!JSON.stringify(f.saves).includes("SENSITIVE_"));
+});
+
+for (const [name, mutate] of [
+  [
+    "pins",
+    (v, context) => {
+      context.reportPins.a = "0".repeat(64);
+      v.reportPins.a = context.reportPins.a;
+    },
+  ],
+  [
+    "scope",
+    (v, context) => {
+      context.scope.profileIds.pop();
+      v.scope.profileIds = clone(context.scope.profileIds);
+    },
+  ],
+  [
+    "launch",
+    (v, context) => {
+      context.launches[0].sessionId = "22222222-2222-4222-8222-222222222222";
+      v.sessions[0].sessionId = context.launches[0].sessionId;
+    },
+  ],
+])
+  test(
+    "observer cannot change retained " + name + " through its context",
+    async () => {
+      const f = fixture(),
+        raw = clone(f.reports),
+        pins = clone(f.manifest.pins);
+      f.onObserve = mutate;
+      await assert.rejects(candidate.createFinalization(f.options()).run());
+      assert.equal(posts(f).length, 0);
+      assert.deepEqual(f.reports, raw);
+      assert.deepEqual(f.manifest.pins, pins);
+    },
+  );
+
+test("observer cannot alter retained marker expectations to approve changed effects", async () => {
+  const f = fixture();
+  f.onObserve = (v, context) => {
+    if (context.stage === "renderer") {
+      context.markers[0].files.effects.bytes++;
+      v.markers[0].files.effects.bytes = context.markers[0].files.effects.bytes;
+    }
+  };
+  await assert.rejects(candidate.createFinalization(f.options()).run());
+  assert.equal(posts(f).length, 3);
+  assert.equal(f.saves.at(-1).reason.reason, "Preserved marker changed");
 });
 for (const [name, mutate] of [
   [
@@ -1048,6 +1219,113 @@ for (const kind of ["response-body", "observer"])
       assert.notEqual(h.snapshot()?.status, "canary-finalization-passed");
     },
   );
+
+test(
+  "actual CLI distinguishes preparation refusal from an unresolved dispatched operation without leaking errors",
+  { skip: process.platform !== "linux", timeout: 10000 },
+  async (t) => {
+    const root = fs.mkdtempSync(
+      path.join(os.tmpdir(), "finalization-diagnostics-"),
+    );
+    fs.chmodSync(root, 0o700);
+    const f = fixture({ live: true }),
+      socket = path.join(root, "broker.sock");
+    f.neverCommit = true;
+    const server = http.createServer(async (req, res) => {
+      try {
+        let raw = "";
+        for await (const chunk of req) raw += chunk;
+        const response = await f.fetch(req.url, {
+          method: req.method,
+          ...(raw ? { body: raw } : {}),
+        });
+        res.writeHead(req.method === "POST" ? 409 : response.status, {
+          "content-type": "application/json",
+        });
+        res.end(
+          req.method === "POST"
+            ? '{"error":"SENSITIVE_SERVER_BODY"}'
+            : await response.text(),
+        );
+      } catch {
+        req.socket.destroy();
+      }
+    });
+    await new Promise((r) => server.listen(socket, r));
+    t.after(async () => {
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+      fs.rmSync(root, { recursive: true, force: true });
+    });
+    const lines = [],
+      errors = [],
+      observer = {
+        qualificationSha256: q.observerQualificationSha256,
+        observe: f.observe,
+      };
+    const env = {
+      RUNNER_DEADLINE: String(f.manifest.cleanupDeadline),
+      RELAY_SESSION_SOCKET: socket,
+    };
+    assert.equal(
+      await cli.runFinalizationCli({
+        argv: [],
+        env,
+        observer,
+        writeLine: (s) => lines.push(JSON.parse(s)),
+        writeError: (s) => errors.push(s),
+      }),
+      1,
+    );
+    assert.equal(lines.at(-1).status, "preparation-refused");
+    assert.equal(lines.at(-1).stage, "arguments");
+    assert.equal(lines.at(-1).intents, 0);
+    assert.equal(f.requests.length, 0);
+    const args = [];
+    for (const [flag, name, raw] of [
+      ["--manifest", "manifest", JSON.stringify(f.manifest)],
+      ["--phase-a", "a", f.reports.a],
+      ["--phase-b", "b", f.reports.b],
+      ["--phase-b-inputs", "bInputs", f.reports.bInputs],
+      ["--phase-c", "c", f.reports.c],
+    ]) {
+      const file = path.join(root, name + ".json");
+      fs.writeFileSync(file, raw, { mode: 0o600 });
+      args.push(flag, file);
+    }
+    const out = path.join(root, "evidence");
+    args.push("--output", out);
+    assert.equal(
+      await cli.runFinalizationCli({
+        argv: args,
+        env,
+        observer,
+        writeLine: (s) => lines.push(JSON.parse(s)),
+        writeError: (s) => errors.push(s),
+      }),
+      1,
+    );
+    const final = lines.at(-1);
+    assert.equal(final.status, "finalization-unresolved");
+    assert.equal(final.snapshotStatus, "finalization-unresolved");
+    assert.equal(final.stage, "revocation-readback");
+    assert.equal(final.reason.code, "settlement-unresolved");
+    assert.equal(final.intents, 1);
+    assert.equal(final.unconfirmedIntents, 1);
+    assert.equal(final.potentiallyDispatchedIntents, 1);
+    assert.equal(posts(f).length, 1);
+    const snapshots = fs
+      .readdirSync(out)
+      .filter((v) => v.startsWith("state-"))
+      .sort();
+    const saved = JSON.parse(
+      fs.readFileSync(path.join(out, snapshots.at(-1)), "utf8"),
+    );
+    assert.equal(saved.intents[0].httpStatus, 409);
+    assert.equal(saved.intents[0].lastReadback.generations.length, 2);
+    assert.ok(!JSON.stringify([lines, errors, saved]).includes("SENSITIVE_"));
+  },
+);
 
 test(
   "actual Unix socket CLI/host preserves raw reports and fsynced intent before each fixed POST",

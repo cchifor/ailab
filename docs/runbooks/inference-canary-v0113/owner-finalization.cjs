@@ -21,8 +21,52 @@ const uuid = (v) =>
   /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(v);
 const hash = (v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
 const int = (v) => Number.isSafeInteger(v) && v >= 0;
+const REASONS = Object.freeze({
+  "external-failure": "External callback or input failed",
+  "callback-aborted": "Finalization callback aborted",
+  "callback-timeout": "Finalization callback timed out",
+  "dispatch-blocked": "Stopped before revoke dispatch",
+  "http-refused": "Finalization API refused",
+  "metadata-invalid": "Finalization metadata is invalid",
+  "persistence-failed": "Finalization evidence persistence failed",
+  "settlement-unresolved": "Revocation unresolved; retain original operation",
+  "callbacks-unresolved":
+    "Finalization callback cleanup unresolved; preserve evidence",
+  "host-stopped": "Finalization host stopped; preserve evidence",
+  "cli-input-invalid": "Finalization CLI input invalid",
+});
+class KnownFailure extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+function failure(code) {
+  const key = Object.hasOwn(REASONS, code) ? code : "external-failure";
+  return new KnownFailure(key, REASONS[key]);
+}
+function redact(error) {
+  if (error instanceof KnownFailure) return error;
+  return failure(
+    error?.name === "AbortError"
+      ? "callback-aborted"
+      : error?.name === "TimeoutError"
+        ? "callback-timeout"
+        : "external-failure",
+  );
+}
+function diagnostic(error) {
+  const safe = redact(error);
+  return {
+    code: safe.code,
+    reason: safe.message,
+    ...(typeof safe.failureEvidencePersisted === "boolean"
+      ? { failureEvidencePersisted: safe.failureEvidencePersisted }
+      : {}),
+  };
+}
 function need(v, message) {
-  if (!v) throw Error(message);
+  if (!v) throw new KnownFailure("validation-refused", message);
 }
 function list(v, max, label) {
   need(Array.isArray(v) && v.length < max, label + " incomplete");
@@ -372,6 +416,7 @@ function createFinalization(options) {
     kind: "canary-finalization",
     completed: false,
     status: "prepared",
+    stage: "preparation",
     sources: q,
     reportPins: manifest.pins,
     decisionSha256: manifest.decisionSha256,
@@ -393,7 +438,12 @@ function createFinalization(options) {
     );
   };
   const persist = () => {
-    const result = save(structuredClone(state));
+    let result;
+    try {
+      result = save(structuredClone(state));
+    } catch {
+      throw failure("persistence-failed");
+    }
     need(
       !result || typeof result.then !== "function",
       "Durable save must be synchronous",
@@ -407,7 +457,7 @@ function createFinalization(options) {
     bindingIds: BINDINGS,
     profileIds: Object.values(FIXED).map((p) => p.id),
   });
-  async function api(path, method = "GET", body, readback = false) {
+  async function api(path, method = "GET", body, readback = false, intent) {
     check(readback);
     const session = data.launches.find(
       (l) =>
@@ -439,18 +489,30 @@ function createFinalization(options) {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal,
     });
-    need(
-      response.ok &&
-        response.headers.get("content-type")?.includes("application/json"),
-      "Finalization API refused",
-    );
+    if (intent) {
+      intent.dispatchDisposition = "http-response";
+      intent.httpStatus =
+        Number.isInteger(response.status) &&
+        response.status >= 100 &&
+        response.status <= 599
+          ? response.status
+          : null;
+      persist();
+    }
+    if (!response.ok) throw failure("http-refused");
+    if (!response.headers.get("content-type")?.includes("application/json"))
+      throw failure("metadata-invalid");
     const text = await response.text();
     check(readback);
     need(
       Buffer.byteLength(text) <= 2 * 1024 * 1024,
       "Metadata response oversized",
     );
-    return JSON.parse(text);
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw failure("metadata-invalid");
+    }
   }
   const knownCredentials = new Set();
   function noConsumers(rows, detail = false) {
@@ -623,23 +685,25 @@ function createFinalization(options) {
     check();
     const deadline = Math.min(manifest.cleanupDeadline, now() + 120000);
     const context = {
-      version: 1,
-      stage,
-      reportPins: manifest.pins,
-      decisionSha256: manifest.decisionSha256,
-      sources: q,
-      scope,
-      launches: data.launches,
-      markers: data.markers,
-      originalIdle: data.originalIdle,
-      notBefore,
-      deadline,
+      ...structuredClone({
+        version: 1,
+        stage,
+        reportPins: manifest.pins,
+        decisionSha256: manifest.decisionSha256,
+        sources: q,
+        scope,
+        launches: data.launches,
+        markers: data.markers,
+        originalIdle: data.originalIdle,
+        notBefore,
+        deadline,
+      }),
       signal: AbortSignal.any([
         controller.signal,
         AbortSignal.timeout(Math.max(1, deadline - now())),
       ]),
     };
-    const v = await observe(context);
+    const v = structuredClone(await observe(context));
     check();
     fresh(v?.observedUtc, now(), notBefore);
     need(
@@ -823,10 +887,77 @@ function createFinalization(options) {
             undefined,
             true,
           ),
-          d = v.credential,
-          t = v.binding;
-        noConsumers(v.consumers, true);
-        list(v.operations, 32, "Operations");
+          d = v?.credential,
+          t = v?.binding;
+        const states = [
+          "requested",
+          "issued",
+          "escrowed",
+          "installing",
+          "ready",
+          "rotation_pending",
+          "revocation_pending",
+          "revoked",
+          "failed",
+          "unknown",
+        ];
+        const known = (value, values) =>
+          values.includes(value) ? value : "invalid";
+        const identifier = (value) =>
+          value === null || uuid(value) ? value : "invalid";
+        const boolean = (value) =>
+          typeof value === "boolean" ? value : "invalid";
+        const operationsBounded =
+          Array.isArray(v?.operations) && v.operations.length < 32;
+        const matches = operationsBounded
+          ? v.operations.filter((o) => o?.id === intent.body.operationId)
+          : [];
+        const observedOperation = matches[0];
+        readback.push({
+          requestedCredentialId: c.id,
+          credentialId: identifier(d?.id),
+          bindingId: identifier(d?.bindingId),
+          generation: int(d?.generation) ? d.generation : null,
+          routerKeyId:
+            typeof d?.routerKeyId === "string" &&
+            /^key_[a-f0-9]{12,32}$/.test(d.routerKeyId)
+              ? d.routerKeyId
+              : "invalid",
+          state: known(d?.state, states),
+          revokeRequested: boolean(d?.revokeRequested),
+          cleanupPending: boolean(d?.cleanupPending),
+          failureCodePresent: d?.failureCode !== null,
+          binding: {
+            id: identifier(t?.id),
+            enabled: boolean(t?.enabled),
+            state: known(t?.state, states),
+            revision: int(t?.revision) ? t.revision : null,
+            currentCredentialId: identifier(t?.currentCredentialId),
+            pendingCredentialId: identifier(t?.pendingCredentialId),
+          },
+          operationsBounded,
+          operationMatches: operationsBounded ? matches.length : null,
+          operation: observedOperation
+            ? {
+                id: intent.body.operationId,
+                kind: known(observedOperation.kind, [
+                  "issue",
+                  "rotate",
+                  "revoke",
+                  "revoke-binding",
+                ]),
+                state: known(observedOperation.state, states),
+                failureCodePresent: observedOperation.failureCode !== null,
+              }
+            : null,
+        });
+        intent.lastReadback = {
+          observedUtc: new Date(now()).toISOString(),
+          generations: structuredClone(readback),
+        };
+        persist();
+        noConsumers(v?.consumers, true);
+        list(v?.operations, 32, "Operations");
         unique(v.operations, "id", "Operations");
         need(
           d?.id === c.id &&
@@ -852,33 +983,6 @@ function createFinalization(options) {
           t.revision === intent.expectedRevision &&
           t.currentCredentialId === null &&
           t.pendingCredentialId === null;
-        readback.push({
-          credentialId: c.id,
-          bindingId: t.id,
-          generation: c.generation,
-          routerKeyId: c.routerKeyId,
-          state: d.state,
-          revokeRequested: d.revokeRequested,
-          cleanupPending: d.cleanupPending,
-          failureCode: d.failureCode,
-          binding: {
-            enabled: t.enabled,
-            state: t.state,
-            revision: t.revision,
-            currentCredentialId: t.currentCredentialId,
-            pendingCredentialId: t.pendingCredentialId,
-          },
-          ...(op
-            ? {
-                operation: {
-                  id: op.id,
-                  kind: op.kind,
-                  state: op.state,
-                  failureCode: op.failureCode,
-                },
-              }
-            : {}),
-        });
       }
       if (complete) {
         intent.status = "confirmed";
@@ -889,9 +993,12 @@ function createFinalization(options) {
         persist();
         return;
       }
+      // An HTTP refusal is not proof that the Hub performed no work. Keep the
+      // original operation and one observed readback, without a retry/poll loop.
+      if (intent.status === "http-refused") break;
       await sleep(Math.min(2000, Math.max(0, deadline - now())));
     }
-    throw Error("Revocation unresolved; retain original operation");
+    throw failure("settlement-unresolved");
   }
   return {
     stop() {
@@ -907,8 +1014,11 @@ function createFinalization(options) {
       persist();
       try {
         check();
+        state.stage = "preflight-sessions";
         await closedSessions();
+        state.stage = "preflight-observation";
         await observation("preflight", now());
+        state.stage = "credential-inventory";
         const targets = [];
         for (const provider of Object.keys(FIXED))
           targets.push(await inventory(provider));
@@ -916,6 +1026,8 @@ function createFinalization(options) {
         state.status = "revoking";
         persist();
         for (const target of targets) {
+          state.stage = "binding-preflight";
+          state.bindingId = target.bindingId;
           check();
           need(
             eq(await inventory(target.provider), target),
@@ -937,36 +1049,75 @@ function createFinalization(options) {
             at: now(),
           };
           state.intents.push(intent);
+          state.intentIndex = state.intents.length - 1;
+          state.stage = "revoke-dispatch";
           persist();
-          check();
           try {
-            await api(intent.path, "POST", body, true);
+            check();
+          } catch (error) {
+            intent.status = "not-dispatched";
+            intent.dispatchDisposition = "not-dispatched";
+            intent.dispatchError = diagnostic(error);
+            persist();
+            throw error;
+          }
+          try {
+            await api(intent.path, "POST", body, true, intent);
             intent.status = "received";
-          } catch {
-            intent.status = "dispatch-uncertain";
+          } catch (error) {
+            intent.dispatchError = diagnostic(error);
+            intent.status =
+              intent.dispatchError.code === "dispatch-blocked"
+                ? "not-dispatched"
+                : intent.dispatchError.code === "http-refused"
+                  ? "http-refused"
+                  : "dispatch-uncertain";
+            intent.dispatchDisposition =
+              intent.status === "not-dispatched"
+                ? "not-dispatched"
+                : intent.dispatchDisposition || "transport-uncertain";
+            persist();
+            if (intent.status === "not-dispatched") throw error;
           }
           persist();
+          state.stage = "revocation-readback";
           await settle(intent);
         }
         check();
+        state.stage = "final-sessions";
         await closedSessions();
         const notBefore = now() + 5000;
         state.rendererNotBefore = notBefore;
         persist();
+        state.stage = "renderer-observation";
         await observation("renderer", notBefore);
+        state.stage = "complete";
         state.status = "canary-finalization-passed";
         state.completed = false;
         persist();
         return structuredClone(state);
-      } catch {
+      } catch (error) {
+        const safe = redact(error);
         state.status = "finalization-unresolved";
         state.completed = false;
-        persist();
-        throw Error(
-          "Finalization stopped; inspect retained evidence, never restart or resend",
-        );
+        state.reason = diagnostic(error);
+        try {
+          persist();
+          safe.failureEvidencePersisted = true;
+        } catch {
+          safe.failureEvidencePersisted = false;
+        }
+        throw safe;
       }
     },
   };
 }
-module.exports = { createFinalization, qualified, sha, BINDINGS };
+module.exports = {
+  createFinalization,
+  qualified,
+  sha,
+  BINDINGS,
+  failure,
+  diagnostic,
+  redact,
+};
