@@ -67,6 +67,17 @@ current SHA are retained separately. Appended messages/tool work before C10 are
 refused. Matching the two runtime-manifest references is a descriptor continuity
 check; artifact qualification remains an external bundle prerequisite.
 
+The imported prefix must equal the retained active history after the pinned
+importer's specific transformations: discard saved model/thinking selections and
+system messages, remove tool-result display details and compaction details/system
+configuration, and rewrite parent links. All remaining conversation and tool
+records must match. Appended metadata must extend that prefix without changing
+the retained native coordination receipt. JSONL splits only on LF; Unicode line
+separators in message text remain data. This reader intentionally supports only
+`message`, coordination `custom`, `model_change`, `thinking_level_change` and
+`compaction` records. Other Pi history kinds (`session_info`, `label`,
+`branch_summary`, `custom_message`) remain unsupported until separately qualified.
+
 `router.js branch` opens only the configured SQLite file with `readOnly:true`,
 extensions disabled and `query_only`. It selects one exact row from `kv`:
 
@@ -99,6 +110,14 @@ succeeded. A has no B-style post-reconciliation receipt checkpoint in this patch
 
 ## Offline verification
 
+The native-reader test module requires actual Linux UID1000 ownership. On a
+different runner account or platform its unittest entry runs the whole module
+in the same pinned Node/Python Docker image used by the owner proxy tests, with
+UID1000, no network, a read-only checkout and private tmpfs. Docker absence fails;
+no tests are skipped and the production ownership constant is never overridden.
+The child suite runs directly at UID1000, with a 60-second process bound and owned
+container cleanup. Production observer ownership and source gates are unchanged.
+
 Run `python3 -m unittest -v scripts.tests.test_relay_phase_a_support scripts.tests.test_relay_phase_a_observer` in an isolated Linux UID1000 container with Node24. All service and authority fixtures are synthetic.
 
 `--sql-fixture` emits the projection schema and rows for disposable PostgreSQL17. `--sql-readbacks DIRECTORY` validates saved actual query results for the implemented gates. No migrations, deployed database, JIT authority or live provider is qualified.
@@ -114,3 +133,13 @@ validators or prototypes. It checks two actual database timestamps under one
 independent content pin, legacy raw mode and changed provenance/content refusals.
 It is not a complete A lifecycle, published artifact, JIT, provider or live-host
 qualification. The independent bounded-refusal transport PR is not required for these collector contracts.
+
+Run the two predecessor queries against the disposable PostgreSQL fixture
+immediately before the Node integration entry, saving the first response as
+`predecessor.json` and the second as `predecessor-fresh.json`. Execute both queries
+with the same fixed SQL and scoped variables; the second timestamp must be later
+and all other projected content identical. Start and finish the integration
+within the collector's strict two-minute freshness window. If the window expires,
+rerun the actual queries and use their new outputs. Never edit the timestamps in
+saved readbacks. `--sql-readbacks` checks both saved responses structurally; the
+actual collector invoked by the Node entry separately enforces current freshness.
