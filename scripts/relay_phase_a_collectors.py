@@ -131,12 +131,17 @@ class Remote:
                         self.cfg.script("relay-phase-a/remote/router.js"), budget, t, what, obs)
         return json.loads(raw)
 
-    def dw(self, args: list, budget, obs, what: str, cap=60.0) -> dict:
+    def dw(self, args: list, budget, obs, what: str, cap=60.0, deadline_arg=False) -> dict:
+        """`deadline_arg` appends the script's own deadline (seconds), kept inside the ssh-side bound, so a remote mode
+        finishes its steps before that bound could cut it off."""
         h = self.cfg.raw["devWorker"]
         for a in args:  # every argument is a validated token: no shell metacharacters reach the remote shell
             need(TOKEN.fullmatch(a) is not None, "remote argument", Refuse)
         t = self._bound(budget, cap)
         remote = max(1, int(t - 4))  # the remote bound, inside the local one (ssh setup and transit)
+        if deadline_arg:
+            need(remote > 8, "too little time for the remote step", Failed)
+            args = list(args) + [str(remote - 4)]
         argv = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o",
                 "UserKnownHostsFile=" + h["knownHosts"], "-o", "ConnectTimeout=8", h["user"] + "@" + h["host"],
                 f"timeout --kill-after=2 {remote} python3 -I - " + " ".join(args)]
@@ -232,7 +237,7 @@ def marker(host, provider: str, run_id: str, phase: str, not_before: int, budget
 
 def holder_record(host, budget, obs) -> dict:
     h = host.cfg.raw["holder"]
-    rec = host.remote.dw(["holder", h["stateDir"]], budget, obs, "holder")
+    rec = host.remote.dw(["holder", h["stateDir"]], budget, obs, "holder", deadline_arg=True)
     hello, status = rec.get("hello"), rec.get("status")
     need(hello is not None and status is not None, "holder hello or status unavailable", Failed)
     merged = {

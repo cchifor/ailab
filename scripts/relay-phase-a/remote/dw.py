@@ -437,11 +437,17 @@ def mutate_resume(state_dir, revision, operation, deadline_s):
     return {"resumed": rc == 0, "rc": rc, "status": maintenance_status(state_dir, end - 1), "journal": journal(state_dir)}
 
 
-def mutate_enable_start():
-    rc1 = run_bounded(["systemctl", "--user", "enable"] + list(UNITS), 10)
-    rc2 = run_bounded(["systemctl", "--user", "start", "relay-holder-control-plane.service"], 15) if rc1 == 0 else None
-    time.sleep(3)
-    return {"enabled": rc1 == 0, "started": rc2 == 0, "rc": [rc1, rc2], "units": {x: systemd(x) for x in UNITS}}
+def mutate_enable_start(deadline_s):
+    """Every step fits the caller's bound: enable <= 8 s, start <= 12 s, then the readback with what is left."""
+    end = time.monotonic() + deadline_s
+    if deadline_s < 24:
+        return {"enabled": False, "started": False, "why": "budget-too-small"}
+    rc1 = run_bounded(["systemctl", "--user", "enable"] + list(UNITS), max(1, int(left(end - 14, 8))))
+    rc2 = (run_bounded(["systemctl", "--user", "start", "relay-holder-control-plane.service"],
+                       max(1, int(left(end - 4, 12)))) if rc1 == 0 else None)
+    time.sleep(left(end - 3, 2))
+    return {"enabled": rc1 == 0, "started": rc2 == 0, "rc": [rc1, rc2],
+            "units": {x: systemd(x, end) for x in UNITS}}
 
 
 def main():
@@ -460,8 +466,8 @@ def main():
     if m == "mutate-resume" and len(a) == 5 and a[2].isdigit() and a[4].isdigit():
         out(mutate_resume(a[1], int(a[2]), a[3], int(a[4])))
         return
-    if m == "mutate-enable-start" and len(a) == 1:
-        out(mutate_enable_start())
+    if m == "mutate-enable-start" and len(a) == 2 and a[1].isdigit():
+        out(mutate_enable_start(int(a[1])))
         return
     if m == "clock" and len(a) == 1:
         out({"now": now_ms()})
@@ -469,8 +475,8 @@ def main():
         if not a[4].isdigit():
             die("bad notBefore", 2)
         out(marker(a[1], a[2], a[3], int(a[4])))
-    elif m == "holder" and len(a) == 2:
-        out(holder(a[1]))
+    elif m == "holder" and len(a) in (2, 3) and (len(a) == 2 or a[2].isdigit()):
+        out(holder(a[1], time.monotonic() + int(a[2]) if len(a) == 3 else None))
     elif m == "credfile" and len(a) == 2:
         out(credfile(a[1]))
     elif m == "transcript" and len(a) == 2:

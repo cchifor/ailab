@@ -330,7 +330,7 @@ class FakeRemote:
         obs.setdefault("sql", {})[name] = {"rows": len(rows)}
         return rows
 
-    def dw(self, args, budget, obs, what, cap=60.0):
+    def dw(self, args, budget, obs, what, cap=60.0, deadline_arg=False):
         return self._ans(what)
 
     def router(self, args, budget, obs, what, cap=60.0, pod=None):
@@ -358,6 +358,9 @@ class FakeHost:
 
     def runner_cutoff_ms(self):
         return self._cutoff
+
+    def extend_inflight(self, seconds):
+        pass
 
 
 def budget(ms=30000):
@@ -699,6 +702,17 @@ class RemoteContainment(unittest.TestCase):
         self.assertTrue(out["contained"])
         self.assertEqual(sg.getsignal(sg.SIGTERM), sg.SIG_DFL)  # the original handler is restored
 
+    def test_the_enable_start_mode_fits_its_own_bound(self):
+        runs = []
+        self.ns["run_bounded"] = lambda argv, seconds: runs.append((argv[2], seconds)) or 0
+        t0 = time.monotonic()
+        out = self.ns["mutate_enable_start"](26)
+        self.assertEqual([r[0] for r in runs], ["enable", "start"])
+        self.assertLessEqual(sum(r[1] for r in runs), 26 - 4)  # both steps fit, leaving the readback its share
+        self.assertLess(time.monotonic() - t0, 5)
+        self.assertTrue(out["enabled"] and out["started"])
+        self.assertEqual(self.ns["mutate_enable_start"](10)["why"], "budget-too-small")
+
     def test_the_resume_mode_fits_its_own_bound(self):
         seen = []
         self.ns["maintenance_status"] = lambda d, deadline=None: (seen.append(deadline - time.monotonic()), {
@@ -872,10 +886,10 @@ class Handoff(unittest.TestCase):
         res = h.remote.answers["mutate-resume"]
         orig = h.remote.dw
 
-        def dw(args, budget, obs, what, cap=60.0):
+        def dw(args, budget, obs, what, cap=60.0, deadline_arg=False):
             if what == "mutate-resume":
                 res["journal"]["admission"]["operationId"] = args[3]  # the journal names THIS operation
-            return orig(args, budget, obs, what, cap)
+            return orig(args, budget, obs, what, cap, deadline_arg)
         h.remote.dw = dw
         ru = {"active": "active", "sub": "running", "enabled": "enabled", "argv": CFG["holder"]["reconciliationArgv"],
               "restarts": 0}
