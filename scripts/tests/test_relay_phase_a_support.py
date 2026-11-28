@@ -483,7 +483,7 @@ def sql_fixture():
         statements.append(f"INSERT INTO agent_control_commands VALUES('{u(1)}','{u(40+i)}','45724087-335a-4c55-ad0f-cb278afe608a','{u(50+i)}',1,'{kind}','completed',{q});")
     return '\n'.join(statements)
 
-def predecessor_adapter(request, *, source_tuple=None):
+def predecessor_adapter(request, *, source_tuple=None, sql_runner=None):
     """Synthetic deployment transport plus unmodified PostgreSQL readback.
     The database timestamp is used verbatim; this adapter never refreshes it.
     """
@@ -510,6 +510,8 @@ def predecessor_adapter(request, *, source_tuple=None):
             assert name=='predecessor-projection.sql'
             assert variables=={'tenant':h.cfg.raw['tenant'],'session_id':'45724087-335a-4c55-ad0f-cb278afe608a',
                               'generation':1,'prompt_operation':u(50),'cancel_operation':u(51),'close_operation':u(52)}
+            if sql_runner is not None:
+                return C.Remote(h.cfg, sql_runner).sql(name,variables,budget,obs)
             return [request['row']]
     h.remote=Adapter()
     obs={}
@@ -574,6 +576,35 @@ class PredecessorProjectionTests(unittest.TestCase):
             rows=copy.deepcopy(original);mutate(rows);self.request['row']['commands']=rows
             with self.subTest(rows=rows),self.assertRaises(O.Failed):predecessor_adapter(self.request)
 
+    def test_malformed_report_and_projection_raise_typed_failure(self):
+        original=copy.deepcopy(self.request)
+        for field, value in [('report',[]),('report',{'operations':[None]}),
+                             ('report',{'operations':[{'body':[]}]}),('row',[])]:
+            self.request=copy.deepcopy(original);self.request[field]=value
+            with self.subTest(field=field,value=value),self.assertRaises(O.Failed):predecessor_adapter(self.request)
+        for value in (None, [], 'command', {'id':u(40)}):
+            self.request=copy.deepcopy(original);self.request['row']['commands'][0]=value
+            with self.subTest(command=value),self.assertRaises(O.Failed):predecessor_adapter(self.request)
+
+    def test_actual_remote_sql_stdin_is_exact_projected_query_hash(self):
+        calls=[]
+        def runner(argv, *, input, capture_output, timeout):
+            calls.append((argv,input,timeout))
+            class Result:
+                returncode=0
+                stdout=encode(self.request['row'])+b'\n'
+                stderr=b''
+            return Result()
+        result=predecessor_adapter(self.request,sql_runner=runner)
+        value=json.loads(result['value'])
+        self.assertEqual(len(calls),1)
+        argv,raw,timeout=calls[0]
+        self.assertEqual(raw,(SCRIPTS/'relay-phase-a/sql/predecessor-projection.sql').read_bytes())
+        self.assertEqual(value['querySha256'],sha(raw))
+        self.assertEqual(argv[-2:],['-f','-'])
+        self.assertIn('ON_ERROR_STOP=1',argv)
+        self.assertGreater(timeout,0)
+
     def test_context_and_independent_report_identity_remain_required(self):
         original=copy.deepcopy(self.request)
         for field,value in [('source','0'*40),('schemaVersion',92),('generation',2),
@@ -626,9 +657,14 @@ if __name__ == '__main__':
     elif len(sys.argv)==3 and sys.argv[1]=='--sql-readbacks':
         root=Path(sys.argv[2])
         p=json.loads((root/'predecessor.json').read_text())
-        C.supported_schema(p)
-        assert [c['kind'] for c in p['commands']]==['prompt','cancel','close']
-        assert [c['receipt']['result'] for c in p['commands']]==[{'stopReason':'cancelled'},{'cancelSent':True},{'cancelSent':True}]
+        fresh=json.loads((root/'predecessor-fresh.json').read_text())
+        for row in (p,fresh):
+            C.supported_schema(row)
+            assert O.is_int(row['observedMs'],1)
+            assert [c['kind'] for c in row['commands']]==['prompt','cancel','close']
+            assert [c['receipt']['result'] for c in row['commands']]==[{'stopReason':'cancelled'},{'cancelSent':True},{'cancelSent':True}]
+        assert fresh['observedMs'] > p['observedMs']
+        assert {k:v for k,v in p.items() if k!='observedMs'} == {k:v for k,v in fresh.items() if k!='observedMs'}
         wrong=json.loads((root/'foreign.json').read_text())
         assert wrong['commands']==[]
         print('actual PostgreSQL17 predecessor readbacks PASS')

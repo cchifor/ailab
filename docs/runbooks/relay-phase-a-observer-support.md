@@ -120,3 +120,13 @@ validators or prototypes. It checks two actual database timestamps under one
 independent content pin, legacy raw mode and changed provenance/content refusals.
 It is not a complete A lifecycle, published artifact, JIT, provider or live-host
 qualification. The independent bounded-refusal transport PR is not required for these collector contracts.
+
+Run the two predecessor queries against the disposable PostgreSQL fixture
+immediately before the Node integration entry, saving the first response as
+`predecessor.json` and the second as `predecessor-fresh.json`. Execute both queries
+with the same fixed SQL and scoped variables; the second timestamp must be later
+and all other projected content identical. Start and finish the integration
+within the collector's strict two-minute freshness window. If the window expires,
+rerun the actual queries and use their new outputs. Never edit the timestamps in
+saved readbacks. `--sql-readbacks` checks both saved responses structurally; the
+actual collector invoked by the Node entry separately enforces current freshness.

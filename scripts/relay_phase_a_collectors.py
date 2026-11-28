@@ -33,9 +33,9 @@ CLOCK_MS = 4000
 SUPPORT_HUB = '5f90d03a6ed291e6c62dfde75938ba07c20d8902'
 SUPPORT_ROUTER = '4e4bb34e2f968f9450aabe9cf228d3e70c8bab71'
 SUPPORT_HOLDER = '64dc50f47a4867a6d9a7afc2e7d5ae24068c59af'
-SUPPORT_PI = '2604c41b69c5d9c50a3324545a51f0bfa38435a0'
 SUPPORT_PREDECESSOR_SESSION = '45724087-335a-4c55-ad0f-cb278afe608a'  # pinned A STOPPED_SESSION
 CONTENT_DOMAIN = 'relay-predecessor-command-projection/content-v1\n'
+SUPPORT_PI = '2604c41b69c5d9c50a3324545a51f0bfa38435a0'
 SHA = re.compile(r'^[a-f0-9]{64}$')
 LABEL = re.compile(r'^[A-Za-z0-9._:-]{1,200}$')
 PROFILE_KEYS = {"id", "run", "binding", "credential", "key", "protocol", "definitionHash", "namespace", "connection",
@@ -707,8 +707,11 @@ def c_predecessor(host, req, ctx, budget, gate_now, obs):
     support_sources(host)
     need(host.predecessor_ok(), 'independent predecessor report changed', Failed)
     report = json.loads(host.predecessor_bytes)
+    need(isinstance(report, dict), 'predecessor report shape differs', Failed)
     prior = report.get('operations')
     need(isinstance(prior, list), 'predecessor commands unavailable', Unsupported)
+    need(all(isinstance(c, dict) and isinstance(c.get('body', {}), dict) for c in prior),
+         'predecessor operation shape differs', Failed)
     wanted = [{'operationId': c.get('body', {}).get('operationId'), 'kind': c.get('body', {}).get('kind')}
               for c in prior if c.get('body', {}).get('kind') in ('prompt', 'cancel', 'close')]
     need(len(wanted) == 3 and {r['kind'] for r in wanted} == {'prompt', 'cancel', 'close'}
@@ -723,6 +726,7 @@ def c_predecessor(host, req, ctx, budget, gate_now, obs):
         **{r['kind'] + '_operation': r['operationId'] for r in wanted}}, budget, obs)
     need(len(rows) == 1, 'predecessor projection unavailable', Failed)
     row = rows[0]
+    need(isinstance(row, dict), 'predecessor projection shape differs', Failed)
     supported_schema(row)
     observed = fresh_ms(row.get('observedMs'))
     need(row.get('databaseName') == host.cfg.raw['hubDb']['database'], 'predecessor database changed', Failed)
@@ -730,7 +734,7 @@ def c_predecessor(host, req, ctx, budget, gate_now, obs):
     need(isinstance(commands, list) and len(commands) == 3, 'predecessor command cardinality', Failed)
     ids = set()
     for expected, c in zip(wanted, commands):
-        need(set(c) == {'id', 'operation_id', 'session_id', 'generation', 'kind', 'state', 'receipt'}
+        need(isinstance(c, dict) and set(c) == {'id', 'operation_id', 'session_id', 'generation', 'kind', 'state', 'receipt'}
              and is_uuid(c['id']) and c['id'] not in ids and c['operation_id'] == expected['operationId']
              and c['kind'] == expected['kind'] and c['session_id'] == ctx['sessionId'] and c['generation'] == 1
              and c['state'] == 'completed', 'predecessor command differs', Failed)
