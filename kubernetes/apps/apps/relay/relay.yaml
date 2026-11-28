@@ -32,8 +32,8 @@ spec:
       labels:
         app: relay
       annotations:
-        chifor.me/release: relay-0.14.1-release-152924
-        chifor.me/source-commit: 5f90d03a6ed291e6c62dfde75938ba07c20d8902
+        chifor.me/release: relay-0.14.2-release-155373
+        chifor.me/source-commit: 82cc8cb98dfb941256e341facdce4a7f9b453ed9
         backup.velero.io/backup-volumes: data,dumps
     spec:
       automountServiceAccountToken: false
@@ -134,7 +134,7 @@ spec:
           mountPath: /tmp
       # Earlier schema history: 080-088 by v0.11.1, 089 by v0.11.4, 090-091 by v0.12.0, 092 by v0.12.1.
       # See relay-researcher-hub-upgrade.md H11/H12/H15/H16 for schema-matching recovery releases.
-      # Same-schema 93 rollback target: v0.13.2, sha256:ce79dec456861f3d70cf9c27be42b6fffd31ddcaf762b83974f42299d99e3b83
+      # Same-schema 93 rollback target: v0.14.1, sha256:eb6a99bf99c0ed2e1a3db3ebe42e93aebf3e0ae3cabe3498ed2a19094e3227da
       # (a re-pin: v0.14.x adds no migration). Procedure: docs/runbooks/relay-expired-binding-renewal-20261126.md#rollback-within-schema-93.
       # FORWARD-ONLY: schema 93 (093 by v0.13.0: native recovery versions 1/2 and explicit acknowledgement
       # of unknown tool effects on a resume). Older images may start on unsupported newer schemas, and
@@ -151,10 +151,10 @@ spec:
       # (H16 to v0.12.0, H15 to v0.11.6, H12 to v0.11.3, H11 to v0.10.25); below v0.10.2 restore the v0.10.2 rollout's
       # pre-migration generation 20261115T162747Z-119fcc01-b84d-4be5-a80c-ac5196caaf73 (else H1's), fence,
       # then a reviewed PR re-pins v0.9.1 (runbook "Rollback", the H2 mechanics).
-      # Relay v0.14.1, source 5f90d03a6ed291e6c62dfde75938ba07c20d8902.
-      # release v0.14.1 / run 152924; schema 93 unchanged; console design alignment (opt-in), holder Pi controls,
-      # acknowledgement metrics (#725). Owner decision 2026-11-27: roll now; phase A re-pins to this hub.
-      - image: registry.chifor.me/relay/control-plane@sha256:eb6a99bf99c0ed2e1a3db3ebe42e93aebf3e0ae3cabe3498ed2a19094e3227da
+      # Relay v0.14.2, source 82cc8cb98dfb941256e341facdce4a7f9b453ed9.
+      # release v0.14.2 / run 155373; schema 93 unchanged; the designed console by default, console audit fixes
+      # (#731), finish revoking retired router bindings (#733).
+      - image: registry.chifor.me/relay/control-plane@sha256:662e32c7cb8584344e04101ae0557a8d0f0f34ef7ee47d4258ce415b2d0cd26f
         workingDir: /app
         envFrom:
         - secretRef:
@@ -206,10 +206,10 @@ spec:
             cpu: '1'
             memory: 512Mi
       containers:
-      # Relay v0.14.1, source 5f90d03a6ed291e6c62dfde75938ba07c20d8902.
-      # release v0.14.1 / run 152924; schema 93 unchanged; console design alignment (opt-in), holder Pi controls,
-      # acknowledgement metrics (#725). Owner decision 2026-11-27: roll now; phase A re-pins to this hub.
-      - image: registry.chifor.me/relay/control-plane@sha256:eb6a99bf99c0ed2e1a3db3ebe42e93aebf3e0ae3cabe3498ed2a19094e3227da
+      # Relay v0.14.2, source 82cc8cb98dfb941256e341facdce4a7f9b453ed9.
+      # release v0.14.2 / run 155373; schema 93 unchanged; the designed console by default, console audit fixes
+      # (#731), finish revoking retired router bindings (#733).
+      - image: registry.chifor.me/relay/control-plane@sha256:662e32c7cb8584344e04101ae0557a8d0f0f34ef7ee47d4258ce415b2d0cd26f
         workingDir: /app
         envFrom:
         - secretRef:
