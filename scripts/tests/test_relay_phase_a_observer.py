@@ -645,6 +645,77 @@ class RoundTwo(unittest.TestCase):
         self.assertIsNone(g.busy)
 
 
+def dw_namespace():
+    """dw.py's functions (not its main), with module globals that a test may replace."""
+    src = (SCRIPTS / "relay-phase-a" / "remote" / "dw.py").read_text()
+    ns = {"__name__": "dw"}
+    exec(compile(src.split("\ndef main():")[0], "dw", "exec"), ns)
+    return ns
+
+
+class RemoteContainment(unittest.TestCase):
+    """The ACTUAL remote start mode, with slow reads: containment always happens inside the stop reserve."""
+
+    def setUp(self):
+        self.ns = dw_namespace()
+        self.calls = []
+        ns = self.ns
+        ns["STOP_RESERVE_S"], ns["MIN_CONTAINED_START_S"] = 1.0, 0.5
+        ns["journal"] = lambda d: {"admission": {"paused": True}}
+        ns["systemd"] = lambda unit, deadline=None: {"active": "inactive", "argv": [], "mainPid": 0}
+        ns["run_bounded"] = lambda argv, seconds: self.calls.append((argv[2], seconds)) or 0
+        ns["hello"] = lambda state_dir, wait_s=0.0, deadline=None: None
+
+    def test_a_slow_status_read_is_contained_before_the_reserve(self):
+        def slow_holder(state_dir, deadline=None):  # a status read that takes all the time it is given
+            time.sleep(max(0.0, deadline - time.monotonic()))
+            return {"status": None}
+        self.ns["holder"] = slow_holder
+        t0 = time.monotonic()
+        out = self.ns["mutate_start_holder"]("/x", 3)
+        self.assertLessEqual(time.monotonic() - t0, 3 - 1.0 + 0.6)  # stop issued inside the reserve
+        self.assertEqual([c[0] for c in self.calls], ["start", "stop"])
+        self.assertEqual((out["paused"], out["contained"]), (False, True))
+
+    def test_an_exception_after_the_start_is_contained(self):
+        def boom(state_dir, deadline=None):
+            raise OSError("socket")
+        self.ns["holder"] = boom
+        out = self.ns["mutate_start_holder"]("/x", 3)
+        self.assertEqual([c[0] for c in self.calls], ["start", "stop"])
+        self.assertTrue(out["contained"])
+
+    @unittest.skipUnless(os.name == "posix", "signals")
+    def test_sigterm_during_the_readback_still_contains(self):
+        import signal as sg
+
+        def term(state_dir, deadline=None):
+            os.kill(os.getpid(), sg.SIGTERM)  # the outer timeout's SIGTERM, mid-readback
+            time.sleep(0.2)
+            return {"status": {"admissionPaused": True}}
+        self.ns["holder"] = term
+        out = self.ns["mutate_start_holder"]("/x", 3)
+        self.assertEqual([c[0] for c in self.calls], ["start", "stop"])
+        self.assertTrue(out["contained"])
+        self.assertEqual(sg.getsignal(sg.SIGTERM), sg.SIG_DFL)  # the original handler is restored
+
+    def test_the_resume_mode_fits_its_own_bound(self):
+        seen = []
+        self.ns["maintenance_status"] = lambda d, deadline=None: (seen.append(deadline - time.monotonic()), {
+            "admissionPaused": True, "admissionRevision": 1, "activeSessions": 0, "pendingCommands": 0,
+            "sealed": False})[1]
+        self.ns["journal"] = lambda d: {}
+        runs = []
+        self.ns["run_bounded"] = lambda argv, seconds: runs.append((argv, seconds)) or 0
+        out = self.ns["mutate_resume"]("/x", 1, u(9), 32)
+        self.assertEqual(len(runs), 1)
+        self.assertIn("resume", runs[0][0])  # docker run ... holder-maintenance.js <dir> resume <rev> <op>
+        self.assertLessEqual(runs[0][1], 20)
+        self.assertLessEqual(seen[0], 10.5)  # the pre-status got at most 10 s
+        self.assertLessEqual(seen[1], 32)  # the post-status ends inside the bound
+        self.assertTrue(out["resumed"])
+
+
 class Gates(unittest.TestCase):
     def test_c10_c11_and_the_projection_stay_unsupported(self):
         for fn in (C.c_reconcile_choice, C.c_retire_branch, C.c_predecessor):
@@ -788,7 +859,7 @@ class Handoff(unittest.TestCase):
     def test_outside_the_window_no_mutation(self):
         h = self.host({"holder": holder_rec(paused=True), "classify-handoff": holder_rec(paused=True)}, window=(0, 1))
         with self.assertRaises(O.Failed):
-            H.c_preserving_holder(h, {}, self.ctx(), budget(), 0, {})
+            H.c_preserving_holder(h, {}, self.ctx(), budget(90_000), 0, {})
         self.assertNotIn("mutate-resume", h.remote.calls)
         self.assertEqual(h.ledger.records()[-1]["outcome"], "failed")
 
@@ -813,7 +884,7 @@ class Handoff(unittest.TestCase):
         h.remote.answers["sql:holder-health.sql"] = [{"journal_id": CFG["holder"]["newJournalId"],
                                                       "admission_paused": False, "native_state_ready": True,
                                                       "observed_ms": int(time.time() * 1000) + 60_000}]
-        v = H.c_preserving_holder(h, {}, self.ctx(), budget(), int(time.time() * 1000), {})
+        v = H.c_preserving_holder(h, {}, self.ctx(), budget(90_000), int(time.time() * 1000), {})
         self.assertTrue(v["preservedOldStateConfirmed"])
         Handoff.last_value = v  # checked by the pinned driver's own preservingHandoff() below
         ops = [(r["op"], r["phase"], r.get("outcome")) for r in h.ledger.records()]
@@ -825,7 +896,7 @@ class Handoff(unittest.TestCase):
         h = self.host({"holder": holder_rec(paused=True), "mutate-resume": O.Deadline("ssh timed out"),
                        "classify-handoff": holder_rec(paused=False)})
         with self.assertRaises(O.Deadline):
-            H.c_preserving_holder(h, {}, self.ctx(), budget(), 0, {})
+            H.c_preserving_holder(h, {}, self.ctx(), budget(90_000), 0, {})
         last = h.ledger.records()[-1]
         self.assertEqual((last["op"], last["outcome"], last["interruptedStage"]), ("handoff", "failed", "resume"))
         self.assertEqual(last["state"]["admissionPaused"], False)

@@ -11,6 +11,7 @@ stop, admission resume, unit enable plus reconciliation start) are the handoff's
 """
 import datetime
 import hashlib
+import signal
 import json
 import os
 import socket
@@ -71,6 +72,13 @@ def now_ms():
     return int(time.time() * 1000)
 
 
+def left(deadline, cap):
+    """Seconds for the next step: at most `cap`, never past the absolute monotonic `deadline` (None = cap)."""
+    if deadline is None:
+        return cap
+    return max(0.0, min(cap, deadline - time.monotonic()))
+
+
 # ------------------------------------------------------------------------------------------ marker (observe.py)
 def file_evidence(dfd, name, expected):
     try:
@@ -127,16 +135,18 @@ def marker(provider, run, phase, not_before):
 
 
 # ------------------------------------------------------------------------------------------ holder
-def hello(state_dir, wait_s=0.0):
+def hello(state_dir, wait_s=0.0, deadline=None):
     sock = os.path.join(state_dir, "control.sock")
-    end = time.monotonic() + wait_s
+    end = time.monotonic() + left(deadline, wait_s)
     while True:
+        if left(deadline, 10) <= 0.2:
+            return None
         try:
             st = os.lstat(sock)
             if not stat.S_ISSOCK(st.st_mode) or st.st_uid != UID or stat.S_IMODE(st.st_mode) & 0o077:
                 return None
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.settimeout(10)
+            s.settimeout(max(0.2, left(deadline, 10)))
             s.connect(sock)
             s.sendall(b'{"version":1,"action":{"type":"hello"}}\n')
             buf = b""
@@ -156,10 +166,10 @@ def hello(state_dir, wait_s=0.0):
         time.sleep(1)
 
 
-def systemd(unit):
+def systemd(unit, deadline=None):
     p = subprocess.run(["systemctl", "--user", "show", unit, "-p", "ActiveState", "-p", "SubState", "-p", "MainPID",
                         "-p", "NRestarts", "-p", "UnitFileState", "-p", "DropInPaths", "-p", "ExecStart"],
-                       capture_output=True, text=True, timeout=10)
+                       capture_output=True, text=True, timeout=max(1.0, left(deadline, 10)))
     d = dict(line.split("=", 1) for line in p.stdout.splitlines() if "=" in line)
     x = d.get("ExecStart", "")
     argv = x.split("argv[]=", 1)[1].split(" ;", 1)[0].split() if "argv[]=" in x else []
@@ -190,12 +200,15 @@ MAINTENANCE_IMAGE = ("registry.chifor.me/relay/control-plane@sha256:"
                      "7fce02539992382d946ce523ead109cd3a325a8112fe60b619ed783cef7295ed")
 
 
-def maintenance_status(state_dir):
+def maintenance_status(state_dir, deadline=None):
     """holder-maintenance `status` (it answers only a RUNNING holder, over its private socket)."""
-    p = subprocess.run(["timeout", "--kill-after=2", "40", "docker", "run", "--rm", "--network", "none",
+    t = int(left(deadline, 40))
+    if t < 3:  # no time for a reliable read: the caller treats "no status" as NOT paused
+        return None
+    p = subprocess.run(["timeout", "--kill-after=2", str(t), "docker", "run", "--rm", "--network", "none",
                         "--user", "1000:1000", "-v", state_dir + ":" + state_dir, MAINTENANCE_IMAGE, "node",
                         "dist/scripts/holder-maintenance.js", state_dir, "status"],
-                       capture_output=True, timeout=45)
+                       capture_output=True, timeout=t + 5)
     if p.returncode != 0:
         return None
     d = json.loads(p.stdout)
@@ -206,11 +219,11 @@ def maintenance_status(state_dir):
             "sealed": bool(d.get("sealId"))}
 
 
-def holder(state_dir):
-    h = hello(state_dir)
+def holder(state_dir, deadline=None):
+    h = hello(state_dir, deadline=deadline)
     rec = {"observedMs": now_ms(), "hello": None, "journal": journal(state_dir),
-           "units": {u: systemd(u) for u in UNITS}}
-    rec["status"] = maintenance_status(state_dir) if h is not None else None
+           "units": {u: systemd(u, deadline) for u in UNITS}}
+    rec["status"] = maintenance_status(state_dir, deadline) if h is not None else None
     if h is not None:
         sessions = h.get("sessions")
         profs = h.get("profiles") or []
@@ -355,6 +368,7 @@ def run_bounded(argv, seconds):
 
 STOPPED = ("inactive", "failed")
 STOP_RESERVE_S = 40  # always left for a verified stop (systemctl stop 30 s + readback)
+MIN_CONTAINED_START_S = 45  # less than this before the containment boundary: refuse to start at all
 
 
 def stop_and_verify():
@@ -373,21 +387,33 @@ def mutate_start_holder(state_dir, deadline_s):
         return {"started": False, "why": "units-not-inactive", "units": u}
     if not (j["admission"] and j["admission"]["paused"] is True):
         return {"started": False, "why": "journal-admission-not-paused", "journal": j}
-    end = time.monotonic() + deadline_s - STOP_RESERVE_S
-    if end - time.monotonic() < 45:
+    end = time.monotonic() + deadline_s - STOP_RESERVE_S  # the containment boundary: STOP_RESERVE_S stays free
+    if end - time.monotonic() < MIN_CONTAINED_START_S:
         return {"started": False, "why": "budget-too-small-for-a-contained-start"}
+
+    class Contain(Exception):
+        pass
+
+    def on_term(signum, frame):  # the outer timeout's SIGTERM must still run containment, not end the process
+        raise Contain()
+
+    old = signal.signal(signal.SIGTERM, on_term)
     rc, rec, paused = None, None, False
     try:
-        rc = run_bounded(["systemctl", "--user", "start", "relay-holder.service"],
-                         max(1, int(min(20, end - time.monotonic()))))
-        hello(state_dir, wait_s=max(0.0, min(15.0, end - time.monotonic() - 25)))
-        rec = holder(state_dir)
+        rc = run_bounded(["systemctl", "--user", "start", "relay-holder.service"], max(1, int(left(end, 20))))
+        hello(state_dir, wait_s=left(end, 15), deadline=end)
+        rec = holder(state_dir, deadline=end)  # every read stops at the boundary: no status = not paused
         paused = bool(rec.get("status")) and rec["status"].get("admissionPaused") is True
-    except BaseException:  # noqa: BLE001 - an exception after the start is contained like an unpaused start
+    except BaseException:  # noqa: BLE001 - an exception or SIGTERM after the start is contained like an unpaused start
         paused = False
-    if not paused:  # contain HERE, on this host: not dependent on the response reaching the operator
-        return {"started": rc == 0, "rc": rc, "paused": False, **stop_and_verify(), "holder": rec}
-    return {"started": rc == 0, "rc": rc, "paused": True, "contained": False, "holder": rec}
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)  # containment itself must not be interrupted
+    try:
+        if not paused:  # contain HERE, on this host: not dependent on the response reaching the operator
+            return {"started": rc == 0, "rc": rc, "paused": False, **stop_and_verify(), "holder": rec}
+        return {"started": rc == 0, "rc": rc, "paused": True, "contained": False, "holder": rec}
+    finally:
+        signal.signal(signal.SIGTERM, old)
 
 
 def mutate_stop_holder():
@@ -395,16 +421,20 @@ def mutate_stop_holder():
     return {"stopped": s["contained"], **s, "units": {x: systemd(x) for x in UNITS}}
 
 
-def mutate_resume(state_dir, revision, operation):
+def mutate_resume(state_dir, revision, operation, deadline_s):
+    """Every step fits the caller's bound: pre-status <= 10 s, the resume <= 20 s, the post-status what is left."""
     operation = canon_uuid(operation)
-    s = maintenance_status(state_dir)
+    end = time.monotonic() + deadline_s
+    if deadline_s < 30:
+        return {"resumed": False, "why": "budget-too-small"}
+    s = maintenance_status(state_dir, time.monotonic() + min(10, deadline_s - 20))
     if not s or s["admissionPaused"] is not True or s["admissionRevision"] != revision or s["activeSessions"] != 0 \
             or s["pendingCommands"] != 0 or s["sealed"]:
         return {"resumed": False, "why": "precondition", "status": s}
     rc = run_bounded(["docker", "run", "--rm", "--network", "none", "--user", "1000:1000", "-v",
                       state_dir + ":" + state_dir, MAINTENANCE_IMAGE, "node", "dist/scripts/holder-maintenance.js",
-                      state_dir, "resume", str(revision), operation], 25)
-    return {"resumed": rc == 0, "rc": rc, "status": maintenance_status(state_dir), "journal": journal(state_dir)}
+                      state_dir, "resume", str(revision), operation], max(1, int(left(end - 6, 20))))
+    return {"resumed": rc == 0, "rc": rc, "status": maintenance_status(state_dir, end - 1), "journal": journal(state_dir)}
 
 
 def mutate_enable_start():
@@ -427,8 +457,8 @@ def main():
     if m == "mutate-stop-holder" and len(a) == 1:
         out(mutate_stop_holder())
         return
-    if m == "mutate-resume" and len(a) == 4 and a[2].isdigit():
-        out(mutate_resume(a[1], int(a[2]), a[3]))
+    if m == "mutate-resume" and len(a) == 5 and a[2].isdigit() and a[4].isdigit():
+        out(mutate_resume(a[1], int(a[2]), a[3], int(a[4])))
         return
     if m == "mutate-enable-start" and len(a) == 1:
         out(mutate_enable_start())

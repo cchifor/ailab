@@ -234,8 +234,9 @@ def prerun(host: ObserverHost, budget) -> dict:
         host.ledger.append(op="pre-run-start", phase="receipt", outcome="not-started-lease-lost")
         raise LeaseLostError("the Lease was lost before the start")
     try:
-        # the remote run gets 120 s, of which dw.py always keeps STOP_RESERVE_S for a verified stop
-        started = host.remote.dw(["mutate-start-holder", h["stateDir"], "120"], budget, obs, "mutate-start-holder",
+        # dw.py's own deadline (110 s, of which it always keeps STOP_RESERVE_S for a verified stop) ends well inside
+        # the ssh-side `timeout` (cap 130 - 4 = 126 s), so the remote bound never cuts containment short
+        started = host.remote.dw(["mutate-start-holder", h["stateDir"], "110"], budget, obs, "mutate-start-holder",
                                  cap=130)
     except BaseException as e:  # noqa: BLE001 - a lost response: classify on the host, contain if unpaused
         outcome = _classify_start(host, obs)
@@ -317,10 +318,13 @@ def c_preserving_holder(host: ObserverHost, req, ctx, budget, gate_now, obs):
     op = str(uuid.uuid4())
     stage = None
     try:
-        cap = host.mutation_cap(budget, 40)
+        cap = host.mutation_cap(budget, 45)
+        need(cap >= 40, "too little time for a bounded resume", Failed)
         stage = "resume"
         host.ledger.append(op="resume", phase="intent", operationId=op, revision=rev)
-        res = host.remote.dw(["mutate-resume", h["stateDir"], str(rev), op], budget, obs, "mutate-resume", cap=cap)
+        # the mode's own deadline is inside the ssh-side bound (cap - 4): its steps never outlive the remote timeout
+        res = host.remote.dw(["mutate-resume", h["stateDir"], str(rev), op, str(int(cap - 8))], budget, obs,
+                             "mutate-resume", cap=cap)
         jr = (res.get("journal") or {}).get("admission") or {}
         ok = res.get("resumed") is True and (res.get("status") or {}).get("admissionPaused") is False \
             and jr.get("paused") is False and jr.get("operationId") == op
