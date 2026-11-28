@@ -279,9 +279,9 @@
       (b) => b.toString(16).padStart(2, "0"),
     ).join("");
   }
-  function markerCommand(provider, run, kind) {
+  function markerCommand(provider, run, kind, profiles = PROFILES) {
     need(
-      PROFILES[provider] && uuid(run) && ["denied", "effects"].includes(kind),
+      profiles[provider] && uuid(run) && ["denied", "effects"].includes(kind),
       "Invalid marker selection",
     );
     return (
@@ -290,7 +290,7 @@
       "-" +
       run +
       "' >> '/home/c4/.local/state/relay-holder/workspaces/" +
-      PROFILES[provider].id +
+      profiles[provider].id +
       "/acceptance-" +
       run +
       "." +
@@ -298,11 +298,11 @@
       "'"
     );
   }
-  function marker(report, provider, run, phase, now) {
+  function marker(report, provider, run, phase, now, profiles = PROFILES) {
     need(
       report?.version === 1 &&
         report.provider === provider &&
-        report.profileId === PROFILES[provider].id &&
+        report.profileId === profiles[provider]?.id &&
         report.runId === run &&
         report.phase === phase &&
         report.state === "observed" &&
@@ -317,7 +317,7 @@
     );
     for (const k of ["denied", "effects"])
       need(
-        report.commands?.[k] === markerCommand(provider, run, k),
+        report.commands?.[k] === markerCommand(provider, run, k, profiles),
         "Marker command changed",
       );
     need(report.files?.denied?.state === "absent", "Denied marker exists");
@@ -349,7 +349,7 @@
       version: 1,
       observedUtc: report.observedUtc,
       provider,
-      profileId: PROFILES[provider].id,
+      profileId: profiles[provider].id,
       runId: run,
       phase,
       state: "observed",
@@ -1168,6 +1168,22 @@
     save() {
       this.env.save(this.state);
     }
+    // Named phase-B entry shares execution guards while these defaults retain
+    // the original phase-A plan and credential-review semantics.
+    phaseText(_name, original) {
+      return original;
+    }
+    effortRunId() {
+      return EFFORT_RUN;
+    }
+    credentialScopeReviewed() {
+      return Boolean(this.state.successorCredentials);
+    }
+    async refreshBeforeLaunch() {
+      if (this.state.successorCredentials)
+        await this.refreshRenewedCredentials();
+    }
+    async afterReconciliation() {}
     record(kind, value) {
       this.state.evidence.push({
         at: new Date(this.now()).toISOString(),
@@ -1656,7 +1672,7 @@
           c.credential.namespace === "default" &&
           c.credential.state === "ready" &&
           c.binding?.currentCredentialId === p.credential &&
-          (!this.state.successorCredentials ||
+          (!this.credentialScopeReviewed() ||
             (r.connection.id === CONNECTION &&
               r.binding.revision === p.revision &&
               r.binding.generation === p.generation &&
@@ -1698,7 +1714,7 @@
         credentialId: p.credential,
         namespace: "default",
         principal: "key:" + p.key,
-        ...(this.state.successorCredentials
+        ...(this.credentialScopeReviewed()
           ? { credentialGeneration: p.generation, expiresAt: p.expiresAt }
           : {}),
       });
@@ -1708,8 +1724,7 @@
       // releases the holder consumer in the same transaction before closing
       // the source session; native recovery rejects an open source. Keep the
       // no-active-consumer rule for recovery too, including unrelated consumers.
-      if (this.state.successorCredentials)
-        await this.refreshRenewedCredentials();
+      await this.refreshBeforeLaunch();
       const p = this.profiles[this.run.provider],
         operationId = this.crypto.randomUUID(),
         previous = recovery ? this.launchRow : null;
@@ -2190,6 +2205,7 @@
                     this.run.runId,
                     phase,
                     this.now(),
+                    this.profiles,
                   ),
                 }
               : {}),
@@ -2290,7 +2306,7 @@
     }
     async phase(provider, effort = false) {
       const p = this.profiles[provider],
-        runId = effort ? EFFORT_RUN : p.run;
+        runId = effort ? this.effortRunId() : p.run;
       const replacement =
         provider === "codex" && !effort ? this.state.replacement : null;
       if (replacement) {
@@ -2333,7 +2349,12 @@
           ": operator pre-launch handoff",
         "Paste {trajectory: fresh scoped snapshot, marker: baseline observe.py report, coverageConfirmed:true, holderReadyConfirmed:true, routeConfirmed:true, clocksWithin5s:true}. Operator must verify browser/collector/observer clocks differ by at most 5 s, and freshly confirm holder " +
           this.holderId +
-          ", zero unrelated work, published pins, one attempt/no fallback; Codex route alias canary-pi-codex, model gpt-6-astra. Verify the target account against the current owner-approved route readback. Run UUID " +
+          ", zero unrelated work, published pins, one attempt/no fallback; " +
+          this.phaseText(
+            "routeHandoff",
+            "Codex route alias canary-pi-codex, model gpt-6-astra.",
+          ) +
+          " Verify the target account against the current owner-approved route readback. Run UUID " +
           runId +
           ". This starts the first actual launch; no probe.",
         (v) => {
@@ -2350,7 +2371,14 @@
             "Stale trajectory baseline",
           );
           return {
-            marker: marker(v.marker, provider, runId, "baseline", this.now()),
+            marker: marker(
+              v.marker,
+              provider,
+              runId,
+              "baseline",
+              this.now(),
+              this.profiles,
+            ),
             trajectory: snapshot(v.trajectory, provider, ROUTER, this.profiles),
           };
         },
@@ -2399,7 +2427,14 @@
           ".",
         (v) => {
           need(v?.deliveryConfirmed === true, "Delivery handoff missing");
-          const m = marker(v.marker, provider, runId, "baseline", this.now());
+          const m = marker(
+            v.marker,
+            provider,
+            runId,
+            "baseline",
+            this.now(),
+            this.profiles,
+          );
           this.collectedAfter(openBoundary, null, m);
           unchangedBaseline(pre.marker, m);
           return { marker: m };
@@ -2440,7 +2475,10 @@
     }
     async lifecycle() {
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly READY. Do not use other tools or modify files.",
+        this.phaseText(
+          "ready",
+          "After any required scoped Relay message read, reply exactly READY. Do not use other tools or modify files.",
+        ),
         { expectedText: "READY" },
       );
       const known = await this.evidence(
@@ -2448,10 +2486,22 @@
         "baseline",
       );
       need(known.added >= 1, "Recorder coverage not exercised");
-      const prefix =
-        "After any required scoped Relay message read, request permission to run exactly the following shell command once. Do not run any other command, change the command, retry after denial, or modify any other file. After the decision, report the outcome and stop. COMMAND: ";
-      const denied = markerCommand(this.run.provider, this.run.runId, "denied"),
-        effects = markerCommand(this.run.provider, this.run.runId, "effects");
+      const prefix = this.phaseText(
+        "markerPrefix",
+        "After any required scoped Relay message read, request permission to run exactly the following shell command once. Do not run any other command, change the command, retry after denial, or modify any other file. After the decision, report the outcome and stop. COMMAND: ",
+      );
+      const denied = markerCommand(
+          this.run.provider,
+          this.run.runId,
+          "denied",
+          this.profiles,
+        ),
+        effects = markerCommand(
+          this.run.provider,
+          this.run.runId,
+          "effects",
+          this.profiles,
+        );
       await this.prompt(prefix + denied, {
         tool: denied,
         decision: "reject_once",
@@ -2484,19 +2534,28 @@
         true,
       );
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly BRANCH_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        this.phaseText(
+          "branch",
+          "After any required scoped Relay message read, reply exactly BRANCH_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        ),
         { expectedText: "BRANCH_OK" },
       );
       await this.evidence("Independent branch completion", "approved");
       await this.prompt("/relay-compact", { notice: "History compacted." });
       await this.evidence("Compaction settled", "approved");
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly COMPACT_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        this.phaseText(
+          "compact",
+          "After any required scoped Relay message read, reply exactly COMPACT_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        ),
         { expectedText: "COMPACT_OK" },
       );
       await this.evidence("Compacted history continuation", "approved");
       await this.prompt(
-        "After any required scoped Relay message read, count upward from 1, one integer per line, until 500. Do not use other tools or modify files.",
+        this.phaseText(
+          "cancel",
+          "After any required scoped Relay message read, count upward from 1, one integer per line, until 500. Do not use other tools or modify files.",
+        ),
         { cancel: true },
       );
       await this.evidence("Cancellation settled; no tool effect", "approved");
@@ -2558,6 +2617,7 @@
         await this.prompt("/relay-reconcile confirmed", {
           notice: "Previous branch retired.",
         });
+        await this.afterReconciliation();
         await this.evidence(
           "Explicit reconstruction made no recorded attempts",
           "recovered",
@@ -2565,7 +2625,10 @@
         );
       }
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly RECOVERED_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        this.phaseText(
+          "recovered",
+          "After any required scoped Relay message read, reply exactly RECOVERED_OK. Do not use other tools, repeat earlier commands, or modify files.",
+        ),
         { expectedText: "RECOVERED_OK" },
       );
       await this.evidence(
@@ -2576,7 +2639,10 @@
     async effort() {
       await this.setEffort("low");
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly EFFORT_LOW_OK. Do not use other tools, access files or modify anything.",
+        this.phaseText(
+          "low",
+          "After any required scoped Relay message read, reply exactly EFFORT_LOW_OK. Do not use other tools, access files or modify anything.",
+        ),
         { expectedText: "EFFORT_LOW_OK" },
       );
       const low = await this.evidence(
@@ -2586,7 +2652,10 @@
       need(low.added >= 1, "Effort recorder coverage missing");
       await this.setEffort("high");
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly EFFORT_HIGH_PROBE. Do not use other tools, access files or modify anything.",
+        this.phaseText(
+          "highProbe",
+          "After any required scoped Relay message read, reply exactly EFFORT_HIGH_PROBE. Do not use other tools, access files or modify anything.",
+        ),
         { backendRefusal: true },
       );
       await this.evidence(
@@ -2612,13 +2681,17 @@
       await this.prompt("/relay-reconcile confirmed", {
         notice: "Previous branch retired.",
       });
+      await this.afterReconciliation();
       await this.evidence(
         "Explicit reconstruction made no recorded attempts",
         null,
         true,
       );
       await this.prompt(
-        "After any required scoped Relay message read, reply exactly EFFORT_HIGH_OK. Do not use other tools, access files or modify anything.",
+        this.phaseText(
+          "high",
+          "After any required scoped Relay message read, reply exactly EFFORT_HIGH_OK. Do not use other tools, access files or modify anything.",
+        ),
         { expectedText: "EFFORT_HIGH_OK" },
       );
       await this.evidence("High effort completed on successor branch", null);
