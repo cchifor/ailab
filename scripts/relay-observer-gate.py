@@ -25,6 +25,7 @@ SOCKET = os.environ.get("RELAY_OBSERVER_SOCKET", "/run/relay-session/observer.so
 MAX_REQUEST = 64 * 1024
 MAX_REPLY = 512 * 1024
 READ_S = 5.0
+MAX_REFUSALS = 8  # ancillary readers never occupy the admitted handler's token or block accept()
 MAX_WAIT_S = 130.0  # no checkpoint is longer than 120 s; a request deadline beyond this is clamped
 CALLS = ("checkpoint", "deployment", "predecessor")
 
@@ -107,6 +108,8 @@ class Gate:
         self.terminal = None  # None, "cancelled" or "observer-down"
         self.replies = {}  # seq -> raw reply line (bytes)
         self.waiting = None  # the seq currently awaited
+        self.refusals = {}  # socket -> worker, capped independently of the admitted handler
+        self.refusals_closed = False
 
     # ------------------------------------------------------------------ host side
     def emit(self, obj) -> None:
@@ -190,6 +193,55 @@ class Gate:
         with self.cond:
             if self.busy == token:
                 self.busy = None
+
+    def refuse_connection(self, conn, code) -> None:
+        """Consume one bounded request before closing, so a delayed writer can receive the refusal."""
+        try:
+            try:
+                self.read_request(conn)
+            except (Bad, OSError) as e:
+                diag(e.args[0] if isinstance(e, Bad) else "request-io")
+            with self.cond:
+                code = self.terminal or code  # cancellation still takes priority if it arrived during the read
+            self.answer(conn, {"v": 1, "ok": False, "code": code})
+        finally:
+            conn.close()
+            with self.cond:
+                self.refusals.pop(conn, None)
+                self.cond.notify_all()
+
+    def start_refusal(self, conn, code) -> None:
+        """Keep bounded refusal reads off accept(). Overload closes only this declined connection."""
+        with self.cond:
+            if self.refusals_closed or len(self.refusals) >= MAX_REFUSALS:
+                conn.close()
+                return
+            worker = threading.Thread(target=self.guarded, args=(self.refuse_connection, conn, code), daemon=True)
+            self.refusals[conn] = worker
+            try:
+                worker.start()  # registered and started before shutdown can snapshot the workers
+            except BaseException:
+                self.refusals.pop(conn)
+                conn.close()
+                raise
+            self.cond.notify_all()
+
+    def close_refusals(self) -> None:
+        """Wake and join every owned refusal reader within one existing I/O budget."""
+        with self.cond:
+            self.refusals_closed = True
+            pending = tuple(self.refusals.items())
+        end = time.monotonic() + READ_S
+        for conn, _ in pending:
+            try:
+                conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            conn.close()
+        for _, worker in pending:
+            worker.join(max(0.0, end - time.monotonic()))
+        if any(worker.is_alive() for _, worker in pending):
+            raise RuntimeError("refusal-shutdown-timeout")
 
     def handle(self, conn, token) -> None:
         try:
@@ -291,23 +343,25 @@ class Gate:
         srv.listen(8)
         threading.Thread(target=self.guarded, args=(self.read_host,), daemon=True).start()
         self.emit({"ready": True})
-        while True:
-            conn, _ = srv.accept()
-            token = object()
-            with self.cond:
-                terminal = self.terminal  # a terminal state answers first: never "busy" after a cancel
-                busy = terminal is None and self.busy is not None
-                if terminal is None and not busy:
-                    self.busy = token
-            if terminal is not None:
-                self.answer(conn, {"v": 1, "ok": False, "code": terminal})
-                conn.close()
-                continue
-            if busy:
-                self.answer(conn, {"v": 1, "ok": False, "code": "busy"})
-                conn.close()
-                continue
-            threading.Thread(target=self.guarded, args=(self.handle, conn, token), daemon=True).start()
+        try:
+            while True:
+                conn, _ = srv.accept()
+                token = object()
+                with self.cond:
+                    terminal = self.terminal  # a terminal state answers first: never "busy" after a cancel
+                    busy = terminal is None and self.busy is not None
+                    if terminal is None and not busy:
+                        self.busy = token
+                if terminal is not None:
+                    self.start_refusal(conn, terminal)
+                    continue
+                if busy:
+                    self.start_refusal(conn, "busy")
+                    continue
+                threading.Thread(target=self.guarded, args=(self.handle, conn, token), daemon=True).start()
+        finally:
+            srv.close()
+            self.close_refusals()
 
     def guarded(self, fn, *args) -> None:
         """Any unexpected error in a gate thread is terminal (observer-down), never a silently dead thread."""
