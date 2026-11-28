@@ -1166,6 +1166,31 @@ for (const [name, options, reason] of [
       f.runner.stopped = true;
       await f.runner.cleanup();
     }
+    if (options.postCasRead) {
+      const decisions = f.calls.filter((v) => v.path.endsWith("/decision"));
+      assert.equal(
+        decisions.length,
+        1,
+        "Cleanup cancels exactly one pending permission",
+      );
+      assert.deepEqual(decisions[0].body.outcome, { outcome: "cancelled" });
+      assert.equal(
+        f.calls.filter((v) => v.body?.text === c.ROWS[1].text).length,
+        0,
+      );
+      assert.equal(
+        f.fence().attempts,
+        101,
+        "Cancellation admits no continuation",
+      );
+      assert.equal(f.fence().state, "closed");
+      assert.equal([...f.permissions.values()][0].state, "resolved");
+      assert.ok(
+        f.runner.state.evidence.some(
+          (v) => v.kind === "cleanup" && v.status === "closed-and-released",
+        ),
+      );
+    }
   });
 
 test("missing trusted clock refuses before warm settings or fence effects", async () => {

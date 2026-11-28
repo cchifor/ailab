@@ -60,7 +60,10 @@ No third settings write occurs when cold and original idle already match.
 
 If a permission arrives after D1's disable CAS begins, the run stops without
 approving it or moving its continuation to another generation. Cleanup can
-cancel that permission. This boundary can leave a legitimate run unqualified;
+cancel that permission through A's inherited cleanup dispatch, which saves the
+cancellation intent and calls `api()` directly. The normal `mutate()` guard
+continues to refuse permission decisions after the CAS; cleanup does not use
+that path or admit a continuation. This boundary can leave a legitimate run unqualified;
 it does not justify changing the fence's generation or increasing its cap.
 
 ## Inputs and predecessor evidence
