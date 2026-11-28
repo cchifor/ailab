@@ -13,13 +13,14 @@ function setup({
   lose,
 } = {}) {
   let now = NOW,
+    fixtureClockStep = 0,
     attempts = 0,
     tokenUsageUnknown = 0,
     stopped = false;
   const state = { operations: [], phases: [] },
     saves = [];
   const backend = fixture.transport({
-    now: () => now,
+    now: () => (now += fixtureClockStep),
     keyId: KEY,
     tenantId: "00000000-0000-4000-8000-000000000001",
     saves,
@@ -90,7 +91,36 @@ function setup({
     advanceClock: (ms) => {
       now += ms;
     },
+    advanceFixtureClockOnRead: () => {
+      fixtureClockStep = 10;
+    },
   };
+}
+for (const mutation of ["arm", "close"]) {
+  test(`synthetic ${mutation} receipt uses one commit timestamp across clock reads`, async () => {
+    const f = setup();
+    await f.controller.initialize();
+    if (mutation === "close") await f.controller.row(f.run, "ready", null);
+    // Only the synthetic service clock advances; the actual Controller still
+    // validates every byte of its receipt against the immutable prior state.
+    f.advanceFixtureClockOnRead();
+    if (mutation === "arm") await f.controller.row(f.run, "ready", null);
+    else await f.controller.close(f.terminal(), true);
+    const operation = f.state.operations.at(-1);
+    assert.equal(operation.status, "committed");
+    assert.equal(
+      operation.receipt.fence[mutation === "arm" ? "createdAt" : "closedAt"],
+      operation.receipt.committedAt,
+    );
+    assert(
+      f.backend.calls.at(-1).request.notBefore < operation.receipt.committedAt,
+      "the regression must cross clock ticks inside the synthetic mutation",
+    );
+    assert.equal(
+      f.backend.calls.filter((call) => call.method === mutation).length,
+      1,
+    );
+  });
 }
 test("HTTP receipt and recovered operation bind the original raw body, separately from the JWT assertion", async () => {
   const f = setup({ lose: (method) => method === "arm" });
