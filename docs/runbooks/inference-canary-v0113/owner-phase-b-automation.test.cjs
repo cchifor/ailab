@@ -230,23 +230,47 @@ test("B retains unresolved collector cleanup and forbids another run", async (t)
 });
 
 test("B earlier window deadline stops a pending collector", async (t) => {
-  const selected = inputs();
-  selected.window.expiresAt = Date.now() + 100;
-  const f = fixture(t, {
-    phaseInputs: selected,
-    deadline: Date.now() + 10000,
-    collectCheckpoint: ({ signal }) =>
-      new Promise((_, reject) => {
-        signal.addEventListener("abort", () => reject(Error("deadline")), {
-          once: true,
-        });
-      }),
+  t.mock.timers.enable({
+    apis: ["Date", "setTimeout", "setInterval"],
+    now: Date.now(),
   });
+  let entered;
+  const waiting = new Promise((resolve) => {
+    entered = resolve;
+  });
+  let aborted = false;
+  const f = fixture(t, {
+    collectCheckpoint: ({ context, signal }) => {
+      assert.equal(context.kind, "claude-readiness");
+      assert.equal(signal.aborted, false);
+      return new Promise((_, reject) => {
+        signal.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+            reject(Error("deadline"));
+          },
+          { once: true },
+        );
+        entered();
+      });
+    },
+  });
+  // Filesystem setup may take longer than the short execution window. Start
+  // that window after setup, and simulate slow setup without a real sleep.
+  t.mock.timers.tick(1000);
+  f.options.phaseInputs.window.expiresAt = Date.now() + 100;
+  f.options.deadline = Date.now() + 10000;
   const host = createClaudePhaseBAutomation(f.options);
-  const started = Date.now();
-  await assert.rejects(host.run(), /Automation stopped/);
-  assert(Date.now() - started < 1500);
+  const rejected = assert.rejects(host.run(), /Automation stopped/);
+  await waiting;
+  t.mock.timers.tick(99);
+  assert.equal(aborted, false, "collector stays active before the window ends");
+  t.mock.timers.tick(1);
+  assert.equal(aborted, true, "the earlier window deadline cancels the collector");
+  await rejected;
   assert.equal(f.calls(), 0);
+  assert.equal(snapshots(f.directory).at(-1).status, "stopped");
 });
 
 test("A reference validates retained completion/accounting structure without rewriting bytes", () => {
