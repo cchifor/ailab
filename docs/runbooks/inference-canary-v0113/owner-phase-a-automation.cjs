@@ -307,6 +307,94 @@ function createClaudePhaseCAutomation(options) {
   );
 }
 
+function createClaudeActiveDrainAutomation(options) {
+  const drain = require("./owner-active-drain.cjs");
+  // Preserve the exact predecessor report privately. A parsed report or its
+  // hash does not independently authenticate the preceding execution.
+  const raw = JSON.stringify(options.phaseInputs);
+  need(
+    typeof raw === "string" && Buffer.byteLength(raw) <= 2 * 1024 * 1024,
+    "Bounded active-drain inputs required",
+  );
+  const now = Date.now();
+  const checked = drain.inputs(JSON.parse(raw), now);
+  for (const field of [
+    "predecessorRaw",
+    "readPredecessorEvidence",
+    "predecessorEvidencePin",
+    "renewalPrelude",
+    "observeDeployment",
+  ])
+    need(
+      !Object.hasOwn(options, field),
+      "Phase A bootstrap is not an active-drain operation",
+    );
+  // No default window: the caller supplies an existing absolute expiry. A
+  // smaller caller budget refuses rather than silently extending that budget.
+  const deadline = options.deadline;
+  need(
+    Number.isSafeInteger(deadline) &&
+      deadline > now &&
+      deadline <= checked.window.expiresAt &&
+      deadline - now <= 2700000,
+    "Active-drain absolute deadline outside the supplied window or host bound",
+  );
+  const remaining = deadline - now;
+  const callerBudget = options.maxDurationMs ?? remaining;
+  need(
+    Number.isSafeInteger(callerBudget) &&
+      callerBudget > 0 &&
+      callerBudget <= 2700000 &&
+      remaining <= callerBudget,
+    "Active-drain deadline exceeds caller budget",
+  );
+  const supplied = options.claudePorts;
+  need(
+    supplied &&
+      typeof supplied === "object" &&
+      Object.keys(supplied).length === Object.keys(CLAUDE_C_PORTS).length,
+    "Fixed Claude service ports required",
+  );
+  const callbacks = {};
+  for (const [group, names] of Object.entries(CLAUDE_C_PORTS)) {
+    need(
+      supplied[group] && Object.keys(supplied[group]).length === names.length,
+      "Fixed Claude service methods required",
+    );
+    callbacks[group] = {};
+    for (const name of names) {
+      need(
+        typeof supplied[group][name] === "function",
+        "Claude service callback missing",
+      );
+      callbacks[group][name] = supplied[group][name];
+    }
+    Object.freeze(callbacks[group]);
+  }
+  Object.freeze(callbacks);
+  return createHost(
+    { ...options, deadline, maxDurationMs: remaining },
+    {
+      store: (directory, onSnapshot) =>
+        createRunStore(
+          directory,
+          "active-drain-inputs",
+          raw,
+          onSnapshot,
+          () => null,
+        ),
+      claudePorts: callbacks,
+      runner: (env, ports) =>
+        drain.createClaudeActiveDrainRunner(
+          { ...env, executionDeadline: deadline },
+          JSON.parse(raw),
+          ports,
+        ),
+      start: (runner) => runner.start(),
+    },
+  );
+}
+
 function createHost(options, entry) {
   const {
     directory,
@@ -748,6 +836,7 @@ module.exports = {
   createAutomation,
   createClaudePhaseBAutomation,
   createClaudePhaseCAutomation,
+  createClaudeActiveDrainAutomation,
   createStore,
   abortable,
 };
