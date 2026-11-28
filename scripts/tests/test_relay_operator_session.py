@@ -624,6 +624,28 @@ class FinalizationPreparation(unittest.TestCase):
         for value in ("none", "--read-only", "--cap-drop", "ALL", ros.UID, IMAGE):
             self.assertIn(value, calls[0])
 
+    def test_broker_validated_scope_is_accepted_by_real_proxy_before_authority(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("finalization_contract_proxy", ROOT/"scripts/relay-session-proxy.py")
+        proxy = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(proxy)
+        scope = ros._validate_cleanup_scope(self.projection, self.plan)
+        proxy.configure_finalization(scope)
+        self.assertEqual(proxy.STATE.purpose, ros.FINALIZATION_PURPOSE)
+        self.assertEqual(proxy.STATE.historical_sessions, frozenset(scope["sessionIds"]))
+        for name in ("FINALIZATION_BINDINGS", "FINALIZATION_PROFILES"):
+            with self.subTest(drift=name):
+                current = sorted(getattr(proxy, name))
+                changed = frozenset([*current[1:], str(uuid.uuid4())])
+                proxy.STATE = proxy.State()
+                before = (proxy.STATE.purpose, proxy.STATE.historical_sessions)
+                with mock.patch.object(proxy, name, changed):
+                    with self.assertRaises(proxy.Refuse): proxy.configure_finalization(scope)
+                self.assertEqual((proxy.STATE.purpose, proxy.STATE.historical_sessions), before)
+        self.assertEqual(self.w.calls, [])
+        self.assertEqual(self.w.granted, [])
+        self.assertEqual(self.w.revokes, 0)
+
     def test_plan_hash_mismatch_and_report_tampering_stop_before_validator(self):
         self.expected = "f"*64
         with self.assertRaises(ros.Refused): self.prepare()
