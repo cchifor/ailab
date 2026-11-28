@@ -237,6 +237,7 @@ class RunState:
     confirmed: list = field(default_factory=list)  # every C8 confirmation: permission, option, kind, step
     reads: int = 0
     recover_ms: int | None = None  # C9's time: the resumed launch must be created after it
+    retained_branch: dict | None = None  # C9 source session/native/Router facts, never overwritten by resume
 
 
 @dataclass

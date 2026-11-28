@@ -13,7 +13,9 @@ import datetime
 import hashlib
 import signal
 import json
+import math
 import os
+import re
 import socket
 import stat
 import subprocess
@@ -333,6 +335,243 @@ def transcript(native_home):
             "configChangedNotices": notices, "stopReasons": stops}
 
 
+# Acceptance reader for Pi2604/holder64dc. No discovery outside the bound native home,
+# no credential/config contents, no writable descriptors and no arbitrary-file fallback.
+def native_need(value):
+    if not value:
+        raise ValueError("native checkpoint unavailable")
+
+
+def private_dir_identity(path):
+    native_need(os.path.isabs(path) and os.path.realpath(path) == path)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        s = os.fstat(fd)
+        native_need(stat.S_ISDIR(s.st_mode) and s.st_uid == UID and stat.S_IMODE(s.st_mode) == 0o700)
+        native_need(os.path.realpath('/proc/self/fd/' + str(fd)) == path)
+        return {"path": path, "device": str(s.st_dev), "inode": str(s.st_ino), "uid": str(s.st_uid)}
+    finally:
+        os.close(fd)
+
+
+def checkpoint_bytes(path, limit):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        s = os.fstat(fd)
+        native_need(stat.S_ISREG(s.st_mode) and s.st_uid == UID and s.st_nlink == 1
+                    and stat.S_IMODE(s.st_mode) == 0o600 and 0 < s.st_size <= limit
+                    and os.path.realpath('/proc/self/fd/' + str(fd)) == path)
+        pieces, size = [], 0
+        while size <= limit:
+            chunk = os.read(fd, min(65536, limit + 1 - size))
+            if not chunk:
+                break
+            pieces.append(chunk)
+            size += len(chunk)
+        after = os.fstat(fd)
+        native_need(size == s.st_size and size <= limit and all(getattr(s, k) == getattr(after, k)
+                    for k in ('st_dev', 'st_ino', 'st_uid', 'st_gid', 'st_mode', 'st_nlink', 'st_size',
+                              'st_mtime_ns', 'st_ctime_ns')))
+        return b''.join(pieces)
+    finally:
+        os.close(fd)
+
+
+def checkpoint_json(raw):
+    def pairs(items):
+        result = {}
+        for k, v in items:
+            native_need(k not in result)
+            result[k] = v
+        return result
+    def number(text):
+        value = float(text)
+        native_need(math.isfinite(value))
+        return value
+    return json.loads(raw, object_pairs_hook=pairs, parse_float=number,
+                      parse_constant=lambda _: native_need(False))
+
+
+def native_ancestry(raw, native_id, workspace):
+    native_need(len(raw) <= 16 * 1024 * 1024)
+    lines = raw.decode('utf-8-sig').strip('\ufeff \r\n\t').splitlines()
+    native_need(1 < len(lines) <= 100000 and all(len(x.encode()) <= 1024 * 1024 for x in lines))
+    header, *entries = [checkpoint_json(x) for x in lines]
+    native_need(isinstance(header, dict) and set(header) == {'type', 'version', 'id', 'timestamp', 'cwd'}
+                and header.get('type') == 'session' and header.get('version') == 3
+                and header.get('id') == native_id and header.get('cwd') == workspace)
+    stamp = re.compile(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$')
+    def timestamp(value):
+        native_need(isinstance(value, str) and stamp.fullmatch(value))
+        datetime.datetime.strptime(value, '%Y-%m-%dT%H:%M:%S.%fZ')
+    timestamp(header.get('timestamp'))
+    by_id = {}
+    for e in entries:
+        native_need(isinstance(e, dict) and re.fullmatch(r'[a-f0-9]{8}', str(e.get('id', '')))
+                    and e['id'] not in by_id and 'parentId' in e
+                    and (e['parentId'] is None or e['parentId'] in by_id)
+                    and e.get('type') in ('message', 'custom', 'model_change', 'thinking_level_change', 'compaction'))
+        timestamp(e.get('timestamp'))
+        by_id[e['id']] = e
+    branch, leaf = [], entries[-1]
+    while leaf:
+        branch.append(leaf)
+        leaf = by_id.get(leaf['parentId'])
+    branch.reverse()
+    receipt, calls, results, shells = None, {}, {}, []
+    for e in branch:
+        if e['type'] == 'compaction':
+            native_need(not (set(calls) - set(results)))
+        if e['type'] == 'custom':
+            native_need(e.get('customType') == 'relay-inference-session-v1')
+            n = e.get('data')
+            native_need(isinstance(n, dict) and {'conversation', 'branch', 'nativeSession'} <= set(n)
+                        and set(n) <= {'conversation', 'branch', 'nativeSession', 'parent', 'pending', 'reconciledFrom'}
+                        and all(isinstance(v, str) and re.fullmatch(r'[A-Za-z0-9._:-]{1,200}', v) for v in n.values())
+                        and n['nativeSession'] == native_id)
+            receipt = n
+        elif e['type'] == 'message':
+            m = e.get('message')
+            native_need(isinstance(m, dict) and m.get('role') in ('user', 'assistant', 'toolResult', 'system'))
+            content = m.get('content')
+            native_need(isinstance(content, (str, list)))
+            if m['role'] in ('user', 'assistant'):
+                native_need(not (set(calls) - set(results)))
+            if m['role'] == 'toolResult':
+                key = m.get('toolCallId')
+                native_need(isinstance(key, str) and key in calls and key not in results
+                            and type(m.get('isError')) is bool and m.get('toolName') == calls[key]['name'])
+                results[key] = m['isError']
+            if m['role'] == 'assistant':
+                native_need(isinstance(content, list))
+                for part in content:
+                    native_need(isinstance(part, dict) and part.get('type') in ('text', 'thinking', 'toolCall'))
+                    if part['type'] == 'toolCall':
+                        key, name, args = part.get('id'), part.get('name'), part.get('arguments')
+                        native_need(isinstance(key, str) and 0 < len(key) <= 200 and key not in calls
+                                    and isinstance(name, str) and isinstance(args, dict))
+                        calls[key] = {'name': name, 'args': args}
+                        if name == 'bash':
+                            native_need(isinstance(args.get('command'), str))
+                            shells.append({'id': key, 'sha256': hashlib.sha256(args['command'].encode()).hexdigest()})
+    native_need(receipt is not None)
+    return {'native': receipt, 'activeLeaf': entries[-1]['id'], 'entries': len(entries),
+            'activeEntries': len(branch), 'toolCalls': len(calls), 'unsettled': sorted(set(calls) - set(results)),
+            'duplicateResults': [], 'toolNames': sorted({v['name'] for v in calls.values()}),
+            'shellCommands': [{'sha256': s['sha256'], 'results': [] if s['id'] not in results
+                               else [results[s['id']]]} for s in shells]}
+
+
+def native_checkpoint(state_dir, session_id, native_id, profile_id, workspace, holder_id, journal_id):
+    for value in (session_id, native_id, profile_id, holder_id, journal_id):
+        native_need(isinstance(value, str) and str(uuid.UUID(value)) == value)
+    state = private_dir_identity(state_dir)
+    homes = os.path.join(state_dir, 'native-homes')
+    private_dir_identity(homes)
+    home = os.path.join(homes, session_id)
+    identity = private_dir_identity(home)
+    workspace_stat = os.stat(workspace, follow_symlinks=False)
+    native_need(stat.S_ISDIR(workspace_stat.st_mode) and os.path.realpath(workspace) == workspace)
+    ws = {'path': workspace, 'device': str(workspace_stat.st_dev), 'inode': str(workspace_stat.st_ino),
+          'uid': str(workspace_stat.st_uid)}
+    journal_raw = checkpoint_bytes(os.path.join(state_dir, 'journal.jsonl'), 64 * 1024 * 1024)
+    records = [checkpoint_json(line) for line in journal_raw.splitlines()]
+    native_need(records and records[0].get('sequence') == 1 and records[0].get('incarnation') == journal_id)
+    for index, r in enumerate(records):
+        native_need(r.get('version') == 1 and r.get('sequence') == index + 1 and isinstance(r.get('event'), dict))
+    starts = [r for r in records if r['event'].get('kind') == 'holder-started']
+    native_need(starts and starts[-1]['incarnation'] == holder_id)
+    opened = [r for r in records if r['event'].get('kind') == 'session-opened'
+              and r['event'].get('sessionId') == session_id and r['incarnation'] == holder_id]
+    native_need(len(opened) == 1)
+    opened_value = opened[0]['event']['value']
+    profile_digest = opened_value.get('profileDigest')
+    native_need(opened_value.get('nativeSessionId') == native_id and opened_value.get('profileId') == profile_id
+                and re.fullmatch(r'[a-f0-9]{64}', str(profile_digest)))
+    retained = [r for r in records if r['event'].get('kind') == 'native-state-retained'
+                and r['event'].get('sessionId') == session_id and r['incarnation'] == holder_id]
+    def read_retained(owner, expected_digest):
+        parent = os.path.join(homes, owner)
+        parent_id = private_dir_identity(parent)
+        raw = checkpoint_bytes(os.path.join(parent, 'relay-retained-state.json'), 16384)
+        native_need(hashlib.sha256(raw).hexdigest() == expected_digest)
+        r = checkpoint_json(raw)
+        native_need(r.get('version') == 1 and r.get('admission') == 'blocked'
+                    and r.get('containment') == 'owned-process-group-only'
+                    and r.get('home') == {k: int(parent_id[k]) for k in ('device', 'inode', 'uid')})
+        m = r.get('metadata') or {}
+        native_need(m.get('sessionId') == owner and m.get('nativeSessionId') == native_id
+                    and m.get('profileDigest') == profile_digest and m.get('workspace') == ws
+                    and m.get('outcome') in ('closed', 'interrupted'))
+        history = m.get('history') or {}
+        path = history.get('path')
+        native_need(isinstance(path, str) and os.path.commonpath([parent, path]) == parent and path != parent
+                    and os.path.realpath(path) == path and path.endswith('.jsonl'))
+        # Only this descriptor-selected file is read, never a directory scan.
+        raw_history = checkpoint_bytes(path, 16 * 1024 * 1024)
+        native_need(hashlib.sha256(raw_history).hexdigest() == history.get('sha256'))
+        native_need(private_dir_identity(parent) == parent_id)
+        return raw_history, history['sha256']
+    imported = None
+    if retained:
+        native_need(len(retained) == 1)
+        receipt_sha = retained[0]['event']['value'].get('receiptSha256')
+        raw, source_sha = read_retained(session_id, receipt_sha)
+        source_session = session_id
+    else:
+        recovery_raw = checkpoint_bytes(os.path.join(home, 'native-recovery.json'), 16384)
+        recovery = checkpoint_json(recovery_raw)
+        source_session = recovery.get('sourceSessionId')
+        native_need(recovery.get('version') == 2 and recovery.get('admission') == 'holder-owned'
+                    and recovery.get('ownerSessionId') == session_id and recovery.get('nativeSessionId') == native_id
+                    and recovery.get('workspace') == ws and source_session != session_id
+                    and isinstance(source_session, str) and str(uuid.UUID(source_session)) == source_session)
+        native_need(re.fullmatch(r'[a-f0-9]{64}', str(recovery.get('runtimeManifestSha256', ''))))
+        source_events = [r for r in records if r['event'].get('kind') == 'native-state-retained'
+                         and r['event'].get('sessionId') == source_session and r['incarnation'] == holder_id]
+        native_need(len(source_events) == 1)
+        receipt_sha = source_events[0]['event']['value'].get('receiptSha256')
+        source_raw, source_sha = read_retained(source_session, receipt_sha)
+        native_need(recovery.get('sourceSha256') == source_sha and recovery.get('retainedReceiptSha256') == receipt_sha
+                    and recovery.get('nativeHome') == private_dir_identity(os.path.join(homes, source_session)))
+        descriptor = checkpoint_json(checkpoint_bytes(os.path.join(home, 'holder-recovery.json'), 16384))
+        native_need(descriptor.get('version') == 2 and descriptor.get('admission') == 'holder-owned'
+                    and descriptor.get('sourceSessionId') == source_session and descriptor.get('ownerSessionId') == session_id
+                    and descriptor.get('nativeSessionId') == native_id and descriptor.get('workspace') == ws
+                    and descriptor.get('historySha256') == source_sha
+                    and descriptor.get('retainedReceiptSha256') == receipt_sha
+                    and descriptor.get('nativeHome') == recovery.get('nativeHome')
+                    and descriptor.get('runtimeManifestSha256') == recovery.get('runtimeManifestSha256')
+                    and 'acknowledgeUnknownToolEffects' not in descriptor)
+        raw = checkpoint_bytes(os.path.join(home, 'resumed-session.jsonl'), 16 * 1024 * 1024)
+        # Pi can append after import. Prove the exact imported prefix; do not retag the current hash as imported.
+        rolling, prefix_end, offset = hashlib.sha256(), None, 0
+        for line in raw.splitlines(keepends=True):
+            offset += len(line)
+            rolling.update(line)
+            if rolling.hexdigest() == recovery.get('importedSha256'):
+                native_need(prefix_end is None)
+                prefix_end = offset
+        native_need(prefix_end is not None)
+        original = native_ancestry(source_raw, native_id, workspace)
+        initial = native_ancestry(raw[:prefix_end], native_id, workspace)
+        native_need(original['native'] == initial['native'])
+        for line in raw[prefix_end:].splitlines():
+            native_need(checkpoint_json(line).get('type') in ('custom', 'model_change', 'thinking_level_change'))
+        imported = recovery['importedSha256']
+    projection = native_ancestry(raw, native_id, workspace)
+    native_need(private_dir_identity(home) == identity and private_dir_identity(state_dir) == state)
+    # Re-read the same bounded journal to refuse a concurrent mutation, not invent an idle snapshot.
+    native_need(checkpoint_bytes(os.path.join(state_dir, 'journal.jsonl'), 64 * 1024 * 1024) == journal_raw)
+    return {'version': 1, 'state': 'observed', 'sessionId': session_id, 'sourceSessionId': source_session,
+            'nativeSessionId': native_id, 'profileId': profile_id, 'profileDigest': profile_digest,
+            'holderId': holder_id, 'journalId': journal_id, 'generation': opened_value.get('generation'),
+            'observedMs': now_ms(), 'nativeHome': identity, 'retainedReceiptSha256': receipt_sha,
+            'sourceSha256': source_sha, 'importedSha256': imported,
+            'currentSha256': hashlib.sha256(raw).hexdigest(), 'journalSha256': hashlib.sha256(journal_raw).hexdigest(),
+            **projection}
+
+
 # ------------------------------------------------------------------------------------------ pre-run facts
 def last_event(path):
     last = None
@@ -495,6 +734,12 @@ def main():
         out(credfile(a[1]))
     elif m == "transcript" and len(a) == 2:
         out(transcript(a[1]))
+    elif m == "native-checkpoint" and len(a) == 8:
+        try:
+            native_need(a[1].startswith(HOME + '/.local/state/'))
+            out(native_checkpoint(*a[1:]))
+        except (ValueError, TypeError, KeyError, AttributeError, OSError, RecursionError):
+            die('native checkpoint unavailable', 3)
     elif m == "prerun" and len(a) == 3:
         out(prerun(a[1], a[2]))
     else:

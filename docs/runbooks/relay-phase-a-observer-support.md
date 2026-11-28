@@ -12,8 +12,8 @@ reviewed readers; they do not authenticate a deployment or independently attest
 the Pi artifact. Unknown configured Hub/Router/holder revisions are unsupported.
 There is no 0.14.2 bridge, new live activation pin or execution-window grant here.
 
-Implemented here: predecessor.
-Remaining gates: C9 retained-reader extension, C10, C11. C10/C11 remain unsupported until their own collector changes arrive.
+Implemented here: predecessor, C9 retained native evidence.
+Remaining gates: C10, C11. C10/C11 remain unsupported until their own collector changes arrive.
 
 ## Predecessor projection
 
@@ -40,6 +40,49 @@ future. Every observation performs a fresh query; cached rows must never receive
 a replacement timestamp. Evidence preserves the returned raw SHA as well as
 content SHA and domain. The database label is an attributed namespace/pod/database
 identity, not cryptographic database authentication.
+
+## C9 retained native and Router readers
+
+`dw.py native-checkpoint` takes already-bound state-root, Relay/native/profile,
+workspace, holder and journal identities. Its CLI only accepts the configured
+private state location. It reads the holder journal and descriptor-selected
+history; it never scans arbitrary session files. Private files require UID1000,
+mode0600, one link and bounded `O_NOFOLLOW` reads. Directories require mode0700;
+before/after identities and journal bytes must agree. These are sampling guards,
+not protection from a malicious process with the same UID.
+
+The original history is bound by `native-state-retained`, the retained receipt,
+home/workspace identities, profile digest, native UUID and history SHA. The reader
+validates the v3 header, unique backwards parent links and timestamps, then walks
+the final leaf's active ancestry. It selects the last
+`relay-inference-session-v1` receipt there. Abandoned physical branches cannot
+replace it. Duplicate/unmatched tool results, unresolved effects, unknown tools
+or changed marker outcomes refuse. The raw transcript and tool arguments are
+not returned; marker commands are represented by hashes.
+
+The resumed home is joined through `holder-recovery.json`, `native-recovery.json`
+and `resumed-session.jsonl`. The exact imported prefix is hashed independently of
+the current file. Pi can append metadata on open, so the initial imported SHA and
+current SHA are retained separately. Appended messages/tool work before C10 are
+refused. Matching the two runtime-manifest references is a descriptor continuity
+check; artifact qualification remains an external bundle prerequisite.
+
+`router.js branch` opens only the configured SQLite file with `readOnly:true`,
+extensions disabled and `query_only`. It selects one exact row from `kv`:
+
+```text
+ns = inference-session-v1
+key = SHA256(JSON.stringify(["default", "key:" + renewedKeyId, conversation, branch]))
+```
+
+It returns only epoch, operation, state, updatedAt and optional successor, plus
+the exact queried JSON's SHA and query/store/read-time provenance. A record more
+than five seconds ahead of the read clock refuses. No managed token, runtime Store construction,
+namespace enumeration, secret-table query or write is used in this mode. Unknown
+database types are unsupported. Pod UID/restart and store identity must match the
+existing observer continuity record.
+
+C9 stores the original join in `RunState.retained_branch`. Reader support for resumed histories is qualified here; C10 remains unsupported until its decision collector is integrated.
 
 ## Offline verification
 

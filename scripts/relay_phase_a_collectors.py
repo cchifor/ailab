@@ -13,6 +13,7 @@ runner_now >= host_now + (gateNow - host receipt), because the gate stamped gate
 from __future__ import annotations
 
 import datetime
+import copy
 import json
 import re
 import subprocess
@@ -643,6 +644,7 @@ def marker_input(desc) -> str:
 
 
 def c_recover_history(host, req, ctx, budget, gate_now, obs):
+    support_sources(host)
     run = run_for(host.state, ctx)
     need(ctx.get("sessionId") == run.session_id and ctx.get("generation") == run.generation, "C9 session")
     need(ctx.get("holderId") == host.state.holder["incarnation"] and ctx.get("journalId") == host.state.holder["journal"],
@@ -668,11 +670,12 @@ def c_recover_history(host, req, ctx, budget, gate_now, obs):
         p = decided[c["permission"]]
         need(p["state"] == "resolved" and p["option_id"] == c["option"], "a permission was not resolved as confirmed",
              Failed)
-    t = host.remote.dw(["transcript", host.native_home(run)], budget, obs, "transcript")
+    t = read_native_checkpoint(host, run, budget, obs)
     if t.get("state") != "observed":
         raise Unsupported("the native transcript source is not established")
     need(t["unsettled"] == [] and t["duplicateResults"] == [], "a native tool call is unsettled or duplicated", Failed)
     outcome = {sha256_bytes(host.marker_command(run.provider, run.run_id, k).encode()): k for k in ("denied", "effects")}
+    need(set(t['toolNames']) <= {'bash', 'mcp__relay__relay_messages_read'}, 'unapproved native tool', Failed)
     calls = t["shellCommands"]  # every call, in order: multiplicity matters (a repeat is never merged away)
     need(len(calls) == 2 and sorted(c["sha256"] for c in calls) == sorted(outcome),
          "shell calls are not exactly one denied and one effects marker call", Failed)
@@ -684,6 +687,10 @@ def c_recover_history(host, req, ctx, budget, gate_now, obs):
     m = marker(host, run.provider, run.run_id, "approved", 0, budget, obs)
     need(m["files"]["effects"].get("sha256") == run.approved_marker_sha, "the approved marker changed", Failed)
     obs["recovery"] = {"permissions": len(run.confirmed), "shellCalls": len(shells)}
+    branch = read_router_branch(host, run, t, budget, obs)
+    branch_decision(t['native'], branch['record'])  # no unknown join retained as permission to resume
+    run.retained_branch = {'sessionId': run.session_id, 'generation': run.generation,
+                           'native': copy.deepcopy(t), 'router': copy.deepcopy(branch)}
     run.recover_ms = now_ms() - 5000
     return True
 
@@ -767,6 +774,71 @@ def fresh_ms(value):
     now = now_ms()
     need(is_int(value, 1) and now - value < 120000 and value - now <= 5000, 'stale source observation', Failed)
     return value
+
+
+def read_native_checkpoint(host, run, budget, obs):
+    need(is_uuid(run.native_id), 'native UUID unavailable', Unsupported)
+    pin, h = host.cfg.profile(run.provider), host.state.holder
+    value = host.remote.dw(['native-checkpoint', host.cfg.raw['holder']['stateDir'], run.session_id,
+                           run.native_id, pin['id'], pin['cwd'], h['incarnation'], h['journal']],
+                          budget, obs, 'native-checkpoint')
+    need(value.get('state') == 'observed' and value.get('version') == 1, 'native source unsupported', Unsupported)
+    need(all(value.get(k) == v for k, v in {'sessionId': run.session_id, 'nativeSessionId': run.native_id,
+         'profileId': pin['id'], 'generation': run.generation, 'holderId': h['incarnation'],
+         'journalId': h['journal']}.items()), 'native checkpoint identity differs', Failed)
+    fresh_ms(value.get('observedMs'))
+    need(all(SHA.fullmatch(str(value.get(k, ''))) for k in ('retainedReceiptSha256', 'currentSha256',
+         'sourceSha256', 'journalSha256', 'profileDigest')), 'native checkpoint provenance missing', Failed)
+    obs.setdefault('nativeCheckpoints', []).append(value)
+    return value
+
+
+def read_router_branch(host, run, native, budget, obs):
+    n = native['native']
+    need(isinstance(n, dict) and all(isinstance(n.get(k), str) and LABEL.fullmatch(n[k])
+         for k in ('conversation', 'branch', 'nativeSession')) and n['nativeSession'] == run.native_id,
+         'native receipt invalid', Failed)
+    principal = 'key:' + host.state.renewed[run.provider]['key']
+    pod = host.remote.router_pod(budget, obs)
+    ident = host.remote.router(['identity'], budget, obs, 'branch-identity', pod=pod)
+    coverage(host, pod, ident, obs)
+    value = host.remote.router(['branch', 'default', principal, n['conversation'], n['branch']],
+                               budget, obs, 'branch-record', pod=pod)
+    expected_key = sha256_bytes(json.dumps(['default', principal, n['conversation'], n['branch']],
+                                           separators=(',', ':'), ensure_ascii=False).encode())
+    need(value.get('version') == 1 and value.get('key') == expected_key
+         and value.get('namespace') == 'default' and value.get('principal') == principal
+         and value.get('conversation') == n['conversation'] and value.get('branch') == n['branch']
+         and value.get('kvNamespace') == 'inference-session-v1' and value.get('storeSha256') == ident['storeSha256']
+         and SHA.fullmatch(str(value.get('rawRecordSha256', '')))
+         and value.get('querySha256') == sha256_bytes(b'SELECT value FROM kv WHERE ns=? AND key=?'),
+         'Router branch provenance differs', Failed)
+    fresh_ms(value.get('requestedAt'))
+    fresh_ms(value.get('observedAt'))
+    need(is_int(value.get('record', {}).get('updatedAt'))
+         and value['record']['updatedAt'] <= value['observedAt'] + 5000,
+         'Router branch timestamp is in the future', Failed)
+    need(value['observedAt'] >= value['requestedAt'] and host.remote.router_pod(budget, obs) == pod,
+         'Router branch source changed', Failed)
+    obs.setdefault('branchCheckpoints', []).append(value)
+    return value
+
+
+def branch_decision(native, router):
+    need(isinstance(native, dict) and isinstance(router, dict) and router.get('state') in ('complete', 'uncertain')
+         and 'successor' not in router and is_int(router.get('updatedAt'))
+         and all(isinstance(router.get(k), str) and LABEL.fullmatch(router[k]) for k in ('epoch', 'operation')),
+         'Router branch is not safely settled', Failed)
+    pending, parent = native.get('pending'), native.get('parent')
+    need(all(v is None or (isinstance(v, str) and LABEL.fullmatch(v)) for v in (pending, parent)),
+         'native receipt malformed', Failed)
+    if pending is not None:
+        need(router['operation'] == pending or (parent is not None and router['operation'] == parent
+             and router['state'] == 'complete'), 'native pending does not join Router', Failed)
+        return True
+    need(parent is not None and router['operation'] == parent and router['state'] == 'complete',
+         'native parent does not join Router', Failed)
+    return False
 
 
 COLLECTORS = {

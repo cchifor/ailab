@@ -515,6 +515,9 @@ class Recovery(unittest.TestCase):
         self.h = FakeHost(None)
         self.h.state.holder = {"incarnation": u(7), "journal": CFG["holder"]["newJournalId"], "mainPid": 42}
         self.r = bound_run(self.h)
+        self.r.native_id = u(11)
+        self.h.state.renewed = {'codex': {'key': 'key_' + 'a' * 32}}
+        self.h.state.router_pod = {'uid': POD['uid'], 'restarts': 0, 'capture': 'c'*64, 'store': 'd'*64}
         self.r.confirmed = [{"permission": u(21), "option": "rej", "kind": "reject_once", "step": "denied"},
                             {"permission": u(22), "option": "acc", "kind": "allow_once", "step": "effects"}]
         self.r.approved_marker_sha = "e" * 64
@@ -528,10 +531,24 @@ class Recovery(unittest.TestCase):
                                           "receipt_status": "accepted", "stop_reason": None}],
             "sql:permission-decisions.sql": [{"id": u(21), "state": "resolved", "option_id": "rej"},
                                              {"id": u(22), "state": "resolved", "option_id": "acc"}],
-            "transcript": {"state": "observed", "unsettled": [], "duplicateResults": [],
+            "native-checkpoint": {"state": "observed", "version": 1, "unsettled": [], "duplicateResults": [],
+                           "sessionId": self.r.session_id, "nativeSessionId": u(11), "profileId": CODEX['id'],
+                           "generation": 1, "holderId": u(7), "journalId": CFG['holder']['newJournalId'],
+                           "observedMs": C.now_ms(), "retainedReceiptSha256": 'a'*64, "currentSha256": 'b'*64,
+                           "sourceSha256": 'b'*64, "journalSha256": 'c'*64, "profileDigest": 'f'*64,
+                           "native": {'conversation':'c','branch':'b','nativeSession':u(11),'parent':'p'},
+                           "toolNames": ['bash'],
                            "shellCommands": [shell("denied", True), shell("effects", False)]},
             "marker:approved": {"state": "observed", "phaseChecksPass": True, "observedUtc": "x",
                                 "files": {"effects": {"sha256": "e" * 64}}}}
+        self.answers['branch-identity'] = {'captureLevel':'metadata','captureSha256':'c'*64,'storeSha256':'d'*64}
+        self.answers['branch-record'] = {'version':1,'namespace':'default','principal':'key:key_'+'a'*32,
+            'conversation':'c','branch':'b','kvNamespace':'inference-session-v1','storeSha256':'d'*64,
+            'key':O.sha256_bytes(json.dumps(['default','key:key_'+'a'*32,'c','b'],separators=(',',':')).encode()),
+            'querySha256':O.sha256_bytes(b'SELECT value FROM kv WHERE ns=? AND key=?'),
+            'rawRecordSha256':'e'*64,
+            'requestedAt':C.now_ms(),'observedAt':C.now_ms(),
+            'record':{'epoch':'e','operation':'p','state':'complete','updatedAt':C.now_ms()}}
         self.ctx = {"sessionId": self.r.session_id, "generation": 1, "holderId": u(7),
                     "journalId": CFG["holder"]["newJournalId"], "provider": "codex", "runId": self.r.run_id}
 
@@ -545,11 +562,11 @@ class Recovery(unittest.TestCase):
         self.assertTrue(self.c9())
 
     def test_missing_evidence_fails(self):
-        bad = dict(self.answers["transcript"])
+        bad = dict(self.answers["native-checkpoint"])
         bad["shellCommands"] = [dict(s) for s in bad["shellCommands"]]
         bad["shellCommands"][0]["results"] = [False]  # the denied command executed
         with self.assertRaises(O.Failed):
-            self.c9(transcript=bad)
+            self.c9(**{'native-checkpoint':bad})
         with self.assertRaises(O.Failed):  # resolved with another option than confirmed
             self.c9(**{"sql:permission-decisions.sql": [{"id": u(21), "state": "resolved", "option_id": "acc"},
                                                          {"id": u(22), "state": "resolved", "option_id": "acc"}]})
@@ -559,10 +576,10 @@ class Recovery(unittest.TestCase):
         with self.assertRaises(O.Failed):  # a control command in an unknown state
             self.c9(**{"sql:session-commands.sql": [{"table": "control", "kind": "prompt", "state": "unknown",
                                                      "receipt_status": "completed", "stop_reason": None}]})
-        unknown = dict(self.answers["transcript"])
+        unknown = dict(self.answers["native-checkpoint"])
         unknown["shellCommands"] = [dict(s, results=[]) for s in unknown["shellCommands"]]
         with self.assertRaises(O.Unsupported):  # the native outcome cannot be established
-            self.c9(transcript=unknown)
+            self.c9(**{'native-checkpoint':unknown})
 
 
 class Delivery(unittest.TestCase):
@@ -612,10 +629,10 @@ class RoundTwo(unittest.TestCase):
     def test_a_repeated_marker_call_is_never_merged_away(self):
         rec = Recovery()
         rec.setUp()
-        t = dict(rec.answers["transcript"])
+        t = dict(rec.answers["native-checkpoint"])
         t["shellCommands"] = t["shellCommands"] + [dict(t["shellCommands"][1])]  # effects twice
         with self.assertRaises(O.Failed):
-            rec.c9(transcript=t)
+            rec.c9(**{"native-checkpoint": t})
 
     def test_an_evidence_failure_after_an_earlier_fault_is_still_reported(self):
         seen = []
@@ -759,7 +776,7 @@ class RemoteContainment(unittest.TestCase):
 
 
 class Gates(unittest.TestCase):
-    def test_c10_c11_and_the_projection_stay_unsupported(self):
+    def test_c10_c11_and_projection_without_source_tuple_stay_unsupported(self):
         for fn in (C.c_reconcile_choice, C.c_retire_branch, C.c_predecessor):
             with self.assertRaises(O.Unsupported):
                 fn(None, {}, {}, budget(), 0, {})
